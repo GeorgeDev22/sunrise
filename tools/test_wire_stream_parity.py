@@ -453,8 +453,12 @@ class VanillaClient:
         args = argparse.Namespace(name=PLAYER, join=address, world=None, game_dir=work / 'client', assets=None,
                                   heap='2G', width=854, height=480, lan_port=None, backend=None)
         args.game_dir.mkdir()
-        # 20 frames a second at least: a tick's lines then act in their own frame, as Sunrise's do.
-        vanilla_client.write_options(args.game_dir, {'maxFps': '60'})
+        # 20 frames a second at least: a tick's lines then act in their own frame, as Sunrise's do. On a virtual
+        # screen the frames are drawn on the CPU: the lightest graphics keep each well under a tick, or the client
+        # runs its missed ticks in bursts and takes the server's packets on other ticks than a smooth one would.
+        vanilla_client.write_options(args.game_dir, {
+            'maxFps': '60', 'renderDistance': '2', 'graphicsMode': '0', 'renderClouds': '"false"', 'ao': 'false',
+            'entityShadows': 'false', 'particles': '2', 'biomeBlendRadius': '0', 'mipmapLevels': '0'})
         command = vanilla_client.command(args)
         cp = command.index('-cp') + 1
         command[cp] = os.pathsep.join([str(classes), command[cp]])
