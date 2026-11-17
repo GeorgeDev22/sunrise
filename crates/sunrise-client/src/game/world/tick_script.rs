@@ -97,6 +97,23 @@ impl Game<'_> {
             }
             // `mouse-move DX DY`: the motion a grabbed pointer adds between frames (MouseHandler.onMove), which
             // the frame turns the view by, not sunrise-ctl's glide (one at a time), so a move every tick counts.
+            // `menu-button N`: what a station screen does with its button (a stonecutter's recipe, a loom's
+            // pattern): the menu's clickMenuButton, then handleInventoryButtonClick when the menu took it.
+            if let Some(button) = line
+                .strip_prefix("menu-button ")
+                .and_then(|n| n.trim().parse::<i32>().ok())
+            {
+                let mut taken = false;
+                let flag = &mut taken;
+                self.menu_session(|menu, env, _| {
+                    *flag = menu.button(env, button);
+                    Some(*flag)
+                });
+                if taken {
+                    self.remote_station_button(button);
+                }
+                continue;
+            }
             if let Some((dx, dy)) = tick_script_mouse_move(&line) {
                 self.mouse.add_motion(dx, dy);
                 self.agent_pointer = true;
