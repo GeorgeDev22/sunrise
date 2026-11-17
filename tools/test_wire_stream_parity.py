@@ -289,8 +289,7 @@ def script(name, spec, sunrise):
 
 
 # WIRE_STREAM_GRIM=DIR: the server is Paper with the Grim anticheat (DIR holds paper-<version>-*.jar and
-# grimac-bukkit-*.jar, which the user downloaded); each client's Grim alerts are counted after the run.
-GRIM_ALERT = re.compile(r'\[Grim[A-Za-z]*\].*\bfailed\b')
+# grimac-bukkit-*.jar, which the user downloaded); each client's Grim violations are counted after the run.
 
 
 def grim_server(directory, jars):
@@ -307,16 +306,20 @@ def grim_server(directory, jars):
     return ['java', '-Xmx1536m', '-jar', 'paper.jar', 'nogui']
 
 
-def grim_alerts(log, clients):
-    """Each client's Grim alert lines in the server log: the clients joined one after the other, in order."""
-    lines = Path(log).read_text(encoding='utf-8', errors='replace').splitlines()
-    out, who = {c: [] for c in clients}, None
-    joins = iter(clients)
-    for line in lines:
-        if f'{PLAYER} joined the game' in line:
-            who = next(joins, who)
-        elif who and GRIM_ALERT.search(line):
-            out[who].append(line.split(']: ', 1)[-1])
+def grim_violations(db, clients):
+    """Each client's Grim violations, from Grim's own history database: it logs every one (punishments.yml
+    `1:1 [log]`) but prints an alert only from a violation level of 100 (`100:40 [alert]`), so the console shows
+    small deviations never. The clients joined one after the other: their sessions, in order."""
+    import sqlite3
+    con = sqlite3.connect(db)
+    checks = dict(con.execute('select check_id, display from grim_checks'))
+    sessions = [row[0] for row in con.execute('select session_id from grim_sessions order by started_at')]
+    out = {}
+    for who, session in zip(clients, sessions):
+        rows = con.execute('select check_id, vl from grim_violations where session_id = ? order by occurred_at',
+                           (session,)).fetchall()
+        out[who] = [(checks.get(check, str(check)), vl) for check, vl in rows]
+    con.close()
     return out
 
 
@@ -562,6 +565,9 @@ def run(args, out):
     finally:
         server.stop()
         shutil.copy(server.log_path, out / server.log_path.name)
+        grim_db = directory / 'plugins' / 'GrimAC' / 'data' / 'history.v1.db'
+        if grim_db.exists():
+            shutil.copy(grim_db, out / 'grim.db')
         if not args.keep:
             shutil.rmtree(work, ignore_errors=True)
     return captures
@@ -649,11 +655,12 @@ def main():
         results = compare(captures, args.scenarios)
     except Failed as e:
         sys.exit(f'FAIL: {e}')
-    if os.environ.get('WIRE_STREAM_GRIM') and (out / 'server.log').exists():
-        for who, alerts in grim_alerts(out / 'server.log', args.clients).items():
-            print(f'Grim alerts, {CLIENTS[who]}: {len(alerts)}')
-            for line in alerts[:30]:
-                print(f'    {line}')
+    if (out / 'grim.db').exists():
+        for who, violations in grim_violations(out / 'grim.db', args.clients).items():
+            counts = {}
+            for check, _ in violations:
+                counts[check] = counts.get(check, 0) + 1
+            print(f'Grim violations, {CLIENTS[who]}: {len(violations)} {counts}')
     print(f'\nserverbound play streams, {CLIENTS[args.clients[0]]} vs {CLIENTS[args.clients[1]]}; captures in {out}')
     for name, problems in results:
         print(f'  {"pass" if not problems else "FAIL"}  {name}')
