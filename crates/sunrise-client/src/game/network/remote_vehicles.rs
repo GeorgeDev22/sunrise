@@ -247,8 +247,25 @@ impl Game<'_> {
             r.passenger_index = passengers.iter().position(|&p| p == me).unwrap_or(0);
         }
         if passengers.contains(&me) {
+            // handleSetEntityPassengersPacket takes every passenger off and puts them back
+            // (ejectPassengers, startRiding), so each list naming the player runs
+            // AbstractHorse.addPassenger: a horse's, camel's or llama's rider turns to its
+            // view at the start of the tick (absSnapRotationTo(getViewYRot(0), getViewXRot(0))).
+            if let Some(m) = self.mobs.iter().find(|m| {
+                m.id == vehicle_id && sunrise_client::mobs::equine::is_equine(m.species())
+            }) {
+                self.yaw = m.previous_yaw % 360.0;
+                self.pitch = m.previous_head_pitch.clamp(-90.0, 90.0) % 360.0;
+                self.rope_rot_old = (self.yaw, self.pitch);
+            }
             if self.riding != Some(vehicle_id) {
                 self.riding = Some(vehicle_id);
+                // ClientPacketListener.handleSetEntityPassengersPacket: boarding a boat
+                // faces the boat's way.
+                if let Some(b) = self.boats.iter().find(|b| b.id == vehicle_id) {
+                    self.yaw = b.yaw;
+                    self.rope_rot_old.0 = b.yaw;
+                }
                 // ClientPacketListener.handleSetEntityPassengersPacket: boarding says how to get off,
                 // on the overlay and to the narrator.
                 let key = if self.cushions.iter().any(|c| c.id == vehicle_id) {
