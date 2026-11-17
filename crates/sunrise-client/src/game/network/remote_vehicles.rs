@@ -515,15 +515,20 @@ impl Game<'_> {
         ]
     }
 
-    /// The vehicle this client moves, when it is `id`: where it is, its yaw and pitch and
-    /// its deltaMovement (`PositionMoveRotation.of`).
+    /// The vehicle this client moves, when it is `id`, as `PositionMoveRotation.of` sees it:
+    /// its client position and rotation (`getClientPositionAndRotation`: while an
+    /// interpolation runs, where it is going) and its known movement, which is its controller's
+    /// (`getKnownMovement`): the local player's, nothing while it rides (`Entity.rideTick`).
     pub(super) fn driven_vehicle(&self, id: u32) -> Option<(Vec3, f32, f32, Vec3)> {
+        let known = self.player.as_ref().map_or(Vec3::ZERO, |p| p.velocity);
         if let Some(m) = self.driven_mount().filter(|m| m.id == id) {
-            return Some((m.position, m.yaw, m.head_pitch, m.velocity));
+            let at = self.driven_mount_heading(m);
+            let [x, y, z] = at.position;
+            return Some((Vec3::new(x, y, z), at.yaw, at.pitch, known));
         }
         let b = self.driven_boat().filter(|&i| self.boats[i].id == id)?;
-        let b = &self.boats[b];
-        Some((b.position, b.yaw, b.pitch, b.velocity))
+        let (at, yaw, pitch) = self.boats[b].client_position();
+        Some((at, yaw, pitch, known))
     }
 
     /// The boat this client steers, as an index into `boats`.
