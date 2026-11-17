@@ -288,6 +288,38 @@ def script(name, spec, sunrise):
     return {'name': name, 'ticks': spec['ticks'] + PRELUDE, 'steps': {str(k): v for k, v in sorted(steps.items())}}
 
 
+# WIRE_STREAM_GRIM=DIR: the server is Paper with the Grim anticheat (DIR holds paper-<version>-*.jar and
+# grimac-bukkit-*.jar, which the user downloaded); each client's Grim alerts are counted after the run.
+GRIM_ALERT = re.compile(r'\[Grim[A-Za-z]*\].*\bfailed\b')
+
+
+def grim_server(directory, jars):
+    """The command for Paper and Grim in `directory`. Paperclip patches the Mojang server jar it finds in its cache,
+    so it is given the prepared copy (the same jar its download-context names) and downloads nothing."""
+    servers = Path(os.environ['WIRE_STREAM_GRIM'])
+    paper = next(servers.glob(f'paper-{lab.VERSION}-*.jar'))
+    (directory / 'cache').mkdir()
+    # The bundled server.jar the user imported (jars['server'] is the unbundled game jar inside it).
+    shutil.copy(jars['server'].with_name('server.jar'), directory / 'cache' / f'mojang_{lab.VERSION}.jar')
+    (directory / 'plugins').mkdir()
+    shutil.copy(next(servers.glob('grimac-bukkit-*.jar')), directory / 'plugins')
+    shutil.copy(paper, directory / 'paper.jar')
+    return ['java', '-Xmx1536m', '-jar', 'paper.jar', 'nogui']
+
+
+def grim_alerts(log, clients):
+    """Each client's Grim alert lines in the server log: the clients joined one after the other, in order."""
+    lines = Path(log).read_text(encoding='utf-8', errors='replace').splitlines()
+    out, who = {c: [] for c in clients}, None
+    joins = iter(clients)
+    for line in lines:
+        if f'{PLAYER} joined the game' in line:
+            who = next(joins, who)
+        elif who and GRIM_ALERT.search(line):
+            out[who].append(line.split(']: ', 1)[-1])
+    return out
+
+
 class Failed(Exception):
     pass
 
@@ -497,6 +529,8 @@ def run(args, out):
                                                      'level': 4, 'bypassesPlayerLimit': False}]))
     scripts = work / 'scripts'
     scripts.mkdir()
+    if os.environ.get('WIRE_STREAM_GRIM'):
+        vanilla = grim_server(directory, jars)
     server = Server(vanilla, directory, 'server')
     captures = {}
     try:
@@ -615,6 +649,11 @@ def main():
         results = compare(captures, args.scenarios)
     except Failed as e:
         sys.exit(f'FAIL: {e}')
+    if os.environ.get('WIRE_STREAM_GRIM') and (out / 'server.log').exists():
+        for who, alerts in grim_alerts(out / 'server.log', args.clients).items():
+            print(f'Grim alerts, {CLIENTS[who]}: {len(alerts)}')
+            for line in alerts[:30]:
+                print(f'    {line}')
     print(f'\nserverbound play streams, {CLIENTS[args.clients[0]]} vs {CLIENTS[args.clients[1]]}; captures in {out}')
     for name, problems in results:
         print(f'  {"pass" if not problems else "FAIL"}  {name}')
