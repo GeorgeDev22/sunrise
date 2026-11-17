@@ -36,9 +36,9 @@ import wire_stream  # noqa: E402
 
 MARK = 'wire-mark'.encode().hex()
 # A server packet that reached vanilla less than REPLAY_LATE before its next tick-end came after that tick's frame
-# had started (measured: 0.2, 1.9, 2.1 and 5.3 ms before it, taken a tick later; 10.5 ms before it, taken on that
-# tick), so the replay gives it to Sunrise after that tick too. Up to REPLAY_EDGE the tick is uncertain: listed.
-REPLAY_LATE = 0.008
+# had started (measured: 0.2, 1.9, 2.1, 5.3 and 8.6 ms before it, taken a tick later; 10.5 ms before it, taken on
+# that tick), so the replay gives it to Sunrise after that tick too. Up to REPLAY_EDGE the tick is uncertain: listed.
+REPLAY_LATE = 0.0095
 REPLAY_EDGE = 0.012
 # A phased capture's packets reach the client `phase` after a tick-end, give or take this; a later one came
 # after the hold point, when the server sent it.
