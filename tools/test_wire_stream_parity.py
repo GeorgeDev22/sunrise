@@ -921,7 +921,7 @@ def play_all(client, server, scenarios, scripts, sunrise, capture):
         settle(counts, accepted)
         path = scripts / f'{name}-{"sunrise" if sunrise else "vanilla"}.json'
         path.write_text(json.dumps(script(name, spec, sunrise)))
-        client.play(path, name, timeout=60)
+        client.play(path, name, timeout=max(60, spec['ticks'] / 20 + 30))
         time.sleep(0.5)
 
 

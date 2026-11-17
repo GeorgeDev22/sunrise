@@ -277,7 +277,7 @@ def main():
                 raise replay.error
             path = scripts / f'{name}-sunrise.json'
             path.write_text(json.dumps(ws.script(name, ws.SCENARIOS[name], True)))
-            client.play(path, name, timeout=60)
+            client.play(path, name, timeout=max(60, ws.SCENARIOS[name]['ticks'] / 20 + 30))
         replay.done.wait(60)
     finally:
         if client:
