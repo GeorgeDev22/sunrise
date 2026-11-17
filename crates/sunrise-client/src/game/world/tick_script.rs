@@ -95,6 +95,13 @@ impl Game<'_> {
                 clicks.extend(click);
                 continue;
             }
+            // `mouse-move DX DY`: the motion a grabbed pointer adds between frames (MouseHandler.onMove), which
+            // the frame turns the view by, not sunrise-ctl's glide (one at a time), so a move every tick counts.
+            if let Some((dx, dy)) = tick_script_mouse_move(&line) {
+                self.mouse.add_motion(dx, dy);
+                self.agent_pointer = true;
+                continue;
+            }
             if !clicks.is_empty() {
                 self.remote_menu_clicks(&std::mem::take(&mut clicks));
             }
@@ -116,6 +123,15 @@ impl Game<'_> {
 /// `SLOT` is the menu's own slot number, -999 outside it; `INPUT` is a `ContainerInput` name
 /// (`SWAP`, `THROW`, `PICKUP_ALL`, `QUICK_CRAFT`...).
 /// The line's click: `None` for another line, `Some(None)` for a slot out of range.
+/// A `mouse-move DX DY` line's motion.
+fn tick_script_mouse_move(line: &str) -> Option<(f64, f64)> {
+    let mut words = line.split_whitespace();
+    if words.next()? != "mouse-move" {
+        return None;
+    }
+    Some((words.next()?.parse().ok()?, words.next()?.parse().ok()?))
+}
+
 fn tick_script_click(line: &str) -> Option<Option<(i16, i32, sunrise_client::menu::Input)>> {
     use sunrise_client::menu::Input;
     let words: Vec<&str> = line.split_whitespace().collect();
