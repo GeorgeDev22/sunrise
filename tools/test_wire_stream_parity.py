@@ -834,6 +834,9 @@ SCENARIOS = {
                                {t: ['mouse left click'] for t in range(20, 110, 12)},
                                {t: ['key w up'] for t in range(22, 110, 12)},
                                {t: ['key w down'] for t in range(25, 110, 12)}, {112: ['key w up']})),
+    # Keep-alive (item 8): 20 seconds standing, so a keep-alive (every 15 s) and its answer fall inside; run with
+    # WIRE_STREAM_LATENCY for a slow or changing connection (item 83).
+    'keepalive_idle': dict(ticks=400, steps={200: ['key w down'], 204: ['key w up']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
