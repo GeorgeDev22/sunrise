@@ -401,6 +401,80 @@ fn place_interpolated(m: &mut Mob, at: PosRot) {
     m.head_pitch = (at.pitch % 360.0).clamp(-90.0, 90.0);
 }
 
+/// Where a mob is, as its `SteppedInterpolationHandler` sees it.
+fn mob_pos_rot(m: &Mob) -> PosRot {
+    PosRot {
+        position: [m.position.x, m.position.y, m.position.z],
+        yaw: m.yaw,
+        pitch: m.head_pitch,
+    }
+}
+
+impl Game<'_> {
+    /// `Entity.commonTick` for the mount this client drives, `mobs[i]`: an
+    /// interpolation it had going when the client took it over runs on, its
+    /// target carried along by the mount's own moves (where the mount fits).
+    pub(super) fn interpolate_driven_mount(&mut self, i: usize) {
+        let id = self.mobs[i].id as i32;
+        let Some(handler) = self.remote.as_mut().and_then(|r| r.stepped.get_mut(&id)) else {
+            return;
+        };
+        let m = &mut self.mobs[i];
+        let mut scene = sunrise_client::collisions::SceneCollisions {
+            world: &self.world,
+            binding: self.collision,
+            subject: None,
+        };
+        handler.follow(mob_pos_rot(m), |to| {
+            let bounds = m.bounds_at(Vec3::new(to[0], to[1], to[2]));
+            scene.unobstructed(bounds).unwrap_or(false)
+        });
+        if let Some(at) = handler.interpolate() {
+            place_interpolated(m, at);
+        }
+    }
+    /// `Entity.getClientPositionAndRotation` of the mount this client drives:
+    /// while an interpolation runs, where it is going.
+    pub(super) fn driven_mount_heading(&self, m: &Mob) -> PosRot {
+        let at = mob_pos_rot(m);
+        self.remote
+            .as_ref()
+            .and_then(|r| r.stepped.get(&(m.id as i32)))
+            .map_or(at, |h| h.heading(at))
+    }
+    /// The mount this client drives teleported to `at` (`moveOrInterpolateTo`):
+    /// it eases there over its type's update interval.
+    pub(super) fn interpolate_driven_mount_to(&mut self, i: usize, at: PosRot) {
+        let m = &mut self.mobs[i];
+        let Some(r) = self.remote.as_mut() else {
+            return;
+        };
+        let handler = r.stepped.entry(m.id as i32).or_insert_with(|| {
+            let interval = sunrise_client::lan::tracking::settings(&m.kind.id).1;
+            SteppedInterpolation::new(interval as i32)
+        });
+        let entity = mob_pos_rot(m);
+        if let Start::Snap(to) = handler.interpolate_to(
+            entity,
+            Some(Path::Linear(at.position)),
+            Some((at.yaw, at.pitch)),
+        ) {
+            place_interpolated(m, to);
+        }
+    }
+    /// `handleMoveVehicle`'s `getInterpolation().cancel()` for the mount this
+    /// client drives.
+    pub(super) fn cancel_driven_mount_interpolation(&mut self, id: u32) {
+        if let Some(h) = self
+            .remote
+            .as_mut()
+            .and_then(|r| r.stepped.get_mut(&(id as i32)))
+        {
+            h.cancel();
+        }
+    }
+}
+
 /// The packet a living entity's move came in.
 #[derive(Clone, Copy, PartialEq)]
 enum MovePacket {
@@ -2871,8 +2945,8 @@ impl Game<'_> {
             if driven {
                 // handleMoveEntity, handleEntityPositionSync: the mount this
                 // client moves (isLocalInstanceAuthoritative) keeps its own
-                // position, and no steps pile up for after the ride.
-                r.stepped.remove(&id);
+                // position. An interpolation it had going runs on
+                // (`interpolate_driven_mount`), with no new steps.
                 return;
             }
             if let Some(m) = mob {
