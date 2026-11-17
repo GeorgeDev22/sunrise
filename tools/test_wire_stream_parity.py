@@ -302,6 +302,19 @@ SCENARIOS = {
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:carrot_on_a_stick'],
         ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:pig,limit=1]'], 10: ['look 30 10'],
                          30: ['mouse right click'], 50: ['look -20 10'], 75: ['key shift down'], 79: ['key shift up']}),
+    # Mounting turns the rider (AbstractHorse.addPassenger's absSnapRotationTo; a boat's yaw when boarding): the
+    # boat and the horse face 123 degrees, the player 0, so the rider's first look and the vehicle's moves show it.
+    'boat_turned': dict(
+        setup=[f'fill -5 {FLOOR} 1 5 {FLOOR} 26 minecraft:water',
+               f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 3.5 {{Rotation:[123.0f,0.0f]}}'],
+        ticks=50, steps={0: ['command ride @s mount @e[type=minecraft:oak_boat,limit=1]'], 8: ['key w down'],
+                         30: ['key w up'], 40: ['key shift down'], 44: ['key shift up']}),
+    'horse_turned': dict(
+        setup=[f'summon minecraft:horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,Variant:0,'
+               'Rotation:[123.0f,10.0f],equipment:{saddle:{id:"minecraft:saddle",count:1}},'
+               'attributes:[{id:"minecraft:movement_speed",base:0.3}]}'],
+        ticks=50, steps={0: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 8: ['key w down'],
+                         30: ['key w up'], 40: ['key shift down'], 44: ['key shift up']}),
     # Container clicks (items 56, 58, 59): every ContainerInput a screen sends, in a chest, a crafting table, a
     # furnace and the player's own inventory. Each ContainerClick carries the client's predicted slot changes and
     # carried item, which the server compares with its own (a wrong one resyncs, and anticheats watch them).
