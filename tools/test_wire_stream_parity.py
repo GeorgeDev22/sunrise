@@ -810,14 +810,14 @@ SCENARIOS = {
     # Bridging techniques (item 133) over a trench: a ninja bridge (walking backwards, sneaking at each edge)
     # and a jump bridge (jumping and placing below each jump), facing away.
     'ninja_bridge': dict(
-        setup=[f'fill -3 {FLOOR - 4} 2 3 {FLOOR} 24 minecraft:air',
+        setup=[f'fill -3 {FLOOR - 2} 2 3 {FLOOR} 24 minecraft:air',
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:stone 64'],
         ticks=120, steps=merge({0: ['look 180 78'], 3: ['key s down']},
                                {t: ['key shift down'] for t in range(10, 110, 10)},
                                {t: ['key shift up'] for t in range(14, 110, 10)},
                                {t: ['mouse right click'] for t in range(11, 110, 10)}, {110: ['key s up']})),
     'jump_bridge': dict(
-        setup=[f'fill -3 {FLOOR - 4} 2 3 {FLOOR} 24 minecraft:air',
+        setup=[f'fill -3 {FLOOR - 2} 2 3 {FLOOR} 24 minecraft:air',
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:stone 64'],
         ticks=100, steps=merge({0: ['look 180 80'], 3: ['key s down', 'key space down']},
                                {t: ['mouse right click'] for t in range(8, 90, 3)}, {90: ['key s up', 'key space up']})),
