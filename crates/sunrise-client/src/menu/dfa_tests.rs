@@ -139,6 +139,32 @@ fn a_clients_smithing_table_works_out_no_result() {
     );
 }
 
+/// StonecutterMenu.setupResultSlot finds no recipe on a client (its SelectableRecipe entries carry none):
+/// a recipe button leaves the result empty, and a shift-click on the result the server sent crafts once,
+/// as vanilla's client predicts, not until the input runs out.
+#[test]
+#[ignore = "daily"]
+fn a_clients_stonecutter_crafts_what_the_server_shows_once() {
+    let mut ran = false;
+    with_menu(Kind::Stonecutter, |env, menu| {
+        ran = true;
+        menu.on_client = true;
+        menu.carried = stack("stone", 8);
+        menu.click(env, 0, 0, Input::Pickup).unwrap();
+        assert!(menu.button(env, 0));
+        assert_eq!(menu.slot(1), None);
+        // The server's ContainerSetSlot shows the result.
+        menu.set_slot(env, 1, stack("stone_slab", 2));
+        menu.click(env, 1, 0, Input::QuickMove).unwrap();
+        assert_eq!(menu.slot(0), stack("stone", 7).as_ref());
+        assert_eq!(menu.slot(1), None);
+    });
+    assert!(
+        ran,
+        "requires prepared resources in SUNRISE_TEST_RESOURCES or .local/sunrise-client/26.3"
+    );
+}
+
 /// CraftingMenu.slotsChanged works out a result only on a ServerLevel: a server's client's menu
 /// leaves the result slot to the server, so two stone placed in the grid show no plate there.
 #[test]

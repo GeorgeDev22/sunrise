@@ -1076,6 +1076,13 @@ impl Menu {
     /// `StonecutterMenu.setupResultSlot`.
     fn stone_setup_result(&mut self, env: &Env, index: i32) {
         self.touch();
+        // A client's SelectableRecipe entries carry no recipe (`entry.recipe().recipe()` is empty off the
+        // server): its result stays empty until the server's slot update, and a take refills nothing.
+        if self.state.on_client {
+            self.state.stone.used = None;
+            self.state.containers[RESULT][0] = None;
+            return;
+        }
         let recipe = usize::try_from(index)
             .ok()
             .and_then(|i| self.state.stone.recipes.get(i).copied());
