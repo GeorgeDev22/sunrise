@@ -89,8 +89,15 @@ impl Game<'_> {
                         .mobs
                         .iter()
                         .any(|m| m.extra.mount.is_some_and(|r| r as i32 == hit.id)));
-            let passes =
-                is_painting || frame_passes || boat_passes || cart_passes || cushion_passes;
+            // EndCrystal and EnderDragonPart keep Entity.interact's PASS.
+            let crystal_passes = self.crystals.iter().any(|c| c.id as i32 == hit.id)
+                || self.level_dragon_part(hit.id as u32).is_some();
+            let passes = is_painting
+                || frame_passes
+                || boat_passes
+                || cart_passes
+                || cushion_passes
+                || crystal_passes;
             // Otherwise the main hand's turn takes it; there is no off hand turn.
             if response.is_none() && hand == Hand::Off && !passes {
                 return false;
