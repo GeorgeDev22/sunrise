@@ -108,12 +108,13 @@ class Session:
         table = self.names.get((self.state[direction], direction), [])
         return table[packet_id] if 0 <= packet_id < len(table) else f"unknown_{packet_id}"
 
-    def record(self, direction, packet_id, payload):
+    def record(self, direction, packet_id, payload, at=None):
+        """`at`: when the packet reaches its peer, if not now (a clientbound one WIRE_STREAM_LATENCY holds)."""
         state = self.state[direction]
         name = self.name(direction, packet_id)
         entry = {
             "conn": self.id,
-            "t": round(time.time() - self.start, 4),
+            "t": round((at or time.time()) - self.start, 4),
             "dir": "s2c" if direction == "clientbound" else "c2s",
             "state": state,
             "id": packet_id,
@@ -189,13 +190,19 @@ class Pipe(threading.Thread):
         if self.queue is not None:
             threading.Thread(target=self.send_later, daemon=True).start()
 
-    def forward(self, frame):
+    def due(self):
+        """When a frame read now goes out under WIRE_STREAM_LATENCY (None without it)."""
         if self.queue is None:
-            self.dst.sendall(frame)
-            return
+            return None
         now = time.time()
         self.last_due = max(self.last_due, now + self.latency(now))
-        self.queue.put((self.last_due, frame))
+        return self.last_due
+
+    def forward(self, frame, due):
+        if due is None:
+            self.dst.sendall(frame)
+        else:
+            self.queue.put((due, frame))
 
     def send_later(self):
         while True:
@@ -235,7 +242,10 @@ class Pipe(threading.Thread):
                     packet_id, p = read_varint(body, 0)
                     if self.direction == "clientbound":
                         s.hold(arrived)
-                    s.record(self.direction, packet_id, body[p:])
+                    # Under WIRE_STREAM_LATENCY a server packet counts from when it reaches the client, which is
+                    # what a replay of the capture delivers it by; a client packet from when the client sent it.
+                    due = self.due()
+                    s.record(self.direction, packet_id, body[p:], at=due if self.direction == "clientbound" else None)
                     # The compression threshold applies after its packet, in
                     # both directions; the client answers only after reading it.
                     pending = getattr(s, "pending_threshold", None)
@@ -244,7 +254,7 @@ class Pipe(threading.Thread):
                         s.pending_threshold = None
                     # State switches must be in effect before the peer can
                     # answer, so forward each frame after recording it.
-                    self.forward(frames.pop())
+                    self.forward(frames.pop(), due)
         except (OSError, ValueError, zlib.error) as e:
             with s.lock:
                 s.out.write(json.dumps({"conn": s.id, "event": "error", "dir": self.direction,
