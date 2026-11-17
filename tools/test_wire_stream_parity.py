@@ -60,7 +60,7 @@ FLOOR = -61
 ATTRIBUTES = ('movement_speed', 'jump_strength', 'step_height', 'gravity', 'scale', 'safe_fall_distance',
               'block_interaction_range', 'entity_interaction_range')
 RESET = [
-    'gamerule spawn_mobs false', 'gamerule advance_time false', 'gamerule advance_weather false',
+    'gamerule spawn_mobs false', 'gamerule advance_time false', 'gamerule advance_weather false', 'weather clear',
     f'fill -12 {FLOOR + 1} -12 12 {FLOOR + 12} 28 minecraft:air',
     f'fill -12 {FLOOR} -12 12 {FLOOR} 28 minecraft:grass_block',
     'kill @e[type=!minecraft:player]', f'clear {PLAYER}', f'effect clear {PLAYER}', f'gamemode survival {PLAYER}',
@@ -845,6 +845,101 @@ SCENARIOS = {
     'toggle_keys': dict(
         ticks=80, steps={0: ['key ctrl tap'], 2: ['key w down'], 20: ['key shift tap'], 35: ['key shift tap'],
                          45: ['key ctrl tap'], 60: ['key w up']}),
+    # Section 23 (anticheat-sensitive). Combat timing (item 156): a sword's attacks at exactly its full charge
+    # (12.5 ticks: 13 apart) and one tick early (12), at a target walking into reach, while blocking with a shield,
+    # and sprint resets (w-tap, s-tap) between hits.
+    'attack_cooldown_edges': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.6), SWORD],
+        ticks=80, steps=merge({0: ['look 0 15']}, {t: ['mouse left click'] for t in (10, 23, 35, 48, 60, 61)})),
+    'attack_entering_reach': dict(
+        setup=[MACE_RESISTANCE, SWORD, f'summon minecraft:husk 0.5 {FLOOR + 1} 7.5 {{PersistenceRequired:1b,'
+               'Health:1000f,attributes:[{id:"minecraft:max_health",base:1000.0}]}'],
+        ticks=90, steps=merge({0: ['look 0 5']}, {t: ['mouse left click'] for t in range(8, 80, 4)})),
+    'attack_while_blocking': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.6), SWORD,
+               f'item replace entity {PLAYER} weapon.offhand with minecraft:shield'],
+        ticks=60, steps={0: ['look 0 15'], 5: ['mouse right down'], 15: ['mouse left click'], 25: ['mouse left click'],
+                         30: ['mouse right up'], 31: ['mouse left click'], 45: ['mouse left click']}),
+    'sprint_reset_taps': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=6.5), SWORD],
+        ticks=90, steps={0: ['look 0 5', 'key ctrl down', 'key w down'], 18: ['mouse left click'], 20: ['key w up'],
+                         22: ['key w down'], 31: ['mouse left click'], 33: ['key s down'], 35: ['key s up'],
+                         44: ['mouse left click'], 50: ['key ctrl up'], 52: ['key ctrl down'], 57: ['mouse left click'],
+                         70: ['key w up', 'key ctrl up']}),
+    # Crits (item 157): jumping attacks as the jump rises, at its top and on the way down; a sprinting jump's (no crit).
+    **{f'crit_jump_{when}': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.6), SWORD],
+        ticks=40, steps=merge({0: ['look 0 15'], 5: ['key space down'], 6: ['key space up']},
+                              {5 + delay: ['mouse left click']}, sprint))
+       for when, delay, sprint in (('rising', 3, {}), ('top', 6, {}), ('falling', 9, {}),
+                                   ('sprinting', 7, {3: ['key ctrl down', 'key w down'], 14: ['key w up', 'key ctrl up']}))},
+    # Combat across a server stall (item 158): the server's ticks stop for 15 ticks while the player keeps hitting.
+    'attack_through_freeze': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.6), SWORD],
+        ticks=70, steps=merge({0: ['look 0 15'], 10: ['command tick freeze'], 25: ['command tick unfreeze']},
+                              {t: ['mouse left click'] for t in range(8, 50, 7)})),
+    # Block breaking packets (item 159): a 2-tick break, a long break given up halfway, a target switched mid-break,
+    # a break at the reach limit, breaking while falling.
+    'break_quick_and_abort': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:dirt', f'setblock 1 {FLOOR + 1} 2 minecraft:obsidian',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:diamond_shovel'],
+        ticks=80, steps={0: ['look 0 40'], 5: ['mouse left down'], 15: ['mouse left up'], 20: ['look -30 40'],
+                         25: ['mouse left down'], 55: ['mouse left up']}),
+    'break_switch_target': dict(
+        setup=[f'fill -1 {FLOOR + 1} 2 1 {FLOOR + 1} 2 minecraft:stone',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:iron_pickaxe'],
+        ticks=80, steps={0: ['look 0 40', 'mouse left down'], 10: ['look -30 40'], 20: ['look 30 40'], 40: ['look 0 40'],
+                         70: ['mouse left up']}),
+    'break_at_reach': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 5 minecraft:stone', f'item replace entity {PLAYER} weapon.mainhand with minecraft:iron_pickaxe'],
+        ticks=70, steps={0: ['look 0 18'], 5: ['mouse left down'], 15: ['key s down'], 17: ['key s up'], 60: ['mouse left up']}),
+    'break_while_falling': dict(
+        setup=[f'fill -1 {FLOOR + 1} 2 1 {FLOOR + 8} 2 minecraft:stone', f'item replace entity {PLAYER} weapon.mainhand with minecraft:diamond_pickaxe[minecraft:enchantments={{"minecraft:efficiency":5}}]'],
+        ticks=60, anchor='accept_teleportation',
+        steps={0: ['command tp @s 0.5 ~8 0.5 0 30'], 1: ['look 0 30', 'mouse left down'], 40: ['mouse left up']}),
+    # Block placing packets (item 160): every face of a block, at the reach limit, against a mob standing where the
+    # block would go (refused), and while sprint-jumping.
+    'place_faces_and_reach': dict(
+        setup=[f'setblock 0 {FLOOR + 2} 3 minecraft:stone', f'item replace entity {PLAYER} weapon.mainhand with minecraft:stone 64'],
+        ticks=70, steps={0: ['look 0 10'], 5: ['mouse right click'], 10: ['look -25 0'], 14: ['mouse right click'],
+                         18: ['look 25 0'], 22: ['mouse right click'], 26: ['look 0 -30'], 30: ['mouse right click'],
+                         34: ['look 0 8'], 36: ['key s down'], 40: ['key s up'], 44: ['mouse right click'], 50: ['mouse right click']}),
+    'place_into_mob': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=3.5), f'item replace entity {PLAYER} weapon.mainhand with minecraft:stone 64'],
+        ticks=40, steps={0: ['look 0 50'], 5: ['mouse right click'], 10: ['look 0 35'], 15: ['mouse right click']}),
+    'place_sprint_jumping': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:stone 64'],
+        ticks=60, steps=merge({0: ['look 0 70', 'key ctrl down', 'key w down', 'key space down']},
+                              {t: ['mouse right click'] for t in range(4, 44, 2)}, {45: ['key w up', 'key ctrl up', 'key space up']})),
+    # Elytra (item 161): from 30 blocks up, open the wings (a jump in the air), glide, pitch down and up, a firework
+    # boost, glide into a wall, then land.
+    'elytra_flight': dict(
+        setup=[MACE_RESISTANCE, f'item replace entity {PLAYER} armor.chest with minecraft:elytra',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:firework_rocket 4',
+               f'fill -6 {FLOOR + 1} 24 6 {FLOOR + 12} 24 minecraft:stone'],
+        ticks=160, anchor='accept_teleportation',
+        steps={0: [f'command tp @s 0.5 {FLOOR + 30} 0.5 0 10'], 8: ['key space down'], 9: ['key space up'],
+               12: ['key space down'], 13: ['key space up'], 30: ['look 0 40'], 45: ['look 0 -15'], 55: ['mouse right click'],
+               90: ['look 0 20'], 140: ['look 0 60']}),
+    'elytra_riptide_water': dict(
+        setup=[MACE_RESISTANCE, f'item replace entity {PLAYER} armor.chest with minecraft:elytra',
+               f'fill -4 {FLOOR - 2} 4 4 {FLOOR} 30 minecraft:water'],
+        ticks=120, anchor='accept_teleportation',
+        steps={0: [f'command tp @s 0.5 {FLOOR + 14} 0.5 0 20'], 6: ['key space down'], 7: ['key space up'],
+               10: ['key space down'], 11: ['key space up'], 30: ['look 0 50']}),
+    # Riptide (item 162): in rain, at each level, into a wall, two back to back.
+    **{f'riptide_rain_{level}': dict(
+        setup=['weather rain', f'item replace entity {PLAYER} weapon.mainhand with minecraft:trident[minecraft:enchantments={{"minecraft:riptide":{level}}}]'],
+        ticks=70, steps={0: ['look 0 -20'], 5: ['mouse right down'], 20: ['mouse right up'], 50: ['command weather clear']})
+       for level in (1, 2, 3)},
+    'riptide_into_wall': dict(
+        setup=['weather rain', f'fill -3 {FLOOR + 1} 4 3 {FLOOR + 6} 4 minecraft:stone',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:trident[minecraft:enchantments={{"minecraft:riptide":3}}]'],
+        ticks=70, steps={0: ['look 0 -5'], 5: ['mouse right down'], 20: ['mouse right up'], 50: ['command weather clear']}),
+    'riptide_twice': dict(
+        setup=['weather rain', f'item replace entity {PLAYER} weapon.mainhand with minecraft:trident[minecraft:enchantments={{"minecraft:riptide":2}}]'],
+        ticks=90, steps={0: ['look 0 -15'], 5: ['mouse right down'], 18: ['mouse right up'], 40: ['look 90 -15'],
+                         41: ['mouse right down'], 54: ['mouse right up'], 80: ['command weather clear']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
