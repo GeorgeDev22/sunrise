@@ -134,7 +134,8 @@ def scenarios(entries):
 
     A click's state id becomes `stale`: how far it is behind the last one the server sent for that container
     (0 = up to date). The ids themselves count every change the server made since the login, so two runs
-    whose earlier scenarios differed number the same click differently."""
+    whose earlier scenarios differed number the same click differently. Prediction sequences are numbered from
+    the scenario's first for the same reason (number_sequences)."""
     me = self_id(entries)
     play = [e for e in entries if e.get('state') == 'play' and 'name' in e and e.get('dir') in ('c2s', 's2c')]
     runs, current, server_state = [], None, {}
@@ -169,7 +170,22 @@ def scenarios(entries):
             current.append(new_tick())
     for run in runs:
         name_entities(run)
+        number_sequences(run)
     return runs
+
+
+def number_sequences(run):
+    """Block prediction sequences (player_action, use_item, use_item_on) count every sequenced action since the
+    login: count them from the scenario's own first one instead, so one extra sequenced packet in an earlier
+    scenario doesn't make every later one differ. A difference inside the scenario still shows."""
+    base = None
+    for tick in run:
+        for _, fields in tick['packets']:
+            sequence = fields.get('sequence')
+            if isinstance(sequence, int) and sequence != 0:
+                if base is None:
+                    base = sequence
+                fields['sequence'] = sequence - base
 
 
 def first_frame(run, name):
