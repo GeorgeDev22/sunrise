@@ -56,12 +56,17 @@ PROPERTIES = {
 }
 # The flat world's grass is at y -61: the player stands at -60.
 FLOOR = -61
+# The attributes a scenario sets (item 94), reset before every scenario.
+ATTRIBUTES = ('movement_speed', 'jump_strength', 'step_height', 'gravity', 'scale', 'safe_fall_distance',
+              'block_interaction_range', 'entity_interaction_range')
 RESET = [
     'gamerule spawn_mobs false', 'gamerule advance_time false', 'gamerule advance_weather false',
     f'fill -12 {FLOOR + 1} -12 12 {FLOOR + 12} 28 minecraft:air',
     f'fill -12 {FLOOR} -12 12 {FLOOR} 28 minecraft:grass_block',
     'kill @e[type=!minecraft:player]', f'clear {PLAYER}', f'effect clear {PLAYER}', f'gamemode survival {PLAYER}',
     f'effect give {PLAYER} minecraft:saturation 1 20 true', f'effect give {PLAYER} minecraft:instant_health 1 5 true',
+    # What a scenario may have changed that the commands above don't undo: server-set attributes, the border.
+    *[f'attribute {PLAYER} minecraft:{a} base reset' for a in ATTRIBUTES], 'worldborder set 59999968',
     f'tp {PLAYER} 0.5 {FLOOR + 1} 0.5 0 0',
 ]
 # A target that takes hits without moving: no AI, no knockback.
@@ -315,6 +320,72 @@ SCENARIOS = {
                'attributes:[{id:"minecraft:movement_speed",base:0.3}]}'],
         ticks=50, steps={0: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 8: ['key w down'],
                          30: ['key w up'], 40: ['key shift down'], 44: ['key shift up']}),
+    # Server-set attributes (item 94): the client's prediction must use the server's values.
+    'attr_speed': dict(
+        setup=[f'attribute {PLAYER} minecraft:movement_speed base set 0.17'],
+        ticks=60, steps={0: ['key w down'], 15: ['key ctrl down'], 20: ['key space down'], 30: ['key space up'],
+                         45: ['key w up', 'key ctrl up']}),
+    'attr_jump': dict(
+        setup=[f'attribute {PLAYER} minecraft:jump_strength base set 0.75'],
+        ticks=60, steps={5: ['key space down'], 8: ['key space up'], 30: ['key w down', 'key space down'],
+                         34: ['key space up'], 45: ['key w up']}),
+    'attr_step': dict(
+        setup=[f'attribute {PLAYER} minecraft:step_height base set 1.25',
+               f'fill -2 {FLOOR + 1} 3 2 {FLOOR + 1} 4 minecraft:stone', f'fill -2 {FLOOR + 2} 5 2 {FLOOR + 2} 6 minecraft:stone'],
+        ticks=50, steps={0: ['key w down'], 40: ['key w up']}),
+    'attr_gravity': dict(
+        setup=[f'attribute {PLAYER} minecraft:gravity base set 0.03'],
+        ticks=70, steps={5: ['key space down'], 8: ['key space up'], 10: ['key w down'], 50: ['key w up']}),
+    'attr_scale': dict(
+        setup=[f'attribute {PLAYER} minecraft:scale base set 1.6'],
+        ticks=60, steps={0: ['key w down'], 20: ['key space down'], 24: ['key space up'], 30: ['key shift down'],
+                         45: ['key shift up', 'key w up']}),
+    'attr_safe_fall': dict(
+        setup=[f'attribute {PLAYER} minecraft:safe_fall_distance base set 6'],
+        ticks=50, anchor='accept_teleportation', steps={0: ['command tp @s 0.5 ~8 0.5']}),
+    'attr_reach': dict(
+        setup=[f'attribute {PLAYER} minecraft:block_interaction_range base set 2.0',
+               f'attribute {PLAYER} minecraft:entity_interaction_range base set 2.0',
+               TARGET.format(x=0.5, y=FLOOR + 1, z=3.2), f'setblock 0 {FLOOR + 1} 2 minecraft:stone', SWORD],
+        ticks=50, steps={0: ['look 0 40'], 5: ['mouse left click'], 15: ['look 0 15'], 20: ['mouse left click'],
+                         30: ['mouse right click']}),
+    # Walking into a world border five blocks wide, around the start.
+    'world_border': dict(
+        setup=['worldborder center 0.5 0.5', 'worldborder set 5'],
+        ticks=60, steps={0: ['key w down', 'key ctrl down'], 25: ['key d down'], 40: ['key w up', 'key ctrl up',
+                         'key d up']}),
+    # Enchantments that change movement (item 103).
+    'depth_strider': dict(
+        setup=[f'fill -3 {FLOOR} 1 3 {FLOOR + 1} 14 minecraft:water',
+               f'item replace entity {PLAYER} armor.feet with minecraft:diamond_boots[minecraft:enchantments={{"minecraft:depth_strider":3}}]'],
+        ticks=60, steps={0: ['key w down'], 50: ['key w up']}),
+    'soul_speed': dict(
+        setup=[f'fill -1 {FLOOR} 1 1 {FLOOR} 14 minecraft:soul_sand',
+               f'item replace entity {PLAYER} armor.feet with minecraft:diamond_boots[minecraft:enchantments={{"minecraft:soul_speed":3}}]'],
+        ticks=60, steps={0: ['key w down'], 20: ['key ctrl down'], 50: ['key w up', 'key ctrl up']}),
+    'swift_sneak': dict(
+        setup=[f'item replace entity {PLAYER} armor.legs with minecraft:diamond_leggings[minecraft:enchantments={{"minecraft:swift_sneak":3}}]'],
+        ticks=50, steps={0: ['key shift down', 'key w down'], 40: ['key w up', 'key shift up']}),
+    'frost_walker': dict(
+        setup=[f'fill -3 {FLOOR} 2 3 {FLOOR} 14 minecraft:water',
+               f'item replace entity {PLAYER} armor.feet with minecraft:diamond_boots[minecraft:enchantments={{"minecraft:frost_walker":2}}]'],
+        ticks=60, steps={0: ['key w down'], 50: ['key w up']}),
+    # Game modes (items 27, 28, 104): adventure can neither break nor place here; creative double-taps jump to
+    # fly (ServerboundPlayerAbilities), sprint-flies, and lands; spectator flies through blocks.
+    'adventure_mode': dict(
+        setup=[f'gamemode adventure {PLAYER}', f'setblock 0 {FLOOR + 1} 2 minecraft:stone',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:stone 8'],
+        ticks=50, steps={0: ['look 0 45'], 5: ['mouse left down'], 20: ['mouse left up'], 25: ['mouse right click'],
+                         30: ['look 0 70'], 35: ['mouse right click']}),
+    'creative_flight': dict(
+        setup=[f'gamemode creative {PLAYER}'],
+        ticks=90, steps=merge({5: ['key space down'], 6: ['key space up'], 8: ['key space down'], 9: ['key space up']}, {12: ['key space down'], 20: ['key space up'],
+                               22: ['key w down'], 30: ['key ctrl down'], 50: ['key ctrl up', 'key shift down'],
+                               58: ['key shift up'], 60: ['key w up']}, {70: ['key space down'], 71: ['key space up'], 73: ['key space down'], 74: ['key space up']})),
+    'spectator_flight': dict(
+        setup=[f'gamemode spectator {PLAYER}', f'fill -2 {FLOOR + 1} 3 2 {FLOOR + 3} 5 minecraft:stone'],
+        ticks=60, steps={0: ['key w down'], 20: ['key space down'], 28: ['key space up'], 35: ['key ctrl down'],
+                         50: ['key w up', 'key ctrl up']}),
     # Container clicks (items 56, 58, 59): every ContainerInput a screen sends, in a chest, a crafting table, a
     # furnace and the player's own inventory. Each ContainerClick carries the client's predicted slot changes and
     # carried item, which the server compares with its own (a wrong one resyncs, and anticheats watch them).
