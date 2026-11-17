@@ -940,6 +940,40 @@ SCENARIOS = {
         setup=['weather rain', f'item replace entity {PLAYER} weapon.mainhand with minecraft:trident[minecraft:enchantments={{"minecraft:riptide":2}}]'],
         ticks=90, steps={0: ['look 0 -15'], 5: ['mouse right down'], 18: ['mouse right up'], 40: ['look 90 -15'],
                          41: ['mouse right down'], 54: ['mouse right up'], 80: ['command weather clear']}),
+    # Vehicles the server checks (item 163): a horse's jump charged 5, 10 and 20 ticks; a strider on lava boosted
+    # with a warped fungus; a boat the server teleports mid-ride; dismounting at a trench's edge and in water; a
+    # minecart left while it runs on powered rails.
+    'horse_jump_strengths': dict(
+        setup=[f'summon minecraft:horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,Variant:0,'
+               'equipment:{saddle:{id:"minecraft:saddle",count:1}},attributes:[{id:"minecraft:jump_strength",base:0.8}]}'],
+        ticks=120, steps={0: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 10: ['key space down'],
+                          15: ['key space up'], 40: ['key space down'], 50: ['key space up'], 75: ['key space down'],
+                          95: ['key space up']}),
+    'strider_lava': dict(
+        setup=[f'fill -3 {FLOOR} 1 3 {FLOOR} 20 minecraft:lava',
+               f'summon minecraft:strider 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,equipment:{{saddle:{{id:"minecraft:saddle",count:1}}}}}}',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:warped_fungus_on_a_stick'],
+        ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:strider,limit=1]'], 10: ['look 0 10'],
+                         30: ['mouse right click'], 55: ['look 25 10'], 80: ['key shift down'], 82: ['key shift up']}),
+    'boat_teleported': dict(
+        setup=[f'fill -5 {FLOOR} 1 5 {FLOOR} 26 minecraft:water', f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 3.5'],
+        ticks=80, steps={0: ['command ride @s mount @e[type=minecraft:oak_boat,limit=1]'], 6: ['key w down'],
+                         30: ['command execute as @e[type=minecraft:oak_boat] run tp @s ~ ~ ~4'], 60: ['key w up']}),
+    'dismount_edge_and_water': dict(
+        setup=[f'fill -3 {FLOOR - 2} 4 3 {FLOOR} 8 minecraft:air', f'fill -3 {FLOOR - 2} 9 3 {FLOOR} 14 minecraft:water',
+               f'summon minecraft:horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,Variant:0,'
+               'equipment:{saddle:{id:"minecraft:saddle",count:1}}}'],
+        ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 6: ['key w down'], 14: ['key w up'],
+                         20: ['key shift down'], 22: ['key shift up'],
+                         40: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 45: ['command execute as @e[type=minecraft:horse] run tp @s 0.5 ~ 11.5'],
+                         55: ['key shift down'], 57: ['key shift up']}),
+    'minecart_jump_off': dict(
+        setup=[f'fill 0 {FLOOR} 4 0 {FLOOR} 7 minecraft:redstone_block',
+               f'fill 0 {FLOOR + 1} 1 0 {FLOOR + 1} 24 minecraft:rail[shape=north_south]',
+               f'fill 0 {FLOOR + 1} 4 0 {FLOOR + 1} 7 minecraft:powered_rail[shape=north_south,powered=true]',
+               f'summon minecraft:minecart 0.5 {FLOOR + 1} 2.5'],
+        ticks=70, steps={0: ['command ride @s mount @e[type=minecraft:minecart,limit=1]'], 5: ['key w down'],
+                         30: ['key shift down'], 32: ['key shift up'], 33: ['key w up']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
