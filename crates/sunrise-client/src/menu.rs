@@ -1361,7 +1361,9 @@ impl Menu {
         };
         // The box (an EditBox of 50) keeps the first 50 UTF-16 units of what it is given.
         let name = if input.custom_name().is_some() {
-            let hover = crate::stations::hover_name(env.names, &input);
+            // As vanilla's client names it: the name goes to the server.
+            let hover =
+                crate::lang::returned_to_server(|| crate::stations::hover_name(env.names, &input));
             let mut units = 0;
             hover
                 .chars()

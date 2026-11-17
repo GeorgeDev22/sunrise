@@ -31,6 +31,9 @@ pub struct Language {
     /// right to left (`ClientLanguage.defaultRightToLeft`).
     bidirectional: bool,
     map: HashMap<String, String>,
+    /// The keys only Sunrise's own files give (the engine's `sunrise` namespace and the crates'),
+    /// which vanilla's client doesn't know: no other source has them.
+    own: std::collections::HashSet<String>,
 }
 pub const DEFAULT: &str = "en_us";
 
@@ -501,6 +504,7 @@ impl Language {
             code: code.to_owned(),
             bidirectional: false,
             map: entries.into_iter().collect(),
+            own: Default::default(),
         }
     }
     /// ClientLanguage.loadFrom: en_us first, then the selected language, each
@@ -518,6 +522,7 @@ impl Language {
         crate_files: &[&[(&str, &str)]],
     ) -> Self {
         let mut map = HashMap::new();
+        let mut own = std::collections::HashSet::new();
         let mut codes = vec![DEFAULT];
         if code != DEFAULT {
             codes.push(code);
@@ -533,12 +538,25 @@ impl Language {
         for c in codes {
             for namespace in &namespaces {
                 for (i, source) in sources.iter().enumerate() {
+                    let engine = i == 0 && namespace == "sunrise";
                     if let Some(bytes) = source.read(&format!("assets/{namespace}/lang/{c}.json")) {
-                        read_lang_file(&bytes, &mut map);
+                        let mut entries = HashMap::new();
+                        read_lang_file(&bytes, &mut entries);
+                        for key in entries.keys() {
+                            if engine {
+                                own.insert(key.clone());
+                            } else {
+                                own.remove(key);
+                            }
+                        }
+                        map.extend(entries);
                     }
                     // The crates' text right after the engine's own (`Bundled`, the first source).
-                    if i == 0 && namespace == "sunrise" {
-                        read_crate_files(crate_files, c, &mut map);
+                    if engine {
+                        let mut entries = HashMap::new();
+                        read_crate_files(crate_files, c, &mut entries);
+                        own.extend(entries.keys().cloned());
+                        map.extend(entries);
                     }
                 }
             }
@@ -558,6 +576,21 @@ impl Language {
             code: code.to_owned(),
             bidirectional,
             map,
+            own,
+        }
+    }
+    /// This language as vanilla's client has it: without the keys only Sunrise's own files give.
+    pub fn without_own(&self) -> Self {
+        Self {
+            code: self.code.clone(),
+            bidirectional: self.bidirectional,
+            map: self
+                .map
+                .iter()
+                .filter(|(key, _)| !self.own.contains(*key))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            own: Default::default(),
         }
     }
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -732,6 +765,15 @@ pub fn scoped<R>(language: Language, f: impl FnOnce() -> R) -> (R, Vec<String>) 
     });
     (result, missed.unwrap_or_default())
 }
+/// Text the client sends back to a server, resolved as vanilla's client resolves it (an anvil's
+/// name box, a sign opened for editing: `Component.getString`): a key only Sunrise's own files
+/// give comes back as the key, so a server can't tell this client by the keys it knows.
+pub fn returned_to_server<R>(f: impl FnOnce() -> R) -> R {
+    match current() {
+        Some(language) => scoped(language.without_own(), f).0,
+        None => f(),
+    }
+}
 /// `key` was asked for in a `scoped` language that has no text for it.
 fn missed(key: &str) {
     SCOPE.with(|s| {
@@ -881,6 +923,34 @@ mod tests {
         let plain = Language::load_with(&[&pack], "de_de", &[]);
         assert_eq!(plain.get("test.crate.hello"), None);
         assert_eq!(plain.len() + 1, de.len());
+    }
+
+    /// Text the client sends back resolves as vanilla's client would: a key only Sunrise's own
+    /// files or the crates give stays the key; a key a pack or vanilla also gives keeps its text.
+    #[test]
+    fn text_returned_to_a_server_knows_no_key_only_sunrise_gives() {
+        static CRATE: &[(&str, &str)] = &[("en_us", r#"{"test.crate.hello": "Hello"}"#)];
+        let pack = Mem(HashMap::from([
+            (
+                "assets/minecraft/lang/en_us.json".to_owned(),
+                br#"{"block.minecraft.stone": "Stone"}"#.to_vec(),
+            ),
+            (
+                "assets/sunrise/lang/en_us.json".to_owned(),
+                br#"{"sunrise.osk.close": "Packed close"}"#.to_vec(),
+            ),
+        ]));
+        let language = Language::load_with(&[&pack], "en_us", &[CRATE]);
+        let back = language.without_own();
+        assert_eq!(language.get("sunrise.pages.mods"), Some("Mods"));
+        assert_eq!(back.get("sunrise.pages.mods"), None);
+        assert_eq!(back.get("test.crate.hello"), None);
+        assert_eq!(back.get("block.minecraft.stone"), Some("Stone"));
+        assert_eq!(back.get("sunrise.osk.close"), Some("Packed close"));
+        let (seen, _) = scoped(language, || {
+            returned_to_server(|| get("sunrise.pages.mods"))
+        });
+        assert_eq!(seen, "sunrise.pages.mods");
     }
 
     #[test]
