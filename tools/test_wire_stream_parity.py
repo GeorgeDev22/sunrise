@@ -1009,7 +1009,7 @@ SCENARIOS = {
         setup=[f'summon minecraft:villager 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,'
                'VillagerData:{profession:"minecraft:farmer",level:1,type:"minecraft:plains"},'
                'Offers:{Recipes:[{buy:{id:"minecraft:emerald",count:1},sell:{id:"minecraft:bread",count:6},'
-               'maxUses:12,xp:1,priceMultiplier:0.05f}]}}}', f'give {PLAYER} minecraft:emerald 5'],
+               'maxUses:12,xp:1,priceMultiplier:0.05f}]}}', f'give {PLAYER} minecraft:emerald 5'],
         ticks=34, steps={0: ['look 0 15'], 2: ['mouse right click'], 8: ['select-trade 0'],
                          14: ['click-slot 2 shift'], 22: ['key esc tap']}),
     # A beacon (item 62) on a 3x3 iron pyramid: opened, an iron ingot paid, speed confirmed.
