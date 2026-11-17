@@ -2213,6 +2213,7 @@ sunrise-client game::recipe_book_variants_tests::control_a_multi_display_recipe_
 sunrise-client game::recipe_properties_tests::tests::disconnect_discards_properties_before_reconnect lib daily resources
 sunrise-client game::remote::attachment_query_tests::synced_client_queries_follow_replacement_retirement_and_level_changes lib daily resources
 sunrise-client game::remote::block_entity_data_tests::block_entity_data_received_after_merge lib daily resources
+sunrise-client game::remote::boat_push_order_tests::a_boat_pushes_the_player_in_the_level_tick_order lib daily resources
 sunrise-client game::remote::effect_blend_tests::ordinary_effect_blends_follow_the_client_lifecycle lib daily resources
 sunrise-client game::remote::effect_blend_tests::ordinary_effect_first_read_does_not_restart_the_blend lib daily resources
 sunrise-client game::remote::effect_blend_tests::ordinary_effect_infinite_partial_ticks_follow_the_blend_direction lib daily resources

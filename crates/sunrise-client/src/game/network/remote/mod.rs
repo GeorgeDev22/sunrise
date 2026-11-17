@@ -3506,8 +3506,12 @@ impl Game<'_> {
                 self.enter_respawn_level(&p, reason);
                 // handleRespawn adds the new LocalPlayer after what the kept
                 // level holds; a new level holds nothing yet.
-                let before: std::collections::HashSet<u32> =
-                    self.mobs.iter().map(|m| m.id).collect();
+                let before: std::collections::HashSet<u32> = self
+                    .mobs
+                    .iter()
+                    .map(|m| m.id)
+                    .chain(self.boats.iter().map(|b| b.id))
+                    .collect();
                 if let Some(r) = self.remote.as_mut() {
                     r.ticked_before_player = before;
                 }
@@ -6769,9 +6773,9 @@ impl Game<'_> {
     /// `LivingEntity.pushEntities`, and of the boats' pushes: on a client
     /// `EntitySelector.pushableBy` lets entities push only the local player,
     /// so the server never sends these pushes. `doPush(player)` is
-    /// `player.push(entity)`. `before_player`: the mobs that tick before the
-    /// player (`ticked_before_player`) and the boats, else the mobs that tick
-    /// after it.
+    /// `player.push(entity)`. `before_player`: the mobs and boats that tick
+    /// before the player (`ticked_before_player`), else those that tick after
+    /// it.
     fn remote_pushes(&self, before_player: bool) -> Vec3 {
         let (Some(p), Some(r)) = (self.player.as_ref(), self.remote.as_ref()) else {
             return Vec3::ZERO;
@@ -6840,14 +6844,12 @@ impl Game<'_> {
         // AbstractBoat.push(player) from the boat's own tick (its box grown
         // by 0.2 sideways) and from the player's pushEntities (its box).
         let area = Vec3::new(f64::from(0.2_f32), f64::from(-0.01_f32), f64::from(0.2_f32));
-        // The boats' pushes stay where they were measured: with the entities
-        // that tick before the player.
-        let boats = if before_player {
-            &self.boats[..]
-        } else {
-            &[][..]
-        };
-        for b in boats.iter().filter(|b| self.riding != Some(b.id)) {
+        // A boat pushes from its own tick, in the same order as the mobs.
+        for b in self
+            .boats
+            .iter()
+            .filter(|b| order(b.id) && self.riding != Some(b.id))
+        {
             let bb = b.bounds();
             let times = usize::from(
                 bounds.intersects(bb.inflate(area))
@@ -15817,3 +15819,33 @@ mod item_use_tick_tests {
 }
 #[cfg(test)]
 mod smoke_source_tests;
+
+#[cfg(test)]
+mod boat_push_order_tests {
+    use super::*;
+    use sunrise_client::motion::PlayerMotion;
+
+    /// ClientLevel ticks entities in the order they joined: a boat added after the
+    /// player pushes it after its move, one the level held when the player respawned
+    /// pushes it before.
+    #[test]
+    #[ignore = "daily"]
+    fn a_boat_pushes_the_player_in_the_level_tick_order() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let (_peer, _writer) = super::tests::connect_menu_test(game);
+            let mut player = PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 3.7)).unwrap();
+            player.client_side = true;
+            game.player = Some(player);
+            game.mobs.clear();
+            let boat =
+                crate::game::boats::Boat::new(9, "oak".into(), Vec3::new(0.5, 64.0, 3.5), 0.0);
+            game.boats.push(boat);
+            let after = game.remote_pushes(false);
+            assert_eq!(game.remote_pushes(true), Vec3::ZERO);
+            assert!(after.z > 0.0, "{after:?}");
+            game.remote.as_mut().unwrap().ticked_before_player.insert(9);
+            assert_eq!(game.remote_pushes(false), Vec3::ZERO);
+            assert_eq!(game.remote_pushes(true), after);
+        });
+    }
+}
