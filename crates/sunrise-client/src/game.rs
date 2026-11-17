@@ -2543,12 +2543,11 @@ impl Game<'_> {
     /// (aiStep, unless a spectator or a passenger): a corner inside a
     /// suffocating block sets a 0.1 speed towards the nearest side that is
     /// free, on that side's axis; a later corner overwrites an earlier one.
-    /// Suffocating is a full collision cube that is also a full render cube,
-    /// as `in_wall` has it.
+    /// Suffocating is `LocalPlayer.suffocatesAt` (`closest_space_nudge`).
     fn closest_space_nudge(&self) -> [Option<f64>; 2] {
         match self.player.as_ref() {
             Some(p) if !p.spectator && self.riding.is_none() => {
-                closest_space_nudge(p, &self.world, self.res.facts())
+                closest_space_nudge(p, &self.world, self.collision, self.level_suffocation())
             }
             _ => [None; 2],
         }

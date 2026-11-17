@@ -208,6 +208,7 @@ sunrise-client game::clone_block_ticks_tests::a_strict_clone_copies_the_pending_
 sunrise-client game::clone_block_ticks_tests::copied_block_ticks_keep_order_priority_and_dedup lib daily resources
 sunrise-client game::clone_dimensions_tests::a_clone_to_another_dimension_lands_in_that_world_and_comes_back lib daily resources
 sunrise-client game::clone_dimensions_tests::an_unknown_clone_dimension_fails_and_clones_nothing lib daily resources
+sunrise-client game::closest_space::tests::a_player_is_pushed_out_of_ice_and_a_closed_shulker_box_but_not_glass lib daily resources
 sunrise-client game::combat::guest_hit_tests::an_effect_hit_on_a_guest_credits_the_mob_that_swung lib daily resources
 sunrise-client game::combat::infested_roll_tests::a_starving_infested_player_rolls_the_infested_effect lib daily resources
 sunrise-client game::combat::infested_roll_tests::an_absorbed_hit_still_rolls_the_infested_effect lib daily resources
