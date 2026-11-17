@@ -2214,6 +2214,7 @@ sunrise-client game::remote::effect_blend_tests::ordinary_effect_blends_follow_t
 sunrise-client game::remote::effect_blend_tests::ordinary_effect_first_read_does_not_restart_the_blend lib daily resources
 sunrise-client game::remote::effect_blend_tests::ordinary_effect_infinite_partial_ticks_follow_the_blend_direction lib daily resources
 sunrise-client game::remote::effect_blend_tests::ordinary_effect_packets_preserve_or_skip_the_blend lib daily resources
+sunrise-client game::remote::fall_sound::tests::a_loaded_client_falls_where_no_chunk_has_come lib daily resources
 sunrise-client game::remote::fall_sound::tests::a_silent_local_player_hears_no_block_fall_sound lib daily resources
 sunrise-client game::remote::fall_sound::tests::remote_five_block_fall_plays_stone_locally_once lib daily resources
 sunrise-client game::remote::interaction_event_tests::a_creative_hand_replaced_by_a_finish_listener_is_not_sent_as_a_creative_slot lib daily resources

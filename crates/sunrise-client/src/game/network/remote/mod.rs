@@ -6224,39 +6224,22 @@ impl Game<'_> {
         // Those added before it tick before it: their pushes reach this move.
         let pushed = self.remote_pushes(true);
         let sprint_window = self.settings.sprint_window;
-        let Some(player) = self.player.as_mut() else {
-            return Ok(());
-        };
-        let (cx, cz) = (
-            (player.position.x.floor() as i32) >> 4,
-            (player.position.z.floor() as i32) >> 4,
-        );
-        if !self.streaming.is_lit(cx, cz) {
-            // LocalPlayer.tick can wait for chunks, but Minecraft.tick still
-            // calls sendChanges: rotations and the 20-tick position reminder
-            // must continue, as well as moves into the unloaded area.
-            if let Some(r) = self.remote.as_ref()
-                && r.loaded_sent
-            {
-                let input = r.last_input;
-                self.remote_send_state(input);
-            }
+        if self.player.is_none() {
             return Ok(());
         }
-        // LocalPlayer.tick reaches Player.tick only once the client has loaded
-        // and the player's chunk is there; its endpoints bracket that work
-        // alone, also on the death screen, not the level pass before it.
-        let player = self
-            .remote
-            .as_ref()
-            .is_some_and(|r| r.loaded_sent)
-            .then(|| {
-                (mod_api::__private::listened(mod_api::HookId::PlayerTickPre)
-                    || mod_api::__private::listened(mod_api::HookId::PlayerTickPost))
-                .then(|| self.local_player())
-                .flatten()
-            })
-            .flatten();
+        // LocalPlayer.tick and sendChanges run once the client has loaded (hasClientLoaded),
+        // wherever the player is: a chunk that hasn't come yet has no blocks here, as vanilla's
+        // empty chunk has none, so the player falls through it until the chunk comes.
+        if !self.remote.as_ref().is_some_and(|r| r.loaded_sent) {
+            return Ok(());
+        }
+        // LocalPlayer.tick reaches Player.tick only once the client has loaded; its
+        // endpoints bracket that work alone, also on the death screen, not the level
+        // pass before it.
+        let player = (mod_api::__private::listened(mod_api::HookId::PlayerTickPre)
+            || mod_api::__private::listened(mod_api::HookId::PlayerTickPost))
+        .then(|| self.local_player())
+        .flatten();
         let player_from = entity_section_steps::player_before(self);
         if let Some(player) = player {
             self.native_player_tick_pre(mod_api::__private::PlayerTickPreCall { player });
