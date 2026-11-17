@@ -5852,6 +5852,10 @@ impl Game<'_> {
             o.velocity = v;
         } else if let Some(i) = self.carts.iter().position(|c| c.id == id as u32) {
             self.carts.update(i, |c| c.velocity = v);
+        } else if let Some(i) = self.boats.iter().position(|b| b.id == id as u32) {
+            // Entity.lerpMotion: the boat the player drives floats on from the server's motion
+            // (`tick_remote_boat_bubbles` drops it again on a boat nobody here drives).
+            self.boats.update(i, |b| b.velocity = v);
         } else if let Some(i) = self
             .creatures
             .projectiles
