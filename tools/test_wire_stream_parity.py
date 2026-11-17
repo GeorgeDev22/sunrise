@@ -755,6 +755,22 @@ SCENARIOS = {
         ticks=120, steps={0: ['look 0 10', f'command summon minecraft:vindicator 0.5 {FLOOR + 1} 5.5 '
                               '{PersistenceRequired:1b,equipment:{mainhand:{id:"minecraft:iron_axe",count:1}}}'],
                           5: ['mouse right down'], 110: ['mouse right up']}),
+    # Real mouse turning (item 12), at the default sensitivity (0.5) both clients have: raw mouse counts through
+    # MouseHandler (the sensitivity's scale, Entity.turn's 0.15), the rotation steps anticheats' aim checks read.
+    'mouse_slow_turn': dict(
+        ticks=60, steps={t: [f'mouse-move {3 + t % 2} {1 if t % 5 == 0 else 0}'] for t in range(0, 50)}),
+    'mouse_fast_turn': dict(
+        ticks=50, steps={t: [f'mouse-move {85 if t < 20 else -70} {12 if t % 3 else -9}'] for t in range(0, 40)}),
+    'mouse_flicks': dict(
+        ticks=50, steps={5: ['mouse-move 640 0'], 15: ['mouse-move -1100 120'], 25: ['mouse-move 37 -260'],
+                         35: ['mouse-move -2 3']}),
+    'mouse_micro': dict(
+        ticks=50, steps={t: [f'mouse-move {(-1) ** t} {(-1) ** (t // 2)}'] for t in range(0, 40)}),
+    'mouse_turn_walk_attack': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=4.5), SWORD],
+        ticks=70, steps=merge({0: ['key w down'], 50: ['key w up']},
+                              {t: [f'mouse-move {(-1) ** (t // 6) * 9} {2 if t < 20 else -1}'] for t in range(0, 50)},
+                              {t: ['mouse left click'] for t in (12, 24, 36, 48)})),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(

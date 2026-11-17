@@ -43,7 +43,7 @@ import org.lwjgl.sdl.SDLVideo;
  * the next tick: its first tick sends the command /wire-mark, which marks it in the capture. It prints
  * "[VanillaTickScript] done NAME" when the scenario's ticks have run. "where" prints the position.
  *
- * Lines (sunrise-ctl's words): key NAME down|up|tap, mouse left|right down|up|click, look YAW PITCH,
+ * Lines (sunrise-ctl's words): key NAME down|up|tap, mouse left|right down|up|click, look YAW PITCH, mouse-move DX DY,
  * click-slot SLOT [right] [shift] (the menu's slot id), command TEXT, close.
  */
 public final class VanillaTickScript {
@@ -316,6 +316,25 @@ public final class VanillaTickScript {
                 Method pick = Minecraft.class.getDeclaredMethod("pick", float.class);
                 pick.setAccessible(true);
                 pick.invoke(mc, 1.0F);
+            }
+            case "mouse-move" -> {
+                // MouseHandler.onMove with the pointer grabbed in an active window: the frame's
+                // handleAccumulatedMovement turns the player (turnPlayer: the sensitivity's scale, then
+                // Entity.turn), after the tick, as a real mouse's motion between frames does. Under Xvfb the
+                // window may not hold the focus or the grab, so the script gives it both.
+                MouseHandler mouse = mc.mouseHandler;
+                for (String name : new String[] {"accumulatedDX", "accumulatedDY"}) {
+                    Field field = MouseHandler.class.getDeclaredField(name);
+                    field.setAccessible(true);
+                    double delta = Double.parseDouble(name.endsWith("X") ? w[1] : w[2]);
+                    field.setDouble(mouse, field.getDouble(mouse) + delta);
+                }
+                Field grabbed = MouseHandler.class.getDeclaredField("mouseGrabbed");
+                grabbed.setAccessible(true);
+                grabbed.setBoolean(mouse, true);
+                Field focused = com.mojang.blaze3d.platform.Window.class.getDeclaredField("focused");
+                focused.setAccessible(true);
+                focused.setBoolean(mc.getWindow(), true);
             }
             case "click-slot" -> {
                 // click-slot SLOT [right] [shift] [INPUT] [bBUTTON]: INPUT a ContainerInput name, slot -999
