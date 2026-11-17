@@ -1331,21 +1331,26 @@ impl MotionWorld<'_, '_, '_> {
         if self.player.block_effects {
             self.apply_effects_from_blocks()?;
         }
-        // LivingEntity.aiStep "freezing" (server).
-        if !self.player.in_powder_snow || !self.player.can_freeze() {
-            self.player.ticks_frozen = (self.player.ticks_frozen - 2).max(0);
+        // LivingEntity.aiStep "freezing", the server's alone (`level instanceof
+        // ServerLevel`): a client's player gets its frost slowdown from the
+        // server's attributes and its frozen ticks from the server's entity data.
+        if !self.player.client_side {
+            if !self.player.in_powder_snow || !self.player.can_freeze() {
+                self.player.ticks_frozen = (self.player.ticks_frozen - 2).max(0);
+            }
+            self.player.remove_frost()?;
+            let on = self.support(movement_support::LEGACY_SUPPORT_OFFSET)?;
+            let on_air = self.assets.registry.state(self.block(on)).is_none_or(|s| {
+                matches!(
+                    s.name.as_str(),
+                    "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+                )
+            });
+            self.player.try_add_frost(on_air)?;
         }
-        self.player.remove_frost()?;
-        let on = self.support(movement_support::LEGACY_SUPPORT_OFFSET)?;
-        let on_air = self.assets.registry.state(self.block(on)).is_none_or(|s| {
-            matches!(
-                s.name.as_str(),
-                "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
-            )
-        });
-        self.player.try_add_frost(on_air)?;
         self.update_soul_speed_block()?;
-        if self.player.health.tick_count % 40 == 0
+        if !self.player.client_side
+            && self.player.health.tick_count % 40 == 0
             && self.player.is_fully_frozen()
             && self.player.can_freeze()
         {
