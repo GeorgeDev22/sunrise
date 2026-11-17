@@ -422,12 +422,13 @@ SCENARIOS = {
     'chest_drag': dict(
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:chest[facing=north]',
                f'item replace entity {PLAYER} hotbar.0 with minecraft:stone 16'],
+        # A screen sends a drag's clicks together when the button comes up (AbstractContainerScreen.mouseReleased).
         ticks=70, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 54'],
-                         14: ['click-slot -999 QUICK_CRAFT b0'], 15: ['click-slot 0 QUICK_CRAFT b1'],
-                         16: ['click-slot 1 QUICK_CRAFT b1'], 17: ['click-slot 2 QUICK_CRAFT b1'],
-                         18: ['click-slot -999 QUICK_CRAFT b2'], 22: ['click-slot 0'],
-                         24: ['click-slot -999 QUICK_CRAFT b4'], 25: ['click-slot 9 QUICK_CRAFT b5'],
-                         26: ['click-slot 10 QUICK_CRAFT b5'], 27: ['click-slot -999 QUICK_CRAFT b6'],
+                         14: ['click-slot -999 QUICK_CRAFT b0', 'click-slot 0 QUICK_CRAFT b1',
+                              'click-slot 1 QUICK_CRAFT b1', 'click-slot 2 QUICK_CRAFT b1',
+                              'click-slot -999 QUICK_CRAFT b2'], 22: ['click-slot 0'],
+                         24: ['click-slot -999 QUICK_CRAFT b4', 'click-slot 9 QUICK_CRAFT b5',
+                              'click-slot 10 QUICK_CRAFT b5', 'click-slot -999 QUICK_CRAFT b6'],
                          30: ['click-slot 3'], 31: ['click-slot 3 PICKUP_ALL b0'], 35: ['click-slot 54'],
                          45: ['key e tap']}),
     # Planks one by one into the grid (a crafting table appears as the result), a shift-click on the result, and
