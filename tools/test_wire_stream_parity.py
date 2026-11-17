@@ -67,6 +67,7 @@ RESET = [
     f'effect give {PLAYER} minecraft:saturation 1 20 true', f'effect give {PLAYER} minecraft:instant_health 1 5 true',
     # What a scenario may have changed that the commands above don't undo: server-set attributes, the border.
     *[f'attribute {PLAYER} minecraft:{a} base reset' for a in ATTRIBUTES], 'worldborder set 59999968',
+    'tick unfreeze', 'tick rate 20',
     f'tp {PLAYER} 0.5 {FLOOR + 1} 0.5 0 0',
 ]
 # A target that takes hits without moving: no AI, no knockback.
@@ -472,6 +473,27 @@ SCENARIOS = {
         ticks=50, steps={5: ['key e tap'], 10: ['click-slot 9'], 13: ['click-slot 36 right'],
                          16: ['click-slot 10'], 19: ['click-slot 36 right'], 22: ['click-slot 36 right'],
                          25: ['click-slot 11'], 30: ['key e tap']}),
+    # The server changes things mid-action (item 99): effects and an attribute arrive while sprinting and in the
+    # middle of a jump.
+    'mid_action_changes': dict(
+        ticks=70, steps={0: ['key w down', 'key ctrl down'], 10: ['command effect give @s minecraft:speed 30 2'],
+                         20: ['key space down'], 22: ['command effect give @s minecraft:jump_boost 30 2'],
+                         24: ['key space up'], 35: ['command attribute @s minecraft:movement_speed base set 0.14'],
+                         45: ['command effect clear @s'], 55: ['key w up', 'key ctrl up']}),
+    # The server's tick rate (item 97): a server's client follows a slower rate (its tick target only ever grows,
+    # ClientboundTickingStatePacket), and keeps moving while the server is frozen.
+    'tick_rate_slow': dict(
+        ticks=90, steps={5: ['command tick rate 10'], 15: ['key w down'], 40: ['key w up'], 45: ['key space down'],
+                         48: ['key space up'], 60: ['command tick rate 20'], 70: ['key w down'], 80: ['key w up']}),
+    'tick_freeze': dict(
+        ticks=70, steps={5: ['command tick freeze'], 10: ['key w down'], 25: ['key w up'], 30: ['key space down'],
+                         33: ['key space up'], 45: ['command tick unfreeze'], 50: ['key w down'], 60: ['key w up']}),
+    # Blocks that hurt and slow (item 126): walking into a cactus, over magma, into a campfire.
+    'damaging_blocks': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:cactus', f'fill -2 {FLOOR} 3 2 {FLOOR} 5 minecraft:magma_block',
+               f'setblock 1 {FLOOR + 1} 6 minecraft:campfire'],
+        ticks=80, steps={0: ['key w down'], 20: ['key w up', 'key d down'], 26: ['key d up', 'key w down'],
+                         50: ['look 30 0'], 70: ['key w up']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
