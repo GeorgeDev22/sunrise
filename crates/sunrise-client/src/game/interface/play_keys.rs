@@ -67,7 +67,14 @@ impl Game<'_> {
                     if self.screen == Screen::Inventory && self.recipe_book_escape() {
                         return Ok(());
                     }
-                    self.close_container();
+                    // AbstractContainerScreen.onClose closes the menu (on a server, with
+                    // a ServerboundContainerClosePacket); PauseScreen.onClose only
+                    // swaps the screen.
+                    if self.screen == Screen::Inventory {
+                        self.close_container();
+                    } else {
+                        self.pad_clear_focus();
+                    }
                     self.pause_focus = None;
                     self.set_screen(Screen::Playing);
                     self.pause_menu = true;
@@ -476,6 +483,39 @@ mod swap_hands_tests {
                 g.offhand.as_ref().map(|s| &*s.item),
                 Some("minecraft:torch")
             );
+        });
+    }
+}
+
+#[cfg(test)]
+mod pause_close_tests {
+    use crate::game::{Screen, native_entity_refs::tests::with_game};
+    use sunrise_protocol::packets::play::Serverbound as S;
+    use winit::keyboard::KeyCode;
+
+    /// On a server, Escape out of the inventory closes its menu with a
+    /// ServerboundContainerClosePacket; Escape out of the pause menu sends
+    /// nothing (PauseScreen.onClose only swaps the screen).
+    #[test]
+    #[ignore = "daily"]
+    fn escape_out_of_the_pause_menu_closes_no_container() {
+        with_game(|game| {
+            let (mut peer, _writer) = crate::game::remote::tests::connect_menu_test(game);
+            peer.set_read_timeout(Some(std::time::Duration::from_millis(50)))
+                .unwrap();
+            while peer.recv().is_ok() {}
+            for (screen, closes) in [(Screen::Paused, 0), (Screen::Inventory, 1)] {
+                game.set_screen(screen);
+                game.key_pressed(KeyCode::Escape, KeyCode::Escape).unwrap();
+                assert_eq!(game.screen, Screen::Playing);
+                let mut sent = 0;
+                while let Ok((id, bytes)) = peer.recv() {
+                    if matches!(S::decode(id, &bytes), Ok(S::ContainerClose(_))) {
+                        sent += 1;
+                    }
+                }
+                assert_eq!(sent, closes, "Escape out of {screen:?}");
+            }
         });
     }
 }

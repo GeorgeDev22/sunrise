@@ -2155,6 +2155,7 @@ sunrise-client game::piston_push::order_tests::a_pushed_tnt_loses_velocity_into_
 sunrise-client game::place_feature_tests::an_inline_feature_draws_the_level_random_as_its_named_twin lib daily resources
 sunrise-client game::place_feature_tests::an_inline_simple_block_feature_places_like_a_named_one lib daily resources
 sunrise-client game::place_feature_tests::inline_and_named_features_fail_and_succeed_alike lib daily resources
+sunrise-client game::play_keys::pause_close_tests::escape_out_of_the_pause_menu_closes_no_container lib daily resources
 sunrise-client game::play_keys::swap_hands_tests::a_guest_swap_through_its_connection_is_heard_once_and_sends_the_hands lib daily resources
 sunrise-client game::play_keys::swap_hands_tests::the_own_player_swap_asks_the_listener_for_each_hand lib daily resources
 sunrise-client game::play_ping_tests::dead_guest_play_ping_is_transport_not_an_action lib daily resources
