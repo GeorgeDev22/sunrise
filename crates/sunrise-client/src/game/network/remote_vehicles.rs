@@ -147,20 +147,11 @@ impl Game<'_> {
         {
             hits.push((id, d, p));
         }
-        // EndCrystal.isPickable: its 2 x 2 box, with the server's entity
-        // id, not special_targets' local projectile target id. A right click
-        // interacts with it too (MultiPlayerGameMode.interact sends the packet),
-        // then passes on to the item (Entity.interact).
-        let reach = self.entity_reach;
-        for c in self.crystals.iter().filter(|c| c.id != 0) {
-            let p = c.position;
-            let bounds = Aabb::new(
-                Vec3::new(p.x - 1.0, p.y, p.z - 1.0),
-                Vec3::new(p.x + 1.0, p.y + 2.0, p.z + 1.0),
-            );
-            if let Some(d) = ray_box(eye, dir, reach, bounds) {
-                hits.push((c.id as i32, d, [p.x, p.y, p.z]));
-            }
+        // A right click on a crystal interacts with it too (MultiPlayerGameMode.interact
+        // sends the packet), then passes on to the item (Entity.interact).
+        if let Some((i, d)) = self.crystal_hit() {
+            let p = self.crystals[i].position;
+            hits.push((self.crystals[i].id as i32, d, [p.x, p.y, p.z]));
         }
         // EnderDragonPart.isPickable: the server's dragon hurts by part, and
         // a right click on one passes as a crystal's does.
@@ -176,6 +167,26 @@ impl Game<'_> {
                 point[2] - origin[2],
             ],
         })
+    }
+
+    /// `EndCrystal.isPickable`: the nearest crystal the view hits within reach, by its
+    /// 2 x 2 box, with the server's entity id (not special_targets' local projectile
+    /// target id).
+    pub(super) fn crystal_hit(&self) -> Option<(usize, f64)> {
+        let (eye, dir) = self.aim()?;
+        self.crystals
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.id != 0)
+            .filter_map(|(i, c)| {
+                let p = c.position;
+                let bounds = Aabb::new(
+                    Vec3::new(p.x - 1.0, p.y, p.z - 1.0),
+                    Vec3::new(p.x + 1.0, p.y + 2.0, p.z + 1.0),
+                );
+                ray_box(eye, dir, self.entity_reach, bounds).map(|d| (i, d))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
     /// `ClientPacketListener.handleSetEntityPassengersPacket`: who rides
