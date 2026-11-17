@@ -634,7 +634,10 @@ def run(args, out):
             capture = out / f'{who}.jsonl'
             capture.touch()
             listen = free_port()
-            stop = net_capture.start_background(listen, f'127.0.0.1:{port}', capture, full=True)
+            # WIRE_STREAM_PHASE (seconds): the server's packets reach the client that long after each of its
+            # tick-ends (net_capture's phase), so wire_replay.py --phase can give Sunrise them on the same ticks.
+            phase = float(os.environ['WIRE_STREAM_PHASE']) if os.environ.get('WIRE_STREAM_PHASE') else None
+            stop = net_capture.start_background(listen, f'127.0.0.1:{port}', capture, full=True, phase=phase)
             client = None
             try:
                 if who != 'vanilla':

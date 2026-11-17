@@ -65,7 +65,7 @@ class Plan:
     """Vanilla's server packets with when to send them: before the first play packet in order, waiting for the
     client's own packet where vanilla's came between; in play, after the client's (mark, ticks since it)."""
 
-    def __init__(self, rows):
+    def __init__(self, rows, phase=None):
         conn = play_conn(rows)
         rows = [r for r in rows if r.get('conn') == conn and 'name' in r]
         self.steps = []  # ('send', row, gate, edge) | ('await', name)
@@ -92,14 +92,25 @@ class Plan:
                     and REPLAY_LATE <= before_end < REPLAY_EDGE)
             # An answer to the client's own packet of this tick (a command's teleport) waits for that packet:
             # the gate counts the client's packets within the tick too, and its tick-end releases it anyway.
-            gate = ((mark, ticks + 1, 0) if late else (mark, ticks, sent)) if r['state'] == 'play' else None
+            if phase is not None:
+                # A phased capture (net_capture's phase): every server packet reached vanilla `phase` after a
+                # tick-end, so it is given to Sunrise as long after the same tick-end; nothing is uncertain.
+                late = edge = False
+                gate = (mark, ticks, 0) if r['state'] == 'play' else None
+            else:
+                gate = ((mark, ticks + 1, 0) if late else (mark, ticks, sent)) if r['state'] == 'play' else None
             self.steps.append(('send', r, gate, edge))
 
 
 class Replay(threading.Thread):
-    def __init__(self, plan, capture):
+    def __init__(self, plan, capture, phase=None):
         super().__init__(daemon=True)
         self.plan = plan
+        self.phase = phase
+        # When Sunrise ended each tick, by (mark, ticks since it); (mark, 0) is its last tick-end before the mark.
+        self.end_times = {}
+        self.last_end = None
+        self.late = 0
         self.capture = capture
         self.listener = socket.socket()
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -130,6 +141,15 @@ class Replay(threading.Thread):
                 if gate is not None:
                     self.wait(lambda gate=gate: (self.mark, self.ticks, self.sent) >= gate,
                               f'the client never reached mark {gate[0]} tick {gate[1]}', timeout=600)
+                    if self.phase is not None:
+                        with self.cond:
+                            ended = self.end_times.get(gate[:2])
+                        if ended is not None:
+                            delay = ended + self.phase - time.time()
+                            if delay > 0:
+                                time.sleep(delay)
+                            elif delay < -0.02:
+                                self.late += 1
                 if edge:
                     self.edges.append((gate, row['name']))
                 self.send(row['id'], bytes.fromhex(row['data']))
@@ -182,8 +202,11 @@ class Replay(threading.Thread):
                             self.received.append(name)
                         elif name == 'chat_command' and MARK in body[p:].hex():
                             self.mark, self.ticks, self.sent = self.mark + 1, 0, 0
+                            self.end_times[(self.mark, 0)] = self.last_end
                         elif name == 'client_tick_end':
                             self.ticks, self.sent = self.ticks + 1, 0
+                            self.last_end = time.time()
+                            self.end_times[(self.mark, self.ticks)] = self.last_end
                         elif name not in wire_stream.FRAME:
                             self.sent += 1
                         self.cond.notify_all()
@@ -197,13 +220,14 @@ def main():
     parser.add_argument('--scenarios', required=True, type=lambda s: s.split(','), help='that run\'s, in order')
     parser.add_argument('--bin', default=str(lab.cargo_target() / 'fast'), help='sunrise-client and sunrise-ctl')
     parser.add_argument('--out', required=True)
+    parser.add_argument('--phase', type=float, help="the run's WIRE_STREAM_PHASE: its capture is phased")
     args = parser.parse_args()
     out = Path(args.out)
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     rows = [json.loads(line) for line in open(args.vanilla)]
     shutil.copy(args.vanilla, out / 'vanilla.jsonl')
-    plan = Plan(rows)
+    plan = Plan(rows, args.phase)
     vanilla_accepts = []  # accepted teleports before each mark, in vanilla's run
     accepted = 0
     for r in rows:
@@ -213,7 +237,7 @@ def main():
             vanilla_accepts.append(accepted)
     if len(vanilla_accepts) != len(args.scenarios):
         sys.exit(f'the capture has {len(vanilla_accepts)} scenarios, --scenarios names {len(args.scenarios)}')
-    replay = Replay(plan, out / 'sunrise.jsonl')
+    replay = Replay(plan, out / 'sunrise.jsonl', args.phase)
     replay.start()
     work = Path(tempfile.mkdtemp(prefix='hz-wire-replay-'))
     for var, sub in (('SUNRISE_HOME', 'home'), ('SUNRISE_LAUNCHER_HOME', 'launcher'), ('XDG_DATA_HOME', 'data'),
@@ -242,6 +266,8 @@ def main():
         shutil.rmtree(work, ignore_errors=True)
     if replay.error:
         print(f'replay: {replay.error}')
+    if replay.late:
+        print(f'replay: {replay.late} packets went out more than 20 ms after their phase point (Sunrise was ahead)')
     if replay.edges:
         print(f'packets vanilla got {REPLAY_LATE * 1000:.0f}-{REPLAY_EDGE * 1000:.0f} ms before a tick-end (their tick is uncertain): '
               + ', '.join(f'{n} at mark {g[0]} tick {g[1]}' for g, n in replay.edges if g[0] >= 0))

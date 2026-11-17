@@ -73,6 +73,28 @@ class Session:
         self.full = full
         self.start = time.time()
         self.closed = threading.Event()
+        # `phase` (seconds): in play, the server's packets reach the client that long after its last tick-end,
+        # mid-way between two of its ticks, so it takes each on its next tick for certain (no packet lands near a
+        # tick boundary, where which tick takes it depends on the client's frame).
+        self.phase = None
+        self.last_tick_end = None
+        self.ticked = threading.Condition()
+
+    def hold(self):
+        """With a phase, in play: wait until `phase` after the client's last tick-end, or after its next one when
+        that point has passed."""
+        if self.phase is None or self.state["clientbound"] != "play":
+            return
+        with self.ticked:
+            if self.last_tick_end is None:
+                return
+            if time.time() >= self.last_tick_end + self.phase:
+                last = self.last_tick_end
+                self.ticked.wait_for(lambda: self.last_tick_end != last, timeout=1.0)
+            target = self.last_tick_end + self.phase
+        delay = target - time.time()
+        if delay > 0:
+            time.sleep(delay)
 
     def name(self, direction, packet_id):
         table = self.names.get((self.state[direction], direction), [])
@@ -98,6 +120,10 @@ class Session:
             self.out.write(json.dumps(entry) + "\n")
             self.out.flush()
         self.transition(direction, name, payload)
+        if direction == "serverbound" and name == "client_tick_end" and state == "play":
+            with self.ticked:
+                self.last_tick_end = time.time()
+                self.ticked.notify_all()
 
     def transition(self, direction, name, payload):
         s = self.state
@@ -147,6 +173,8 @@ class Pipe(threading.Thread):
                         size, p = read_varint(body, 0)
                         body = zlib.decompress(body[p:]) if size else body[p:]
                     packet_id, p = read_varint(body, 0)
+                    if self.direction == "clientbound":
+                        s.hold()
                     s.record(self.direction, packet_id, body[p:])
                     # The compression threshold applies after its packet, in
                     # both directions; the client answers only after reading it.
@@ -171,7 +199,7 @@ class Pipe(threading.Thread):
             s.closed.set()
 
 
-def serve(listen, target, out_path, full=False, ready=None, stop=None):
+def serve(listen, target, out_path, full=False, ready=None, stop=None, phase=None):
     names = load_names()
     host, port = target.rsplit(":", 1)
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -201,15 +229,16 @@ def serve(listen, target, out_path, full=False, ready=None, stop=None):
             for sock in (client, upstream):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             session = Session(conn_id, out, names, lock, full)
+            session.phase = phase
             Pipe(session, "serverbound", client, upstream).start()
             Pipe(session, "clientbound", upstream, client).start()
     server.close()
 
 
-def start_background(listen, target, out_path, full=False):
+def start_background(listen, target, out_path, full=False, phase=None):
     """Run the proxy on a thread; returns the stop event."""
     ready, stop = threading.Event(), threading.Event()
-    threading.Thread(target=serve, args=(listen, target, out_path, full, ready, stop),
+    threading.Thread(target=serve, args=(listen, target, out_path, full, ready, stop, phase),
                      daemon=True).start()
     ready.wait(5)
     return stop
