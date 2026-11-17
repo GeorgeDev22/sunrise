@@ -257,6 +257,51 @@ SCENARIOS = {
     'inventory_walk': dict(
         ticks=60, steps={0: ['key w down'], 10: ['key e tap'], 30: ['key e tap'], 40: ['key w down'],
                          50: ['key w up']}),
+    # Vehicles (items 32-35): the rider's client moves the vehicle itself (ServerboundMoveVehiclePacket, the
+    # boat's paddles, PlayerInput), so a vehicle-predicting anticheat checks these as closely as walking. Each
+    # mounts by command on tick 0, after the prelude, except boat_mount_click.
+    'boat_paddle': dict(
+        setup=[f'fill -5 {FLOOR} 1 5 {FLOOR} 26 minecraft:water', f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 3.5'],
+        ticks=110, steps=merge({0: ['command ride @s mount @e[type=minecraft:oak_boat,limit=1]'],
+                                8: ['key w down'], 30: ['key a down'], 40: ['key a up'], 50: ['key d down'],
+                                58: ['key d up'], 62: ['look 120 10'], 70: ['look 200 10'], 76: ['look -150 10'],
+                                80: ['key w up', 'key s down'], 92: ['key s up'], 100: ['key shift down'], 104: ['key shift up']})),
+    'boat_land': dict(
+        setup=[f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 3.5'],
+        ticks=70, steps={0: ['command ride @s mount @e[type=minecraft:oak_boat,limit=1]'], 6: ['key w down'],
+                         20: ['key a down'], 30: ['key a up'], 40: ['key w up'], 55: ['key shift down'], 59: ['key shift up']}),
+    'boat_mount_click': dict(
+        setup=[f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 2.5'],
+        ticks=60, steps={0: ['look 0 40'], 5: ['mouse right click'], 12: ['key w down'], 25: ['key w up'],
+                         35: ['key shift down'], 39: ['key shift up'], 45: ['key w down'], 50: ['key w up']}),
+    'minecart_rails': dict(
+        setup=[f'fill 0 {FLOOR} 4 0 {FLOOR} 7 minecraft:redstone_block',
+               f'fill 0 {FLOOR + 1} 1 0 {FLOOR + 1} 24 minecraft:rail[shape=north_south]',
+               f'fill 0 {FLOOR + 1} 4 0 {FLOOR + 1} 7 minecraft:powered_rail[shape=north_south,powered=true]',
+               f'summon minecraft:minecart 0.5 {FLOOR + 1} 2.5'],
+        ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:minecart,limit=1]'], 5: ['key w down'],
+                         25: ['key w up'], 40: ['look 90 0'], 60: ['key s down'], 70: ['key s up'],
+                         80: ['key shift down'], 84: ['key shift up']}),
+    'horse_ride': dict(
+        setup=[f'summon minecraft:horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,Variant:0,'
+               'equipment:{saddle:{id:"minecraft:saddle",count:1}},attributes:[{id:"minecraft:movement_speed",'
+               'base:0.3},{id:"minecraft:jump_strength",base:0.8},{id:"minecraft:max_health",base:30.0}]}'],
+        ticks=110, steps={0: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 6: ['key w down'],
+                          20: ['key space down'], 30: ['key space up'], 45: ['key a down'], 55: ['key a up'],
+                          60: ['key ctrl down'], 62: ['key space down'], 64: ['key space up'], 80: ['key ctrl up'],
+                          85: ['key w up'], 100: ['key shift down'], 104: ['key shift up']}),
+    'camel_dash': dict(
+        setup=[f'summon minecraft:camel 0.5 {FLOOR + 1} 2.5 {{PersistenceRequired:1b,Tame:1b,'
+               'equipment:{saddle:{id:"minecraft:saddle",count:1}}}'],
+        ticks=120, steps={0: ['command ride @s mount @e[type=minecraft:camel,limit=1]'], 10: ['key w down'],
+                          30: ['key space down'], 34: ['key space up'], 60: ['key ctrl down'], 70: ['key ctrl up'], 85: ['key w up'],
+                          110: ['key shift down'], 114: ['key shift up']}),
+    'pig_carrot': dict(
+        setup=[f'summon minecraft:pig 0.5 {FLOOR + 1} 2.5 {{PersistenceRequired:1b,'
+               'equipment:{saddle:{id:"minecraft:saddle",count:1}}}',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:carrot_on_a_stick'],
+        ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:pig,limit=1]'], 10: ['look 30 10'],
+                         30: ['mouse right click'], 50: ['look -20 10'], 75: ['key shift down'], 79: ['key shift up']}),
     # Container clicks (items 56, 58, 59): every ContainerInput a screen sends, in a chest, a crafting table, a
     # furnace and the player's own inventory. Each ContainerClick carries the client's predicted slot changes and
     # carried item, which the server compares with its own (a wrong one resyncs, and anticheats watch them).
