@@ -95,6 +95,34 @@ def every(start, stop, step, *lines):
     return {t: list(lines) for t in range(start, stop, step)}
 
 
+# A mob's hit on the player, from the player's own command: knockback away from the far husk (LivingEntity.knockback).
+KNOCKBACK = 'command damage @s 1 minecraft:mob_attack by @e[tag=far,limit=1]'
+# The attacker for KNOCKBACK, far ahead (+z): its hits push the player back (-z).
+FAR_HUSK = ('summon minecraft:husk 0.5 {y} 9.0 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Tags:["far"]}}'
+            .format(y=FLOOR + 1))
+# Puts the player 0.3 into a husk at z 2.2, from behind.
+OVERLAP = 'command tp @s 0.5 ~ 1.9'
+# A smash's fall damage, and a 20-block fall's, must not kill the player mid-scenario (a death screen ends it).
+MACE_RESISTANCE = f'effect give {PLAYER} minecraft:resistance 60 4 true'
+
+
+def mace_fall(height, enchantment=None, effects=(), target_z=5.2):
+    """The player stands on a 3x3 stone platform `height` blocks up, walks off its south edge looking down and
+    ahead, and swings a mace every third tick on the way down at a target standing below: MaceItem's smash needs
+    a fall of more than 1.5 blocks (heavy past 5), and the server answers a hit with the attacker's new motion
+    (ClientboundSetEntityMotionPacket), which the client's next moves follow."""
+    top = FLOOR + height
+    mace = 'minecraft:mace' + (f'[minecraft:enchantments={{{enchantment}}}]' if enchantment else '')
+    fall_ticks = 20 + 2 * height
+    return dict(
+        setup=[f'fill -1 {top} -1 1 {top} 1 minecraft:stone', TARGET.format(x=0.5, y=FLOOR + 1, z=target_z),
+               MACE_RESISTANCE, *[f'effect give {PLAYER} {effect} 60 0 true' for effect in effects],
+               f'item replace entity {PLAYER} weapon.mainhand with {mace}', f'tp {PLAYER} 0.5 {top + 1} 0.5 0 0'],
+        ticks=20 + fall_ticks + 20,
+        steps=merge({0: ['look 0 55', 'key w down'], 14: ['key w up']},
+                    every(12, 12 + fall_ticks, 3, 'mouse left click')))
+
+
 SCENARIOS = {
     'walk': dict(ticks=70, steps=merge(
         {0: ['key w down'], 20: ['look 30 0'], 30: ['look 30 15'], 40: ['key w up'], 50: ['look 0 0']})),
@@ -172,6 +200,44 @@ SCENARIOS = {
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:stone'],
         ticks=60, anchor='accept_teleportation',
         steps={0: ['look 0 45'], 3: ['mouse left down'], 15: ['command tp @s ~ ~ ~'], 40: ['mouse left up']}),
+    # A mace on the ground: no fall, so no smash; one hit at full charge and one early.
+    'mace_ground': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=3.0), f'item replace entity {PLAYER} weapon.mainhand with '
+               'minecraft:mace'],
+        ticks=80, steps={0: ['look 0 20'], 5: ['mouse left click'], 20: ['mouse left click'],
+                         60: ['mouse left click']}),
+    **{f'mace_fall_{height}': mace_fall(height) for height in (3, 5, 10, 20)},
+    # Each of the mace's own enchantments on a 5-block smash; Wind Burst launches the attacker back up.
+    **{f'mace_{name}': mace_fall(5, enchantment=f'"minecraft:{name}":{level}')
+       for name, level in (('density', 5), ('breach', 4), ('wind_burst', 3))},
+    # A smash from 10 blocks under Slow Falling, whose fall the server still counts.
+    'mace_slow_falling': mace_fall(10, effects=['minecraft:slow_falling']),
+    # The first demo's geometry: the player lands past the target, still sliding, with no key held.
+    'mace_fall_5_overshoot': mace_fall(5, target_z=3.4),
+    # Falling past the target and swinging at the air: the misses' 10-tick delay, no hit.
+    'mace_fall_miss': mace_fall(10, target_z=8.0),
+    # Knockback while overlapping a mob. The player is teleported 0.3 into a husk in front of it (z 1.9 against
+    # 2.2), whose pushEntities then pushes it back each tick, after the player's own tick; two ticks later a second
+    # husk far ahead hits it, so the knockback and the push both point back and nothing blocks them. The server's
+    # motion replaces the player's velocity, push included (ClientPacketListener.handleSetEntityMotion).
+    'push_knockback': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.2), FAR_HUSK],
+        ticks=60, steps=merge({t: [OVERLAP] for t in (10, 25, 40)}, {t: [KNOCKBACK] for t in (12, 27, 42)})),
+    # The same teleports and hits with no husk to overlap: the control for push_knockback.
+    'push_knockback_control': dict(
+        setup=[FAR_HUSK],
+        ticks=60, steps=merge({t: [OVERLAP] for t in (10, 25, 40)}, {t: [KNOCKBACK] for t in (12, 27, 42)})),
+    # A teleport onto itself two ticks after overlapping the husk: the teleport's velocity reset and the push.
+    'push_teleport': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.2)],
+        ticks=60, steps={10: [OVERLAP], 12: ['command tp @s ~ ~ ~'], 30: [OVERLAP], 32: ['command tp @s ~ ~ ~']}),
+    # A wind charge at the feet launches the player; the mace comes out and smashes on the way down.
+    'mace_wind_charge': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.4), MACE_RESISTANCE,
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:mace',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:wind_charge 8'],
+        ticks=90, steps=merge({0: ['key 2 tap', 'look 0 90'], 4: ['mouse right click'], 8: ['key 1 tap'],
+                               12: ['look 0 55']}, every(20, 80, 3, 'mouse left click'))),
 }
 
 
@@ -289,7 +355,8 @@ class HeadlessGame(Game):
                                 SUNRISE_TELEMETRY_URL='off', SUNRISE_TICK_SCRIPT=scripts / 'scenario.json')
         self.base = [str(lab.binary(bins, 'sunrise-ctl')), '--socket', str(work / 'c.sock')]
         self.log = self.home / 'logs' / 'latest.log'
-        reply = self('launch', '--game', lab.binary(bins, 'sunrise-client'), '--headless', '--resources', resources)
+        headless = [] if os.environ.get('WIRE_STREAM_WINDOWED') == '1' else ['--headless']
+        reply = self('launch', '--game', lab.binary(bins, 'sunrise-client'), *headless, '--resources', resources)
         self.pid = reply.get('pid')
 
 
@@ -360,7 +427,13 @@ def play_all(client, server, scenarios, scripts, sunrise, capture):
         spec = SCENARIOS[name]
         # The place settles: blocks and items reach the client, the player stands still on the ground.
         # From the console `~` is the world spawn: the player teleports onto itself.
-        commands = RESET + spec.get('setup', []) + [f'tp {PLAYER} {PLAYER}']
+        # WIRE_STREAM_SERVER_TPS: the server answers within one of its (shorter) ticks, so an answer reaches both
+        # clients on the same client tick instead of whichever one two independent 50 ms clocks happen to give.
+        # The clients stay at 20 ticks a second: a server's client only ever slows down (getTickTargetMillis).
+        # The server's floating kick counts its own ticks (80): at a faster tick rate a smash's or Wind Burst's
+        # airtime would end in it, so these runs set allow-flight (server-side only; the clients send the same).
+        tps = os.environ.get('WIRE_STREAM_SERVER_TPS')
+        commands = ([f'tick rate {tps}'] if tps else []) + RESET + spec.get('setup', []) + [f'tp {PLAYER} {PLAYER}']
         accepted = counts.update().accepted + sum(c.startswith('tp ') for c in commands)
         for command in commands:
             server.console(command)
@@ -387,6 +460,8 @@ def run(args, out):
     directory.mkdir()
     port = free_port()
     props = dict(PROPERTIES, **{'server-port': str(port), 'server-ip': '127.0.0.1'})
+    if os.environ.get('WIRE_STREAM_SERVER_TPS'):
+        props['allow-flight'] = 'true'
     (directory / 'server.properties').write_text(''.join(f'{k}={v}\n' for k, v in props.items()),
                                                  encoding='iso-8859-1')
     (directory / 'eula.txt').write_text('eula=true\n')
