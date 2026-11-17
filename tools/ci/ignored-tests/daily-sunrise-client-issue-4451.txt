@@ -2321,6 +2321,7 @@ sunrise-client game::remote_tags::tests::remote_tag_packets_rebuild_vanilla_ench
 sunrise-client game::remote_vehicles::plugin_seat_tests::controlling_client_copies_sneak_press_and_release_into_rider lib daily resources
 sunrise-client game::remote_vehicles::plugin_seat_tests::local_rider_uses_attachments_and_follows_a_moving_seat_chain lib daily resources
 sunrise-client game::remote_vehicles::tests::a_driven_horse_moves_on_the_riders_last_tick_input lib daily resources
+sunrise-client game::remote_vehicles::tests::the_driven_vehicle_takes_the_servers_teleports_and_moves lib daily resources
 sunrise-client game::render_tick::tests::a_mod_cancels_the_screen_effect_of_one_block lib daily resources
 sunrise-client game::residency_tick::tests::client_tick_drains_actual_bound_owner_events_without_a_lookup lib daily resources
 sunrise-client game::resource_load::scope_tests::loader_workers_keep_owning_mod_sets_and_share_only_matching_numeric_payloads lib daily resources

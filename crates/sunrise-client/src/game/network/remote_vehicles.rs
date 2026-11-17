@@ -513,6 +513,36 @@ impl Game<'_> {
 
     /// `ClientPacketListener.handleMoveVehicle`: the server put the boat or
     /// the mount the player drives back.
+    /// The vehicle this client moves, when it is `id`: where it is, its yaw and its
+    /// deltaMovement (`PositionMoveRotation.of`).
+    pub(super) fn driven_vehicle(&self, id: u32) -> Option<(Vec3, f32, Vec3)> {
+        if let Some(m) = self.driven_mount().filter(|m| m.id == id) {
+            return Some((m.position, m.yaw, m.velocity));
+        }
+        let b = self
+            .riding
+            .filter(|&r| r == id && self.controls_boat(r))
+            .and_then(|r| self.boats.iter().find(|b| b.id == r))?;
+        Some((b.position, b.yaw, b.velocity))
+    }
+
+    /// `setDeltaMovement` of the vehicle this client moves.
+    pub(super) fn set_driven_vehicle_velocity(&mut self, velocity: Vec3) {
+        if let Some(id) = self.driven_mount().map(|m| m.id)
+            && let Some(m) = self.mob_index.get_mut(&mut self.mobs, id)
+        {
+            m.velocity = velocity;
+            return;
+        }
+        if let Some(i) = self
+            .riding
+            .filter(|&id| self.controls_boat(id))
+            .and_then(|id| self.boats.iter().position(|b| b.id == id))
+        {
+            self.boats.update(i, |b| b.velocity = velocity);
+        }
+    }
+
     pub(super) fn remote_move_vehicle(&mut self, position: [f64; 3], yaw: f32) {
         let at = Vec3::new(position[0], position[1], position[2]);
         if let Some(id) = self.driven_mount().map(|m| m.id)
@@ -778,6 +808,62 @@ mod tests {
 
     use super::*;
     use sunrise_client::mobs::MobTypes;
+
+    /// handleTeleportEntity and handleMoveVehicle for the vehicle this client moves (a saddled pig steered with a
+    /// carrot on a stick): a relative teleport counts from where the pig is on this client, and a server move
+    /// puts it there and is answered at once with a ServerboundMoveVehiclePacket from that spot.
+    #[test]
+    #[ignore = "daily"]
+    fn the_driven_vehicle_takes_the_servers_teleports_and_moves() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            use sunrise_client::{items::ItemStack, motion::PlayerMotion};
+            use sunrise_protocol::packets::play::Clientbound as C;
+            let root =
+                std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
+            let (mut peer, _writer) = crate::game::remote::tests::connect_menu_test(game);
+            peer.set_read_timeout(Some(std::time::Duration::from_millis(50)))
+                .unwrap();
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+            let types = MobTypes::load(&root).unwrap();
+            let pig = std::sync::Arc::new(types.types["minecraft:pig"].clone());
+            let mut m = Mob::new(7, pig, Vec3::new(3.5, 64.0, 2.5), 0.0);
+            m.set_saddle(Some(ItemStack::new("minecraft:saddle", 1)));
+            game.mobs.clear();
+            game.mobs.push(m);
+            game.inventory[game.selected] = Some(ItemStack::new("minecraft:carrot_on_a_stick", 1));
+            game.riding = Some(7);
+            game.remote.as_mut().unwrap().first_passenger = true;
+            assert!(game.driven_mount().is_some());
+            use play::relative as rel;
+            game.apply_packet(C::TeleportEntity(play::TeleportEntity {
+                id: 7,
+                position: [0.0, 0.0, 4.0],
+                delta: [0.0; 3],
+                yaw: 0.0,
+                pitch: 0.0,
+                relatives: rel::X | rel::Y | rel::Z | rel::Y_ROT | rel::X_ROT,
+                on_ground: false,
+            }))
+            .unwrap();
+            assert_eq!(game.mobs[0].position, Vec3::new(3.5, 64.0, 6.5));
+            while peer.recv().is_ok() {}
+            game.apply_packet(C::MoveVehicle(play::MoveVehicle {
+                position: [1.5, 64.0, 1.5],
+                yaw: 90.0,
+                pitch: 0.0,
+            }))
+            .unwrap();
+            assert_eq!(game.mobs[0].position, Vec3::new(1.5, 64.0, 1.5));
+            let mut answers = Vec::new();
+            while let Ok((id, bytes)) = peer.recv() {
+                if let Ok(play::Serverbound::MoveVehicle(p)) = play::Serverbound::decode(id, &bytes)
+                {
+                    answers.push(p.position);
+                }
+            }
+            assert_eq!(answers, [[1.5, 64.0, 1.5]]);
+        });
+    }
 
     #[test]
     #[ignore = "requires prepared resources and the vanilla mount-control reference"]
