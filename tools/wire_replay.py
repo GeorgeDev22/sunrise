@@ -148,7 +148,7 @@ class Replay(threading.Thread):
                             delay = ended + self.phase - time.time()
                             if delay > 0:
                                 time.sleep(delay)
-                            elif delay < -0.02:
+                            elif delay < -0.02 and gate[0] >= 0:
                                 self.late += 1
                 if edge:
                     self.edges.append((gate, row['name']))
