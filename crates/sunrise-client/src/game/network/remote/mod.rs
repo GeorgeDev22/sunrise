@@ -6358,41 +6358,15 @@ impl Game<'_> {
         // (`yRotO`/`xRotO`), as the local tick does; `tick` returns before it
         // reaches its own write when this window is a server client.
         self.rope_rot_old = (self.yaw, self.pitch);
-        // Entity.rideTick: a passenger first moves itself from its seat
-        // (`rider_travel_tick`), then its vehicle seats it (`remote_ride`), which
-        // moves it and nothing else (positionRider): the deltaMovement and the
-        // collision flags of its own move stay. The seat it moved from stays the
-        // camera's start, as the old position is.
-        let mut rider_velocity = None;
-        if self.screen != Screen::Dead
-            && self.riding.is_some()
-            && let Some(player) = self.player.as_mut()
-        {
-            player.client_side = true;
-            let seat = player.position;
-            MotionWorld {
-                entities: &entity_collisions,
-                player,
-                scene: &mut self.world,
-                assets: &self.pack.assets,
-                collision_binding: self.collision,
-                resources: self.motion,
-                health: &self.health_resources,
-                loop_context: &self.loop_context,
-                damage_hooks: &self.damage_hooks,
-                tag_items: None,
-                block_registries: None,
-            }
-            .rider_travel_tick(keys.direction())?;
-            rider_velocity = Some(player.velocity);
-            player.position = seat;
-        }
+        // Entity.rideTick: the vehicle ticks first, then its rider, which moves itself
+        // from where it sat before (`rider_tick`, in the riding branch below, once its
+        // look and the vehicle's fluid shelter are this tick's); positionRider then puts
+        // it on the new seat and changes nothing else.
+        let old_seat = self
+            .riding
+            .filter(|_| self.screen != Screen::Dead)
+            .and_then(|_| self.player.as_ref().map(|p| p.position));
         let riding = self.screen != Screen::Dead && self.remote_ride(keys, sprint_window)?;
-        if let Some(velocity) = rider_velocity.filter(|_| riding)
-            && let Some(player) = self.player.as_mut()
-        {
-            player.velocity = velocity;
-        }
         // The server sends no passenger's position: they sit where their
         // vehicles are now.
         self.position_riders();
@@ -6487,7 +6461,13 @@ impl Game<'_> {
                     tag_items: None,
                     block_registries: None,
                 };
-                passenger.passenger_pose_tick()?;
+                // The rider moves from its old seat; the new one is its place after.
+                let seat = passenger.player.position;
+                if let Some(from) = old_seat {
+                    passenger.player.position = from;
+                }
+                passenger.rider_tick(keys.direction())?;
+                passenger.player.position = seat;
                 // LivingEntity.aiStep: a passenger freezes in powder snow too, and the
                 // frostbite overlay shows it (#8156).
                 passenger.passenger_block_effects_tick()?;

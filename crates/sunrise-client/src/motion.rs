@@ -1439,7 +1439,7 @@ impl MotionWorld<'_, '_, '_> {
     /// the fall. The caller seats it after (`positionRider`). The move leaves
     /// the onGround and horizontalCollision its Rot packet carries, and the
     /// deltaMovement a dismount teleport keeps (its DELTA_* are relative).
-    pub fn rider_travel_tick(&mut self, direction: [f32; 2]) -> Result<()> {
+    pub(crate) fn rider_travel_tick(&mut self, direction: [f32; 2]) -> Result<()> {
         self.player.velocity = Vec3::ZERO;
         let input = crate::input::modify_input(direction, None, None);
         let mut gate = MoveGate::new();
@@ -5030,6 +5030,83 @@ mod tests {
         assert!(!w.player.swimming);
         assert_eq!(w.player.pose, crate::pose::Pose::Standing);
         assert_eq!(w.player.dimensions.eye_height, 1.62);
+    }
+    /// A rider's own move (`rider_tick`): one beside a wall, holding forward, collides with it only
+    /// when its look is turned to it, so its look packet's flag follows this tick's look.
+    #[test]
+    #[ignore = "daily"]
+    fn a_riders_own_move_takes_this_ticks_look() {
+        let Some(v) = crate::test_fixtures::vanilla() else {
+            return;
+        };
+        let (assets, render, binding, resources) = (&v.assets, &v.render, &v.collision, &v.motion);
+        let mut scene = World::test_scene(assets, render, 2).unwrap();
+        let stone = assets.registry.default_state("minecraft:stone").unwrap();
+        for y in 4..=6 {
+            scene.set(20, y, 21, stone).unwrap();
+        }
+        let mut collided = Vec::new();
+        for yaw in [0.0, 180.0] {
+            // A hair from the wall at +z: forward at yaw 0 runs into it.
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, 4.0, 20.69)).unwrap();
+            player.yaw = yaw;
+            let mut w = MotionWorld {
+                tag_items: None,
+                block_registries: None,
+                loop_context: crate::test_resources::server_loop_context(),
+                damage_hooks: &crate::health::DamageHooks::NONE,
+                entities: &[],
+                player: &mut player,
+                scene: &mut scene,
+                assets,
+                collision_binding: binding,
+                resources,
+                health: &resources.health,
+            };
+            w.rider_tick([0.0, 1.0]).unwrap();
+            collided.push(w.player.collision.horizontal);
+        }
+        assert_eq!(collided, [true, false]);
+    }
+    /// A rider's fluids are this tick's before it moves: in water its own move is a fluid
+    /// one (`travelInFluid`: 0.8 of the motion, minus gravity / 16, so y is -0.005), out of
+    /// it an air one (gravity then 0.98: -0.0784), and the fall is forgotten either way.
+    #[test]
+    #[ignore = "daily"]
+    fn a_riders_own_move_follows_the_fluid_it_is_in_now() {
+        let Some(v) = crate::test_fixtures::vanilla() else {
+            return;
+        };
+        let (assets, render, binding, resources) = (&v.assets, &v.render, &v.collision, &v.motion);
+        let mut scene = World::test_scene(assets, render, 2).unwrap();
+        let water = assets.registry.default_state("minecraft:water").unwrap();
+        for y in 6..=7 {
+            scene.set(20, y, 20, water).unwrap();
+        }
+        let mut fell = Vec::new();
+        for y in [6.2, 10.2] {
+            let mut player = PlayerMotion::new(resources, Vec3::new(20.5, y, 20.5)).unwrap();
+            player.fall_distance = 3.0;
+            let mut w = MotionWorld {
+                tag_items: None,
+                block_registries: None,
+                loop_context: crate::test_resources::server_loop_context(),
+                damage_hooks: &crate::health::DamageHooks::NONE,
+                entities: &[],
+                player: &mut player,
+                scene: &mut scene,
+                assets,
+                collision_binding: binding,
+                resources,
+                health: &resources.health,
+            };
+            w.rider_tick([0.0, 0.0]).unwrap();
+            assert_eq!(w.player.fall_distance, 0.0);
+            assert!(!w.player.ground.on_ground);
+            fell.push(w.player.velocity.y);
+        }
+        assert!((fell[0] - -0.005).abs() < 1e-6, "{fell:?}");
+        assert!((fell[1] - -0.0784).abs() < 1e-6, "{fell:?}");
     }
     /// #4509: a cushion seat clips the feet into the floor, so `can_fit_pose`
     /// rejects standing and would leave a swim pose; sit up anyway.
