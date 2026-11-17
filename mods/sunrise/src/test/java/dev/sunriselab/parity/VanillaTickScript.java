@@ -314,11 +314,23 @@ public final class VanillaTickScript {
                 pick.invoke(mc, 1.0F);
             }
             case "click-slot" -> {
+                // click-slot SLOT [right] [shift] [INPUT] [bBUTTON]: INPUT a ContainerInput name, slot -999
+                // outside the menu.
                 int slot = Integer.parseInt(w[1]);
-                boolean right = List.of(w).contains("right");
-                boolean shift = List.of(w).contains("shift");
-                mc.gameMode.handleContainerInput(mc.player.containerMenu.containerId, slot, right ? 1 : 0,
-                        shift ? ContainerInput.QUICK_MOVE : ContainerInput.PICKUP, mc.player);
+                List<String> rest = List.of(w).subList(2, w.length);
+                ContainerInput input = rest.contains("shift") ? ContainerInput.QUICK_MOVE : ContainerInput.PICKUP;
+                int button = rest.contains("right") ? 1 : 0;
+                for (String word : rest) {
+                    for (ContainerInput named : ContainerInput.values()) {
+                        if (named.name().equals(word)) {
+                            input = named;
+                        }
+                    }
+                    if (word.matches("b-?[0-9]+")) {
+                        button = Integer.parseInt(word.substring(1));
+                    }
+                }
+                mc.gameMode.handleContainerInput(mc.player.containerMenu.containerId, slot, button, input, mc.player);
             }
             case "command" -> mc.player.connection.sendCommand(String.join(" ", List.of(w).subList(1, w.length)));
             case "close" -> {
