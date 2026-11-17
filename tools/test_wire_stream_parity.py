@@ -522,6 +522,53 @@ SCENARIOS = {
     'unloaded_chunks': dict(
         ticks=120, anchor='accept_teleportation', steps={5: ['command tp @s 30000.5 -60 30000.5'], 10: ['key w down'],
                                                          60: ['key w up'], 80: ['command tp @s 0.5 -60 0.5']}),
+    # Knockback in more situations (items 146-152): on each surface, against a wall, at an edge, with knockback
+    # resistance, behind a raised shield, from an explosion and a snowball, in a boat, under levitation, and two
+    # in one tick. The server's velocity reaches both clients on the same tick through the replay.
+    **{f'kb_on_{name}': dict(
+        setup=[FAR_HUSK, f'fill -2 {FLOOR} -2 2 {FLOOR} 6 minecraft:{block}'],
+        ticks=60, steps=merge({0: ['key w down'], 30: ['key w up']}, {t: [KNOCKBACK] for t in (12, 35)}))
+       for name, block in (('ice', 'packed_ice'), ('slime', 'slime_block'), ('soul_sand', 'soul_sand'))},
+    'kb_in_water': dict(
+        setup=[FAR_HUSK, f'fill -2 {FLOOR + 1} -2 2 {FLOOR + 1} 6 minecraft:water'],
+        ticks=60, steps=merge({0: ['key w down'], 30: ['key w up']}, {t: [KNOCKBACK] for t in (12, 35)})),
+    'kb_on_ladder': dict(
+        setup=[FAR_HUSK, f'fill 0 {FLOOR + 1} -1 0 {FLOOR + 4} -1 minecraft:stone',
+               f'fill 0 {FLOOR + 1} 0 0 {FLOOR + 4} 0 minecraft:ladder[facing=south]'],
+        ticks=60, steps=merge({0: ['look 180 0', 'key w down'], 25: ['key w up', 'key shift down'],
+                               45: ['key shift up']}, {t: [KNOCKBACK] for t in (15, 30)})),
+    'kb_against_wall': dict(
+        setup=[FAR_HUSK, f'fill -2 {FLOOR + 1} -1 2 {FLOOR + 3} -1 minecraft:stone'],
+        ticks=50, steps={10: [KNOCKBACK], 25: [KNOCKBACK]}),
+    'kb_at_edge': dict(
+        setup=[FAR_HUSK, f'fill -2 {FLOOR + 1} -1 2 {FLOOR + 1} 1 minecraft:stone', f'tp {PLAYER} 0.5 {FLOOR + 2} 0.5 0 0'],
+        ticks=50, steps={5: ['key shift down'], 10: [KNOCKBACK], 30: ['key shift up', KNOCKBACK]}),
+    'kb_resistance': dict(
+        setup=[FAR_HUSK, f'item replace entity {PLAYER} armor.chest with minecraft:netherite_chestplate',
+               f'item replace entity {PLAYER} armor.legs with minecraft:netherite_leggings'],
+        ticks=50, steps={10: [KNOCKBACK], 30: ['key w down', KNOCKBACK], 40: ['key w up']}),
+    'kb_shield': dict(
+        setup=[FAR_HUSK, f'item replace entity {PLAYER} weapon.offhand with minecraft:shield'],
+        ticks=60, steps={5: ['mouse right down'], 15: [KNOCKBACK], 30: ['mouse right up'], 40: [KNOCKBACK]}),
+    'kb_creeper': dict(
+        setup=[f'summon minecraft:creeper 0.5 {FLOOR + 1} 4.5 {{NoAI:1b,Fuse:1s,ignited:1b,ExplosionRadius:1b}}',
+               f'effect give {PLAYER} minecraft:resistance 20 4 true'],
+        ticks=50, steps={0: ['key w down'], 20: ['key w up']}),
+    'kb_snowball': dict(
+        setup=[f'effect give {PLAYER} minecraft:resistance 20 4 true'],
+        ticks=50, steps={10: ['command summon minecraft:snowball 0.5 -59 4.0 {Motion:[0.0,0.0,-1.2]}'],
+                         30: ['command summon minecraft:egg 0.8 -59 4.0 {Motion:[0.0,0.0,-1.2]}']}),
+    'kb_in_boat': dict(
+        setup=[FAR_HUSK, f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 2.5'],
+        ticks=60, steps={0: ['command ride @s mount @e[type=minecraft:oak_boat,limit=1]'], 15: [KNOCKBACK],
+                         30: ['key w down'], 35: [KNOCKBACK], 45: ['key w up'], 50: ['key shift down'],
+                         54: ['key shift up']}),
+    'kb_levitation': dict(
+        setup=[FAR_HUSK, f'effect give {PLAYER} minecraft:levitation 3 1 true'],
+        ticks=70, steps={10: [KNOCKBACK], 30: [KNOCKBACK]}),
+    'kb_twice_one_tick': dict(
+        setup=[FAR_HUSK],
+        ticks=50, steps={10: [KNOCKBACK, KNOCKBACK], 30: ['key w down', KNOCKBACK, KNOCKBACK], 40: ['key w up']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
