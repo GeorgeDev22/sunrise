@@ -100,6 +100,7 @@ KNOCKBACK = 'command damage @s 1 minecraft:mob_attack by @e[tag=far,limit=1]'
 # The attacker for KNOCKBACK, far ahead (+z): its hits push the player back (-z).
 FAR_HUSK = ('summon minecraft:husk 0.5 {y} 9.0 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Tags:["far"]}}'
             .format(y=FLOOR + 1))
+SWORD = f'item replace entity {PLAYER} weapon.mainhand with minecraft:diamond_sword'
 # A husk with its AI, 6 blocks ahead: it walks to the player and attacks (a thousand health, takes knockback).
 CHASER = ('summon minecraft:husk 0.5 {y} 6.5 {{PersistenceRequired:1b,Health:1000f,'
           'attributes:[{{id:"minecraft:max_health",base:1000.0}}]}}'.format(y=FLOOR + 1))
@@ -345,6 +346,88 @@ SCENARIOS = {
         setup=[f'effect give {PLAYER} minecraft:levitation 2 1 true'],
         ticks=90, steps={0: ['key w down'], 45: ['command effect give @s minecraft:slow_falling 10 0 true'],
                          60: ['key w up']}),
+    # Combat details (plan items 40-54, 110) and interactions (108-111, 128, 134-136).
+    # Critical hits: jumping and swinging on the way down.
+    'crit_hits': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.6), SWORD],
+        ticks=80, steps=merge({0: ['look 0 15']}, {t: ['key space down'] for t in (5, 30, 55)},
+                              {t: ['key space up'] for t in (7, 32, 57)}, {t: ['mouse left click'] for t in (12, 37, 62)})),
+    # A full-charge hit on the ground beside two mobs: the sweep.
+    'sweep_hits': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.6), TARGET.format(x=1.6, y=FLOOR + 1, z=2.8), SWORD],
+        ticks=70, steps=merge({0: ['look 0 15']}, every(5, 65, 15, 'mouse left click'))),
+    # A click every tick (far faster than the cooldown) at a mob in reach.
+    'high_cps': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.6), SWORD],
+        ticks=50, steps=merge({0: ['look 0 15']}, every(5, 45, 1, 'mouse left click'))),
+    # A mob at the edge of reach, the player stepping in and out of it while swinging.
+    'reach_limit': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=3.85), SWORD],
+        ticks=70, steps=merge({0: ['look 0 5'], 10: ['key w down'], 12: ['key w up'], 30: ['key s down'],
+                               32: ['key s up']}, every(5, 65, 6, 'mouse left click'))),
+    # An end crystal set on obsidian and hit: its explosion's knockback, under Resistance.
+    'end_crystal': dict(
+        setup=[MACE_RESISTANCE, f'setblock 0 {FLOOR} 3 minecraft:obsidian',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:end_crystal 4'],
+        ticks=60, steps={0: ['look 0 40'], 5: ['mouse right click'], 15: ['mouse left click']}),
+    'ender_pearl': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:ender_pearl 4'],
+        ticks=80, steps={0: ['look 0 -20'], 5: ['mouse right click'], 50: ['mouse right click']}),
+    'throw_projectiles': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:snowball 16',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:egg 16',
+               f'item replace entity {PLAYER} hotbar.2 with minecraft:wind_charge 16'],
+        ticks=60, steps=merge({0: ['look 0 -10']}, every(5, 20, 4, 'mouse right click'), {22: ['key 2 tap']},
+                              every(25, 40, 4, 'mouse right click'), {42: ['key 3 tap']}, {45: ['mouse right click']})),
+    'trident_throw': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:trident'],
+        ticks=60, steps={0: ['look 0 -5'], 5: ['mouse right down'], 20: ['mouse right up']}),
+    'crossbow_shoot': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:crossbow',
+               f'give {PLAYER} minecraft:arrow 16'],
+        ticks=80, steps={0: ['look 0 -5'], 5: ['mouse right down'], 35: ['mouse right up'], 45: ['mouse right click'],
+                         55: ['mouse right down'], 60: ['mouse right up']}),
+    # Holding a shield up while a husk with its AI attacks.
+    'shield_block_mob': dict(
+        setup=[MACE_RESISTANCE, CHASER, f'item replace entity {PLAYER} weapon.offhand with minecraft:shield'],
+        ticks=90, steps={0: ['look 0 10'], 10: ['mouse right down'], 60: ['mouse right up'], 70: ['mouse right down'],
+                         85: ['mouse right up']}),
+    # Totems swapped to the offhand and back in quick succession.
+    'totem_swap': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:totem_of_undying',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:totem_of_undying'],
+        ticks=50, steps={5: ['key f tap'], 7: ['key f tap'], 8: ['key 2 tap'], 9: ['key f tap'], 20: ['key f tap'],
+                         21: ['key 1 tap', 'key f tap']}),
+    # Two clicks and two hotbar keys in one tick (all handled in that tick).
+    'inputs_one_tick': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.6), SWORD,
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:stone 16'],
+        ticks=50, steps={0: ['look 0 15'], 10: ['mouse left click', 'mouse left click'], 20: ['key 2 tap', 'key 1 tap'],
+                         30: ['key 2 tap', 'mouse right click', 'mouse right click']}),
+    # Holding right click on the ground ahead: vanilla places every 4 ticks (rightClickDelay).
+    'held_place': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:stone 64'],
+        ticks=50, steps={0: ['look 0 60'], 5: ['mouse right down'], 35: ['mouse right up']}),
+    # Towering: jumping and placing a block under the player at the top of each jump.
+    'tower_up': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:stone 64'],
+        ticks=80, steps=merge({0: ['look 0 90'], 5: ['key space down'], 70: ['key space up']},
+                              every(9, 70, 6, 'mouse right click'))),
+    # A water bucket placed under the player just before it lands from 10 blocks, then scooped up.
+    'water_clutch': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:water_bucket',
+               f'tp {PLAYER} 0.5 {FLOOR + 11} 0.5 0 90'],
+        ticks=70, steps={0: ['look 0 90'], 24: ['mouse right click'], 26: ['mouse right click'], 40: ['mouse right click']}),
+    # Instant mining: Haste II and an Efficiency V pickaxe on a row of stone, walking along it.
+    'instant_mine': dict(
+        setup=[f'fill 0 {FLOOR + 1} 2 0 {FLOOR + 1} 8 minecraft:stone', f'effect give {PLAYER} minecraft:haste 30 1 true',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:diamond_pickaxe[minecraft:enchantments={{"minecraft:efficiency":5}}]'],
+        ticks=70, steps={0: ['look 0 40', 'mouse left down'], 5: ['key w down'], 55: ['key w up', 'mouse left up']}),
+    # An armor stand given a helmet with a right click on its head.
+    'armor_stand_interact': dict(
+        setup=[f'summon minecraft:armor_stand 0.5 {FLOOR + 1} 2.5 {{Rotation:[180f,0f]}}',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:iron_helmet'],
+        ticks=40, steps={0: ['look 0 -20'], 5: ['mouse right click'], 20: ['look 0 -20'], 25: ['mouse right click']}),
     # A wind charge at the feet launches the player; the mace comes out and smashes on the way down.
     'mace_wind_charge': dict(
         setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.4), MACE_RESISTANCE,
