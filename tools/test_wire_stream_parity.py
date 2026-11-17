@@ -837,6 +837,14 @@ SCENARIOS = {
     # Keep-alive (item 8): 20 seconds standing, so a keep-alive (every 15 s) and its answer fall inside; run with
     # WIRE_STREAM_LATENCY for a slow or changing connection (item 83).
     'keepalive_idle': dict(ticks=400, steps={200: ['key w down'], 204: ['key w up']}),
+    # Options both clients start with (item 105; WIRE_STREAM_OPTIONS): Auto-Jump walking into a step
+    # (autoJump:true), toggled sprint and sneak tapped on and off (toggleSprint:true,toggleCrouch:true).
+    'autojump_walk': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 3 minecraft:stone', f'fill 0 {FLOOR + 1} 5 0 {FLOOR + 2} 5 minecraft:stone'],
+        ticks=60, steps={0: ['key w down'], 45: ['key w up']}),
+    'toggle_keys': dict(
+        ticks=80, steps={0: ['key ctrl tap'], 2: ['key w down'], 20: ['key shift tap'], 35: ['key shift tap'],
+                         45: ['key ctrl tap'], 60: ['key w up']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
@@ -1231,7 +1239,8 @@ class VanillaClient:
         # runs its missed ticks in bursts and takes the server's packets on other ticks than a smooth one would.
         vanilla_client.write_options(args.game_dir, {
             'maxFps': '60', 'renderDistance': '2', 'graphicsMode': '0', 'renderClouds': '"false"', 'ao': 'false',
-            'entityShadows': 'false', 'particles': '2', 'biomeBlendRadius': '0', 'mipmapLevels': '0'})
+            'entityShadows': 'false', 'particles': '2', 'biomeBlendRadius': '0', 'mipmapLevels': '0',
+            **extra_options()})
         command = vanilla_client.command(args)
         cp = command.index('-cp') + 1
         command[cp] = os.pathsep.join([str(classes), command[cp]])
@@ -1271,6 +1280,13 @@ class VanillaClient:
         self.log.close()
 
 
+def extra_options():
+    """WIRE_STREAM_OPTIONS=key:value,...: options.txt entries both clients start with (a sensitivity, auto-jump,
+    toggled sprint and sneak, an inverted mouse), in vanilla's names and form."""
+    spec = os.environ.get('WIRE_STREAM_OPTIONS', '')
+    return dict(item.split(':', 1) for item in spec.split(',') if ':' in item)
+
+
 class HeadlessGame(Game):
     """server_pack_e2e's game, `--headless`: no display, window or GPU; the frame and the ticks run as a
     window's do (game/runtime/headless.rs), and only the ticks' packets matter here."""
@@ -1282,6 +1298,9 @@ class HeadlessGame(Game):
         if extras:
             # The game folder is the home here (Game runs sunrise-ctl there): extras sit next to options.txt.
             (self.home / 'sunrise-extras.txt').write_text(extras)
+        if extra_options():
+            # WIRE_STREAM_OPTIONS: the same options as the vanilla client's, in vanilla's options.txt form.
+            (self.home / 'options.txt').write_text(''.join(f'{k}:{v}\n' for k, v in extra_options().items()))
         self.env = lab.game_env(SUNRISE_HOME=self.home, SUNRISE_LAUNCHER_HOME=work / 'launcher',
                                 XDG_DATA_HOME=work / 'data', XDG_CONFIG_HOME=work / 'config',
                                 SUNRISE_TELEMETRY_URL='off', SUNRISE_TICK_SCRIPT=scripts / 'scenario.json')
