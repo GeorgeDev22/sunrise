@@ -7779,13 +7779,14 @@ impl Game<'_> {
                 return false;
             }
             // startDestroyBlock aborts only a break that is running; a target left by a stop that
-            // ended one is just replaced by the START below.
-            let aborted = self.remote.as_mut().and_then(|r| {
-                if !std::mem::take(&mut r.is_destroying) {
-                    return None;
-                }
-                r.destroying.take()
-            });
+            // ended one is just replaced by the START below. The abort leaves the running break's
+            // state as it was: a break that isn't instant replaces it below, and after an instant
+            // one the old target is still running, so the next start aborts it again.
+            let aborted = self
+                .remote
+                .as_ref()
+                .filter(|r| r.is_destroying)
+                .and_then(|r| r.destroying);
             if let Some((old, _, _)) = aborted {
                 let old_state = self.world.block(old[0], old[1], old[2]);
                 self.tutorial_destroy(old_state, -1.0);
