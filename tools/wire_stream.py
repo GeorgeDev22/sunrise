@@ -117,6 +117,12 @@ def decode(name, data):
         return {'container': r.varint()}
     if name == 'chat_command':
         return {'command': r.string()}
+    if name in ('chat', 'chat_command_signed'):
+        # The timestamp (Instant.now) and the salt (a random long) differ on every send, on any client: left out.
+        # The signatures, the last-seen acknowledgements and their checksum stay raw.
+        text = r.string()
+        r.take(16)
+        return {'message' if name == 'chat' else 'command': text, 'raw': r.rest()}
     return {'raw': r.rest()} if data else {}
 
 
