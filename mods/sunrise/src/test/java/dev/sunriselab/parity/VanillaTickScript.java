@@ -393,6 +393,36 @@ public final class VanillaTickScript {
                     screen.onClose();
                 }
             }
+            case "select-trade" -> {
+                // A merchant screen's offer button (MerchantScreen.postButtonClick): the shown offer, then the
+                // menu's setSelectionHint and tryMoveItems on this client, then ServerboundSelectTradePacket.
+                int offer = Integer.parseInt(w[1]);
+                if (screen instanceof net.minecraft.client.gui.screens.inventory.MerchantScreen) {
+                    java.lang.reflect.Field shop = screen.getClass().getDeclaredField("shopItem");
+                    shop.setAccessible(true);
+                    shop.setInt(screen, offer);
+                    Method press = screen.getClass().getDeclaredMethod("postButtonClick");
+                    press.setAccessible(true);
+                    press.invoke(screen);
+                }
+            }
+            case "beacon" -> {
+                // BeaconScreen's confirm button with primary power `w[1]` and no secondary (BeaconConfirmButton.onPress).
+                if (screen instanceof net.minecraft.client.gui.screens.inventory.BeaconScreen) {
+                    var effect = net.minecraft.core.registries.BuiltInRegistries.MOB_EFFECT
+                        .get(net.minecraft.resources.Identifier.withDefaultNamespace(w[1])).orElseThrow();
+                    mc.getConnection().send(new net.minecraft.network.protocol.game.ServerboundSetBeaconPacket(
+                        java.util.Optional.<net.minecraft.core.Holder<net.minecraft.world.effect.MobEffect>>of(effect),
+                        java.util.Optional.empty()));
+                    mc.player.closeContainer();
+                }
+            }
+            case "open-stats" -> {
+                // PauseScreen's Statistics button: the StatsScreen over the pause menu, whose init asks the server
+                // for the stats; Escape goes back to the pause menu.
+                Screen back = screen != null ? screen : new net.minecraft.client.gui.screens.PauseScreen(true);
+                mc.gui.setScreen(new net.minecraft.client.gui.screens.achievement.StatsScreen(back, mc.player.getStats()));
+            }
             default -> System.out.println(TAG + "unknown line: " + String.join(" ", w));
         }
     }

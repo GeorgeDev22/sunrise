@@ -1003,6 +1003,23 @@ SCENARIOS = {
     'creative_open_close': dict(
         setup=[f'gamemode creative {PLAYER}'],
         ticks=40, steps={0: ['key e tap'], 10: ['key esc tap'], 20: ['key e tap'], 30: ['key e tap']}),
+    # Villager trading (item 61): a farmer's one offer, opened with a click, the offer picked (the client fills the
+    # payment slots itself), the result taken with a shift-click, the screen closed.
+    'villager_trade': dict(
+        setup=[f'summon minecraft:villager 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,'
+               'VillagerData:{profession:"minecraft:farmer",level:1,type:"minecraft:plains"},'
+               'Offers:{Recipes:[{buy:{id:"minecraft:emerald",count:1},sell:{id:"minecraft:bread",count:6},'
+               'maxUses:12,xp:1,priceMultiplier:0.05f}]}}}', f'give {PLAYER} minecraft:emerald 5'],
+        ticks=34, steps={0: ['look 0 15'], 2: ['mouse right click'], 8: ['select-trade 0'],
+                         14: ['click-slot 2 shift'], 22: ['key esc tap']}),
+    # A beacon (item 62) on a 3x3 iron pyramid: opened, an iron ingot paid, speed confirmed.
+    'beacon_set': dict(
+        setup=[f'fill -1 {FLOOR} 2 1 {FLOOR} 4 minecraft:iron_block', f'setblock 0 {FLOOR + 1} 3 minecraft:beacon',
+               f'give {PLAYER} minecraft:iron_ingot 1'],
+        ticks=30, steps={0: ['look 0 20'], 2: ['mouse right click'], 8: ['click-slot 28'], 12: ['click-slot 0'],
+                         18: ['beacon speed']}),
+    # Statistics (item 88): the pause menu's Statistics button (the stats request), back to the pause menu, out.
+    'stats_open': dict(ticks=30, steps={2: ['open-stats'], 15: ['key esc tap'], 22: ['key esc tap']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
