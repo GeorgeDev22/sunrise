@@ -551,21 +551,23 @@ SCENARIOS = {
         setup=[FAR_HUSK, f'item replace entity {PLAYER} weapon.offhand with minecraft:shield'],
         ticks=60, steps={5: ['mouse right down'], 15: [KNOCKBACK], 30: ['mouse right up'], 40: [KNOCKBACK]}),
     'kb_creeper': dict(
-        setup=[f'summon minecraft:creeper 0.5 {FLOOR + 1} 4.5 {{NoAI:1b,Fuse:1s,ignited:1b,ExplosionRadius:1b}}',
+        setup=[f'summon minecraft:creeper 0.5 {FLOOR + 1} 4.5 {{NoAI:1b,Fuse:30s,ignited:1b,ExplosionRadius:1b}}',
                f'effect give {PLAYER} minecraft:resistance 20 4 true'],
         ticks=50, steps={0: ['key w down'], 20: ['key w up']}),
     'kb_snowball': dict(
         setup=[f'effect give {PLAYER} minecraft:resistance 20 4 true'],
-        ticks=50, steps={10: ['command summon minecraft:snowball 0.5 -59 4.0 {Motion:[0.0,0.0,-1.2]}'],
-                         30: ['command summon minecraft:egg 0.8 -59 4.0 {Motion:[0.0,0.0,-1.2]}']}),
+        ticks=75, steps={10: ['command summon minecraft:snowball 0.5 -59 4.0 {Motion:[0.0,0.0,-1.2]}'],
+                         30: ['command summon minecraft:egg 0.8 -59 4.0 {Motion:[0.0,0.0,-1.2]}'],
+                         50: ['command summon minecraft:arrow 0.5 -59 4.0 {Motion:[0.0,0.0,-1.2],damage:0.5d}']}),
     'kb_in_boat': dict(
         setup=[FAR_HUSK, f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 2.5'],
         ticks=60, steps={0: ['command ride @s mount @e[type=minecraft:oak_boat,limit=1]'], 15: [KNOCKBACK],
                          30: ['key w down'], 35: [KNOCKBACK], 45: ['key w up'], 50: ['key shift down'],
                          54: ['key shift up']}),
     'kb_levitation': dict(
-        setup=[FAR_HUSK, f'effect give {PLAYER} minecraft:levitation 3 1 true'],
-        ticks=70, steps={10: [KNOCKBACK], 30: [KNOCKBACK]}),
+        setup=[FAR_HUSK],
+        ticks=80, steps={0: [f'command effect give {PLAYER} minecraft:levitation 3 1 true'], 10: [KNOCKBACK],
+                         30: [KNOCKBACK]}),
     'kb_twice_one_tick': dict(
         setup=[FAR_HUSK],
         ticks=50, steps={10: [KNOCKBACK, KNOCKBACK], 30: ['key w down', KNOCKBACK, KNOCKBACK], 40: ['key w up']}),
