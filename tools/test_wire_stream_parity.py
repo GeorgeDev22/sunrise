@@ -409,6 +409,11 @@ SCENARIOS = {
         ticks=50, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 30 shift'],
                          16: ['click-slot 0 shift'], 20: ['click-slot 31 shift'], 24: ['click-slot 0 shift'],
                          28: ['click-slot 32 shift'], 32: ['click-slot 0 shift'], 40: ['key e tap']}),
+    # Real-time tick rate (items 78-80): two minutes of standing and walking, measured from the capture's
+    # tick-ends against the wall clock (a client must average 20 a second; catch-up after a stall is bounded).
+    'timing_long': dict(
+        ticks=2400, steps=merge(every(100, 2300, 200, 'key w down'), every(140, 2340, 200, 'key w up'),
+                                every(160, 2360, 200, 'key s down'), every(190, 2390, 200, 'key s up'))),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
