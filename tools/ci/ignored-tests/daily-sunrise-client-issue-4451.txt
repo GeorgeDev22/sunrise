@@ -2525,6 +2525,7 @@ sunrise-client game::transactions::tests::cauldron_effects_wait_for_root_and_abo
 sunrise-client game::transactions::tests::cauldron_stat_listener_observes_committed_state_and_can_cancel lib daily resources
 sunrise-client game::transactions::tests::container_limits_preserve_capacity_and_transaction_rollback lib daily resources
 sunrise-client game::transactions::tests::menu_journals_keep_only_the_first_write_inside_a_transaction lib daily resources
+sunrise-client game::trident::tests::a_riptide_from_the_ground_leaves_the_player_in_the_air lib daily resources
 sunrise-client game::trident::tests::trident_release_rechecks_stack_durability_after_charge lib daily resources
 sunrise-client game::use_hand::bow_enchantment_tests::a_multishot_bow_fires_three_arrows_ten_degrees_apart lib daily resources
 sunrise-client game::use_hand::bow_enchantment_tests::a_piercing_bow_shoots_arrows_that_pierce_their_level lib daily resources

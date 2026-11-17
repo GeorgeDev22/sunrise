@@ -6,6 +6,7 @@
 use super::level_sounds::LevelSound;
 use super::{Game, commands::Target, minecarts::CartHit};
 use mod_api::SoundSource;
+use sunrise_client::motion::MotionWorld;
 use sunrise_client::{
     arrows::{Pickup, back_off, clip_block_hit},
     collisions::SceneCollisions,
@@ -581,34 +582,29 @@ impl Game<'_> {
                 p.auto_spin_attack_dmg = 8.0;
                 p.auto_spin_attack_item = spin_stack;
             }
-            // `player.move(SELF, (0, 1.1999999, 0))` when on the ground: the lift
-            // stops at a ceiling. A self move through the move gate (#2414);
-            // PR 1a records the movement unchanged.
-            let lift = self
-                .player
-                .as_ref()
-                .filter(|p| p.ground.on_ground)
-                .map(|p| p.bounds());
-            if let Some(bounds) = lift {
-                let mut scene = SceneCollisions {
-                    world: &self.world,
-                    binding: self.collision,
-                    subject: None,
-                };
-                let up = Vec3::new(0.0, f64::from(1.1999999f32), 0.0);
-                let mut gate = sunrise_client::move_gate::armed(
-                    &self.loop_context,
-                    self.player.as_ref().map_or(0, |p| p.entity_id as u32),
-                    "minecraft:player",
-                    sunrise_world::entity_move::MoverType::SelfMovement,
-                    up,
-                );
-                let moved = sunrise_client::move_gate::scene_resolve(
-                    &mut gate, &mut scene, bounds, up, 0.0, true,
-                )
-                .unwrap_or(Vec3::ZERO);
-                if let Some(p) = self.player.as_mut() {
-                    p.position.y += moved.y;
+            // `player.move(SELF, (0, 1.1999999, 0))` when on the ground: the player's own move
+            // (LocalPlayer.move, through the move gate, #2414), which stops at a ceiling and whose
+            // end writes the ground state, so the rest of the tick travels in the air.
+            if self.player.as_ref().is_some_and(|p| p.ground.on_ground) {
+                let entities = self.player_entity_collisions();
+                if let Some(player) = self.player.as_mut() {
+                    let _ = MotionWorld {
+                        entities: &entities,
+                        player,
+                        scene: &mut self.world,
+                        assets: &self.pack.assets,
+                        collision_binding: self.collision,
+                        resources: self.motion,
+                        health: &self.health_resources,
+                        loop_context: &self.loop_context,
+                        damage_hooks: &self.damage_hooks,
+                        tag_items: Some(world_items!(self)),
+                        block_registries: Some(&self.pack.block_registries),
+                    }
+                    .move_self(
+                        &mut sunrise_world::move_gate::MoveGate::new(),
+                        Vec3::new(0.0, f64::from(1.1999999f32), 0.0),
+                    );
                 }
             }
             if !server_client {
@@ -1879,5 +1875,40 @@ mod tests {
         game.release_trident(10);
         assert_eq!(game.tridents[1].pickup, super::Pickup::CreativeOnly);
         assert!(game.held().is_some());
+    }
+
+    /// TridentItem.releaseUsing on the ground: the riptide's `move(SELF, (0, 1.1999999, 0))` is the player's own
+    /// move, whose end writes the ground state, so the player is in the air for the rest of the tick (and travels
+    /// with air friction) as vanilla's is.
+    #[test]
+    #[ignore = "daily"]
+    fn a_riptide_from_the_ground_leaves_the_player_in_the_air() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            use std::sync::Arc;
+            use sunrise_client::{chunk::Chunk, motion::PlayerMotion};
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let registry = game.pack.assets.registry;
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            let water = registry.default_state("minecraft:water").unwrap();
+            game.world.set(0, 63, 0, stone).unwrap();
+            game.world.set(0, 64, 0, water).unwrap();
+            let mut player = PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap();
+            player.ground.on_ground = true;
+            game.player = Some(player);
+            let mut stack = super::ItemStack::new("minecraft:trident", 1);
+            stack.enchant("minecraft:riptide", 3);
+            *game.held_mut() = Some(stack.clone());
+            assert!(game.use_trident(&stack));
+            game.release_trident(20);
+            let p = game.player.as_ref().unwrap();
+            assert!(!p.ground.on_ground);
+            assert!(
+                (p.position.y - (64.0 + f64::from(1.1999999_f32))).abs() < 1e-9,
+                "{}",
+                p.position.y
+            );
+        });
     }
 }
