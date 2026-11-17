@@ -455,7 +455,7 @@ SCENARIOS = {
         setup=[f'setblock 0 {FLOOR + 1} 3 minecraft:stone',
                f'summon minecraft:item_frame 0 {FLOOR + 1} 2 {{Facing:2b}}',
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:apple 3'],
-        ticks=50, steps={0: ['look 0 15'], 5: ['mouse right click'], 15: ['mouse right click'],
+        ticks=50, steps={0: ['look 0 25'], 5: ['mouse right click'], 15: ['mouse right click'],
                          25: ['mouse right click'], 35: ['mouse left click']}),
     'spawn_egg_name_lead': dict(
         setup=[f'summon minecraft:cow 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}',
