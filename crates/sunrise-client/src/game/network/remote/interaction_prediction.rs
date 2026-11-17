@@ -405,6 +405,19 @@ impl Game<'_> {
                 if result.should_swing() && block_answer != Some(Answer::SuccessServer) {
                     self.with_hand(hand, Game::swing_arm);
                 }
+            } else if item_used
+                && held
+                    .as_ref()
+                    .is_some_and(|s| &*s.item == "minecraft:end_crystal")
+            {
+                // EndCrystalItem.useOn on a client level: SUCCESS where the
+                // crystal fits (the server spawns it), this hand swings; FAIL
+                // elsewhere, no swing. Either ends the click
+                // (Minecraft.startUseItem), so no UseItem and no other hand.
+                if self.end_crystal_fits(hit.pos) {
+                    self.with_hand(hand, Game::swing_arm);
+                }
+                return true;
             } else if item_used && held.as_ref().is_some_and(|s| &*s.item == "minecraft:brush") {
                 // BrushItem.useOn: brushing starts here (CONSUME, no swing); the
                 // server brushes and the dust is this client's own.
