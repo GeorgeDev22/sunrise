@@ -261,11 +261,12 @@ impl Game<'_> {
             // handleSetEntityPassengersPacket takes every passenger off and puts them back
             // (ejectPassengers, startRiding), so each list naming the player runs
             // AbstractHorse.addPassenger: a horse's, camel's or llama's rider turns to its
-            // view at the start of the tick (absSnapRotationTo(getViewYRot(0), getViewXRot(0))).
+            // view at the start of the tick (absSnapRotationTo(getViewYRot(0), getViewXRot(0));
+            // a LivingEntity's view yaw is its head's, yHeadRotO).
             if let Some(m) = self.mobs.iter().find(|m| {
                 m.id == vehicle_id && sunrise_client::mobs::equine::is_equine(m.species())
             }) {
-                self.yaw = m.previous_yaw % 360.0;
+                self.yaw = m.previous_head_yaw % 360.0;
                 self.pitch = m.previous_head_pitch.clamp(-90.0, 90.0) % 360.0;
                 self.rope_rot_old = (self.yaw, self.pitch);
             }
