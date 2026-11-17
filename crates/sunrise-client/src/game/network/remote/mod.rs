@@ -7497,6 +7497,12 @@ impl Game<'_> {
     /// vehicle and sprint, or `sendPosition`'s sprint and move. The held slot is not sent here:
     /// `MultiPlayerGameMode.tick` sends it at the start of the next tick (`remote_handle_input`).
     fn remote_send_state(&mut self, input: u8) {
+        // LocalPlayer.tickDeath removes the player once its deathTime reaches 20, and
+        // Minecraft.tick's sendChanges skips a removed player: nothing goes out until the
+        // respawn's new player, not even the position reminder.
+        if self.screen == Screen::Dead && self.ui.death_time >= 20 {
+            return;
+        }
         let Some(p) = self.player.as_ref() else {
             return;
         };
