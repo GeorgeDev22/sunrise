@@ -1867,9 +1867,9 @@ struct Game<'a> {
     tick_hit: std::cell::Cell<Option<Option<Hit>>>,
     /// Non-window simulation's tick-local mob ray, including the held attack range.
     tick_mob: Option<Option<(usize, f64, [f64; 3])>>,
-    /// Number keys since the last tick (`keyHotbarSlots[i].consumeClick`):
+    /// Each number key's clicks since it was last consumed (`keyHotbarSlots[i].clickCount`):
     /// `Minecraft.handleKeybinds` selects them before the tick's inputs.
-    hotbar_presses: sunrise_client::input_queue::InputQueue<usize>,
+    hotbar_presses: [sunrise_client::input_queue::ClickQueue; 9],
     /// `Player.entityInteractionRange` and `blockInteractionRange`, refreshed
     /// each tick from the attribute (a server's reach modifier, creative's
     /// +2): the pick helpers' `&self` reach.
@@ -11164,7 +11164,7 @@ impl<'a> Game<'a> {
             forced_hit: None,
             tick_hit: Default::default(),
             tick_mob: None,
-            hotbar_presses: sunrise_client::input_queue::InputQueue::new(hand::HOTBAR_PRESSES),
+            hotbar_presses: [hand::HOTBAR_CLICKS; 9],
             entity_reach: 3.0,
             block_reach: 4.5,
             client_pick: Default::default(),

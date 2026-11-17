@@ -271,7 +271,7 @@ impl Game<'_> {
                 {
                     self.hotbar_load_or_save(slot, load);
                 } else {
-                    self.hotbar_presses.push(slot);
+                    self.hotbar_presses[slot].press();
                 }
             }
             _ if self.screen == Screen::Paused && self.pause_menu => {

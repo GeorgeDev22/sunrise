@@ -8731,7 +8731,9 @@ impl Game<'_> {
         }
         if !ready {
             // A screen's opening released the keys (`KeyMapping.releaseAll`).
-            self.hotbar_presses.clear();
+            self.hotbar_presses
+                .iter_mut()
+                .for_each(sunrise_client::input_queue::ClickQueue::clear);
             return;
         }
         let (attack, use_item) = (self.left, self.right);

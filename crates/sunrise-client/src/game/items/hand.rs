@@ -17,13 +17,13 @@ use sunrise_client::{
 /// (`CLICK_QUEUES`).
 pub(super) const ATTACK_CLICKS: ClickQueue = click_queue(Button::Attack);
 pub(super) const USE_CLICKS: ClickQueue = click_queue(Button::Use);
-/// The bounds of `Game::hotbar_presses`: each selection from the queue takes 64 number keys, oldest
-/// first, and 1024 wait at most. A player presses a few a tick.
-pub(super) const HOTBAR_PRESSES: QueueLimits = QueueLimits {
+/// The clicks of one number key (`KeyMapping.clickCount`): a tick takes one, as
+/// `consumeClick` does, and 1024 wait at most.
+pub(super) const HOTBAR_CLICKS: ClickQueue = ClickQueue::new(QueueLimits {
     name: "number keys",
     max_len: 1024,
-    per_tick: 64,
-};
+    per_tick: 1,
+});
 use sunrise_core::geometry::{Aabb, Vec3};
 
 /// The point a `ServerboundInteractPacket` carries: `EntityHitResult.getLocation()
@@ -329,10 +329,14 @@ impl Game<'_> {
         self.tick_mob = Some(mob.unwrap_or_else(|| self.mob_hit()));
         self.select_queued_hotbar();
     }
-    /// `handleKeybinds`' number keys (`keyHotbarSlots[i].consumeClick`).
+    /// `handleKeybinds`' number keys: keys 1 to 9 in that order, one click of each
+    /// (`keyHotbarSlots[i].consumeClick`), so the highest key clicked this tick wins and a
+    /// key's further clicks wait for the next ticks.
     pub(super) fn select_queued_hotbar(&mut self) {
-        for slot in self.hotbar_presses.take_tick() {
-            self.selected = slot;
+        for (slot, clicks) in self.hotbar_presses.iter_mut().enumerate() {
+            if clicks.take_tick() > 0 {
+                self.selected = slot;
+            }
         }
     }
     /// Release only the non-window simulation's tick-local caches.
@@ -495,7 +499,7 @@ impl Game<'_> {
             self.clicks.miss_time = 10000;
             self.attack_clicks.clear();
             self.use_clicks.clear();
-            self.hotbar_presses.clear();
+            self.hotbar_presses.iter_mut().for_each(ClickQueue::clear);
         }
         let d = &self.clicks.destroying;
         self.set_client_mining(d.active.then_some(Mining {
