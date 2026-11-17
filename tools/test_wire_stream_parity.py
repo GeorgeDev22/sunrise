@@ -771,6 +771,69 @@ SCENARIOS = {
         ticks=70, steps=merge({0: ['key w down'], 50: ['key w up']},
                               {t: [f'mouse-move {(-1) ** (t // 6) * 9} {2 if t < 20 else -1}'] for t in range(0, 50)},
                               {t: ['mouse left click'] for t in (12, 24, 36, 48)})),
+    # Spear (item 43): jabs at a target, then a charge held while sprinting at it.
+    'spear_jab_charge': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=5.5), f'item replace entity {PLAYER} weapon.mainhand with minecraft:iron_spear'],
+        ticks=90, steps={0: ['look 0 10'], 5: ['mouse left click'], 25: ['mouse left click'], 40: ['key ctrl down', 'key w down'],
+                         42: ['mouse right down'], 70: ['mouse right up'], 75: ['key w up', 'key ctrl up']}),
+    # A happy ghast with a harness, ridden: up, forward, down (item 36).
+    'happy_ghast_ride': dict(
+        setup=[f'summon minecraft:happy_ghast 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,'
+               'equipment:{body:{id:"minecraft:white_harness",count:1}}}'],
+        ticks=100, steps={0: ['command ride @s mount @e[type=minecraft:happy_ghast,limit=1]'], 8: ['key space down'],
+                          28: ['key space up', 'key w down'], 60: ['key w up', 'key shift down'], 62: ['key shift up']}),
+    # A boat shared with a pig (item 37): the player takes the second seat and paddles.
+    'shared_boat': dict(
+        setup=[f'fill -5 {FLOOR} 1 5 {FLOOR} 26 minecraft:water',
+               f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 3.5 {{Passengers:[{{id:"minecraft:pig",NoAI:1b}}]}}'],
+        ticks=80, steps={0: ['command ride @s mount @e[type=minecraft:oak_boat,limit=1]'], 8: ['key w down'],
+                         30: ['key a down'], 40: ['key a up'], 60: ['key w up'], 70: ['key shift down'],
+                         72: ['key shift up']}),
+    # A server-opened screen (item 100): a chested donkey's inventory, opened with the inventory key while riding.
+    'donkey_inventory': dict(
+        setup=[f'summon minecraft:donkey 0.5 {FLOOR + 1} 2.5 {{Tame:1b,ChestedHorse:1b,PersistenceRequired:1b,'
+               'equipment:{saddle:{id:"minecraft:saddle",count:1}}}'],
+        ticks=60, steps={0: ['command ride @s mount @e[type=minecraft:donkey,limit=1]'], 10: ['key e tap'],
+                         20: ['click-slot 2'], 25: ['click-slot 20'], 35: ['key esc tap'], 45: ['key shift down'],
+                         47: ['key shift up']}),
+    # Animal interactions (item 111): milking a cow, feeding sheep (breeding), dyeing one.
+    'animal_interactions': dict(
+        setup=[f'summon minecraft:cow 0.5 {FLOOR + 1} 2.0 {{NoAI:1b,PersistenceRequired:1b}}',
+               f'summon minecraft:sheep -1.5 {FLOOR + 1} 2.0 {{NoAI:1b,PersistenceRequired:1b}}',
+               f'summon minecraft:sheep 2.5 {FLOOR + 1} 2.0 {{NoAI:1b,PersistenceRequired:1b}}',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:bucket',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:wheat 8',
+               f'item replace entity {PLAYER} hotbar.2 with minecraft:blue_dye 4'],
+        ticks=80, steps={0: ['look 0 25'], 5: ['mouse right click'], 15: ['key 2 tap', 'look 45 25'],
+                         20: ['mouse right click'], 30: ['look -45 25'], 35: ['mouse right click'],
+                         45: ['key 3 tap'], 50: ['mouse right click']}),
+    # Bridging techniques (item 133) over a trench: a ninja bridge (walking backwards, sneaking at each edge)
+    # and a jump bridge (jumping and placing below each jump), facing away.
+    'ninja_bridge': dict(
+        setup=[f'fill -3 {FLOOR - 4} 2 3 {FLOOR} 24 minecraft:air',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:stone 64'],
+        ticks=120, steps=merge({0: ['look 180 78'], 3: ['key s down']},
+                               {t: ['key shift down'] for t in range(10, 110, 10)},
+                               {t: ['key shift up'] for t in range(14, 110, 10)},
+                               {t: ['mouse right click'] for t in range(11, 110, 10)}, {110: ['key s up']})),
+    'jump_bridge': dict(
+        setup=[f'fill -3 {FLOOR - 4} 2 3 {FLOOR} 24 minecraft:air',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:stone 64'],
+        ticks=100, steps=merge({0: ['look 180 80'], 3: ['key s down', 'key space down']},
+                               {t: ['mouse right click'] for t in range(8, 90, 3)}, {90: ['key s up', 'key space up']})),
+    # Knockback from an enchanted weapon (item 145): a zombie with a Knockback II sword hits the player.
+    'kb_enchanted_mob': dict(
+        setup=[MACE_RESISTANCE],
+        ticks=100, steps={0: [f'command summon minecraft:zombie 0.5 {FLOOR + 1} 4.5 {{PersistenceRequired:1b,'
+                              'equipment:{mainhand:{id:"minecraft:iron_sword",count:1,components:{"minecraft:enchantments":'
+                              '{"minecraft:knockback":2}}}}}']}),
+    # Trading hits (item 154): the player attacks a husk that attacks back, w-tapping between hits.
+    'trade_hits': dict(
+        setup=[MACE_RESISTANCE, CHASER, SWORD],
+        ticks=120, steps=merge({0: ['look 0 5', 'key w down']},
+                               {t: ['mouse left click'] for t in range(20, 110, 12)},
+                               {t: ['key w up'] for t in range(22, 110, 12)},
+                               {t: ['key w down'] for t in range(25, 110, 12)}, {112: ['key w up']})),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
