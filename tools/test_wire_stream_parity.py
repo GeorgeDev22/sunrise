@@ -551,9 +551,9 @@ SCENARIOS = {
         setup=[FAR_HUSK, f'item replace entity {PLAYER} weapon.offhand with minecraft:shield'],
         ticks=60, steps={5: ['mouse right down'], 15: [KNOCKBACK], 30: ['mouse right up'], 40: [KNOCKBACK]}),
     'kb_creeper': dict(
-        setup=[f'summon minecraft:creeper 0.5 {FLOOR + 1} 4.5 {{NoAI:1b,Fuse:30s,ignited:1b,ExplosionRadius:1b}}',
-               f'effect give {PLAYER} minecraft:resistance 20 4 true'],
-        ticks=50, steps={0: ['key w down'], 20: ['key w up']}),
+        setup=[f'effect give {PLAYER} minecraft:resistance 20 4 true'],
+        ticks=60, steps={0: [f'command summon minecraft:creeper 0.5 {FLOOR + 1} 4.5 '
+                             '{NoAI:1b,Fuse:15s,ignited:1b,ExplosionRadius:1b}', 'key w down'], 20: ['key w up']}),
     'kb_snowball': dict(
         setup=[f'effect give {PLAYER} minecraft:resistance 20 4 true'],
         ticks=75, steps={10: ['command summon minecraft:snowball 0.5 -59 4.0 {Motion:[0.0,0.0,-1.2]}'],
