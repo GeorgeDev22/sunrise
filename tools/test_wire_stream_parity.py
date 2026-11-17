@@ -1020,6 +1020,9 @@ SCENARIOS = {
                          18: ['beacon speed']}),
     # Statistics (item 88): the pause menu's Statistics button (the stats request), back to the pause menu, out.
     'stats_open': dict(ticks=30, steps={2: ['open-stats'], 15: ['key esc tap'], 22: ['key esc tap']}),
+    # 30 minutes standing (item 116): keep-alives, the 20-tick position reminder and the time over a long idle, then
+    # a step, for slow drift.
+    'afk_30min': dict(ticks=36040, steps={36000: ['key w down'], 36010: ['key w up']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
