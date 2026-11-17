@@ -409,6 +409,22 @@ SCENARIOS = {
         ticks=50, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 30 shift'],
                          16: ['click-slot 0 shift'], 20: ['click-slot 31 shift'], 24: ['click-slot 0 shift'],
                          28: ['click-slot 32 shift'], 32: ['click-slot 0 shift'], 40: ['key e tap']}),
+    # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
+    # the respawn button, then walking again.
+    'death_respawn': dict(
+        ticks=90, steps={5: ['command kill @s'], 15: ['mouse left click', 'key w down'], 20: ['key w up'],
+                         40: ['respawn'], 70: ['key w down'], 80: ['key w up']}),
+    # Dimension changes (item 5): to the Nether's roof, walking there, to the End above its island, falling
+    # onto it, and back to the start (the reset teleports within the dimension the player is in).
+    'dimensions': dict(
+        ticks=200, steps={5: ['command execute in minecraft:the_nether run tp @s 0.5 128 0.5'],
+                          50: ['key w down'], 60: ['key w up'],
+                          80: ['command execute in minecraft:the_end run tp @s 0.5 75 0.5'],
+                          150: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5'],
+                          180: ['key w down'], 190: ['key w up']}),
+    # Container clicks (items 56, 58, 59): every ContainerInput a screen sends, in a chest, a crafting table, a
+    # furnace and the player's own inventory. Each ContainerClick carries the client's predicted slot changes and
+    # carried item, which the server compares with its own (a wrong one resyncs, and anticheats watch them).
     'chest_clicks': dict(
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:chest[facing=north]{{Items:[{{Slot:0b,id:"minecraft:stone",'
                'count:32},{Slot:1b,id:"minecraft:oak_planks",count:10}]}',
