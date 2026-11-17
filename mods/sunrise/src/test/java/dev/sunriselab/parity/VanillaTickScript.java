@@ -333,6 +333,15 @@ public final class VanillaTickScript {
                 mc.gameMode.handleContainerInput(mc.player.containerMenu.containerId, slot, button, input, mc.player);
             }
             case "command" -> mc.player.connection.sendCommand(String.join(" ", List.of(w).subList(1, w.length)));
+            case "chat" -> {
+                // ChatScreen.handleChatInput: a line starting with / is a command, the rest is chat.
+                String text = String.join(" ", List.of(w).subList(1, w.length)).trim();
+                if (text.startsWith("/")) {
+                    mc.player.connection.sendCommand(text.substring(1));
+                } else if (!text.isEmpty()) {
+                    mc.player.connection.sendChat(text);
+                }
+            }
             case "close" -> {
                 if (screen != null) {
                     screen.onClose();

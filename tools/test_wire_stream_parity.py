@@ -386,6 +386,13 @@ SCENARIOS = {
         setup=[f'gamemode spectator {PLAYER}', f'fill -2 {FLOOR + 1} 3 2 {FLOOR + 3} 5 minecraft:stone'],
         ticks=60, steps={0: ['key w down'], 20: ['key space down'], 28: ['key space up'], 35: ['key ctrl down'],
                          50: ['key w up', 'key ctrl up']}),
+    # Chat (items 75-77) on this offline-mode server: unsigned chat, and commands typed into chat, among them
+    # ones with a message argument (signed on an online server) and one that fails to parse.
+    'chat_plain': dict(
+        ticks=60, steps={5: ['chat hello world'], 25: ['chat a second message'], 45: ['chat   spaced   out   ']}),
+    'chat_commands': dict(
+        ticks=70, steps={5: ['chat /me waves'], 20: ['chat /msg Steve hi there'], 35: ['chat /say hello'],
+                         50: ['chat /notacommand at all']}),
     # Container clicks (items 56, 58, 59): every ContainerInput a screen sends, in a chest, a crafting table, a
     # furnace and the player's own inventory. Each ContainerClick carries the client's predicted slot changes and
     # carried item, which the server compares with its own (a wrong one resyncs, and anticheats watch them).
