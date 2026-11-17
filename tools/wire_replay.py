@@ -40,6 +40,9 @@ MARK = 'wire-mark'.encode().hex()
 # tick), so the replay gives it to Sunrise after that tick too. Up to REPLAY_EDGE the tick is uncertain: listed.
 REPLAY_LATE = 0.008
 REPLAY_EDGE = 0.012
+# A phased capture's packets reach the client `phase` after a tick-end, give or take this; a later one came
+# after the hold point, when the server sent it.
+PHASE_SLACK = 0.005
 # The server packets that change how the player moves: only their uncertain ticks are worth listing.
 MOVING = {'set_entity_motion', 'explode', 'player_position', 'player_rotation', 'update_mob_effect',
           'remove_mob_effect', 'update_attributes', 'player_abilities', 'set_health'}
@@ -69,7 +72,7 @@ class Plan:
         conn = play_conn(rows)
         rows = [r for r in rows if r.get('conn') == conn and 'name' in r]
         self.steps = []  # ('send', row, gate, edge) | ('await', name)
-        mark, ticks, sent = -1, 0, 0
+        mark, ticks, sent, last_end = -1, 0, 0, None
         # When each of vanilla's play ticks ended, in order: a server packet's next tick-end is the next of these.
         ends = iter([r['t'] for r in rows
                      if r['dir'] == 'c2s' and r['state'] == 'play' and r['name'] == 'client_tick_end'])
@@ -81,7 +84,7 @@ class Plan:
                 elif MARK in r.get('data', ''):
                     mark, ticks, sent = mark + 1, 0, 0
                 elif r['name'] == 'client_tick_end':
-                    ticks, sent = ticks + 1, 0
+                    ticks, sent, last_end = ticks + 1, 0, r['t']
                     next_end = next(ends, None)
                 elif r['name'] not in wire_stream.FRAME:
                     sent += 1
@@ -92,11 +95,17 @@ class Plan:
                     and REPLAY_LATE <= before_end < REPLAY_EDGE)
             # An answer to the client's own packet of this tick (a command's teleport) waits for that packet:
             # the gate counts the client's packets within the tick too, and its tick-end releases it anyway.
-            if phase is not None:
-                # A phased capture (net_capture's phase): every server packet reached vanilla `phase` after a
-                # tick-end, so it is given to Sunrise as long after the same tick-end; nothing is uncertain.
+            held = (phase is not None and last_end is not None
+                    and r['t'] - last_end < phase + PHASE_SLACK)
+            if held:
+                # A phased capture (net_capture's phase): a server packet the hold released reached vanilla
+                # `phase` after a tick-end, so it is given to Sunrise as long after the same tick-end; nothing is
+                # uncertain. One the server sent after the hold point arrived when it came, as unphased.
                 late = edge = False
                 gate = (mark, ticks, 0) if r['state'] == 'play' else None
+            elif phase is not None:
+                gate = (mark, ticks + 1, 0) if late else (mark, ticks, 0)
+                gate = gate if r['state'] == 'play' else None
             else:
                 gate = ((mark, ticks + 1, 0) if late else (mark, ticks, sent)) if r['state'] == 'play' else None
             self.steps.append(('send', r, gate, edge))
