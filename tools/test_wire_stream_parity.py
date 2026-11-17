@@ -302,6 +302,16 @@ SCENARIOS = {
     'powder_snow_walk': dict(
         setup=[f'fill 0 {FLOOR} 3 0 {FLOOR + 1} 4 minecraft:powder_snow'],
         ticks=70, steps={0: ['key w down'], 25: ['key space down'], 35: ['key space up'], 55: ['key w up']}),
+    # Walking a long strip of powder snow: the frost (LivingEntity.tryAddFrost, server-side) builds up tick by
+    # tick, and the client gets the slowdown from the server's attributes. With leather boots the player walks on
+    # it and never freezes: the control.
+    'powder_snow_long': dict(
+        setup=[f'fill 0 {FLOOR + 1} 2 0 {FLOOR + 1} 12 minecraft:powder_snow'],
+        ticks=90, steps={0: ['key w down'], 80: ['key w up']}),
+    'powder_snow_boots': dict(
+        setup=[f'fill 0 {FLOOR + 1} 2 0 {FLOOR + 1} 12 minecraft:powder_snow',
+               f'item replace entity {PLAYER} armor.feet with minecraft:leather_boots'],
+        ticks=90, steps={0: ['key w down'], 5: ['key space down'], 7: ['key space up'], 80: ['key w up']}),
     # Up a ladder, held still sneaking halfway, on up, then off backwards.
     'ladder_climb': dict(
         setup=[f'fill 0 {FLOOR + 1} 2 0 {FLOOR + 8} 2 minecraft:stone',
