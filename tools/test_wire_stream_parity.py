@@ -599,12 +599,14 @@ SCENARIOS = {
                f'setblock 0 {FLOOR + 2} 6 minecraft:stone_slab', f'fill 0 {FLOOR + 2} 7 0 {FLOOR + 2} 12 minecraft:stone',
                f'fill 0 {FLOOR + 3} 9 0 {FLOOR + 3} 12 minecraft:stone'],
         ticks=70, steps={0: ['key w down'], 38: ['key space down'], 39: ['key space up'], 60: ['key w up']}),
-    'shapes_walk': dict(
-        setup=[f'setblock 1 {FLOOR + 1} {z} minecraft:{block}' for z, block in enumerate((
-            'oak_fence', 'cobblestone_wall', 'glass_pane', 'iron_bars', 'iron_chain', 'lantern', 'end_rod',
-            'lightning_rod', 'amethyst_cluster', 'pointed_dripstone', 'cauldron', 'hopper', 'anvil', 'chest',
-            'enchanting_table', 'daylight_detector'), start=1)] + [f'fill 2 {FLOOR + 1} 0 2 {FLOOR + 3} 18 minecraft:stone'],
-        ticks=90, steps={0: ['key w down', 'key a down'], 75: ['key w up', 'key a up']}),
+    # One shape at a time, 1.5 blocks ahead: walked into while strafing, so the player slides along its faces
+    # and off its corner.
+    **{f'shape_{block}': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:{block}'],
+        ticks=40, steps={0: ['key w down', 'key a down'], 8: ['key a up'], 12: ['key a down'], 30: ['key w up', 'key a up']})
+       for block in ('oak_fence', 'cobblestone_wall', 'glass_pane', 'iron_bars', 'iron_chain', 'lantern', 'end_rod',
+                     'lightning_rod', 'amethyst_cluster', 'pointed_dripstone', 'cauldron', 'hopper', 'anvil', 'chest',
+                     'enchanting_table', 'daylight_detector')},
     'snow_layers_walk': dict(
         setup=[f'setblock 0 {FLOOR + 1} {z} minecraft:snow[layers={z - 1}]' for z in range(2, 10)],
         ticks=60, steps={0: ['key w down'], 45: ['key w up']}),
