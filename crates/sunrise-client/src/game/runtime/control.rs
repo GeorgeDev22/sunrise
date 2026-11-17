@@ -1426,8 +1426,10 @@ impl Game<'_> {
     /// `key ... up`: the script lets go. What it pressed as the keyboard's stand-in goes with it
     /// (a fixture's untagged press), and a controller's hold stays.
     fn control_key_up(&mut self, key: KeyCode) {
+        // Sneak and sprint: the toggle mappings take the release, as the window's (a toggled one stays down).
         if matches!(key, KeyCode::ShiftLeft | KeyCode::ControlLeft) {
             let _ = self.mapped_key(key, false, false, key, Source::Agent);
+            return;
         }
         self.keys.release(&key, Source::Agent);
         self.keys.release(&key, Source::Keyboard);
