@@ -378,6 +378,14 @@ pub struct Anvil {
     pub repair_count: u32,
     /// `onlyRenaming`.
     pub only_renaming: bool,
+    /// An `AnvilScreen` listens: a client predicting a click with the screen open, whose
+    /// `slotChanged` hears each new input (`slotsChanged`'s `broadcastChanges`).
+    pub screen: bool,
+    /// The input the screen last heard of (`AbstractContainerMenu.lastSlots`).
+    pub seen_input: Option<ItemStack>,
+    /// The names the screen's `onNameChanged` sent while the click ran
+    /// (`ServerboundRenameItemPacket`), in order; they go out before the click.
+    pub renamed: Vec<String>,
 }
 
 /// An anvil menu before a click, for `Menu::anvil_cancel`: the anvil's three
@@ -1112,7 +1120,10 @@ impl Menu {
                 );
             }
             Kind::CrafterBlock => self.crafter_result(env),
-            Kind::Anvil => self.anvil_result(env),
+            Kind::Anvil => {
+                self.anvil_screen_heard(env);
+                self.anvil_result(env);
+            }
             Kind::Enchanting => self.enchant_changed(env),
             Kind::Smithing => {
                 self.smith_result(env);
@@ -1334,6 +1345,37 @@ impl Menu {
         self.state.data[2] = secondary.map_or(0, |e| e.0 + 1);
         self.remove(env, 0, 1);
         true
+    }
+
+    /// `AnvilScreen.slotChanged` for a new input, inside the click that changed it: the name
+    /// box takes the input's name, and `onNameChanged` gives the menu that name (blank for an
+    /// input with no custom name of its own), which takes it when it differs (`setItemName`).
+    fn anvil_screen_heard(&mut self, env: &Env) {
+        if !self.state.anvil.screen || self.state.containers[MAIN][0] == self.state.anvil.seen_input
+        {
+            return;
+        }
+        self.state.anvil.seen_input = self.state.containers[MAIN][0].clone();
+        let Some(input) = self.state.containers[MAIN][0].clone() else {
+            return;
+        };
+        // The box (an EditBox of 50) keeps the first 50 UTF-16 units of what it is given.
+        let name = if input.custom_name().is_some() {
+            let hover = crate::stations::hover_name(env.names, &input);
+            let mut units = 0;
+            hover
+                .chars()
+                .take_while(|c| {
+                    units += c.len_utf16();
+                    units <= 50
+                })
+                .collect()
+        } else {
+            String::new()
+        };
+        if self.rename(env, &name) {
+            self.state.anvil.renamed.push(name);
+        }
     }
 
     pub fn rename(&mut self, env: &Env, name: &str) -> bool {
