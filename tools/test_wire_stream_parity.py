@@ -974,6 +974,11 @@ SCENARIOS = {
                f'summon minecraft:minecart 0.5 {FLOOR + 1} 2.5'],
         ticks=70, steps={0: ['command ride @s mount @e[type=minecraft:minecart,limit=1]'], 5: ['key w down'],
                          30: ['key shift down'], 32: ['key shift up'], 33: ['key w up']}),
+    # The pause menu while walking and jumping (item 81): Gui.setScreen releases the held keys, so the player stops
+    # (a server's game doesn't pause), and the keys held on past its close don't count until pressed again.
+    'pause_menu_walk': dict(
+        ticks=70, steps={0: ['key w down', 'key space down'], 10: ['key esc tap'], 30: ['key esc tap'],
+                         45: ['key w up', 'key space up'], 50: ['key w down'], 60: ['key w up']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
