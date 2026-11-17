@@ -6170,10 +6170,6 @@ impl Game<'_> {
         // ClientLevel.tick: the End's sky flash, frozen or not.
         self.tick_end_flash();
         self.player_border();
-        // The entities added after the player tick after it: their pushes
-        // (from where they ended last tick, onto where the player ended)
-        // reach its next move, this one.
-        let pushed_after = self.remote_pushes(false);
         self.tick_remote_entities(running);
         self.tick_remote_arm_poses();
         self.tick_random_textures();
@@ -6222,7 +6218,7 @@ impl Game<'_> {
         self.tick_client_load();
         let entity_collisions = self.player_entity_collisions();
         // Those added before it tick before it: their pushes reach this move.
-        let pushed = pushed_after.add_vector(self.remote_pushes(true));
+        let pushed = self.remote_pushes(true);
         let sprint_window = self.settings.sprint_window;
         let Some(player) = self.player.as_mut() else {
             return Ok(());
@@ -6263,6 +6259,7 @@ impl Game<'_> {
         }
         self.native_local_player_fit_sizes();
         let result = self.tick_local_player(entity_collisions, pushed, sprint_window);
+        self.push_after_player();
         entity_section_steps::player_after(self, player_from);
         // `EntityEvent.Size` for the pose the tick set.
         self.native_local_player_size();
@@ -6270,6 +6267,23 @@ impl Game<'_> {
             self.native_player_tick_post(mod_api::__private::PlayerTickPostCall { player });
         }
         result
+    }
+
+    /// The pushes of the entities added after the player, which tick after
+    /// it: `Entity.push` adds each to the player's deltaMovement during their
+    /// tick, from where they and the player ended it. A velocity or teleport
+    /// the server sends before the next tick replaces that deltaMovement, push
+    /// included (`ClientPacketListener.handleSetEntityMotion`,
+    /// `handleMovePlayer`), so the push lands on the velocity now, not on the
+    /// next move.
+    fn push_after_player(&mut self) {
+        let pushed = self.remote_pushes(false);
+        let still = self.screen == Screen::Dead || self.sleeping.is_some() || self.riding.is_some();
+        if let Some(player) = self.player.as_mut()
+            && !still
+        {
+            player.velocity = player.velocity.add_vector(pushed);
+        }
     }
 
     /// `LocalPlayer.tick`'s `Player.tick` work: input, riding, motion, sleep
