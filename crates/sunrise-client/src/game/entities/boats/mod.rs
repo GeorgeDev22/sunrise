@@ -891,9 +891,12 @@ impl Game<'_> {
             if down {
                 acceleration -= 0.005;
             }
-            let r = b.yaw.to_radians();
-            b.velocity.x += f64::from((-r).sin() * acceleration);
-            b.velocity.z += f64::from(r.cos() * acceleration);
+            // AbstractBoat.controlBoat: Mth's sine table, at the float angle.
+            use sunrise_core::geometry::trig;
+            b.velocity.x +=
+                f64::from(trig::sin(f64::from(-b.yaw * trig::DEG_TO_RAD)) * acceleration);
+            b.velocity.z +=
+                f64::from(trig::cos(f64::from(b.yaw * trig::DEG_TO_RAD)) * acceleration);
             b.paddling = [right && !left || up, left && !right || up];
         }
         // Entity.move: collisions zero the blocked components, the world border's
