@@ -882,6 +882,20 @@ SCENARIOS = {
                          20: ['click-slot 5 right'], 22: ['click-slot 3 right'], 24: ['click-slot 37'],
                          27: ['click-slot 0 shift'], 32: ['click-slot 0'], 35: ['click-slot 38'],
                          40: ['key e tap']}),
+    # Workstations (item 60): a grindstone takes an enchanted sword's enchantments off, a smithing table upgrades a
+    # diamond sword to netherite (each result shift-clicked out).
+    'grindstone_use': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:grindstone[face=floor,facing=north]',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:iron_sword[minecraft:enchantments={{"minecraft:sharpness":3}}]'],
+        ticks=60, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 30'], 15: ['click-slot 0'],
+                         20: ['click-slot 2 shift'], 30: ['key e tap']}),
+    'smithing_use': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:smithing_table',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:netherite_upgrade_smithing_template',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:diamond_sword',
+               f'item replace entity {PLAYER} hotbar.2 with minecraft:netherite_ingot'],
+        ticks=60, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 31 shift'], 15: ['click-slot 32 shift'],
+                         18: ['click-slot 33 shift'], 24: ['click-slot 3 shift'], 34: ['key e tap']}),
     # Shift-clicks route raw iron to the input and coal to the fuel; the furnace starts smelting while open (its
     # progress comes as container data), then the result is taken.
     'furnace_shift': dict(
