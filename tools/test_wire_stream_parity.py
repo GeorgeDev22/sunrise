@@ -435,6 +435,17 @@ SCENARIOS = {
         setup=[f'fill 0 {FLOOR + 1} 2 0 {FLOOR + 1} 8 minecraft:stone', f'effect give {PLAYER} minecraft:haste 30 1 true',
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:diamond_pickaxe[minecraft:enchantments={{"minecraft:efficiency":5}}]'],
         ticks=70, steps={0: ['look 0 40', 'mouse left down'], 5: ['key w down'], 55: ['key w up', 'mouse left up']}),
+    # An end crystal clicked onto grass (EndCrystalItem.useOn: FAIL) and onto obsidian (SUCCESS), a shield in the
+    # other hand: either result ends the click (Minecraft.startUseItem), so no UseItem and no offhand use follows.
+    'end_crystal_fail': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:end_crystal 4',
+               f'item replace entity {PLAYER} weapon.offhand with minecraft:shield'],
+        ticks=40, steps={0: ['look 0 40'], 5: ['mouse right click'], 15: ['mouse right click']}),
+    'end_crystal_place': dict(
+        setup=[f'setblock 0 {FLOOR} 2 minecraft:obsidian',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:end_crystal 4',
+               f'item replace entity {PLAYER} weapon.offhand with minecraft:shield'],
+        ticks=40, steps={0: ['look 0 40'], 5: ['mouse right click'], 15: ['mouse right click']}),
     # An armor stand given a helmet with a right click on its head.
     'armor_stand_interact': dict(
         setup=[f'summon minecraft:armor_stand 0.5 {FLOOR + 1} 2.5 {{Rotation:[180f,0f]}}',
