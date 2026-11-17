@@ -497,11 +497,14 @@ impl Game<'_> {
         else {
             return Vec::new();
         };
+        // ServerboundMoveVehiclePacket.fromEntity: while a teleport eases the
+        // boat, the spot it is going to.
+        let (at, yaw, pitch) = b.client_position();
         vec![
             S::MoveVehicle(play::MoveVehicleRequest {
-                position: [b.position.x, b.position.y, b.position.z],
-                yaw: b.yaw,
-                pitch: 0.0,
+                position: [at.x, at.y, at.z],
+                yaw,
+                pitch,
                 on_ground: b.on_ground,
             }),
             S::PaddleBoat(play::PaddleBoat {
@@ -511,38 +514,80 @@ impl Game<'_> {
         ]
     }
 
-    /// `ClientPacketListener.handleMoveVehicle`: the server put the boat or
-    /// the mount the player drives back.
-    /// The vehicle this client moves, when it is `id`: where it is, its yaw and its
-    /// deltaMovement (`PositionMoveRotation.of`).
-    pub(super) fn driven_vehicle(&self, id: u32) -> Option<(Vec3, f32, Vec3)> {
+    /// The vehicle this client moves, when it is `id`: where it is, its yaw and pitch and
+    /// its deltaMovement (`PositionMoveRotation.of`).
+    pub(super) fn driven_vehicle(&self, id: u32) -> Option<(Vec3, f32, f32, Vec3)> {
         if let Some(m) = self.driven_mount().filter(|m| m.id == id) {
-            return Some((m.position, m.yaw, m.velocity));
+            return Some((m.position, m.yaw, m.head_pitch, m.velocity));
         }
-        let b = self
-            .riding
-            .filter(|&r| r == id && self.controls_boat(r))
-            .and_then(|r| self.boats.iter().find(|b| b.id == r))?;
-        Some((b.position, b.yaw, b.velocity))
+        let b = self.driven_boat().filter(|&i| self.boats[i].id == id)?;
+        let b = &self.boats[b];
+        Some((b.position, b.yaw, b.pitch, b.velocity))
     }
 
-    /// `setDeltaMovement` of the vehicle this client moves.
-    pub(super) fn set_driven_vehicle_velocity(&mut self, velocity: Vec3) {
-        if let Some(id) = self.driven_mount().map(|m| m.id)
-            && let Some(m) = self.mob_index.get_mut(&mut self.mobs, id)
-        {
-            m.velocity = velocity;
-            return;
-        }
-        if let Some(i) = self
-            .riding
+    /// The boat this client steers, as an index into `boats`.
+    fn driven_boat(&self) -> Option<usize> {
+        self.riding
             .filter(|&id| self.controls_boat(id))
             .and_then(|id| self.boats.iter().position(|b| b.id == id))
-        {
-            self.boats.update(i, |b| b.velocity = velocity);
+    }
+
+    /// `Entity.getClientPosition` of the vehicle this client moves: for a boat a
+    /// teleport is easing, where it is going.
+    pub(super) fn driven_client_position(&self) -> Option<Vec3> {
+        if let Some(m) = self.driven_mount() {
+            return Some(m.position);
+        }
+        self.driven_boat()
+            .map(|i| self.boats[i].client_position().0)
+    }
+
+    /// `handleTeleportEntity` (`setValuesFromPositionPacket`) for the vehicle this
+    /// client moves, with the packet's relative parts already counted: a boat eases
+    /// there (`moveOrInterpolateTo`) unless it is more than 64 blocks away, when it is
+    /// put there and reported to the server at once; a mount is put there. Its
+    /// deltaMovement and onGround are the packet's.
+    pub(super) fn teleport_driven_vehicle(
+        &mut self,
+        to: [f64; 3],
+        rotation: (f32, f32),
+        velocity: Vec3,
+        on_ground: bool,
+    ) {
+        let at = Vec3::new(to[0], to[1], to[2]);
+        if let Some(id) = self.driven_mount().map(|m| m.id) {
+            self.remote_move_vehicle_and_file(to, rotation.0);
+            if let Some(m) = self.mob_index.get_mut(&mut self.mobs, id) {
+                m.velocity = velocity;
+                m.on_ground = on_ground;
+            }
+            return;
+        }
+        let Some(i) = self.driven_boat() else {
+            return;
+        };
+        let far = self.boats[i].position.distance_squared(at) > 4096.0;
+        self.boats.update(i, |b| {
+            if far {
+                b.lerp = None;
+                b.position = at;
+                b.previous = at;
+                b.yaw = rotation.0;
+                b.previous_yaw = rotation.0;
+                b.pitch = rotation.1;
+            } else {
+                b.interpolate_to(at, rotation.0, rotation.1);
+            }
+            b.velocity = velocity;
+            b.on_ground = on_ground;
+        });
+        if far && let Some(report) = self.remote_vehicle_packets().into_iter().next() {
+            self.send(report);
         }
     }
 
+    /// `ClientPacketListener.handleMoveVehicle`: the server put the boat or
+    /// the mount the player drives back.
     pub(super) fn remote_move_vehicle(&mut self, position: [f64; 3], yaw: f32) {
         let at = Vec3::new(position[0], position[1], position[2]);
         if let Some(id) = self.driven_mount().map(|m| m.id)
@@ -555,19 +600,17 @@ impl Game<'_> {
             m.velocity = Vec3::ZERO;
             return;
         }
-        let Some(i) = self
-            .riding
-            .filter(|&id| self.controls_boat(id))
-            .and_then(|id| self.boats.iter().position(|b| b.id == id))
-        else {
+        let Some(i) = self.driven_boat() else {
             return;
         };
+        // absSnapTo, after the interpolation is cancelled: the boat keeps its
+        // deltaMovement.
         self.boats.update(i, |b| {
+            b.lerp = None;
             b.previous = at;
             b.position = at;
-            b.yaw = yaw;
-            b.previous_yaw = yaw;
-            b.velocity = Vec3::ZERO;
+            b.yaw = yaw % 360.0;
+            b.previous_yaw = b.yaw;
         });
     }
 

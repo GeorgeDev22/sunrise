@@ -3699,13 +3699,10 @@ impl Game<'_> {
                 self.remote_position_sync_and_file(p.id, path, p.yaw, p.pitch, p.on_ground);
             }
             // handleTeleportEntity: setValuesFromPositionPacket counts a relative part
-            // from where the entity is on this client (PositionMoveRotation.of). The
-            // vehicle this client moves has no interpolation to take it (its handler
-            // refuses, so moveOrInterpolateTo sets it there), and its deltaMovement is
-            // the packet's.
+            // from where the entity is on this client (PositionMoveRotation.of).
             C::TeleportEntity(p) if self.driven_vehicle(p.id as u32).is_some() => {
                 use play::relative as rel;
-                let Some((at, yaw, velocity)) = self.driven_vehicle(p.id as u32) else {
+                let Some((at, yaw, pitch, velocity)) = self.driven_vehicle(p.id as u32) else {
                     return Ok(());
                 };
                 let pick = |bit: i32, current: f64, change: f64| {
@@ -3720,18 +3717,23 @@ impl Game<'_> {
                     pick(rel::Y, at.y, p.position[1]),
                     pick(rel::Z, at.z, p.position[2]),
                 ];
-                let yaw = if p.relatives & rel::Y_ROT != 0 {
-                    yaw + p.yaw
-                } else {
-                    p.yaw
+                let turn = |bit: i32, current: f32, change: f32| {
+                    if p.relatives & bit != 0 {
+                        current + change
+                    } else {
+                        change
+                    }
                 };
+                let rotation = (
+                    turn(rel::Y_ROT, yaw, p.yaw),
+                    turn(rel::X_ROT, pitch, p.pitch),
+                );
                 let delta = Vec3::new(
                     pick(rel::DELTA_X, velocity.x, p.delta[0]),
                     pick(rel::DELTA_Y, velocity.y, p.delta[1]),
                     pick(rel::DELTA_Z, velocity.z, p.delta[2]),
                 );
-                self.remote_move_vehicle_and_file(position, yaw);
-                self.set_driven_vehicle_velocity(delta);
+                self.teleport_driven_vehicle(position, rotation, delta, p.on_ground);
             }
             C::TeleportEntity(p) => {
                 let base = self
@@ -3793,7 +3795,7 @@ impl Game<'_> {
             // handleMoveVehicle: the vehicle this client moves goes where the server says,
             // unless it is within 1e-5 already, and is reported back at once.
             C::MoveVehicle(p) => {
-                if let Some((at, _, _)) = self.riding.and_then(|id| self.driven_vehicle(id)) {
+                if let Some(at) = self.driven_client_position() {
                     let to = Vec3::new(p.position[0], p.position[1], p.position[2]);
                     if to.subtract(at).length() > f64::from(1.0e-5_f32) {
                         self.remote_move_vehicle_and_file(p.position, p.yaw);

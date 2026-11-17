@@ -123,6 +123,33 @@ pub(super) struct Boat {
     /// `Entity.tickCount`, for the 100 ticks a saved holder is waited for.
     pub age: i32,
     pub random: LegacyRandom,
+    /// The server teleport the boat this client drives is easing to.
+    pub(super) lerp: Option<DrivenLerp>,
+}
+/// `LinearInterpolationHandler` of the boat this client drives: where a server
+/// teleport takes it (`interpolationData`), the steps left, and where the boat
+/// was after the last step (`lastPositionAndRotation`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct DrivenLerp {
+    pub target: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    steps: u32,
+    last: (Vec3, f32, f32),
+}
+/// `LinearInterpolationHandler.DEFAULT_INTERPOLATION_STEPS`, the length
+/// `AbstractBoat.createInterpolationHandler` gives it.
+const LERP_STEPS: u32 = 3;
+/// `Mth.wrapDegrees(double)`.
+fn wrap_degrees_f64(angle: f64) -> f64 {
+    let mut a = angle % 360.0;
+    if a >= 180.0 {
+        a -= 360.0;
+    }
+    if a < -180.0 {
+        a += 360.0;
+    }
+    a
 }
 /// `ChestBoat.CONTAINER_SIZE`.
 pub(super) const CHEST_SLOTS: usize = 27;
@@ -250,7 +277,33 @@ impl Boat {
             leash_spin: 0.0,
             age: 0,
             random: sunrise_client::random_source::entity(),
+            lerp: None,
         }
+    }
+    /// `AbstractInterpolationHandler.interpolateTo`: the boat eases to a server
+    /// teleport over `LERP_STEPS` ticks, unless it is easing to that spot already.
+    pub(super) fn interpolate_to(&mut self, target: Vec3, yaw: f32, pitch: f32) {
+        if self
+            .lerp
+            .is_some_and(|l| l.yaw == yaw && l.pitch == pitch && l.target == target)
+        {
+            return;
+        }
+        self.lerp = Some(DrivenLerp {
+            target,
+            yaw,
+            pitch,
+            steps: LERP_STEPS,
+            last: (self.position, self.yaw, self.pitch),
+        });
+    }
+    /// `Entity.getClientPositionAndRotation`: where the boat is easing to, or
+    /// where it is when it isn't.
+    pub(super) fn client_position(&self) -> (Vec3, f32, f32) {
+        self.lerp
+            .map_or((self.position, self.yaw, self.pitch), |l| {
+                (l.target, l.yaw, l.pitch)
+            })
     }
     /// A chest boat or chest raft.
     pub fn with_chest(mut self) -> Self {
@@ -771,9 +824,48 @@ impl Game<'_> {
         b.fall_distance
     }
     /// `AbstractBoat.tick` for one boat (`controlled` when the player rides it).
+    /// `AbstractInterpolationHandler.interpolate` for the boat this client
+    /// drives: its own moves since the last step carry the target along (where
+    /// the boat fits there), then `LinearInterpolationHandler.doInterpolate`
+    /// takes a `1 / steps` share of the way.
+    fn interpolate_driven_boat(&self, b: &mut Boat) {
+        let Some(mut l) = b.lerp.take() else {
+            return;
+        };
+        let moved = b.position.subtract(l.last.0);
+        if moved.length_squared() > f64::from(1.0e-5_f32) {
+            let to = l.target.add_vector(moved);
+            let mut scene = SceneCollisions {
+                world: &self.world,
+                binding: self.collision,
+                subject: None,
+            };
+            if scene.unobstructed(Boat::bounds_at(to)).unwrap_or(false) {
+                l.target = to;
+            }
+        }
+        l.yaw += b.yaw - l.last.1;
+        l.pitch += b.pitch - l.last.2;
+        let alpha = 1.0 / f64::from(l.steps);
+        b.position = b.position.lerp(l.target, alpha);
+        let yaw = f64::from(b.yaw) + alpha * wrap_degrees_f64(f64::from(l.yaw) - f64::from(b.yaw));
+        let pitch = f64::from(b.pitch) + alpha * (f64::from(l.pitch) - f64::from(b.pitch));
+        // Entity.setRot
+        b.yaw = yaw as f32 % 360.0;
+        b.pitch = pitch as f32 % 360.0;
+        l.steps -= 1;
+        l.last = (b.position, b.yaw, b.pitch);
+        if l.steps > 0 {
+            b.lerp = Some(l);
+        }
+    }
     pub(super) fn tick_boat(&mut self, mut b: Boat, controlled: bool) -> Boat {
         b.previous = b.position;
         b.previous_yaw = b.yaw;
+        // Entity.commonTick: the client's interpolation, before the boat ticks.
+        if controlled {
+            self.interpolate_driven_boat(&mut b);
+        }
         // Entity.baseTick ends with Leashable.tickLeash, on a server only
         // (a ridden boat's lead ticks in `tick_boats`).
         if !controlled && self.remote.is_none() {
@@ -2208,6 +2300,36 @@ mod tests {
 
     fn boat() -> Boat {
         Boat::new(1, Arc::from("oak"), Vec3::ZERO, 0.0)
+    }
+
+    /// The boat this client drives eases to a server teleport over three ticks
+    /// (LinearInterpolationHandler), and until it gets there it reports the spot it is
+    /// going to (getClientPositionAndRotation).
+    #[test]
+    #[ignore = "daily"]
+    fn a_driven_boat_eases_to_a_teleport_and_reports_where_it_is_going() {
+        super::super::native_entity_refs::tests::with_game(|game| {
+            let mut b = Boat::new(9, "oak".into(), Vec3::new(0.5, 64.0, 2.5), 0.0);
+            b.interpolate_to(Vec3::new(0.5, 64.0, 6.5), 90.0, 0.0);
+            let mut steps = Vec::new();
+            for _ in 0..3 {
+                game.interpolate_driven_boat(&mut b);
+                steps.push((b.position.z, b.yaw, b.client_position()));
+            }
+            let expected = [
+                (2.5 + 4.0 / 3.0, 30.0),
+                (2.5 + 8.0 / 3.0, 60.0),
+                (6.5, 90.0),
+            ];
+            for (i, ((z, yaw, _), (want_z, want_yaw))) in steps.iter().zip(expected).enumerate() {
+                assert!((z - want_z).abs() < 1e-9, "step {i}: z {z}");
+                assert!((yaw - want_yaw).abs() < 1e-4, "step {i}: yaw {yaw}");
+            }
+            assert_eq!(steps[0].2, (Vec3::new(0.5, 64.0, 6.5), 90.0, 0.0));
+            assert_eq!(steps[1].2, (Vec3::new(0.5, 64.0, 6.5), 90.0, 0.0));
+            assert_eq!(steps[2].2, (b.position, b.yaw, b.pitch));
+            assert!(b.lerp.is_none());
+        });
     }
 
     #[test]
