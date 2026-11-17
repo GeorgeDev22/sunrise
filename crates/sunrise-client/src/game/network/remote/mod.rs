@@ -9415,6 +9415,12 @@ impl Game<'_> {
         self.send(S::ContainerClose(play::ContainerClose { container: id }));
         self.remote_close_local();
     }
+    /// `LocalPlayer.closeContainer` as the creative inventory closes: its
+    /// `ItemPickerMenu` is window 0, and a server hears the close as it does
+    /// any container screen's (`AbstractContainerScreen.onClose`).
+    pub(super) fn close_creative_menu(&self) {
+        self.send(S::ContainerClose(play::ContainerClose { container: 0 }));
+    }
     /// `MultiPlayerGameMode.handleInventoryButtonClick`: button `button` of
     /// the menu the server opened goes to it (`ContainerButtonClick`), whose
     /// menu decides what it does (`clickMenuButton`). No sound: that is the

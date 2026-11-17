@@ -758,6 +758,9 @@ impl Game<'_> {
                         self.book_shortcut(shortcut);
                         return ok();
                     }
+                    // The rest of the press goes to the book, as the window's (`book_key`).
+                    self.book_input(Some(key), None);
+                    return ok();
                 }
                 // KeyboardHandler.keyPress: the debug keys see the physical key first.
                 let physical = key;

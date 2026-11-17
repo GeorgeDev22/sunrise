@@ -58,6 +58,7 @@ impl Game<'_> {
                     self.pad_clear_focus();
                     self.mod_browser_closed();
                     self.carried = None;
+                    self.close_creative_menu();
                     self.set_screen(Screen::Playing);
                     self.capture(true);
                 }
@@ -214,6 +215,7 @@ impl Game<'_> {
                     if let Some(c) = self.carried.take() {
                         let _ = self.add_stack_to_inventory(c);
                     }
+                    self.close_creative_menu();
                     self.set_screen(Screen::Playing);
                     self.capture(true);
                 }
