@@ -607,22 +607,23 @@ impl Game<'_> {
             }
         }
     }
-    /// `MerchantMenu.tryMoveItems` for the selected offer (the select trade packet).
+    /// `MerchantScreen.postButtonClick` for offer `index`: this client's menu takes the
+    /// selection and moves the payment itself (`setSelectionHint`, `tryMoveItems`), so its
+    /// result and the clicks after it are its own; a server is then told
+    /// (ServerboundSelectTradePacket) and does the same.
     pub(super) fn try_move_items(&mut self, index: usize) {
+        self.menu_session(|menu, env, _| {
+            menu.merchant_select(env, index);
+            Some(true)
+        });
         if self.remote.is_some() {
-            // ServerboundSelectTradePacket; the server moves the items.
             if let Some(m) = self.station.as_mut().and_then(|s| s.merchant.as_mut()) {
                 m.session.selection_hint = index;
             }
             self.send(sunrise_protocol::packets::play::Serverbound::SelectTrade(
                 sunrise_protocol::packets::play::SelectTrade { item: index as i32 },
             ));
-            return;
         }
-        self.menu_session(|menu, env, _| {
-            menu.merchant_select(env, index);
-            Some(true)
-        });
     }
     /// Clicks on the offer list; true when one was hit. A press on the
     /// scroller holds it (`MerchantScreen.mouseClicked`).
