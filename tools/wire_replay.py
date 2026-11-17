@@ -229,12 +229,20 @@ def main():
     shutil.copy(args.vanilla, out / 'vanilla.jsonl')
     plan = Plan(rows, args.phase)
     vanilla_accepts = []  # accepted teleports before each mark, in vanilla's run
-    accepted = 0
+    # Vanilla's ticks between the previous mark (the first: the login) and each mark. The settle before a mark is
+    # timed in wall-clock polls, so it lasts a few ticks more or less from run to run; packets are gated by the
+    # ticks since the last mark, so a Sunrise that marked sooner would get vanilla's last packets before the mark
+    # (a thaw's last attribute updates) only on the scenario's second tick. Sunrise waits for as many ticks.
+    window_ticks, accepted, ticks = [], 0, 0
     for r in rows:
         if r.get('dir') == 'c2s' and r.get('name') == 'accept_teleportation':
             accepted += 1
+        elif r.get('dir') == 'c2s' and r.get('state') == 'play' and r.get('name') == 'client_tick_end':
+            ticks += 1
         elif r.get('dir') == 'c2s' and MARK in r.get('data', ''):
             vanilla_accepts.append(accepted)
+            window_ticks.append(ticks)
+            ticks = 0
     if len(vanilla_accepts) != len(args.scenarios):
         sys.exit(f'the capture has {len(vanilla_accepts)} scenarios, --scenarios names {len(args.scenarios)}')
     replay = Replay(plan, out / 'sunrise.jsonl', args.phase)
@@ -252,8 +260,10 @@ def main():
         client = ws.SunriseClient(Path(args.bin).resolve(), lab.LOCAL / 'sunrise-client' / lab.VERSION,
                                   work / 'sunrise', f'127.0.0.1:{replay.port}', scripts)
         counts = ws.ClientCounts(out / 'sunrise.jsonl')
-        for name, need in zip(args.scenarios, vanilla_accepts):
+        for index, (name, need) in enumerate(zip(args.scenarios, vanilla_accepts)):
             ws.settle(counts, need)
+            replay.wait(lambda index=index: (replay.mark, replay.ticks) >= (index - 1, window_ticks[index]),
+                        f'Sunrise never reached tick {window_ticks[index]} before mark {index}')
             if replay.error:
                 raise replay.error
             path = scripts / f'{name}-sunrise.json'
