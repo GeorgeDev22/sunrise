@@ -1025,13 +1025,17 @@ impl Game<'_> {
             );
             b.on_ground = movement.y < 0.0 && moved.y > movement.y;
             b.fall_distance = self.boat_fall(&b, moved.y);
-            if (moved.x - movement.x).abs() > 1.0e-7 {
+            // restituteMovementAfterCollisions zeroes each blocked axis (a boat doesn't
+            // bounce): a sideways one by `Mth.equal`, the vertical one by any difference
+            // (`verticalCollision`), as Entity.move tells them.
+            use sunrise_world::entity_move::different;
+            if different(movement.x, moved.x) {
                 b.velocity.x = 0.0;
             }
-            if (moved.z - movement.z).abs() > 1.0e-7 {
+            if different(movement.z, moved.z) {
                 b.velocity.z = 0.0;
             }
-            if (moved.y - movement.y).abs() > 1.0e-7 {
+            if moved.y != movement.y {
                 b.velocity.y = 0.0;
             }
         }
