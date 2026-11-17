@@ -282,6 +282,9 @@ def main():
     finally:
         if client:
             client.close()
+        # Sunrise's own log, kept beside the capture.
+        for log in (work / 'sunrise').glob('*.log'):
+            shutil.copy(log, out / f'sunrise-{log.name}')
         shutil.rmtree(work, ignore_errors=True)
     if replay.error:
         print(f'replay: {replay.error}')
