@@ -608,6 +608,58 @@ SCENARIOS = {
     'snow_layers_walk': dict(
         setup=[f'setblock 0 {FLOOR + 1} {z} minecraft:snow[layers={z - 1}]' for z in range(2, 10)],
         ticks=60, steps={0: ['key w down'], 45: ['key w up']}),
+    # Pistons moving the player (item 129): pushed sideways, then launched on a slime block.
+    'piston_push': dict(
+        setup=[f'setblock 0 {FLOOR + 1} -1 minecraft:piston[facing=south]'],
+        ticks=50, steps={5: [f'command setblock 1 {FLOOR + 1} -1 minecraft:redstone_block'],
+                         25: [f'command setblock 1 {FLOOR + 1} -1 minecraft:air']}),
+    'slime_piston_launch': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 3 minecraft:piston[facing=up]', f'setblock 0 {FLOOR + 2} 3 minecraft:slime_block',
+               f'tp {PLAYER} 0.5 {FLOOR + 3} 3.5 0 0'],
+        ticks=70, steps={5: [f'command setblock 1 {FLOOR + 1} 3 minecraft:redstone_block']}),
+    # Effects at 255 (item 132): Speed, Jump Boost, Levitation, and Levitation with Slow Falling.
+    'speed_255': dict(
+        ticks=40, steps={0: [f'command effect give {PLAYER} minecraft:speed 2 254 true'], 3: ['key w down'],
+                         8: ['key w up']}),
+    'jump_boost_255': dict(
+        ticks=60, steps={0: [f'command effect give {PLAYER} minecraft:jump_boost 3 254 true'], 3: ['key space down'],
+                         4: ['key space up']}),
+    'levitation_255_slow_falling': dict(
+        ticks=60, steps={0: [f'command effect give {PLAYER} minecraft:levitation 1 254 true'],
+                         10: [f'command effect give {PLAYER} minecraft:slow_falling 5 0 true']}),
+    # Switching slots and hands while an item is in use (item 140): eating, then another slot; drawing a bow,
+    # then swapping hands; a loaded crossbow switched away and back; dropping while walking.
+    'switch_while_eating': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:bread 8',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:bread 8', f'effect give {PLAYER} minecraft:hunger 2 255 true'],
+        ticks=50, steps={5: ['mouse right down'], 12: ['key 2 tap'], 20: ['key 1 tap'], 30: ['mouse right up']}),
+    'swap_hands_while_drawing': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:bow', f'give {PLAYER} minecraft:arrow 16'],
+        ticks=50, steps={0: ['look 0 -10'], 5: ['mouse right down'], 15: ['key f tap'], 25: ['key f tap'],
+                         35: ['mouse right up']}),
+    'crossbow_switch_away': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:crossbow', f'give {PLAYER} minecraft:arrow 16'],
+        ticks=70, steps={0: ['look 0 -10'], 5: ['mouse right down'], 35: ['mouse right up'], 40: ['key 2 tap'],
+                         45: ['key 1 tap'], 50: ['mouse right click']}),
+    'drop_while_walking': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:stone 16'],
+        ticks=40, steps={0: ['key w down'], 5: ['key q tap'], 6: ['key q tap'], 10: ['key ctrl down', 'key q down'],
+                         12: ['key q up'], 25: ['key w up', 'key ctrl up']}),
+    # Clutches (item 135): a fall caught by a cobweb, a ladder, slime, hay or powder snow placed below at the
+    # last moment, and a boat.
+    **{f'clutch_{name}': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:{item}'],
+        ticks=60, anchor='accept_teleportation',
+        steps={0: [f'command tp @s 0.5 {FLOOR + 12} 0.5 0 90'], 1: ['look 0 90'], 24: ['mouse right click'],
+               25: ['mouse right click'], 26: ['mouse right click']})
+       for name, item in (('cobweb', 'cobweb'), ('slime', 'slime_block'), ('hay', 'hay_block'),
+                          ('powder_snow', 'powder_snow_bucket'), ('boat', 'oak_boat'))},
+    # Actions in the tick of a teleport (item 141): a click, a slot change and a jump as the teleport arrives.
+    'act_on_teleport_tick': dict(
+        setup=[SWORD, f'item replace entity {PLAYER} hotbar.1 with minecraft:stone 16'],
+        ticks=40, anchor='accept_teleportation',
+        steps={5: ['command tp @s 0.5 ~ 4.5', 'mouse left click', 'key 2 tap', 'key space down'],
+               6: ['key space up', 'mouse right click'], 15: ['key w down'], 25: ['key w up']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
