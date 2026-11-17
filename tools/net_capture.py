@@ -14,6 +14,8 @@ Sunrise hosting and a vanilla server serving the same world).
 """
 import argparse
 import collections
+import heapq
+import itertools
 import json
 import os
 import queue
@@ -83,6 +85,40 @@ class Session:
         self.phase = None
         self.tick_ends = collections.deque(maxlen=200)
         self.ticked = threading.Condition()
+        # WIRE_STREAM_LATENCY: a held server packet's line is written when it reaches the client, so the capture
+        # stays in time order and a replay walking it hands the packet over on the client tick vanilla had it.
+        self.later = []
+        self.later_seq = itertools.count()
+        self.later_cv = threading.Condition()
+        self.writer = None
+
+    def write(self, line, at=None):
+        if at is None or at <= time.time():
+            with self.lock:
+                self.out.write(line)
+                self.out.flush()
+            return
+        with self.later_cv:
+            heapq.heappush(self.later, (at, next(self.later_seq), line))
+            self.later_cv.notify()
+            if self.writer is None:
+                self.writer = threading.Thread(target=self.write_later, daemon=True)
+                self.writer.start()
+
+    def write_later(self):
+        while True:
+            with self.later_cv:
+                while not self.later:
+                    self.later_cv.wait()
+                at, _, line = self.later[0]
+                wait = at - time.time()
+                if wait > 0:
+                    self.later_cv.wait(wait)
+                    continue
+                heapq.heappop(self.later)
+            with self.lock:
+                self.out.write(line)
+                self.out.flush()
 
     def hold(self, arrived):
         """With a phase, in play: hold a server packet that `arrived` until `phase` after the client's last
@@ -125,9 +161,7 @@ class Session:
             entry["data"] = payload.hex()
         else:
             entry["head"] = payload[:512].hex()
-        with self.lock:
-            self.out.write(json.dumps(entry) + "\n")
-            self.out.flush()
+        self.write(json.dumps(entry) + "\n", at)
         self.transition(direction, name, payload)
         if direction == "serverbound" and name == "client_tick_end" and state == "play":
             with self.ticked:
