@@ -114,6 +114,27 @@ impl Game<'_> {
                 }
                 continue;
             }
+            // `select-trade N`, `beacon EFFECT`, `open-stats`: a merchant's offer button, the beacon's confirm
+            // with a primary power, the pause menu's Statistics button.
+            if let Some(n) = line
+                .strip_prefix("select-trade ")
+                .and_then(|n| n.trim().parse::<usize>().ok())
+            {
+                self.try_move_items(n);
+                continue;
+            }
+            if let Some(effect) = line.strip_prefix("beacon ") {
+                let effect = effect.trim();
+                if let Some(i) = super::beacon::EFFECTS.iter().position(|e| e.0 == effect) {
+                    self.confirm_beacon([Some(i), None]);
+                    self.close_beacon_screen();
+                }
+                continue;
+            }
+            if line.trim() == "open-stats" {
+                self.open_stats();
+                continue;
+            }
             if let Some((dx, dy)) = tick_script_mouse_move(&line) {
                 self.mouse.add_motion(dx, dy);
                 self.agent_pointer = true;

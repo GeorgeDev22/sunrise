@@ -608,7 +608,7 @@ impl Game<'_> {
         }
     }
     /// `MerchantMenu.tryMoveItems` for the selected offer (the select trade packet).
-    fn try_move_items(&mut self, index: usize) {
+    pub(super) fn try_move_items(&mut self, index: usize) {
         if self.remote.is_some() {
             // ServerboundSelectTradePacket; the server moves the items.
             if let Some(m) = self.station.as_mut().and_then(|s| s.merchant.as_mut()) {
