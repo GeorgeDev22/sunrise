@@ -31,9 +31,10 @@ pub struct Language {
     /// right to left (`ClientLanguage.defaultRightToLeft`).
     bidirectional: bool,
     map: HashMap<String, String>,
-    /// The keys only Sunrise's own files give (the engine's `sunrise` namespace and the crates'),
-    /// which vanilla's client doesn't know: no other source has them.
-    own: std::collections::HashSet<String>,
+    /// This language as vanilla's client loads it: the same sources and order without Sunrise's
+    /// own (the engine's `sunrise` namespace and the crates'), built once with it. `None` when
+    /// it has no strings of Sunrise's own to leave out.
+    vanilla: Option<Arc<Language>>,
 }
 pub const DEFAULT: &str = "en_us";
 
@@ -504,7 +505,7 @@ impl Language {
             code: code.to_owned(),
             bidirectional: false,
             map: entries.into_iter().collect(),
-            own: Default::default(),
+            vanilla: None,
         }
     }
     /// ClientLanguage.loadFrom: en_us first, then the selected language, each
@@ -522,7 +523,9 @@ impl Language {
         crate_files: &[&[(&str, &str)]],
     ) -> Self {
         let mut map = HashMap::new();
-        let mut own = std::collections::HashSet::new();
+        // What vanilla's client would load from the same sources: everything but the engine's.
+        let mut vanilla = HashMap::new();
+        let mut engine_keys = false;
         let mut codes = vec![DEFAULT];
         if code != DEFAULT {
             codes.push(code);
@@ -540,23 +543,18 @@ impl Language {
                 for (i, source) in sources.iter().enumerate() {
                     let engine = i == 0 && namespace == "sunrise";
                     if let Some(bytes) = source.read(&format!("assets/{namespace}/lang/{c}.json")) {
-                        let mut entries = HashMap::new();
-                        read_lang_file(&bytes, &mut entries);
-                        for key in entries.keys() {
-                            if engine {
-                                own.insert(key.clone());
-                            } else {
-                                own.remove(key);
-                            }
+                        if engine {
+                            engine_keys = true;
+                        } else {
+                            read_lang_file(&bytes, &mut vanilla);
                         }
-                        map.extend(entries);
+                        read_lang_file(&bytes, &mut map);
                     }
                     // The crates' text right after the engine's own (`Bundled`, the first source).
                     if engine {
-                        let mut entries = HashMap::new();
-                        read_crate_files(crate_files, c, &mut entries);
-                        own.extend(entries.keys().cloned());
-                        map.extend(entries);
+                        let before = map.len();
+                        read_crate_files(crate_files, c, &mut map);
+                        engine_keys |= map.len() != before;
                     }
                 }
             }
@@ -568,6 +566,7 @@ impl Language {
             .find_map(|s| s.read("assets/minecraft/lang/deprecated.json"))
         {
             apply_deprecated(&mut map, &bytes);
+            apply_deprecated(&mut vanilla, &bytes);
         }
         let bidirectional = available(sources)
             .iter()
@@ -576,21 +575,14 @@ impl Language {
             code: code.to_owned(),
             bidirectional,
             map,
-            own,
-        }
-    }
-    /// This language as vanilla's client has it: without the keys only Sunrise's own files give.
-    pub fn without_own(&self) -> Self {
-        Self {
-            code: self.code.clone(),
-            bidirectional: self.bidirectional,
-            map: self
-                .map
-                .iter()
-                .filter(|(key, _)| !self.own.contains(*key))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            own: Default::default(),
+            vanilla: engine_keys.then(|| {
+                Arc::new(Self {
+                    code: code.to_owned(),
+                    bidirectional,
+                    map: vanilla,
+                    vanilla: None,
+                })
+            }),
         }
     }
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -741,6 +733,10 @@ pub fn current() -> Option<Arc<Language>> {
 /// one's misses do not include the inner one's. For tests: `bidirectional` stays the process-wide
 /// language's.
 pub fn scoped<R>(language: Language, f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    scoped_shared(Arc::new(language), f)
+}
+/// [`scoped`] with a language already shared.
+fn scoped_shared<R>(language: Arc<Language>, f: impl FnOnce() -> R) -> (R, Vec<String>) {
     /// Puts the outer scope back, also when `f` panics.
     struct Restore(Option<Scope>);
     impl Drop for Restore {
@@ -751,7 +747,7 @@ pub fn scoped<R>(language: Language, f: impl FnOnce() -> R) -> (R, Vec<String>) 
     }
     let outer = SCOPE.with(|s| {
         s.borrow_mut().replace(Scope {
-            language: Arc::new(language),
+            language,
             missed: Vec::new(),
         })
     });
@@ -769,8 +765,8 @@ pub fn scoped<R>(language: Language, f: impl FnOnce() -> R) -> (R, Vec<String>) 
 /// name box, a sign opened for editing: `Component.getString`): a key only Sunrise's own files
 /// give comes back as the key, so a server can't tell this client by the keys it knows.
 pub fn returned_to_server<R>(f: impl FnOnce() -> R) -> R {
-    match current() {
-        Some(language) => scoped(language.without_own(), f).0,
+    match current().and_then(|language| language.vanilla.clone()) {
+        Some(vanilla) => scoped_shared(vanilla, f).0,
         None => f(),
     }
 }
@@ -925,32 +921,48 @@ mod tests {
         assert_eq!(plain.len() + 1, de.len());
     }
 
-    /// Text the client sends back resolves as vanilla's client would: a key only Sunrise's own
-    /// files or the crates give stays the key; a key a pack or vanilla also gives keeps its text.
+    /// Text the client sends back resolves as vanilla's client would load it from the same
+    /// sources: a key only Sunrise's own files or the crates give stays the key, and a pack's
+    /// English stays the fallback for a key whose selected-language text is only Sunrise's own,
+    /// while the screens keep Sunrise's own text.
     #[test]
     fn text_returned_to_a_server_knows_no_key_only_sunrise_gives() {
-        static CRATE: &[(&str, &str)] = &[("en_us", r#"{"test.crate.hello": "Hello"}"#)];
+        static CRATE: &[(&str, &str)] = &[
+            (
+                "en_us",
+                r#"{"test.crate.hello": "Hello", "test.crate.packed": "Crate"}"#,
+            ),
+            ("de_de", r#"{"test.crate.hello": "Hallo"}"#),
+        ];
         let pack = Mem(HashMap::from([
             (
                 "assets/minecraft/lang/en_us.json".to_owned(),
                 br#"{"block.minecraft.stone": "Stone"}"#.to_vec(),
             ),
             (
+                "assets/minecraft/lang/de_de.json".to_owned(),
+                br#"{"block.minecraft.stone": "Stein"}"#.to_vec(),
+            ),
+            (
                 "assets/sunrise/lang/en_us.json".to_owned(),
-                br#"{"sunrise.osk.close": "Packed close"}"#.to_vec(),
+                br#"{"sunrise.osk.close": "Packed close", "test.crate.packed": "Pack"}"#.to_vec(),
             ),
         ]));
-        let language = Language::load_with(&[&pack], "en_us", &[CRATE]);
-        let back = language.without_own();
-        assert_eq!(language.get("sunrise.pages.mods"), Some("Mods"));
-        assert_eq!(back.get("sunrise.pages.mods"), None);
-        assert_eq!(back.get("test.crate.hello"), None);
-        assert_eq!(back.get("block.minecraft.stone"), Some("Stone"));
-        assert_eq!(back.get("sunrise.osk.close"), Some("Packed close"));
-        let (seen, _) = scoped(language, || {
-            returned_to_server(|| get("sunrise.pages.mods"))
-        });
-        assert_eq!(seen, "sunrise.pages.mods");
+        let load = || Language::load_with(&[&pack], "de_de", &[CRATE]);
+        let german = load();
+        assert_eq!(german.get("sunrise.osk.close"), Some("Schließen"));
+        assert_eq!(german.get("test.crate.hello"), Some("Hallo"));
+        let back = |key: &str| scoped(load(), || returned_to_server(|| get(key))).0;
+        assert_eq!(back("sunrise.pages.mods"), "sunrise.pages.mods");
+        assert_eq!(back("test.crate.hello"), "test.crate.hello");
+        assert_eq!(back("sunrise.osk.close"), "Packed close");
+        assert_eq!(back("test.crate.packed"), "Pack");
+        assert_eq!(back("block.minecraft.stone"), "Stein");
+        // Outside the call, the same language keeps Sunrise's own text.
+        assert_ne!(
+            scoped(load(), || get("sunrise.pages.mods")).0,
+            "sunrise.pages.mods"
+        );
     }
 
     #[test]
