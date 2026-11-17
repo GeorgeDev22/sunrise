@@ -4,7 +4,7 @@
 //! return to the owner, pickup) with `ThrownTridentRenderer`, and Channeling's
 //! lightning on a hit (`channeling.json`).
 use super::level_sounds::LevelSound;
-use super::{Game, commands::Target, minecarts::CartHit, view_vector};
+use super::{Game, commands::Target, minecarts::CartHit};
 use mod_api::SoundSource;
 use sunrise_client::{
     arrows::{Pickup, back_off, clip_block_hit},
@@ -559,12 +559,22 @@ impl Game<'_> {
             // trident_spin_attack_strength: 1.5 + 0.75 per level above the first.
             let spin_stack = self.held().cloned();
             let strength = 1.5 + 0.75 * (riptide as f32 - 1.0);
-            let d = view_vector(self.yaw, self.pitch);
+            // TridentItem.releaseUsing: the look in floats from Mth's sine table, scaled to
+            // the strength by its float length (Mth.sqrt), then Entity.push.
+            use sunrise_core::geometry::trig;
+            let (y, x) = (
+                f64::from(self.yaw * trig::DEG_TO_RAD),
+                f64::from(self.pitch * trig::DEG_TO_RAD),
+            );
+            let xd = -trig::sin(y) * trig::cos(x);
+            let yd = -trig::sin(x);
+            let zd = trig::cos(y) * trig::cos(x);
+            let scale = strength / f64::from(xd * xd + yd * yd + zd * zd).sqrt() as f32;
             if let Some(p) = self.player.as_mut() {
                 p.velocity = Vec3::new(
-                    p.velocity.x + d[0] * f64::from(strength),
-                    p.velocity.y + d[1] * f64::from(strength),
-                    p.velocity.z + d[2] * f64::from(strength),
+                    p.velocity.x + f64::from(xd * scale),
+                    p.velocity.y + f64::from(yd * scale),
+                    p.velocity.z + f64::from(zd * scale),
                 );
                 // Player.startAutoSpinAttack(20, 8, stack).
                 p.auto_spin_attack_ticks = 20;
