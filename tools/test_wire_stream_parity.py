@@ -442,6 +442,36 @@ SCENARIOS = {
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:netherrack',
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:flint_and_steel'],
         ticks=40, steps={0: ['look 0 25'], 5: ['mouse right click'], 20: ['mouse left click']}),
+    # Pick block (item 65): a middle click asks the server for the block's item (ServerboundPickItemFromBlock),
+    # in survival with it in the inventory and in creative.
+    'pick_block': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_log',
+               f'item replace entity {PLAYER} inventory.3 with minecraft:oak_log 5'],
+        ticks=50, steps={0: ['look 0 30'], 5: ['mouse middle click'], 15: ['command gamemode creative'],
+                         25: ['look 0 70'], 30: ['mouse middle click']}),
+    # Entities used with items (items 111, 138): an item frame filled, turned and emptied; a spawn egg; a name
+    # tag and a lead on a cow.
+    'item_frame': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 3 minecraft:stone',
+               f'summon minecraft:item_frame 0 {FLOOR + 1} 2 {{Facing:2b}}',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:apple 3'],
+        ticks=50, steps={0: ['look 0 15'], 5: ['mouse right click'], 15: ['mouse right click'],
+                         25: ['mouse right click'], 35: ['mouse left click']}),
+    'spawn_egg_name_lead': dict(
+        setup=[f'summon minecraft:cow 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:name_tag[minecraft:custom_name="Bob"]',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:lead',
+               f'item replace entity {PLAYER} hotbar.2 with minecraft:pig_spawn_egg'],
+        ticks=60, steps={0: ['look 0 25'], 5: ['mouse right click'], 15: ['key 2 tap'], 20: ['mouse right click'],
+                         30: ['key 3 tap', 'look 60 60'], 35: ['mouse right click']}),
+    # Bundles (item 63): items clicked into a bundle in the inventory, and one taken out.
+    'bundle_clicks': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:bundle',
+               f'item replace entity {PLAYER} inventory.0 with minecraft:stone 10',
+               f'item replace entity {PLAYER} inventory.1 with minecraft:apple 5'],
+        ticks=50, steps={5: ['key e tap'], 10: ['click-slot 9'], 13: ['click-slot 36 right'],
+                         16: ['click-slot 10'], 19: ['click-slot 36 right'], 22: ['click-slot 36 right'],
+                         25: ['click-slot 11'], 30: ['key e tap']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(

@@ -293,7 +293,11 @@ public final class VanillaTickScript {
                 }
             }
             case "mouse" -> {
-                InputConstants.Key key = InputConstants.Type.MOUSE.getOrCreate(w[1].equals("left") ? InputConstants.MOUSE_BUTTON_LEFT : InputConstants.MOUSE_BUTTON_RIGHT);
+                InputConstants.Key key = InputConstants.Type.MOUSE.getOrCreate(switch (w[1]) {
+                    case "left" -> InputConstants.MOUSE_BUTTON_LEFT;
+                    case "middle" -> InputConstants.MOUSE_BUTTON_MIDDLE;
+                    default -> InputConstants.MOUSE_BUTTON_RIGHT;
+                });
                 if (screen != null) {
                     return;
                 }
