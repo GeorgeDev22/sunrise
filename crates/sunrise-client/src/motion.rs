@@ -6416,20 +6416,17 @@ mod tests {
         );
         assert_eq!(w.player.fall_fly_ticks, 20);
     }
-    /// #9817: `LivingEntity.travelInAir`: a client (`level.isClientSide()`) whose
-    /// chunk below is not loaded skips gravity and falls at 0.1 a tick
-    /// (above `getMinY`), before the 0.98 vertical drag.
+    /// `LivingEntity.travelInAir` falls at 0.1 a tick on a client whose chunk below isn't loaded,
+    /// but 26.3's `ClientLevel.hasChunk` is always `true`: a client's player over a chunk that
+    /// hasn't come falls under gravity, as a server's does.
     #[test]
     #[ignore = "daily"]
-    fn a_client_over_an_unloaded_chunk_falls_at_a_tenth() {
+    fn a_player_over_an_unloaded_chunk_falls_under_gravity() {
         let Some(v) = crate::test_fixtures::vanilla() else {
             return;
         };
         let (assets, render, binding, resources) = (&v.assets, &v.render, &v.collision, &v.motion);
-        for (client_side, want) in [
-            (true, -0.1 * f64::from(0.98_f32)),
-            (false, -0.0784000015258789),
-        ] {
+        for client_side in [true, false] {
             let mut scene = World::test_scene(assets, render, 2).unwrap();
             // Far outside the test scene's chunks.
             let at = Vec3::new(10_000.5, 20.0, 10_000.5);
@@ -6451,7 +6448,10 @@ mod tests {
             }
             .controlled_simulation_tick(Default::default())
             .unwrap();
-            assert_eq!(player.velocity.y, want, "client_side={client_side}");
+            assert_eq!(
+                player.velocity.y, -0.0784000015258789,
+                "client_side={client_side}"
+            );
         }
     }
     /// `LocalPlayer.isSuppressingSlidingDownLadder` is `!abilities.flying && super...()`, where
