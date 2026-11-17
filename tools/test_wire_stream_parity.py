@@ -1022,7 +1022,10 @@ SCENARIOS = {
     'stats_open': dict(ticks=30, steps={2: ['open-stats'], 15: ['key esc tap'], 22: ['key esc tap']}),
     # 30 minutes standing (item 116): keep-alives, the 20-tick position reminder and the time over a long idle, then
     # a step, for slow drift.
-    'afk_30min': dict(ticks=36040, steps={36000: ['key w down'], 36010: ['key w up']}),
+    # Peaceful for the half hour: a slime killed the standing player once (spawn_mobs doesn't cover it); easy again
+    # (the server's default) at the end.
+    'afk_30min': dict(setup=['difficulty peaceful'], ticks=36040,
+                      steps={36000: ['key w down'], 36010: ['key w up'], 36030: ['command difficulty easy']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
