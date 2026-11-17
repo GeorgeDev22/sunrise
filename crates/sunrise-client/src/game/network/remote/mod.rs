@@ -6358,8 +6358,41 @@ impl Game<'_> {
         // (`yRotO`/`xRotO`), as the local tick does; `tick` returns before it
         // reaches its own write when this window is a server client.
         self.rope_rot_old = (self.yaw, self.pitch);
-        // A passenger moves with its vehicle (Entity.rideTick), not by itself.
+        // Entity.rideTick: a passenger first moves itself from its seat
+        // (`rider_travel_tick`), then its vehicle seats it (`remote_ride`), which
+        // moves it and nothing else (positionRider): the deltaMovement and the
+        // collision flags of its own move stay. The seat it moved from stays the
+        // camera's start, as the old position is.
+        let mut rider_velocity = None;
+        if self.screen != Screen::Dead
+            && self.riding.is_some()
+            && let Some(player) = self.player.as_mut()
+        {
+            player.client_side = true;
+            let seat = player.position;
+            MotionWorld {
+                entities: &entity_collisions,
+                player,
+                scene: &mut self.world,
+                assets: &self.pack.assets,
+                collision_binding: self.collision,
+                resources: self.motion,
+                health: &self.health_resources,
+                loop_context: &self.loop_context,
+                damage_hooks: &self.damage_hooks,
+                tag_items: None,
+                block_registries: None,
+            }
+            .rider_travel_tick(keys.direction())?;
+            rider_velocity = Some(player.velocity);
+            player.position = seat;
+        }
         let riding = self.screen != Screen::Dead && self.remote_ride(keys, sprint_window)?;
+        if let Some(velocity) = rider_velocity.filter(|_| riding)
+            && let Some(player) = self.player.as_mut()
+        {
+            player.velocity = velocity;
+        }
         // The server sends no passenger's position: they sit where their
         // vehicles are now.
         self.position_riders();

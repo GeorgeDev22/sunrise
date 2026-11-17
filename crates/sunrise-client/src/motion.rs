@@ -1402,25 +1402,52 @@ impl MotionWorld<'_, '_, '_> {
             }
         }
         let flying_y = self.player.flying.then_some(self.player.velocity.y);
+        self.living_travel(&mut gate, input)?;
+        if let Some(y) = flying_y {
+            self.player.velocity.y = y * 0.6;
+        }
+        Ok(())
+    }
+    /// `LivingEntity.travel`: in a fluid (`isAffectedByFluids`: not while
+    /// flying), gliding, or in the air.
+    fn living_travel(&mut self, gate: &mut MoveGate, input: Vec3) -> Result<()> {
         if !self.player.flying
             && (self.player.fluids.was_touching_water || self.player.is_in_lava())
         {
-            sunrise_world::living_fluid::travel_in_fluid(self, &mut gate, input)?;
+            sunrise_world::living_fluid::travel_in_fluid(self, gate, input)?;
+            Ok(())
         } else if self.player.fall_flying {
             // LivingEntity.travelFallFlying: on a climbable the glide ends and
             // the player moves like in the air.
             if self.climbable()? {
-                self.travel_in_air(&mut gate, input)?;
+                self.travel_in_air(gate, input)?;
                 self.player.fall_flying = false;
+                Ok(())
             } else {
-                self.travel_fall_flying(&mut gate)?;
+                self.travel_fall_flying(gate)
             }
         } else {
-            self.travel_in_air(&mut gate, input)?;
+            self.travel_in_air(gate, input)
         }
-        if let Some(y) = flying_y {
-            self.player.velocity.y = y * 0.6;
-        }
+    }
+    /// `Entity.rideTick` for a rider this client moves (`LocalPlayer`): its
+    /// deltaMovement starts at zero, then `LivingEntity.aiStep` travels it as
+    /// it does any entity it simulates (`Player.travel` for a passenger is
+    /// `LivingEntity.travel`, with no swimming or flight change), from where
+    /// it sat, with its own input (`LocalPlayer.applyInput`: a passenger slows
+    /// for neither an item nor sneaking); `LivingEntity.rideTick` then forgets
+    /// the fall. The caller seats it after (`positionRider`). The move leaves
+    /// the onGround and horizontalCollision its Rot packet carries, and the
+    /// deltaMovement a dismount teleport keeps (its DELTA_* are relative).
+    pub fn rider_travel_tick(&mut self, direction: [f32; 2]) -> Result<()> {
+        self.player.velocity = Vec3::ZERO;
+        let input = crate::input::modify_input(direction, None, None);
+        let mut gate = MoveGate::new();
+        self.living_travel(
+            &mut gate,
+            Vec3::new(f64::from(input[0]), 0.0, f64::from(input[1])),
+        )?;
+        self.player.fall_distance = 0.0;
         Ok(())
     }
     /// ServerPlayer's own travel: the server simulates a player too
