@@ -2277,6 +2277,7 @@ sunrise-client game::remote::tables::tests::a_servers_block_and_item_tags_replac
 sunrise-client game::remote::tests::a_mod_chat_line_shows_locally_and_sends_nothing lib daily resources
 sunrise-client game::remote::tests::a_reconfiguring_client_plays_menu_music_and_never_indexes_past_the_biomes lib daily resources
 sunrise-client game::remote::tests::a_servers_client_takes_its_speed_from_the_attributes_not_the_effect lib daily resources
+sunrise-client game::remote::tests::a_spear_jab_sends_only_its_stab lib daily resources
 sunrise-client game::remote::tests::block_alias_survival_consumption_and_client_prediction lib daily resources
 sunrise-client game::remote::tests::client_camera_entity_returns_to_player_after_removal lib daily resources
 sunrise-client game::remote::tests::client_day_time_reads_overworld_clock_across_packets_and_levels lib daily resources
