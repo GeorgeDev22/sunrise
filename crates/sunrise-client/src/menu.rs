@@ -794,6 +794,7 @@ impl Menu {
                 carried: None,
                 data: vec![0; data],
                 creative: false,
+                on_client: false,
                 selected: 0,
                 drops: Vec::new(),
                 dropped: Vec::new(),
@@ -2009,7 +2010,7 @@ impl Menu {
     #[sunrise_mod_api_macros::replaceable]
     fn recompute(&mut self, env: &Env) {
         self.touch();
-        if self.state.grid_size == 0 {
+        if self.state.grid_size == 0 || self.state.on_client {
             return;
         }
         let result = env

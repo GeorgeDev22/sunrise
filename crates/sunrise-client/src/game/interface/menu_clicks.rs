@@ -500,6 +500,8 @@ impl Game<'_> {
             ..self.menu_env()
         };
         menu.creative = creative;
+        // A server's client predicts with the server's crafting result, never its own.
+        menu.on_client = self.remote.is_some();
         menu.selected = self.selected;
         menu.levels = self.experience.level;
         if anvil_open {
