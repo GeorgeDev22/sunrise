@@ -1672,10 +1672,10 @@ impl MotionWorld<'_, '_, '_> {
         Ok(())
     }
     /// The block effects and the frost of a window's own player while a vehicle carries it. Its
-    /// client does not travel (`passenger_pose_tick` is all it runs), but `LivingEntity.aiStep`
-    /// still applies the effects of the blocks a passenger is in (`applyEffectsFromBlocks`: powder
-    /// snow's FREEZE adds a tick of frost) and thaws it when it is out of powder snow. The
-    /// frostbite overlay reads these ticks. The server's copy does this in `server_block_damage`.
+    /// own move is `rider_tick`'s; after it, `LivingEntity.aiStep` still applies the effects of
+    /// the blocks a passenger is in (`applyEffectsFromBlocks`: powder snow's FREEZE adds a tick of
+    /// frost) and thaws it when it is out of powder snow. The frostbite overlay reads these ticks.
+    /// The server's copy does this in `server_block_damage`.
     pub fn passenger_block_effects_tick(&mut self) -> Result<()> {
         // Entity.baseTick
         self.player.was_in_powder_snow = self.player.in_powder_snow;
