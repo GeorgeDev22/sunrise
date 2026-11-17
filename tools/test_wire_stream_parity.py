@@ -979,6 +979,30 @@ SCENARIOS = {
     'pause_menu_walk': dict(
         ticks=70, steps={0: ['key w down', 'key space down'], 10: ['key esc tap'], 30: ['key esc tap'],
                          45: ['key w up', 'key space up'], 50: ['key w down'], 60: ['key w up']}),
+    # The advancements screen (item 88): the L key opens it (ServerboundSeenAdvancementsPacket.openedTab for the
+    # first tab), Escape closes it (closedScreen), twice.
+    'advancements_open': dict(
+        ticks=40, steps={0: ['key l tap'], 12: ['key esc tap'], 22: ['key l tap'], 32: ['key esc tap']}),
+    # A spyglass (item 13): held up to the eye while the mouse turns (scoping scales the turn), then lowered.
+    # Needs WIRE_STREAM_WINDOWED for the mouse.
+    'spyglass_turn': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:spyglass'],
+        ticks=50, steps=merge({0: ['mouse right down'], 35: ['mouse right up']},
+                              {t: [f'mouse-move {(-1) ** (t // 5) * 12} {3 if t < 20 else -3}'] for t in range(4, 44)})),
+    # A sign (item 71): placed on the floor, which opens its editor, then left with Escape (the editor sends the
+    # sign's lines as it goes), and a walk after.
+    'sign_place_close': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:oak_sign'],
+        ticks=40, steps={0: ['look 0 60'], 3: ['mouse right click'], 15: ['key esc tap'], 25: ['key w down'],
+                         30: ['key w up']}),
+    # A book and quill (item 64): opened and closed unchanged, twice.
+    'book_open_close': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:writable_book'],
+        ticks=45, steps={2: ['mouse right click'], 15: ['key esc tap'], 25: ['mouse right click'], 35: ['key esc tap']}),
+    # The creative inventory (item 57): opened with E, closed with Escape, opened and closed with E.
+    'creative_open_close': dict(
+        setup=[f'gamemode creative {PLAYER}'],
+        ticks=40, steps={0: ['key e tap'], 10: ['key esc tap'], 20: ['key e tap'], 30: ['key e tap']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(

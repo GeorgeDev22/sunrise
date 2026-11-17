@@ -64,6 +64,7 @@ public final class VanillaTickScript {
         KEYS.put("q", InputConstants.KEY_Q);
         KEYS.put("f", InputConstants.KEY_F);
         KEYS.put("esc", InputConstants.KEY_ESCAPE);
+        KEYS.put("l", InputConstants.KEY_L);
         for (int i = 1; i <= 9; i++) {
             KEYS.put(Integer.toString(i), InputConstants.KEY_1 + i - 1);
         }
