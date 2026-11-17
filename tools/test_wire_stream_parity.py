@@ -290,10 +290,12 @@ SCENARIOS = {
     'honey_walk': dict(
         setup=[f'fill -1 {FLOOR} 1 1 {FLOOR} 8 minecraft:honey_block'],
         ticks=60, steps={0: ['key w down'], 15: ['key space down'], 17: ['key space up'], 40: ['key w up']}),
-    # Falling 5 blocks onto slime: the bounces; then onto it again sneaking (no bounce).
+    # Falling 5 blocks onto slime: the bounces; then onto it again sneaking (no bounce). The player starts on the
+    # ground and is put up there from the scenario, so both clients start the fall on the same tick.
     'slime_bounce': dict(
-        setup=[f'fill -1 {FLOOR} -1 1 {FLOOR} 1 minecraft:slime_block', f'tp {PLAYER} 0.5 {FLOOR + 6} 0.5 0 0'],
-        ticks=80, steps={40: ['key shift down'], 41: ['command tp @s 0.5 ~5 0.5'], 75: ['key shift up']}),
+        setup=[f'fill -1 {FLOOR} -1 1 {FLOOR} 1 minecraft:slime_block'],
+        ticks=90, steps={0: ['command tp @s 0.5 ~5 0.5'], 45: ['key shift down'], 46: ['command tp @s 0.5 ~5 0.5'],
+                         85: ['key shift up']}),
     'cobweb_walk': dict(
         setup=[f'fill 0 {FLOOR + 1} 3 0 {FLOOR + 2} 4 minecraft:cobweb'],
         ticks=70, steps={0: ['key w down'], 20: ['key space down'], 22: ['key space up'], 55: ['key w up']}),
@@ -342,10 +344,10 @@ SCENARIOS = {
         setup=[f'effect give {PLAYER} minecraft:speed 30 2 true', f'effect give {PLAYER} minecraft:jump_boost 30 2 true'],
         ticks=60, steps={0: ['key ctrl down', 'key w down', 'key space down'], 30: ['key space up'],
                          40: ['key w up', 'key ctrl up']}),
+    # The effects come from the scenario's own commands, so both clients start rising on the same tick.
     'levitation_slow_falling': dict(
-        setup=[f'effect give {PLAYER} minecraft:levitation 2 1 true'],
-        ticks=90, steps={0: ['key w down'], 45: ['command effect give @s minecraft:slow_falling 10 0 true'],
-                         60: ['key w up']}),
+        ticks=90, steps={0: ['command effect give @s minecraft:levitation 2 1 true', 'key w down'],
+                         45: ['command effect give @s minecraft:slow_falling 10 0 true'], 60: ['key w up']}),
     # Combat details (plan items 40-54, 110) and interactions (108-111, 128, 134-136).
     # Critical hits: jumping and swinging on the way down.
     'crit_hits': dict(
