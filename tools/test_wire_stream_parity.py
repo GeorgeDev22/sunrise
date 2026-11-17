@@ -571,6 +571,43 @@ SCENARIOS = {
     'kb_twice_one_tick': dict(
         setup=[FAR_HUSK],
         ticks=50, steps={10: [KNOCKBACK, KNOCKBACK], 30: ['key w down', KNOCKBACK, KNOCKBACK], 40: ['key w up']}),
+    # Block shapes and collision (items 15-18, 22, 117-121). A trapdoor closed at head height forces a crawl, then
+    # a one-high tunnel and out again; falls from 11 blocks onto what breaks them; climbing vines; step-ups
+    # walking; brushing along a row of non-full shapes; walking up snow layers 1-8.
+    'crawl_trapdoor': dict(
+        setup=[f'fill -1 {FLOOR + 2} 1 1 {FLOOR + 2} 6 minecraft:stone'],
+        ticks=80, steps={3: [f'command setblock 0 {FLOOR + 2} 0 minecraft:oak_trapdoor[half=bottom]'],
+                         10: ['key w down'], 60: ['key w up']}),
+    **{f'fall_onto_{name}': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 3 minecraft:{block}'],
+        ticks=60, anchor='accept_teleportation',
+        steps=merge({0: [f'command tp @s 0.5 {FLOOR + 12} 3.5']}, extra))
+       for name, block, extra in (('water', 'water', {}), ('hay', 'hay_block', {}), ('slime', 'slime_block', {}),
+                                  ('slime_sneaking', 'slime_block', {0: ['key shift down'], 55: ['key shift up']}),
+                                  ('powder_snow', 'powder_snow', {}), ('cobweb', 'cobweb', {}))},
+    'vine_climb': dict(
+        setup=[f'fill 0 {FLOOR + 1} 2 0 {FLOOR + 8} 2 minecraft:stone',
+               f'fill 0 {FLOOR + 1} 1 0 {FLOOR + 8} 1 minecraft:vine[south=true]'],
+        ticks=90, steps={0: ['key w down'], 30: ['key shift down'], 45: ['key shift up'], 60: ['key w up']}),
+    'twisting_vines_climb': dict(
+        setup=[f'fill 0 {FLOOR + 1} 1 0 {FLOOR + 6} 1 minecraft:twisting_vines'],
+        ticks=80, steps={0: ['key w down', 'key space down'], 40: ['key space up'], 41: ['key w up'],
+                         60: ['key shift down'], 70: ['key shift up']}),
+    'step_ups_walk': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:white_carpet', f'setblock 0 {FLOOR + 1} 3 minecraft:snow[layers=4]',
+               f'setblock 0 {FLOOR + 1} 4 minecraft:stone_slab', f'fill 0 {FLOOR + 1} 5 0 {FLOOR + 1} 12 minecraft:stone',
+               f'setblock 0 {FLOOR + 2} 6 minecraft:stone_slab', f'fill 0 {FLOOR + 2} 7 0 {FLOOR + 2} 12 minecraft:stone',
+               f'fill 0 {FLOOR + 3} 9 0 {FLOOR + 3} 12 minecraft:stone'],
+        ticks=70, steps={0: ['key w down'], 38: ['key space down'], 39: ['key space up'], 60: ['key w up']}),
+    'shapes_walk': dict(
+        setup=[f'setblock 1 {FLOOR + 1} {z} minecraft:{block}' for z, block in enumerate((
+            'oak_fence', 'cobblestone_wall', 'glass_pane', 'iron_bars', 'iron_chain', 'lantern', 'end_rod',
+            'lightning_rod', 'amethyst_cluster', 'pointed_dripstone', 'cauldron', 'hopper', 'anvil', 'chest',
+            'enchanting_table', 'daylight_detector'), start=1)],
+        ticks=90, steps={0: ['key w down', 'key a down'], 75: ['key w up', 'key a up']}),
+    'snow_layers_walk': dict(
+        setup=[f'setblock 0 {FLOOR + 1} {z} minecraft:snow[layers={z - 1}]' for z in range(2, 10)],
+        ticks=60, steps={0: ['key w down'], 45: ['key w up']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
