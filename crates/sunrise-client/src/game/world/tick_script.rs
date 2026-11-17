@@ -120,12 +120,22 @@ impl Game<'_> {
                 .strip_prefix("select-trade ")
                 .and_then(|n| n.trim().parse::<usize>().ok())
             {
-                self.try_move_items(n);
+                // Only on a merchant's screen, as the vanilla driver presses a MerchantScreen's button.
+                if self.station.as_ref().is_some_and(|s| s.merchant.is_some()) {
+                    self.try_move_items(n);
+                }
                 continue;
             }
             if let Some(effect) = line.strip_prefix("beacon ") {
                 let effect = effect.trim();
-                if let Some(i) = super::beacon::EFFECTS.iter().position(|e| e.0 == effect) {
+                let open = self
+                    .station
+                    .as_ref()
+                    .is_some_and(|s| s.kind == super::stations::Kind::Beacon);
+                if let Some(i) = super::beacon::EFFECTS
+                    .iter()
+                    .position(|e| open && e.0 == effect)
+                {
                     self.confirm_beacon([Some(i), None]);
                     self.close_beacon_screen();
                 }
