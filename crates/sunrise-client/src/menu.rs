@@ -1406,18 +1406,27 @@ impl Menu {
         true
     }
 
-    /// `SmithingMenu.createResult`.
+    /// `SmithingMenu.createResult`: a recipe is looked up only on a `ServerLevel`, so a server's
+    /// client finds none and leaves the result empty until the server's slot update.
     fn smith_result(&mut self, env: &Env) {
         self.touch();
+        if self.state.on_client {
+            self.state.containers[RESULT][0] = None;
+            return;
+        }
         let [a, b, c] = [0, 1, 2].map(|i| self.state.containers[MAIN][i].as_ref());
         self.state.containers[RESULT][0] =
             env.station_recipes
                 .smithing_result(env.loop_context, env.enchantments, a, b, c);
     }
 
-    /// `SmithingMenu.slotsChanged`'s `hasRecipeError`: every input filled and no result.
+    /// `SmithingMenu.slotsChanged`'s `hasRecipeError`: every input filled and no result, set on a
+    /// `ServerLevel` only (a client hears it as the menu's data).
     fn smith_error(&mut self) {
         self.touch();
+        if self.state.on_client {
+            return;
+        }
         let error = self.state.containers[MAIN].iter().all(Option::is_some)
             && self.state.containers[RESULT][0].is_none();
         self.state.data[0] = i32::from(error);

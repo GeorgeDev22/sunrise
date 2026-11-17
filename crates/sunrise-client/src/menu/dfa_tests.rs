@@ -112,6 +112,33 @@ fn dfa_baseline_recipe_take_consumes_one_per_cell() {
     );
 }
 
+/// SmithingMenu.createResult looks a recipe up only on a ServerLevel: a server's client's menu
+/// shows no result for a template, a diamond sword and a netherite ingot, nor a recipe error.
+#[test]
+#[ignore = "daily"]
+fn a_clients_smithing_table_works_out_no_result() {
+    let mut ran = false;
+    with_menu(Kind::Smithing, |env, menu| {
+        ran = true;
+        menu.on_client = true;
+        for (slot, item) in [
+            (0, "netherite_upgrade_smithing_template"),
+            (1, "diamond_sword"),
+            (2, "netherite_ingot"),
+        ] {
+            menu.carried = stack(item, 1);
+            menu.click(env, slot, 0, Input::Pickup).unwrap();
+            assert_eq!(menu.slot(slot), stack(item, 1).as_ref());
+        }
+        assert_eq!(menu.slot(3), None);
+        assert_eq!(menu.data[0], 0);
+    });
+    assert!(
+        ran,
+        "requires prepared resources in SUNRISE_TEST_RESOURCES or .local/sunrise-client/26.3"
+    );
+}
+
 /// CraftingMenu.slotsChanged works out a result only on a ServerLevel: a server's client's menu
 /// leaves the result slot to the server, so two stone placed in the grid show no plate there.
 #[test]
