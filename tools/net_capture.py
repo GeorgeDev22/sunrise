@@ -13,6 +13,7 @@ contains, `diff` compares the packet sequences of two captures (for example
 Sunrise hosting and a vanilla server serving the same world).
 """
 import argparse
+import collections
 import json
 import re
 import socket
@@ -77,21 +78,25 @@ class Session:
         # mid-way between two of its ticks, so it takes each on its next tick for certain (no packet lands near a
         # tick boundary, where which tick takes it depends on the client's frame).
         self.phase = None
-        self.last_tick_end = None
+        self.tick_ends = collections.deque(maxlen=200)
         self.ticked = threading.Condition()
 
-    def hold(self):
-        """With a phase, in play: wait until `phase` after the client's last tick-end, or after its next one when
-        that point has passed."""
+    def hold(self, arrived):
+        """With a phase, in play: hold a server packet that `arrived` until `phase` after the client's last
+        tick-end before it, or after its next one when that point had passed. Times come from when packets
+        arrived, so a backlog goes out together, in order, as soon as its point is due."""
         if self.phase is None or self.state["clientbound"] != "play":
             return
         with self.ticked:
-            if self.last_tick_end is None:
+            before = [t for t in self.tick_ends if t <= arrived]
+            if not before:
                 return
-            if time.time() >= self.last_tick_end + self.phase:
-                last = self.last_tick_end
-                self.ticked.wait_for(lambda: self.last_tick_end != last, timeout=1.0)
-            target = self.last_tick_end + self.phase
+            if arrived < before[-1] + self.phase:
+                target = before[-1] + self.phase
+            else:
+                self.ticked.wait_for(lambda: self.tick_ends and self.tick_ends[-1] > arrived, timeout=1.0)
+                after = [t for t in self.tick_ends if t > arrived]
+                target = (after[0] if after else arrived) + self.phase
         delay = target - time.time()
         if delay > 0:
             time.sleep(delay)
@@ -122,7 +127,7 @@ class Session:
         self.transition(direction, name, payload)
         if direction == "serverbound" and name == "client_tick_end" and state == "play":
             with self.ticked:
-                self.last_tick_end = time.time()
+                self.tick_ends.append(time.time())
                 self.ticked.notify_all()
 
     def transition(self, direction, name, payload):
@@ -157,6 +162,7 @@ class Pipe(threading.Thread):
                 chunk = self.src.recv(1 << 16)
                 if not chunk:
                     break
+                arrived = time.time()
                 buffer += chunk
                 frames = []
                 while True:
@@ -174,7 +180,7 @@ class Pipe(threading.Thread):
                         body = zlib.decompress(body[p:]) if size else body[p:]
                     packet_id, p = read_varint(body, 0)
                     if self.direction == "clientbound":
-                        s.hold()
+                        s.hold(arrived)
                     s.record(self.direction, packet_id, body[p:])
                     # The compression threshold applies after its packet, in
                     # both directions; the client answers only after reading it.
