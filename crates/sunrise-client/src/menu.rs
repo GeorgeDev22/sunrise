@@ -1195,9 +1195,11 @@ impl Menu {
     /// `AnvilMenu.createResult`.
     fn anvil_result(&mut self, env: &Env) {
         self.touch();
+        // createResult compares the name with the input's getHoverName().getString(), which
+        // neither side's game resolves with a key only Sunrise gives.
         let hover = self.state.containers[MAIN][0]
             .as_ref()
-            .map(|i| crate::stations::hover_name(env.names, i))
+            .map(|i| crate::lang::returned_to_server(|| crate::stations::hover_name(env.names, i)))
             .unwrap_or_default();
         let out = crate::stations::anvil_result(
             env.enchantments,
