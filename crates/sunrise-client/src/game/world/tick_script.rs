@@ -123,18 +123,10 @@ impl Game<'_> {
             .iter()
             .find_map(|w| w.strip_prefix('b')?.parse().ok())
             .unwrap_or(i32::from(words.contains(&"right")));
-        // The script names the menu's own slot, as the vanilla driver's does; the menu
-        // ops take this window's index of it.
-        let menu = self.remote_menu().1;
-        let internal = if slot == -999 {
-            None
-        } else {
-            match Self::inventory_screen_slot(&menu, slot) {
-                Some(internal) => Some(internal),
-                None => return true,
-            }
-        };
-        self.remote_menu_ops(&[(internal, button, input)]);
+        // The menu's own slot, as the vanilla driver hands it to handleContainerInput.
+        if let Ok(slot) = i16::try_from(slot) {
+            self.remote_menu_clicks(&[(slot, button, input)]);
+        }
         true
     }
 }
