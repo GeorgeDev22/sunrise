@@ -1409,6 +1409,26 @@ class VanillaClient:
         self.log.close()
 
 
+def serve_resource_pack(folder):
+    """WIRE_STREAM_RESOURCE_PACK=1 (item 86): a required server resource pack (its own pack.mcmeta only), served
+    over HTTP from `folder`: the server.properties entries that offer it. Each client downloads and applies it in
+    configuration, and its ResourcePack answers (accepted, downloaded, loaded) are what is compared."""
+    import hashlib
+    import http.server
+    import zipfile
+    folder.mkdir(parents=True)
+    pack = folder / 'wire.zip'
+    with zipfile.ZipFile(pack, 'w') as z:
+        z.writestr('pack.mcmeta', json.dumps({'pack': {'description': 'wire stream test pack', 'min_format': 97,
+                                                       'max_format': 97}}))
+    port = free_port()
+    handler = lambda *a, **k: http.server.SimpleHTTPRequestHandler(*a, directory=str(folder), **k)
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', port), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return {'resource-pack': f'http\\://127.0.0.1\\:{port}/wire.zip',
+            'resource-pack-sha1': hashlib.sha1(pack.read_bytes()).hexdigest(), 'require-resource-pack': 'true'}
+
+
 def extra_options():
     """WIRE_STREAM_OPTIONS=key:value,...: options.txt entries both clients start with (a sensitivity, auto-jump,
     toggled sprint and sneak, an inverted mouse), in vanilla's names and form."""
@@ -1542,6 +1562,8 @@ def run(args, out):
     props = dict(PROPERTIES, **{'server-port': str(port), 'server-ip': '127.0.0.1'})
     if os.environ.get('WIRE_STREAM_SERVER_TPS'):
         props['allow-flight'] = 'true'
+    if os.environ.get('WIRE_STREAM_RESOURCE_PACK'):
+        props.update(serve_resource_pack(work / 'pack'))
     (directory / 'server.properties').write_text(''.join(f'{k}={v}\n' for k, v in props.items()),
                                                  encoding='iso-8859-1')
     (directory / 'eula.txt').write_text('eula=true\n')
