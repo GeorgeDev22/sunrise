@@ -414,6 +414,34 @@ SCENARIOS = {
     'timing_long': dict(
         ticks=2400, steps=merge(every(100, 2300, 200, 'key w down'), every(140, 2340, 200, 'key w up'),
                                 every(160, 2360, 200, 'key s down'), every(190, 2390, 200, 'key s up'))),
+    # Using blocks and tools on blocks (items 70, 73, 74, 137): each right click's use_item_on and the client's
+    # prediction of the result (an opened door, a stripped log, farmland, a path, water placed and taken back).
+    'door_lever_button': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_door[half=lower,facing=north]',
+               f'setblock 0 {FLOOR + 2} 2 minecraft:oak_door[half=upper,facing=north]',
+               f'setblock 1 {FLOOR + 1} 2 minecraft:lever[face=floor,facing=north]',
+               f'setblock -1 {FLOOR + 1} 2 minecraft:stone_button[face=floor,facing=north]'],
+        ticks=60, steps={0: ['look 0 20'], 5: ['mouse right click'], 15: ['mouse right click'],
+                         20: ['look -30 40'], 25: ['mouse right click'], 35: ['look 30 40'],
+                         40: ['mouse right click']}),
+    'axe_strip': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_log',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:iron_axe'],
+        ticks=40, steps={0: ['look 0 30'], 5: ['mouse right click'], 15: ['mouse right click']}),
+    'hoe_shovel': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:iron_hoe',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:iron_shovel'],
+        ticks=50, steps={0: ['look 0 60'], 5: ['mouse right click'], 15: ['look 20 60', 'key 2 tap'],
+                         20: ['mouse right click']}),
+    'bone_meal_bucket': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:bone_meal 4',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:water_bucket'],
+        ticks=60, steps={0: ['look 0 60'], 5: ['mouse right click'], 15: ['look 40 60', 'key 2 tap'],
+                         20: ['mouse right click'], 35: ['mouse right click']}),
+    'flint_and_steel': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:netherrack',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:flint_and_steel'],
+        ticks=40, steps={0: ['look 0 25'], 5: ['mouse right click'], 20: ['mouse left click']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
