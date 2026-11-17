@@ -257,6 +257,57 @@ SCENARIOS = {
     'inventory_walk': dict(
         ticks=60, steps={0: ['key w down'], 10: ['key e tap'], 30: ['key e tap'], 40: ['key w down'],
                          50: ['key w up']}),
+    # Container clicks (items 56, 58, 59): every ContainerInput a screen sends, in a chest, a crafting table, a
+    # furnace and the player's own inventory. Each ContainerClick carries the client's predicted slot changes and
+    # carried item, which the server compares with its own (a wrong one resyncs, and anticheats watch them).
+    'chest_clicks': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:chest[facing=north]{{Items:[{{Slot:0b,id:"minecraft:stone",'
+               'count:32},{Slot:1b,id:"minecraft:oak_planks",count:10}]}',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:diamond_sword'],
+        ticks=60, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 0'], 15: ['click-slot 55'],
+                         18: ['click-slot 1 right'], 21: ['click-slot 27'], 24: ['click-slot 55 shift'],
+                         27: ['click-slot 27 SWAP b4'], 30: ['click-slot 0 THROW b0'], 33: ['click-slot 0 THROW b1'],
+                         36: ['click-slot 54 SWAP b40'], 40: ['key e tap']}),
+    # A left drag of 16 stone over three slots (QUICK_CRAFT start, add, end), a right drag over two, then a
+    # double click (PICKUP_ALL) gathering them again.
+    'chest_drag': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:chest[facing=north]',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:stone 16'],
+        ticks=70, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 54'],
+                         14: ['click-slot -999 QUICK_CRAFT b0'], 15: ['click-slot 0 QUICK_CRAFT b1'],
+                         16: ['click-slot 1 QUICK_CRAFT b1'], 17: ['click-slot 2 QUICK_CRAFT b1'],
+                         18: ['click-slot -999 QUICK_CRAFT b2'], 22: ['click-slot 0'],
+                         24: ['click-slot -999 QUICK_CRAFT b4'], 25: ['click-slot 9 QUICK_CRAFT b5'],
+                         26: ['click-slot 10 QUICK_CRAFT b5'], 27: ['click-slot -999 QUICK_CRAFT b6'],
+                         30: ['click-slot 3'], 31: ['click-slot 3 PICKUP_ALL b0'], 35: ['click-slot 54'],
+                         45: ['key e tap']}),
+    # Planks one by one into the grid (a crafting table appears as the result), a shift-click on the result, and
+    # closing with planks left in the grid (they go back to the inventory).
+    'crafting_table': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:crafting_table',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:oak_planks 9'],
+        ticks=60, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 37'],
+                         14: ['click-slot 1 right'], 16: ['click-slot 2 right'], 18: ['click-slot 4 right'],
+                         20: ['click-slot 5 right'], 22: ['click-slot 3 right'], 24: ['click-slot 37'],
+                         27: ['click-slot 0 shift'], 32: ['click-slot 0'], 35: ['click-slot 38'],
+                         40: ['key e tap']}),
+    # Shift-clicks route raw iron to the input and coal to the fuel; the furnace starts smelting while open (its
+    # progress comes as container data), then the result is taken.
+    'furnace_shift': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:furnace[facing=north]{{Items:[{{Slot:2b,'
+               'id:"minecraft:iron_ingot",count:3}]}',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:raw_iron 8',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:coal 4'],
+        ticks=70, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 30 shift'],
+                         15: ['click-slot 31 shift'], 20: ['click-slot 2 shift'], 50: ['key e tap']}),
+    # The player's own inventory: armour by shift-click, number-key and offhand swaps, throwing one and a stack.
+    'inventory_clicks': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:diamond_chestplate',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:cobblestone 20',
+               f'item replace entity {PLAYER} inventory.0 with minecraft:bread 5'],
+        ticks=60, steps={5: ['key e tap'], 10: ['click-slot 36 shift'], 13: ['click-slot 9 SWAP b8'],
+                         16: ['click-slot 37 SWAP b40'], 19: ['click-slot 45 THROW b0'],
+                         22: ['click-slot 44 THROW b1'], 25: ['click-slot 6 shift'], 30: ['key e tap']}),
     # Hitting a mob that moves (item 112): which entity the crosshair picks, and when, follows how the client
     # interpolates the mob's moves (the server sends them; a replay gives both clients the same). A husk with its
     # AI walks up and hits back (its knockback too); the player strafes and swings, or sprint-hits with w-taps.
