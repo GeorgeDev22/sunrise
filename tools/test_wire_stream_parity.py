@@ -231,6 +231,28 @@ SCENARIOS = {
     'push_teleport': dict(
         setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.2)],
         ticks=60, steps={10: [OVERLAP], 12: ['command tp @s ~ ~ ~'], 30: [OVERLAP], 32: ['command tp @s ~ ~ ~']}),
+    # Knockback from the far husk in different states, no mob in reach: what the server's motion meets.
+    'knockback_sprint': dict(
+        setup=[FAR_HUSK],
+        ticks=60, steps=merge({0: ['key ctrl down', 'key w down'], 40: ['key w up', 'key ctrl up']},
+                              {t: [KNOCKBACK] for t in (10, 25)})),
+    'knockback_air': dict(
+        setup=[FAR_HUSK],
+        ticks=60, steps={5: ['key space down'], 7: ['key space up', KNOCKBACK], 30: ['key space down'],
+                         33: ['key space up', KNOCKBACK]}),
+    'knockback_sneak': dict(
+        setup=[FAR_HUSK],
+        ticks=60, steps={0: ['key shift down', 'key s down'], 15: [KNOCKBACK], 30: [KNOCKBACK],
+                         45: ['key s up', 'key shift up']}),
+    # No sprint at 6 food or less (LocalPlayer.hasEnoughFoodToSprint): Hunger 255 empties the bar at once.
+    'hunger_sprint': dict(
+        setup=[f'effect give {PLAYER} minecraft:hunger 3 255 true'],
+        ticks=60, steps={5: ['key ctrl down', 'key w down'], 40: ['key w up', 'key ctrl up']}),
+    # Opening the inventory while walking: Minecraft.setScreen releases every key (KeyMapping.releaseAll), so the
+    # player stops though W was never let go; it walks again only after W is pressed anew.
+    'inventory_walk': dict(
+        ticks=60, steps={0: ['key w down'], 10: ['key e tap'], 30: ['key e tap'], 40: ['key w down'],
+                         50: ['key w up']}),
     # A wind charge at the feet launches the player; the mace comes out and smashes on the way down.
     'mace_wind_charge': dict(
         setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.4), MACE_RESISTANCE,
@@ -238,6 +260,12 @@ SCENARIOS = {
                f'item replace entity {PLAYER} hotbar.1 with minecraft:wind_charge 8'],
         ticks=90, steps=merge({0: ['key 2 tap', 'look 0 90'], 4: ['mouse right click'], 8: ['key 1 tap'],
                                12: ['look 0 55']}, every(20, 80, 3, 'mouse left click'))),
+    # A TNT's explosion beside the player (the explode packet's knockback), under Resistance; its fuse outlasts the
+    # reset's settling. Last: the crater
+    # stays below the floor the reset refills.
+    'tnt_knockback': dict(
+        setup=[MACE_RESISTANCE, f'summon minecraft:tnt 0.5 {FLOOR + 1} 3.0 {{fuse:80}}'],
+        ticks=60, steps={}),
 }
 
 
