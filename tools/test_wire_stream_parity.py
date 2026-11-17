@@ -393,6 +393,14 @@ SCENARIOS = {
     'chat_commands': dict(
         ticks=70, steps={5: ['chat /me waves'], 20: ['chat /msg Steve hi there'], 35: ['chat /say hello'],
                          50: ['chat /notacommand at all']}),
+    # Client detection (item 85): a sign's lines are translatable components; right-clicking it opens the editor
+    # with them resolved by the client (SignEditScreen: Component.getString), and closing sends them back
+    # (ServerboundSignUpdatePacket). A key only Sunrise knows must come back as the key, as vanilla's does.
+    'sign_probe': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_sign[rotation=8]{{front_text:{{messages:['
+               '{translate:"sunrise.agent.off"},{translate:"block.minecraft.stone"},{keybind:"key.jump"},'
+               '{translate:"no.such.key",fallback:"fallback"}]}}'],
+        ticks=40, steps={0: ['look 0 35'], 5: ['mouse right click'], 20: ['key esc tap']}),
     # Container clicks (items 56, 58, 59): every ContainerInput a screen sends, in a chest, a crafting table, a
     # furnace and the player's own inventory. Each ContainerClick carries the client's predicted slot changes and
     # carried item, which the server compares with its own (a wrong one resyncs, and anticheats watch them).
