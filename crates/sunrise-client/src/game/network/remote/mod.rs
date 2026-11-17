@@ -6182,21 +6182,6 @@ impl Game<'_> {
             self.tick_breeze_effects();
         }
         self.tick_remote_guardian_eyes(running);
-        // Level.tickBlockEntities: a frozen level ticks no block entities.
-        // A step advances the moving pistons created by the block event once,
-        // rather than finishing them during the frozen ticks between steps.
-        if running {
-            self.tick_block_entity_anims();
-            self.tick_remote_spawners();
-            self.client_tick_beacons();
-            self.tick_remote_potent_sulfur();
-            self.with_level(|b, level, ticks| {
-                b.client_tick_block_entities(level, ticks);
-            });
-            let pushes = std::mem::take(&mut self.block_ticks.piston_pushes);
-            self.push_piston_entities(pushes);
-            self.sync_moving_pistons();
-        }
         self.tick_hand();
         if running {
             self.tick_particles();
@@ -6220,18 +6205,53 @@ impl Game<'_> {
         }
         self.tick_subtitles();
         self.tick_client_load();
+        // Minecraft.tick: Level.tickEntities (this player among them), then
+        // Level.tickBlockEntities, then LocalPlayer.sendChanges. A piston's push
+        // lands after the player's own move, and the packet carries what it left:
+        // the position and the ground and collision flags `Entity.move(PISTON, ...)`
+        // set. A frozen level ticks no block entities; a step advances the
+        // moving pistons created by the block event once, rather than finishing
+        // them during the frozen ticks between steps.
+        let sent = self.tick_remote_own_player();
+        if running {
+            self.tick_remote_block_entities();
+        }
+        if let Some(input) = sent? {
+            self.remote_send_state(input);
+        }
+        Ok(())
+    }
+
+    /// `Level.tickBlockEntities` on a client: the block entities' animations
+    /// and client ticks, and the moving pistons' pushes.
+    fn tick_remote_block_entities(&mut self) {
+        self.tick_block_entity_anims();
+        self.tick_remote_spawners();
+        self.client_tick_beacons();
+        self.tick_remote_potent_sulfur();
+        self.with_level(|b, level, ticks| {
+            b.client_tick_block_entities(level, ticks);
+        });
+        let pushes = std::mem::take(&mut self.block_ticks.piston_pushes);
+        self.push_piston_entities(pushes);
+        self.sync_moving_pistons();
+    }
+
+    /// The local player's `LocalPlayer.tick`, once the client has loaded. The
+    /// input `sendChanges` sends after the block entities ticked, if it runs.
+    fn tick_remote_own_player(&mut self) -> Result<Option<u8>> {
         let entity_collisions = self.player_entity_collisions();
         // Those added before it tick before it: their pushes reach this move.
         let pushed = self.remote_pushes(true);
         let sprint_window = self.settings.sprint_window;
         if self.player.is_none() {
-            return Ok(());
+            return Ok(None);
         }
         // LocalPlayer.tick and sendChanges run once the client has loaded (hasClientLoaded),
         // wherever the player is: a chunk that hasn't come yet has no blocks here, as vanilla's
         // empty chunk has none, so the player falls through it until the chunk comes.
         if !self.remote.as_ref().is_some_and(|r| r.loaded_sent) {
-            return Ok(());
+            return Ok(None);
         }
         // LocalPlayer.tick reaches Player.tick only once the client has loaded; its
         // endpoints bracket that work alone, also on the death screen, not the level
@@ -6273,14 +6293,14 @@ impl Game<'_> {
         }
     }
 
-    /// `LocalPlayer.tick`'s `Player.tick` work: input, riding, motion, sleep
-    /// and the state the server hears.
+    /// `LocalPlayer.tick`'s `Player.tick` work: input, riding, motion and
+    /// sleep, and the input `sendChanges` sends for it (`None`: nothing ticked).
     fn tick_local_player(
         &mut self,
         entity_collisions: Vec<sunrise_core::geometry::Aabb>,
         pushed: Vec3,
         sprint_window: i32,
-    ) -> Result<()> {
+    ) -> Result<Option<u8>> {
         // Player.tick's ItemCooldowns.tick, after Pre and after
         // handleKeybinds: this path replaces `tick_world`'s for a server's
         // client (multiplayer and the default single player), so the entries
@@ -6293,7 +6313,7 @@ impl Game<'_> {
         self.sleep_timer = super::tick_sleep_timer(self.sleep_timer, self.sleeping.is_some());
         let stick = self.pad_move();
         if self.player.is_none() {
-            return Ok(());
+            return Ok(None);
         }
         // The LevelLoadingScreen takes the input until the level is ready.
         let loading = self
@@ -6363,7 +6383,7 @@ impl Game<'_> {
                 max_y: b.bounds().max_position().y,
             });
         let Some(player) = self.player.as_mut() else {
-            return Ok(());
+            return Ok(None);
         };
         player.fluids.boat = boat;
         if !riding && !self.replay.playing() {
@@ -6384,7 +6404,7 @@ impl Game<'_> {
         let sleeping = self.sleeping;
         let sleep_position = sleeping.and_then(|head| self.sleeping_position(head));
         let Some(player) = self.player.as_mut() else {
-            return Ok(());
+            return Ok(None);
         };
         let was_gliding = player.fall_flying;
         let dead = self.screen == Screen::Dead;
@@ -6597,8 +6617,7 @@ impl Game<'_> {
         // jump for this tick: the server's prediction plays the jump from it. Sent as held, the jump
         // was the client's alone, and the server saw a jump its keys didn't allow.
         let auto_jumped = self.player.as_ref().is_some_and(|p| p.was_auto_jump);
-        self.remote_send_state(input | u8::from(auto_jumped) << 4);
-        Ok(())
+        Ok(Some(input | u8::from(auto_jumped) << 4))
     }
 
     /// The last `ClientboundPlayerAbilities` the server sent, on a client.
