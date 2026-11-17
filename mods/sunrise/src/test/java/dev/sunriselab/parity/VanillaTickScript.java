@@ -285,6 +285,12 @@ public final class VanillaTickScript {
                     }
                     return;
                 }
+                if (down && w[1].equals("esc")) {
+                    // KeyboardHandler.keyPress: Escape with no screen open pauses (Minecraft.pauseGame), which
+                    // opens the pause screen; Escape is no key mapping.
+                    mc.pauseGame(false);
+                    return;
+                }
                 if (down) {
                     KeyMapping.set(key, true);
                     KeyMapping.click(key);
