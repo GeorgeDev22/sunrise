@@ -579,7 +579,8 @@ SCENARIOS = {
         ticks=80, steps={3: [f'command setblock 0 {FLOOR + 2} 0 minecraft:oak_trapdoor[half=bottom]'],
                          10: ['key w down'], 60: ['key w up']}),
     **{f'fall_onto_{name}': dict(
-        setup=[f'setblock 0 {FLOOR + 1} 3 minecraft:{block}'],
+        # Water in a hole in the floor, where it can't spread and push the player before the scenario starts.
+        setup=[f'setblock 0 {FLOOR if block == "water" else FLOOR + 1} 3 minecraft:{block}'],
         ticks=60, anchor='accept_teleportation',
         steps=merge({0: [f'command tp @s 0.5 {FLOOR + 12} 3.5']}, extra))
        for name, block, extra in (('water', 'water', {}), ('hay', 'hay_block', {}), ('slime', 'slime_block', {}),
