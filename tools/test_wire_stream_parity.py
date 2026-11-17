@@ -393,17 +393,22 @@ SCENARIOS = {
     'chat_commands': dict(
         ticks=70, steps={5: ['chat /me waves'], 20: ['chat /msg Steve hi there'], 35: ['chat /say hello'],
                          50: ['chat /notacommand at all']}),
-    # Client detection (item 85): a sign's lines are translatable components; right-clicking it opens the editor
-    # with them resolved by the client (SignEditScreen: Component.getString), and closing sends them back
-    # (ServerboundSignUpdatePacket). A key only Sunrise knows must come back as the key, as vanilla's does.
-    'sign_probe': dict(
-        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_sign[rotation=8]{{front_text:{{messages:['
-               '{translate:"sunrise.agent.off"},{translate:"block.minecraft.stone"},{keybind:"key.jump"},'
-               '{translate:"no.such.key",fallback:"fallback"}]}}'],
-        ticks=40, steps={0: ['look 0 35'], 5: ['mouse right click'], 20: ['key esc tap']}),
-    # Container clicks (items 56, 58, 59): every ContainerInput a screen sends, in a chest, a crafting table, a
-    # furnace and the player's own inventory. Each ContainerClick carries the client's predicted slot changes and
-    # carried item, which the server compares with its own (a wrong one resyncs, and anticheats watch them).
+    # Client detection (item 85): an item named by translatable components goes into an anvil. AnvilScreen's
+    # slotChanged sets the name box to the name as this client resolves it (Component.getString), and the box's
+    # responder sends it (ServerboundRenameItemPacket). A key only Sunrise knows must come back as the key, as
+    # vanilla's does; a sign can't be the probe here (SignBlock won't open an editor on non-plain lines).
+    'anvil_probe': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:anvil',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:paper[minecraft:custom_name='
+               '{translate:"sunrise.agent.off"}]',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:paper[minecraft:custom_name='
+               '{translate:"block.minecraft.stone"}]',
+               f'item replace entity {PLAYER} hotbar.2 with minecraft:paper[minecraft:custom_name='
+               '{translate:"no.such.key",fallback:"fallback text"}]',
+               f'experience add {PLAYER} 10 levels'],
+        ticks=50, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 30 shift'],
+                         16: ['click-slot 0 shift'], 20: ['click-slot 31 shift'], 24: ['click-slot 0 shift'],
+                         28: ['click-slot 32 shift'], 32: ['click-slot 0 shift'], 40: ['key e tap']}),
     'chest_clicks': dict(
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:chest[facing=north]{{Items:[{{Slot:0b,id:"minecraft:stone",'
                'count:32},{Slot:1b,id:"minecraft:oak_planks",count:10}]}',
