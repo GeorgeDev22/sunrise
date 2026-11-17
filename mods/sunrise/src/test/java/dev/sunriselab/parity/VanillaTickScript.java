@@ -333,6 +333,12 @@ public final class VanillaTickScript {
                 mc.gameMode.handleContainerInput(mc.player.containerMenu.containerId, slot, button, input, mc.player);
             }
             case "command" -> mc.player.connection.sendCommand(String.join(" ", List.of(w).subList(1, w.length)));
+            case "respawn" -> {
+                // DeathScreen's respawn button: LocalPlayer.respawn (ServerboundClientCommand PERFORM_RESPAWN).
+                if (mc.player != null && mc.player.isDeadOrDying()) {
+                    mc.player.respawn();
+                }
+            }
             case "chat" -> {
                 // ChatScreen.handleChatInput: a line starting with / is a command, the rest is chat.
                 String text = String.join(" ", List.of(w).subList(1, w.length)).trim();
