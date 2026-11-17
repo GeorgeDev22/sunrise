@@ -103,8 +103,8 @@ impl Game<'_> {
     /// `click-slot SLOT [right] [shift] [INPUT] [bBUTTON]` without a renderer: sunrise-ctl's
     /// version clicks where the slot is drawn, and `--headless` draws nothing. The vanilla driver
     /// clicks the menu itself (`MultiPlayerGameMode.handleContainerInput`), and so does this.
-    /// `INPUT` is a `ContainerInput` name (`SWAP`, `THROW`, `PICKUP_ALL`, `QUICK_CRAFT`...), and
-    /// slot -999 is outside the menu.
+    /// `SLOT` is the menu's own slot number, -999 outside it; `INPUT` is a `ContainerInput` name
+    /// (`SWAP`, `THROW`, `PICKUP_ALL`, `QUICK_CRAFT`...).
     fn tick_script_click(&mut self, line: &str) -> bool {
         use sunrise_client::menu::Input;
         let words: Vec<&str> = line.split_whitespace().collect();
@@ -123,7 +123,18 @@ impl Game<'_> {
             .iter()
             .find_map(|w| w.strip_prefix('b')?.parse().ok())
             .unwrap_or(i32::from(words.contains(&"right")));
-        self.remote_menu_ops(&[(usize::try_from(slot).ok(), button, input)]);
+        // The script names the menu's own slot, as the vanilla driver's does; the menu
+        // ops take this window's index of it.
+        let menu = self.remote_menu().1;
+        let internal = if slot == -999 {
+            None
+        } else {
+            match Self::inventory_screen_slot(&menu, slot) {
+                Some(internal) => Some(internal),
+                None => return true,
+            }
+        };
+        self.remote_menu_ops(&[(internal, button, input)]);
         true
     }
 }
