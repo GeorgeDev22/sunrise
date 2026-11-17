@@ -648,15 +648,9 @@ SCENARIOS = {
 
 
 def sunrise_lines(lines):
-    """A scenario's lines for sunrise-ctl: menu slot ids become its inventory indices (hotbar 0-8, main 9-35)."""
-    out = []
-    for line in lines:
-        w = line.split()
-        if w[0] == 'click-slot':
-            slot = int(w[1])
-            w[1] = str(slot - 36 if 36 <= slot <= 44 else slot)
-        out.append(' '.join(w))
-    return out
+    """A scenario's lines for Sunrise's tick script, which takes them as the vanilla driver does: click-slot names
+    the menu's own slot (game/world/tick_script.rs)."""
+    return list(lines)
 
 
 def script(name, spec, sunrise):
