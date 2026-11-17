@@ -494,6 +494,34 @@ SCENARIOS = {
                f'setblock 1 {FLOOR + 1} 6 minecraft:campfire'],
         ticks=80, steps={0: ['key w down'], 20: ['key w up', 'key d down'], 26: ['key d up', 'key w down'],
                          50: ['look 30 0'], 70: ['key w up']}),
+    # More movement niches (items 20, 25, 26, 125, 127, 128).
+    'lava_fire_resistance': dict(
+        setup=[f'effect give {PLAYER} minecraft:fire_resistance 60 0 true',
+               f'fill -2 {FLOOR} 2 2 {FLOOR} 8 minecraft:lava'],
+        ticks=80, steps={0: ['key w down'], 30: ['key space down'], 45: ['key space up'], 60: ['key w up']}),
+    'riptide': dict(
+        setup=[f'fill -3 {FLOOR - 2} 1 3 {FLOOR} 10 minecraft:water',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:trident[minecraft:enchantments={{"minecraft:riptide":3}}]',
+               f'tp {PLAYER} 0.5 {FLOOR - 1} 2.5 0 0'],
+        ticks=70, steps={0: ['look 0 -20'], 5: ['mouse right down'], 20: ['mouse right up'], 50: ['key w down'],
+                         60: ['key w up']}),
+    'wind_charge_jump': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:wind_charge 4'],
+        ticks=70, steps={0: ['look 0 90'], 5: ['key space down'], 8: ['key space up'], 9: ['mouse right click'],
+                         40: ['key w down'], 45: ['key space down'], 47: ['key space up', 'mouse right click'],
+                         60: ['key w up']}),
+    'bubble_columns': dict(
+        setup=[f'fill 0 {FLOOR} 2 0 {FLOOR} 2 minecraft:soul_sand', f'fill 0 {FLOOR + 1} 2 0 {FLOOR + 5} 2 minecraft:water',
+               f'fill 0 {FLOOR} 4 0 {FLOOR} 4 minecraft:magma_block', f'fill 0 {FLOOR + 1} 4 0 {FLOOR + 5} 4 minecraft:water',
+               'tick freeze', 'tick unfreeze'],
+        ticks=100, steps={0: ['key w down'], 5: ['key w up'], 40: ['key w down'], 46: ['key w up']}),
+    'chorus_fruit': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:chorus_fruit 2',
+               f'effect give {PLAYER} minecraft:hunger 2 255 true'],
+        ticks=80, anchor='accept_teleportation', steps={5: ['mouse right down'], 45: ['mouse right up']}),
+    'unloaded_chunks': dict(
+        ticks=120, anchor='accept_teleportation', steps={5: ['command tp @s 30000.5 -60 30000.5'], 10: ['key w down'],
+                                                         60: ['key w up'], 80: ['command tp @s 0.5 -60 0.5']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
