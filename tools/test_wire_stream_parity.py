@@ -100,6 +100,9 @@ KNOCKBACK = 'command damage @s 1 minecraft:mob_attack by @e[tag=far,limit=1]'
 # The attacker for KNOCKBACK, far ahead (+z): its hits push the player back (-z).
 FAR_HUSK = ('summon minecraft:husk 0.5 {y} 9.0 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Tags:["far"]}}'
             .format(y=FLOOR + 1))
+# A husk with its AI, 6 blocks ahead: it walks to the player and attacks (a thousand health, takes knockback).
+CHASER = ('summon minecraft:husk 0.5 {y} 6.5 {{PersistenceRequired:1b,Health:1000f,'
+          'attributes:[{{id:"minecraft:max_health",base:1000.0}}]}}'.format(y=FLOOR + 1))
 # Puts the player 0.3 into a husk at z 2.2, from behind.
 OVERLAP = 'command tp @s 0.5 ~ 1.9'
 # A smash's fall damage, and a 20-block fall's, must not kill the player mid-scenario (a death screen ends it).
@@ -253,6 +256,22 @@ SCENARIOS = {
     'inventory_walk': dict(
         ticks=60, steps={0: ['key w down'], 10: ['key e tap'], 30: ['key e tap'], 40: ['key w down'],
                          50: ['key w up']}),
+    # Hitting a mob that moves (item 112): which entity the crosshair picks, and when, follows how the client
+    # interpolates the mob's moves (the server sends them; a replay gives both clients the same). A husk with its
+    # AI walks up and hits back (its knockback too); the player strafes and swings, or sprint-hits with w-taps.
+    'moving_husk_fight': dict(
+        setup=[MACE_RESISTANCE, CHASER, f'item replace entity {PLAYER} weapon.mainhand with minecraft:diamond_sword'],
+        ticks=100, steps=merge({0: ['look 0 15', 'key a down'], 25: ['key a up', 'key d down'], 50: ['key d up',
+                                'key a down'], 75: ['key a up']}, every(8, 96, 12, 'mouse left click'))),
+    'moving_husk_sprint': dict(
+        setup=[MACE_RESISTANCE, CHASER, f'item replace entity {PLAYER} weapon.mainhand with minecraft:diamond_sword'],
+        ticks=100, steps=merge({0: ['look 0 10', 'key ctrl down', 'key w down']}, every(10, 90, 12, 'mouse left click'),
+                               every(12, 92, 12, 'key w up'), every(15, 95, 12, 'key w down'),
+                               {95: ['key w up', 'key ctrl up']})),
+    # The same with a mace, from the ground: hits on a mob walking in and out of reach.
+    'moving_husk_mace': dict(
+        setup=[MACE_RESISTANCE, CHASER, f'item replace entity {PLAYER} weapon.mainhand with minecraft:mace'],
+        ticks=100, steps=merge({0: ['look 0 15', 'key s down'], 30: ['key s up']}, every(10, 96, 17, 'mouse left click'))),
     # A wind charge at the feet launches the player; the mace comes out and smashes on the way down.
     'mace_wind_charge': dict(
         setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.4), MACE_RESISTANCE,
