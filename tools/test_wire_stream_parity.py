@@ -272,6 +272,79 @@ SCENARIOS = {
     'moving_husk_mace': dict(
         setup=[MACE_RESISTANCE, CHASER, f'item replace entity {PLAYER} weapon.mainhand with minecraft:mace'],
         ticks=100, steps=merge({0: ['look 0 15', 'key s down'], 30: ['key s up']}, every(10, 96, 17, 'mouse left click'))),
+    # Movement on special blocks and shapes, all client physics a movement-predicting anticheat simulates. Each
+    # builds its course in front of the player (+z) inside the area the reset refills.
+    'packed_ice_sprint': dict(
+        setup=[f'fill -1 {FLOOR} 1 1 {FLOOR} 14 minecraft:packed_ice'],
+        ticks=70, steps=merge({0: ['key ctrl down', 'key w down'], 40: ['key w up', 'key ctrl up']},
+                              {10: ['key space down'], 12: ['key space up'], 25: ['key space down'], 27: ['key space up']})),
+    'blue_ice_sprint': dict(
+        setup=[f'fill -1 {FLOOR} 1 1 {FLOOR} 14 minecraft:blue_ice'],
+        ticks=70, steps={0: ['key ctrl down', 'key w down'], 20: ['key w up', 'key ctrl up'], 35: ['key s down'],
+                         45: ['key s up']}),
+    'soul_sand_walk': dict(
+        setup=[f'fill -1 {FLOOR} 1 1 {FLOOR} 8 minecraft:soul_sand'],
+        ticks=60, steps={0: ['key ctrl down', 'key w down'], 15: ['key space down'], 17: ['key space up'],
+                         40: ['key w up', 'key ctrl up']}),
+    'honey_walk': dict(
+        setup=[f'fill -1 {FLOOR} 1 1 {FLOOR} 8 minecraft:honey_block'],
+        ticks=60, steps={0: ['key w down'], 15: ['key space down'], 17: ['key space up'], 40: ['key w up']}),
+    # Falling 5 blocks onto slime: the bounces; then onto it again sneaking (no bounce).
+    'slime_bounce': dict(
+        setup=[f'fill -1 {FLOOR} -1 1 {FLOOR} 1 minecraft:slime_block', f'tp {PLAYER} 0.5 {FLOOR + 6} 0.5 0 0'],
+        ticks=80, steps={40: ['key shift down'], 41: ['command tp @s 0.5 ~5 0.5'], 75: ['key shift up']}),
+    'cobweb_walk': dict(
+        setup=[f'fill 0 {FLOOR + 1} 3 0 {FLOOR + 2} 4 minecraft:cobweb'],
+        ticks=70, steps={0: ['key w down'], 20: ['key space down'], 22: ['key space up'], 55: ['key w up']}),
+    'powder_snow_walk': dict(
+        setup=[f'fill 0 {FLOOR} 3 0 {FLOOR + 1} 4 minecraft:powder_snow'],
+        ticks=70, steps={0: ['key w down'], 25: ['key space down'], 35: ['key space up'], 55: ['key w up']}),
+    # Up a ladder, held still sneaking halfway, on up, then off backwards.
+    'ladder_climb': dict(
+        setup=[f'fill 0 {FLOOR + 1} 2 0 {FLOOR + 8} 2 minecraft:stone',
+               f'fill 0 {FLOOR + 1} 1 0 {FLOOR + 8} 1 minecraft:ladder[facing=north]'],
+        ticks=90, steps={0: ['key w down'], 25: ['key shift down'], 40: ['key shift up'], 55: ['key w up'],
+                         56: ['key s down', 'key space down'], 58: ['key space up'], 65: ['key s up']}),
+    'scaffolding_climb': dict(
+        setup=[f'fill 0 {FLOOR + 1} 1 0 {FLOOR + 6} 1 minecraft:scaffolding'],
+        ticks=90, steps={0: ['key w down'], 4: ['key w up', 'key space down'], 35: ['key space up'],
+                         45: ['key shift down'], 75: ['key shift up']}),
+    # Into a pool, sprint-swimming underwater, up and out over the edge.
+    'water_swim': dict(
+        setup=[f'fill -3 {FLOOR - 3} 2 3 {FLOOR} 10 minecraft:water'],
+        ticks=100, steps={0: ['key w down'], 15: ['look 0 40', 'key ctrl down'], 45: ['look 0 -30'],
+                          60: ['key ctrl up', 'key space down'], 85: ['key space up', 'key w up']}),
+    # Sprint-jumping under a ceiling two blocks up: every jump hits it.
+    'head_hitter': dict(
+        setup=[f'fill -1 {FLOOR + 3} 1 1 {FLOOR + 3} 14 minecraft:stone'],
+        ticks=60, steps={0: ['key ctrl down', 'key w down', 'key space down'], 40: ['key space up', 'key w up',
+                                                                                    'key ctrl up']}),
+    # Sprinting up a stair, a slab and a step (0.5 and 1 high), jumping where it must.
+    'stairs_slabs_sprint': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 3 minecraft:stone_slab', f'setblock 0 {FLOOR + 1} 4 minecraft:stone',
+               f'setblock 0 {FLOOR + 2} 5 minecraft:stone_stairs[facing=south]',
+               f'fill 0 {FLOOR + 1} 5 0 {FLOOR + 1} 9 minecraft:stone', f'fill 0 {FLOOR + 2} 6 0 {FLOOR + 2} 9 minecraft:stone',
+               f'setblock 0 {FLOOR + 3} 7 minecraft:oak_slab'],
+        ticks=60, steps={0: ['key ctrl down', 'key w down'], 8: ['key space down'], 9: ['key space up'],
+                         40: ['key w up', 'key ctrl up']}),
+    # Sneaking to the edge of a raised platform, straight and diagonally: it holds the player on it.
+    'sneak_edge': dict(
+        setup=[f'fill -1 {FLOOR + 1} -1 1 {FLOOR + 1} 2 minecraft:stone', f'tp {PLAYER} 0.5 {FLOOR + 2} 0.5 0 0'],
+        ticks=70, steps={0: ['key shift down', 'key w down'], 30: ['key w up', 'key d down', 'key s down'],
+                         55: ['key d up', 'key s up', 'key shift up']}),
+    # Diagonally along a wall: horizontal collision each tick.
+    'wall_slide': dict(
+        setup=[f'fill 2 {FLOOR + 1} -2 2 {FLOOR + 3} 14 minecraft:stone'],
+        ticks=60, steps={0: ['look -20 0', 'key ctrl down', 'key w down', 'key d down'], 40: ['key w up', 'key d up',
+                                                                                             'key ctrl up']}),
+    'speed_jump_effects': dict(
+        setup=[f'effect give {PLAYER} minecraft:speed 30 2 true', f'effect give {PLAYER} minecraft:jump_boost 30 2 true'],
+        ticks=60, steps={0: ['key ctrl down', 'key w down', 'key space down'], 30: ['key space up'],
+                         40: ['key w up', 'key ctrl up']}),
+    'levitation_slow_falling': dict(
+        setup=[f'effect give {PLAYER} minecraft:levitation 2 1 true'],
+        ticks=90, steps={0: ['key w down'], 45: ['command effect give @s minecraft:slow_falling 10 0 true'],
+                         60: ['key w up']}),
     # A wind charge at the feet launches the player; the mace comes out and smashes on the way down.
     'mace_wind_charge': dict(
         setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.4), MACE_RESISTANCE,
