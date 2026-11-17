@@ -36,10 +36,10 @@ import wire_stream  # noqa: E402
 
 MARK = 'wire-mark'.encode().hex()
 # A server packet that reached vanilla less than REPLAY_LATE before its next tick-end came after that tick's frame
-# had started (measured: 0.2-2.1 ms before it, taken a tick later; 10.5 ms before it, taken on that tick), so the
-# replay gives it to Sunrise after that tick too. From REPLAY_LATE to REPLAY_EDGE the tick is uncertain: listed.
-REPLAY_LATE = 0.005
-REPLAY_EDGE = 0.010
+# had started (measured: 0.2, 1.9, 2.1 and 5.3 ms before it, taken a tick later; 10.5 ms before it, taken on that
+# tick), so the replay gives it to Sunrise after that tick too. Up to REPLAY_EDGE the tick is uncertain: listed.
+REPLAY_LATE = 0.008
+REPLAY_EDGE = 0.012
 # The server packets that change how the player moves: only their uncertain ticks are worth listing.
 MOVING = {'set_entity_motion', 'explode', 'player_position', 'player_rotation', 'update_mob_effect',
           'remove_mob_effect', 'update_attributes', 'player_abilities', 'set_health'}
@@ -70,11 +70,9 @@ class Plan:
         rows = [r for r in rows if r.get('conn') == conn and 'name' in r]
         self.steps = []  # ('send', row, gate, edge) | ('await', name)
         mark, ticks, sent = -1, 0, 0
-        tick_end_times = []
-        for r in rows:
-            if r['dir'] == 'c2s' and r['state'] == 'play' and r['name'] == 'client_tick_end':
-                tick_end_times.append((mark, ticks, r['t']))
-        ends = iter(tick_end_times)
+        # When each of vanilla's play ticks ended, in order: a server packet's next tick-end is the next of these.
+        ends = iter([r['t'] for r in rows
+                     if r['dir'] == 'c2s' and r['state'] == 'play' and r['name'] == 'client_tick_end'])
         next_end = next(ends, None)
         for r in rows:
             if r['dir'] == 'c2s':
@@ -88,7 +86,7 @@ class Plan:
                 elif r['name'] not in wire_stream.FRAME:
                     sent += 1
                 continue
-            before_end = next_end[2] - r['t'] if next_end is not None and next_end[0] == mark else None
+            before_end = next_end - r['t'] if next_end is not None and r['state'] == 'play' else None
             late = before_end is not None and before_end < REPLAY_LATE
             edge = (r['state'] == 'play' and r['name'] in MOVING and before_end is not None
                     and REPLAY_LATE <= before_end < REPLAY_EDGE)
