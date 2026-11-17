@@ -662,6 +662,99 @@ SCENARIOS = {
         ticks=40, anchor='accept_teleportation',
         steps={5: ['command tp @s 0.5 ~ 4.5', 'mouse left click', 'key 2 tap', 'key space down'],
                6: ['key space up', 'mouse right click'], 15: ['key w down'], 25: ['key w up']}),
+    # Portals (item 128): a nether portal and an end portal walked into, then back to the start.
+    'nether_portal': dict(
+        setup=[f'fill -1 {FLOOR} 3 2 {FLOOR + 4} 3 minecraft:obsidian',
+               f'fill 0 {FLOOR + 1} 3 1 {FLOOR + 3} 3 minecraft:nether_portal[axis=x]'],
+        ticks=200, steps={0: ['key w down'], 12: ['key w up'], 140: ['key w down'], 150: ['key w up'],
+                          170: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
+    'end_portal': dict(
+        setup=[f'setblock 0 {FLOOR} 3 minecraft:end_portal'],
+        ticks=140, steps={0: ['key w down'], 12: ['key w up'],
+                          110: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
+    # Mobs' and projectiles' pushes (item 130): a shulker's bullets (levitation), a ghast's fireball, a breeze's
+    # wind charge.
+    'shulker_bullets': dict(
+        setup=[MACE_RESISTANCE, f'summon minecraft:shulker 0.5 {FLOOR + 1} 7.5 {{PersistenceRequired:1b}}'],
+        ticks=200, steps={}),
+    'ghast_fireball': dict(
+        setup=[MACE_RESISTANCE],
+        ticks=60, steps={5: [f'command summon minecraft:fireball 0.5 {FLOOR + 2} 6.0 '
+                             '{Motion:[0.0,0.0,-0.8],acceleration_power:0.0d,ExplosionPower:1b}']}),
+    'breeze_wind_charge': dict(
+        setup=[MACE_RESISTANCE],
+        ticks=50, steps={5: [f'command summon minecraft:breeze_wind_charge 0.5 {FLOOR + 1.5} 5.0 '
+                             '{Motion:[0.0,0.0,-0.8],acceleration_power:0.0d}']}),
+    # Entities pushing (item 129): six pigs crammed on the player; a shulker box's lid opening under it; a boat
+    # paddled on packed ice.
+    'mob_cramming': dict(
+        setup=[f'summon minecraft:pig {x} {FLOOR + 1} {z} {{NoAI:1b,PersistenceRequired:1b}}'
+               for x, z in ((0.3, 0.7), (0.7, 0.4), (0.5, 0.2), (0.2, 0.3), (0.8, 0.8), (0.5, 0.9))],
+        ticks=60, steps={20: ['key w down'], 35: ['key w up']}),
+    'shulker_box_lid': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 0 minecraft:shulker_box', f'tp {PLAYER} 0.5 {FLOOR + 2} 0.5 0 90'],
+        ticks=60, steps={0: ['look 0 90'], 5: ['mouse right click'], 30: ['key esc tap']}),
+    'boat_on_ice': dict(
+        setup=[f'fill -5 {FLOOR} 1 5 {FLOOR} 26 minecraft:packed_ice', f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 3.5'],
+        ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:oak_boat,limit=1]'], 8: ['key w down'],
+                         40: ['key a down'], 50: ['key a up'], 60: ['key w up'], 80: ['key shift down'],
+                         84: ['key shift up']}),
+    # A skeleton horse ridden and dismounted (item 131).
+    'skeleton_horse_ride': dict(
+        setup=[f'summon minecraft:skeleton_horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,'
+               'equipment:{saddle:{id:"minecraft:saddle",count:1}}}'],
+        ticks=80, steps={0: ['command ride @s mount @e[type=minecraft:skeleton_horse,limit=1]'], 6: ['key w down'],
+                         20: ['key space down'], 30: ['key space up'], 50: ['key w up'], 60: ['key shift down'],
+                         64: ['key shift up']}),
+    # Respawn anchor (item 49): charged with glowstone, then used in the Overworld, where it explodes; a TNT
+    # minecart's explosion (item 50).
+    'respawn_anchor': dict(
+        setup=[MACE_RESISTANCE, f'setblock 0 {FLOOR + 1} 2 minecraft:respawn_anchor',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:glowstone 4'],
+        ticks=60, steps={0: ['look 0 30'], 5: ['mouse right click'], 15: ['key 2 tap'], 20: ['mouse right click']}),
+    'tnt_minecart': dict(
+        setup=[MACE_RESISTANCE, f'summon minecraft:tnt_minecart 0.5 {FLOOR + 1} 3.5 {{fuse:20}}'],
+        ticks=60, steps={}),
+    # Block uses (item 72): a cauldron filled from a bucket, a composter fed, a note block tuned and played, a
+    # jukebox given a disc and emptied, a bed in daytime.
+    'use_cauldron': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:cauldron',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:water_bucket'],
+        ticks=40, steps={0: ['look 0 30'], 5: ['mouse right click'], 15: ['mouse right click']}),
+    'use_composter': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:composter',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:wheat_seeds 16'],
+        ticks=40, steps=merge({0: ['look 0 30']}, {t: ['mouse right click'] for t in range(5, 25, 4)})),
+    'use_note_block': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:note_block'],
+        ticks=40, steps={0: ['look 0 30'], 5: ['mouse right click'], 10: ['mouse right click'], 15: ['mouse left click']}),
+    'use_jukebox': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:jukebox',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:music_disc_cat'],
+        ticks=40, steps={0: ['look 0 30'], 5: ['mouse right click'], 20: ['mouse right click']}),
+    'use_bed': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:red_bed[facing=south,part=foot]',
+               f'setblock 0 {FLOOR + 1} 3 minecraft:red_bed[facing=south,part=head]'],
+        ticks=40, steps={0: ['look 0 30'], 5: ['mouse right click']}),
+    # Tools on blocks and mobs (item 74): shears on a sheep, a brush on suspicious sand, a fire charge on stone.
+    'use_shears': dict(
+        setup=[f'summon minecraft:sheep 0.5 {FLOOR + 1} 2.0 {{NoAI:1b,PersistenceRequired:1b}}',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:shears'],
+        ticks=40, steps={0: ['look 0 25'], 5: ['mouse right click']}),
+    'use_brush': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:suspicious_sand',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:brush'],
+        ticks=80, steps={0: ['look 0 30'], 5: ['mouse right down'], 70: ['mouse right up']}),
+    'use_fire_charge': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:stone',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:fire_charge 4'],
+        ticks=40, steps={0: ['look 0 30'], 5: ['mouse right click']}),
+    # An axe disables the shield (item 41): a vindicator attacks the blocking player.
+    'axe_disables_shield': dict(
+        setup=[MACE_RESISTANCE, f'item replace entity {PLAYER} weapon.offhand with minecraft:shield',
+               f'summon minecraft:vindicator 0.5 {FLOOR + 1} 5.5 {{PersistenceRequired:1b,'
+               'equipment:{mainhand:{id:"minecraft:iron_axe",count:1}}}'],
+        ticks=120, steps={0: ['look 0 10'], 5: ['mouse right down'], 110: ['mouse right up']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
