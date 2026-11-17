@@ -9,7 +9,8 @@ values it computes from the client's moves, change from run to run.
 
   python3 tools/wire_replay.py --vanilla OUT/vanilla.jsonl --scenarios mace_fall_20,... --out DIR
 
-The scenarios are the ones of that vanilla run, in its order. Sunrise runs windowed (no --headless). DIR gets
+The scenarios are the ones of that vanilla run, in its order. Sunrise runs --headless unless
+WIRE_STREAM_WINDOWED=1. DIR gets
 sunrise.jsonl (its capture) and a copy of vanilla.jsonl, compared as test_wire_stream_parity.py --compare-only
 does. A server packet that reached vanilla just before its next tick-end was taken a tick later (REPLAY_LATE), and
 the replay does the same; one a little earlier may have been taken on either tick: such packets are listed
@@ -222,7 +223,6 @@ def main():
         (work / 'env' / sub).mkdir(parents=True)
         os.environ[var] = str(work / 'env' / sub)
     os.environ.update(lab.game_env(SUNRISE_TELEMETRY_URL='off'))
-    os.environ['WIRE_STREAM_WINDOWED'] = '1'
     scripts = work / 'scripts'
     scripts.mkdir()
     client = None
