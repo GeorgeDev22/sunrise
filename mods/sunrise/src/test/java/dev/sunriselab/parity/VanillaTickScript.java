@@ -24,6 +24,7 @@ import net.minecraft.client.Options;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.tutorial.Tutorial;
+import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.phys.HitResult;
 import org.lwjgl.sdl.SDLEvents;
@@ -43,7 +44,7 @@ import org.lwjgl.sdl.SDLVideo;
  * the next tick: its first tick sends the command /wire-mark, which marks it in the capture. It prints
  * "[VanillaTickScript] done NAME" when the scenario's ticks have run. "where" prints the position.
  *
- * Lines (sunrise-ctl's words): key NAME down|up|tap, mouse left|right down|up|click, look YAW PITCH, mouse-move DX DY,
+ * Lines (sunrise-ctl's words): key NAME down|up|tap, mouse left|right down|up|click, look YAW PITCH, mouse-move DX DY, menu-button N,
  * click-slot SLOT [right] [shift] (the menu's slot id), command TEXT, close.
  */
 public final class VanillaTickScript {
@@ -316,6 +317,15 @@ public final class VanillaTickScript {
                 Method pick = Minecraft.class.getDeclaredMethod("pick", float.class);
                 pick.setAccessible(true);
                 pick.invoke(mc, 1.0F);
+            }
+            case "menu-button" -> {
+                // A station screen's button (a stonecutter's recipe, a loom's pattern): the screen asks the menu
+                // (clickMenuButton) and, when it took the press, handleInventoryButtonClick sends it.
+                int button = Integer.parseInt(w[1]);
+                AbstractContainerMenu menu = mc.player.containerMenu;
+                if (menu.clickMenuButton(mc.player, button)) {
+                    mc.gameMode.handleInventoryButtonClick(menu.containerId, button);
+                }
             }
             case "mouse-move" -> {
                 // MouseHandler.onMove with the pointer grabbed in an active window: the frame's

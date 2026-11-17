@@ -896,6 +896,20 @@ SCENARIOS = {
                f'item replace entity {PLAYER} hotbar.2 with minecraft:netherite_ingot'],
         ticks=60, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 31 shift'], 15: ['click-slot 32 shift'],
                          18: ['click-slot 33 shift'], 24: ['click-slot 3 shift'], 34: ['key e tap']}),
+    # Station buttons (item 60): a stonecutter's first recipe for stone, a loom's pattern on a banner; each result
+    # shift-clicked out.
+    'stonecutter_use': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:stonecutter',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:stone 8'],
+        ticks=60, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 29 shift'], 16: ['menu-button 0'],
+                         22: ['click-slot 1 shift'], 30: ['menu-button 1'], 34: ['click-slot 1'], 38: ['click-slot 29'],
+                         44: ['key e tap']}),
+    'loom_use': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:loom[facing=north]',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:white_banner',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:red_dye 4'],
+        ticks=60, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 31 shift'], 15: ['click-slot 32 shift'],
+                         20: ['menu-button 1'], 26: ['click-slot 3 shift'], 36: ['key e tap']}),
     # Shift-clicks route raw iron to the input and coal to the fuel; the furnace starts smelting while open (its
     # progress comes as container data), then the result is taken.
     'furnace_shift': dict(
