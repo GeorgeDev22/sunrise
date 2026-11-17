@@ -10345,6 +10345,12 @@ impl Game<'_> {
                     self.report_activity();
                     let target = self.tick_target_millis();
                     let steps = self.clock.advance(elapsed, target);
+                    if steps > 0
+                        && self.title.is_none()
+                        && let Err(e) = self.poll_remote_before_tick()
+                    {
+                        log::warn!("Sunrise: {e}");
+                    }
                     self.client_tick_steps(steps, Some(event_loop))?;
                     self.extras_frame(elapsed);
                     self.extras_retry()?;

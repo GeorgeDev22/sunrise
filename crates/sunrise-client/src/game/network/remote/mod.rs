@@ -787,6 +787,9 @@ const CHUNK_PACKETS_PER_FRAME: Duration = Duration::from_millis(1);
 /// whatever inserting their columns costs, up to a column still decoding:
 /// the packets after a slow machine's chunks don't wait on its frames.
 const BACKLOG_LIMIT: Duration = Duration::from_millis(50);
+/// How long a tick about to run waits for one chunk column still decoding;
+/// past it the column, and what came after it, wait for the next frame.
+const TICK_DECODE_WAIT: Duration = Duration::from_millis(250);
 /// The open menu name of a server's horse inventory, then its chest's
 /// columns (the packet names no `MenuType`).
 const MOUNT_MENU: &str = "sunrise:mount";
@@ -2142,7 +2145,21 @@ impl Game<'_> {
     /// already waited `BACKLOG_LIMIT`. A chunk packet still decoding holds
     /// back what follows it.
     pub(super) fn poll_remote(&mut self) -> Result<()> {
-        let polled = self.poll_remote_events();
+        self.poll_remote_with(false)
+    }
+    /// `Minecraft.runTick` handles every packet that came (`runAllTasks`)
+    /// before the frame's ticks. What this frame's poll left for later (chunks
+    /// past its budget or still decoding, and everything after them) is taken
+    /// when a tick is about to run, so the tick moves through those chunks and
+    /// a batch's `ChunkBatchReceived` goes out from it, as vanilla's does.
+    pub(in crate::game) fn poll_remote_before_tick(&mut self) -> Result<()> {
+        if self.remote.as_ref().is_none_or(|r| r.backlog.is_empty()) {
+            return Ok(());
+        }
+        self.poll_remote_with(true)
+    }
+    fn poll_remote_with(&mut self, before_tick: bool) -> Result<()> {
+        let polled = self.poll_remote_events(before_tick);
         // The block events and block changes of a piston clock start and end
         // thousands of moves at once: the collision view and the renderer
         // take them all in one sync, before the tick or frame reads them.
