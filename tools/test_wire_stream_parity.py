@@ -751,10 +751,10 @@ SCENARIOS = {
         ticks=40, steps={0: ['look 0 30'], 5: ['mouse right click']}),
     # An axe disables the shield (item 41): a vindicator attacks the blocking player.
     'axe_disables_shield': dict(
-        setup=[MACE_RESISTANCE, f'item replace entity {PLAYER} weapon.offhand with minecraft:shield',
-               f'summon minecraft:vindicator 0.5 {FLOOR + 1} 5.5 {{PersistenceRequired:1b,'
-               'equipment:{mainhand:{id:"minecraft:iron_axe",count:1}}}'],
-        ticks=120, steps={0: ['look 0 10'], 5: ['mouse right down'], 110: ['mouse right up']}),
+        setup=[MACE_RESISTANCE, f'item replace entity {PLAYER} weapon.offhand with minecraft:shield'],
+        ticks=120, steps={0: ['look 0 10', f'command summon minecraft:vindicator 0.5 {FLOOR + 1} 5.5 '
+                              '{PersistenceRequired:1b,equipment:{mainhand:{id:"minecraft:iron_axe",count:1}}}'],
+                          5: ['mouse right down'], 110: ['mouse right up']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
