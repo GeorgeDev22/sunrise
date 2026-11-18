@@ -98,9 +98,11 @@ jobs:
           echo "harness exit: ${PIPESTATUS[0]}" | tee -a run.log
           mkdir -p out && cp run.log out/
           exit 0
-      - name: No Mojang files in the upload
+      - name: No Mojang files in the upload, captures compressed
         run: |
           find out -type f \( -name '*.jar' -o -name '*.class' -o -name '*.ogg' -o -name '*.png' \) -print -delete
+          # The packet captures shrink about 60 times with xz, which keeps the downloads under GitHub's egress limit.
+          find out -name '*.jsonl' -exec xz -6 -T0 {} +
           du -sh out
       - uses: actions/upload-artifact@v4
         if: always()
