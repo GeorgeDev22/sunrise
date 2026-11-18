@@ -82,6 +82,9 @@ enum ClientState {
     /// `WaitingForPlayerChunk`: until the section around the player is shown.
     WaitingForPlayerChunk {
         player_section_ready: bool,
+        /// When the player's section was first seen compiled: its
+        /// `RenderSection.uploadedTime`, which its fade-in counts from.
+        section_compiled_at: Option<u64>,
         timeout_after: u64,
     },
     /// `ClientLevelReady`.
@@ -149,6 +152,7 @@ impl LevelLoadTracker {
         if let Some(ClientState::WaitingForServer { timeout_after }) = self.state {
             self.state = Some(ClientState::WaitingForPlayerChunk {
                 player_section_ready: false,
+                section_compiled_at: None,
                 timeout_after,
             });
         }
@@ -168,11 +172,37 @@ impl LevelLoadTracker {
             *player_section_ready = true;
         }
     }
+    /// `LevelRenderer`'s check before that callback, for a client that draws
+    /// no sections itself: the player's section is compiled (now, or since
+    /// an earlier call of this load), and `isSectionCompiledAndVisible` holds
+    /// once `RenderSection.getVisibility(now, fade_ms)` reaches 0.3 (225 ms
+    /// at the default 0.75 s `chunkSectionFadeInTime`).
+    pub fn player_section_compiled(&mut self, now: u64, fade_ms: u64) {
+        let Some(ClientState::WaitingForPlayerChunk {
+            player_section_ready,
+            section_compiled_at,
+            ..
+        }) = &mut self.state
+        else {
+            return;
+        };
+        let uploaded = *section_compiled_at.get_or_insert(now);
+        let elapsed = now.saturating_sub(uploaded);
+        let visibility = if elapsed >= fade_ms {
+            1.0
+        } else {
+            elapsed as f32 / fade_ms as f32
+        };
+        if visibility >= 0.3 {
+            *player_section_ready = true;
+        }
+    }
     /// `tickClientLoad`.
     pub fn tick_client_load(&mut self, now: u64, player: PlayerCheck) {
         if let Some(ClientState::WaitingForPlayerChunk {
             player_section_ready,
             timeout_after,
+            ..
         }) = self.state
         {
             let ready = if now > timeout_after {
@@ -845,6 +875,28 @@ mod tracker_tests {
         assert!(tracker.is_level_ready(1_150));
         tracker.finish();
         assert!(!tracker.is_active() && !tracker.is_level_ready(2_000));
+    }
+
+    #[test]
+    fn a_compiled_section_counts_as_shown_once_it_has_faded_in_to_three_tenths() {
+        // RenderSection.getVisibility(now, 750) >= 0.3: 225 ms after the upload.
+        let mut tracker = LevelLoadTracker::new(0);
+        tracker.start_client_load(0, Reason::EndPortal);
+        tracker.loading_packets_received();
+        tracker.player_section_compiled(1_000, 750);
+        tracker.player_section_compiled(1_224, 750);
+        tracker.tick_client_load(1_224, ALIVE);
+        assert!(!tracker.is_level_ready(1_224));
+        tracker.player_section_compiled(1_225, 750);
+        tracker.tick_client_load(1_225, ALIVE);
+        assert!(tracker.is_level_ready(1_225));
+        // With the fade off, at once.
+        let mut tracker = LevelLoadTracker::new(0);
+        tracker.start_client_load(0, Reason::Other);
+        tracker.loading_packets_received();
+        tracker.player_section_compiled(500, 0);
+        tracker.tick_client_load(500, ALIVE);
+        assert!(tracker.is_level_ready(500));
     }
 
     #[test]

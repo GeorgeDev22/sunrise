@@ -6180,12 +6180,18 @@ impl Game<'_> {
             return;
         }
         // `LevelRenderer`'s playerCompiledSectionCallback: the section holding
-        // the camera is there (the column is lit, as meshing needs).
+        // the camera is compiled, which `LevelExtractor` does for a new section
+        // only once `SectionUpdateTracker.hasAllNeighbors` (the 8 chunks around
+        // it there, with light in their column): its column and the 8 around
+        // it lit, as meshing needs here too.
         let (cx, cz) = (
             (player.position.x.floor() as i32) >> 4,
             (player.position.z.floor() as i32) >> 4,
         );
-        let section_ready = self.streaming.is_lit(cx, cz);
+        let section_compiled =
+            (-1..=1).all(|dx| (-1..=1).all(|dz| self.streaming.is_lit(cx + dx, cz + dz)));
+        // `Util.toMillis(chunkSectionFadeInTime)`.
+        let fade_ms = (f64::from(self.settings.chunk_fade) * 1000.0) as u64;
         let camera_y = (player.position.y + f64::from(self.eye)).floor() as i32;
         let shape = self.world.shape;
         let check = sunrise_client::level_loading::PlayerCheck {
@@ -6199,8 +6205,8 @@ impl Game<'_> {
         let Some(r) = self.remote.as_mut() else {
             return;
         };
-        if section_ready && r.level_load.wants_player_section() {
-            r.level_load.player_section_ready();
+        if section_compiled && r.level_load.wants_player_section() {
+            r.level_load.player_section_compiled(now, fade_ms);
         }
         r.level_load.tick_client_load(now, check);
         if !r.level_load.is_level_ready(now) {
