@@ -1420,8 +1420,8 @@ class VanillaClient:
         # screen the frames are drawn on the CPU: the lightest graphics keep each well under a tick, or the client
         # runs its missed ticks in bursts and takes the server's packets on other ticks than a smooth one would.
         vanilla_client.write_options(args.game_dir, {
-            'maxFps': '60', 'renderDistance': '2', 'graphicsMode': '0', 'renderClouds': '"false"', 'ao': 'false',
-            'entityShadows': 'false', 'particles': '2', 'biomeBlendRadius': '0', 'mipmapLevels': '0',
+            'maxFps': '60', 'graphicsMode': '0', 'renderClouds': '"false"', 'ao': 'false',
+            'entityShadows': 'false', 'biomeBlendRadius': '0', 'mipmapLevels': '0',
             **extra_options()})
         command = vanilla_client.command(args)
         cp = command.index('-cp') + 1
@@ -1482,11 +1482,17 @@ def serve_resource_pack(folder):
             'resource-pack-sha1': hashlib.sha1(pack.read_bytes()).hexdigest(), 'require-resource-pack': 'true'}
 
 
+# What both clients tell the server in ClientboundClientInformation and the server acts on: the view distance
+# (how many chunks it sends) and the particle level. The vanilla client runs light (2, minimal) to keep its frames
+# short on a virtual screen; Sunrise starts with the same, or the two get different chunks.
+SHARED_OPTIONS = {'renderDistance': '2', 'particles': '2'}
+
+
 def extra_options():
-    """WIRE_STREAM_OPTIONS=key:value,...: options.txt entries both clients start with (a sensitivity, auto-jump,
-    toggled sprint and sneak, an inverted mouse), in vanilla's names and form."""
+    """SHARED_OPTIONS, then WIRE_STREAM_OPTIONS=key:value,...: options.txt entries both clients start with (a
+    sensitivity, auto-jump, toggled sprint and sneak, an inverted mouse), in vanilla's names and form."""
     spec = os.environ.get('WIRE_STREAM_OPTIONS', '')
-    return dict(item.split(':', 1) for item in spec.split(',') if ':' in item)
+    return {**SHARED_OPTIONS, **dict(item.split(':', 1) for item in spec.split(',') if ':' in item)}
 
 
 class HeadlessGame(Game):
@@ -1500,9 +1506,8 @@ class HeadlessGame(Game):
         if extras:
             # The game folder is the home here (Game runs sunrise-ctl there): extras sit next to options.txt.
             (self.home / 'sunrise-extras.txt').write_text(extras)
-        if extra_options():
-            # WIRE_STREAM_OPTIONS: the same options as the vanilla client's, in vanilla's options.txt form.
-            (self.home / 'options.txt').write_text(''.join(f'{k}:{v}\n' for k, v in extra_options().items()))
+        # The same options as the vanilla client's, in vanilla's options.txt form.
+        (self.home / 'options.txt').write_text(''.join(f'{k}:{v}\n' for k, v in extra_options().items()))
         self.env = lab.game_env(SUNRISE_HOME=self.home, SUNRISE_LAUNCHER_HOME=work / 'launcher',
                                 XDG_DATA_HOME=work / 'data', XDG_CONFIG_HOME=work / 'config',
                                 SUNRISE_TELEMETRY_URL='off', SUNRISE_TICK_SCRIPT=scripts / 'scenario.json')
