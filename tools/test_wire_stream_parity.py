@@ -1534,11 +1534,36 @@ def grim_server(directory, jars):
         # Paper's paperclip fetches its own.
         shutil.copy(jars['server'].with_name('server.jar'), directory / 'cache' / f'mojang_{lab.VERSION}.jar')
     (directory / 'plugins').mkdir()
-    shutil.copy(next(servers.glob('grimac-bukkit-*.jar')), directory / 'plugins')
+    # WIRE_STREAM_ANTICHEAT=intave: Intave (and the ProtocolLib it needs) in Grim's place; DIR also holds
+    # Intave-*.jar and ProtocolLib-*.jar.
+    if os.environ.get('WIRE_STREAM_ANTICHEAT', 'grim') == 'intave':
+        intave_plugin(servers, directory / 'plugins')
+    else:
+        shutil.copy(next(servers.glob('grimac-bukkit-*.jar')), directory / 'plugins')
     if via:
         shutil.copy(next(servers.glob('ViaVersion-*.jar')), directory / 'plugins')
     shutil.copy(paper, directory / 'paper.jar')
     return ['java', '-Xmx1536m', '-jar', 'paper.jar', 'nogui']
+
+
+def intave_plugin(servers, plugins):
+    """Intave with its default config, but logging only: no kick or ban commands, so a flag never ends the run.
+    Every detection still goes to plugins/Intave/logs as a `(DET)` line. ProtocolLib is given as the jar Intave
+    would fetch itself (plugins/ProtocolLib.jar), and bStats is off."""
+    import zipfile
+    jar = next(servers.glob('Intave-*.jar'))
+    shutil.copy(jar, plugins / 'Intave.jar')
+    shutil.copy(next(servers.glob('ProtocolLib-*.jar')), plugins / 'ProtocolLib.jar')
+    with zipfile.ZipFile(jar) as archive:
+        config = archive.read('config.yml').decode('utf-8')
+    config = re.sub(r'(?m)^kick-commands:\n(?:  - .*\n)+', 'kick-commands: []\n', config)
+    config = re.sub(r'(?m)^ban-commands:\n(?:  - .*\n)+', 'ban-commands: []\n', config)
+    if 'kick-commands: []' not in config or 'ban-commands: []' not in config:
+        raise Failed("Intave's config.yml has no kick-commands/ban-commands lists to empty")
+    (plugins / 'Intave').mkdir()
+    (plugins / 'Intave' / 'config.yml').write_text(config, encoding='utf-8')
+    (plugins / 'bStats').mkdir()
+    (plugins / 'bStats' / 'config.yml').write_text('enabled: false\n', encoding='utf-8')
 
 
 def grim_violations(db, clients):
@@ -1898,6 +1923,9 @@ def run(args, out):
         grim_db = directory / 'plugins' / 'GrimAC' / 'data' / 'history.v1.db'
         if grim_db.exists():
             shutil.copy(grim_db, out / 'grim.db')
+        intave_logs = directory / 'plugins' / 'Intave' / 'logs'
+        if intave_logs.exists():
+            shutil.copytree(intave_logs, out / 'intave-logs', dirs_exist_ok=True)
         if not args.keep:
             shutil.rmtree(work, ignore_errors=True)
     return captures
