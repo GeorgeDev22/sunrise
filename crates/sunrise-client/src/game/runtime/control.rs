@@ -759,6 +759,9 @@ impl Game<'_> {
                         self.book_shortcut(shortcut);
                         return ok();
                     }
+                    // The rest of the press goes to the book, as the window's (`book_key`).
+                    self.book_input(Some(key), None);
+                    return ok();
                 }
                 // KeyboardHandler.keyPress: the debug keys see the physical key first.
                 let physical = key;
@@ -1413,6 +1416,11 @@ impl Game<'_> {
             self.block_editor_key_code(key, None, None);
             return Ok(());
         }
+        // Sneak and sprint are ToggleKeyMappings: the window's keyboard path (mapped_key) gives them the press, so
+        // toggleCrouch and toggleSprint act on an agent's key as on a player's.
+        if matches!(key, KeyCode::ShiftLeft | KeyCode::ControlLeft) {
+            return self.mapped_key(key, true, false, raw, Source::Agent);
+        }
         if self.keys.press(key, Source::Agent) {
             self.key_pressed(key, raw)?;
         }
@@ -1422,6 +1430,11 @@ impl Game<'_> {
     /// `key ... up`: the script lets go. What it pressed as the keyboard's stand-in goes with it
     /// (a fixture's untagged press), and a controller's hold stays.
     fn control_key_up(&mut self, key: KeyCode) {
+        // Sneak and sprint: the toggle mappings take the release, as the window's (a toggled one stays down).
+        if matches!(key, KeyCode::ShiftLeft | KeyCode::ControlLeft) {
+            let _ = self.mapped_key(key, false, false, key, Source::Agent);
+            return;
+        }
         self.keys.release(&key, Source::Agent);
         self.keys.release(&key, Source::Keyboard);
     }

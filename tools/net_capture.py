@@ -13,7 +13,13 @@ contains, `diff` compares the packet sequences of two captures (for example
 Sunrise hosting and a vanilla server serving the same world).
 """
 import argparse
+import collections
+import heapq
+import itertools
 import json
+import os
+import queue
+import random
 import re
 import socket
 import sys
@@ -73,17 +79,78 @@ class Session:
         self.full = full
         self.start = time.time()
         self.closed = threading.Event()
+        # `phase` (seconds): in play, the server's packets reach the client that long after its last tick-end,
+        # mid-way between two of its ticks, so it takes each on its next tick for certain (no packet lands near a
+        # tick boundary, where which tick takes it depends on the client's frame).
+        self.phase = None
+        self.tick_ends = collections.deque(maxlen=200)
+        self.ticked = threading.Condition()
+        # WIRE_STREAM_LATENCY: a held server packet's line is written when it reaches the client, so the capture
+        # stays in time order and a replay walking it hands the packet over on the client tick vanilla had it.
+        self.later = []
+        self.later_seq = itertools.count()
+        self.later_cv = threading.Condition()
+        self.writer = None
+
+    def write(self, line, at=None):
+        if at is None or at <= time.time():
+            with self.lock:
+                self.out.write(line)
+                self.out.flush()
+            return
+        with self.later_cv:
+            heapq.heappush(self.later, (at, next(self.later_seq), line))
+            self.later_cv.notify()
+            if self.writer is None:
+                self.writer = threading.Thread(target=self.write_later, daemon=True)
+                self.writer.start()
+
+    def write_later(self):
+        while True:
+            with self.later_cv:
+                while not self.later:
+                    self.later_cv.wait()
+                at, _, line = self.later[0]
+                wait = at - time.time()
+                if wait > 0:
+                    self.later_cv.wait(wait)
+                    continue
+                heapq.heappop(self.later)
+            with self.lock:
+                self.out.write(line)
+                self.out.flush()
+
+    def hold(self, arrived):
+        """With a phase, in play: hold a server packet that `arrived` until `phase` after the client's last
+        tick-end before it, or after its next one when that point had passed. Times come from when packets
+        arrived, so a backlog goes out together, in order, as soon as its point is due."""
+        if self.phase is None or self.state["clientbound"] != "play":
+            return
+        with self.ticked:
+            before = [t for t in self.tick_ends if t <= arrived]
+            if not before:
+                return
+            if arrived < before[-1] + self.phase:
+                target = before[-1] + self.phase
+            else:
+                self.ticked.wait_for(lambda: self.tick_ends and self.tick_ends[-1] > arrived, timeout=1.0)
+                after = [t for t in self.tick_ends if t > arrived]
+                target = (after[0] if after else arrived) + self.phase
+        delay = target - time.time()
+        if delay > 0:
+            time.sleep(delay)
 
     def name(self, direction, packet_id):
         table = self.names.get((self.state[direction], direction), [])
         return table[packet_id] if 0 <= packet_id < len(table) else f"unknown_{packet_id}"
 
-    def record(self, direction, packet_id, payload):
+    def record(self, direction, packet_id, payload, at=None):
+        """`at`: when the packet reaches its peer, if not now (a clientbound one WIRE_STREAM_LATENCY holds)."""
         state = self.state[direction]
         name = self.name(direction, packet_id)
         entry = {
             "conn": self.id,
-            "t": round(time.time() - self.start, 4),
+            "t": round((at or time.time()) - self.start, 4),
             "dir": "s2c" if direction == "clientbound" else "c2s",
             "state": state,
             "id": packet_id,
@@ -94,10 +161,12 @@ class Session:
             entry["data"] = payload.hex()
         else:
             entry["head"] = payload[:512].hex()
-        with self.lock:
-            self.out.write(json.dumps(entry) + "\n")
-            self.out.flush()
+        self.write(json.dumps(entry) + "\n", at)
         self.transition(direction, name, payload)
+        if direction == "serverbound" and name == "client_tick_end" and state == "play":
+            with self.ticked:
+                self.tick_ends.append(time.time())
+                self.ticked.notify_all()
 
     def transition(self, direction, name, payload):
         s = self.state
@@ -118,10 +187,67 @@ class Session:
             self.pending_threshold = read_varint(payload, 0)[0]
 
 
+def latency_from_env():
+    """WIRE_STREAM_LATENCY: a round trip each frame waits half of in each direction. `MS` a constant ping, `MS~J`
+    a ping spread by up to J either way (seeded: the same run waits the same), `A..B/S` a ping rising from A to B
+    and falling back every S seconds. None without the variable."""
+    spec = os.environ.get("WIRE_STREAM_LATENCY")
+    if not spec:
+        return None
+    start = time.time()
+    if ".." in spec:
+        span, period = spec.split("/")
+        low, high = (float(v) for v in span.split(".."))
+        period = float(period)
+
+        def ping(now):
+            phase = ((now - start) % period) / period
+            return low + (high - low) * (1 - abs(2 * phase - 1))
+    else:
+        base, _, jitter = spec.partition("~")
+        base, jitter = float(base), float(jitter or 0)
+        rng = random.Random(1)
+
+        def ping(now):
+            return max(0.0, base + rng.uniform(-jitter, jitter))
+    return lambda now: ping(now) / 2000.0
+
+
 class Pipe(threading.Thread):
     def __init__(self, session, direction, src, dst):
         super().__init__(daemon=True)
         self.session, self.direction, self.src, self.dst = session, direction, src, dst
+        # WIRE_STREAM_LATENCY: frames go out from a queue at their due time, never before an earlier frame's.
+        self.latency = latency_from_env()
+        self.queue = queue.Queue() if self.latency else None
+        self.last_due = 0.0
+        if self.queue is not None:
+            threading.Thread(target=self.send_later, daemon=True).start()
+
+    def due(self):
+        """When a frame read now goes out under WIRE_STREAM_LATENCY (None without it)."""
+        if self.queue is None:
+            return None
+        now = time.time()
+        self.last_due = max(self.last_due, now + self.latency(now))
+        return self.last_due
+
+    def forward(self, frame, due):
+        if due is None:
+            self.dst.sendall(frame)
+        else:
+            self.queue.put((due, frame))
+
+    def send_later(self):
+        while True:
+            due, frame = self.queue.get()
+            wait = due - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                self.dst.sendall(frame)
+            except OSError:
+                return
 
     def run(self):
         buffer = b""
@@ -131,6 +257,7 @@ class Pipe(threading.Thread):
                 chunk = self.src.recv(1 << 16)
                 if not chunk:
                     break
+                arrived = time.time()
                 buffer += chunk
                 frames = []
                 while True:
@@ -147,7 +274,12 @@ class Pipe(threading.Thread):
                         size, p = read_varint(body, 0)
                         body = zlib.decompress(body[p:]) if size else body[p:]
                     packet_id, p = read_varint(body, 0)
-                    s.record(self.direction, packet_id, body[p:])
+                    if self.direction == "clientbound":
+                        s.hold(arrived)
+                    # Under WIRE_STREAM_LATENCY a server packet counts from when it reaches the client, which is
+                    # what a replay of the capture delivers it by; a client packet from when the client sent it.
+                    due = self.due()
+                    s.record(self.direction, packet_id, body[p:], at=due if self.direction == "clientbound" else None)
                     # The compression threshold applies after its packet, in
                     # both directions; the client answers only after reading it.
                     pending = getattr(s, "pending_threshold", None)
@@ -156,7 +288,7 @@ class Pipe(threading.Thread):
                         s.pending_threshold = None
                     # State switches must be in effect before the peer can
                     # answer, so forward each frame after recording it.
-                    self.dst.sendall(frames.pop())
+                    self.forward(frames.pop(), due)
         except (OSError, ValueError, zlib.error) as e:
             with s.lock:
                 s.out.write(json.dumps({"conn": s.id, "event": "error", "dir": self.direction,
@@ -171,7 +303,7 @@ class Pipe(threading.Thread):
             s.closed.set()
 
 
-def serve(listen, target, out_path, full=False, ready=None, stop=None):
+def serve(listen, target, out_path, full=False, ready=None, stop=None, phase=None):
     names = load_names()
     host, port = target.rsplit(":", 1)
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -201,15 +333,16 @@ def serve(listen, target, out_path, full=False, ready=None, stop=None):
             for sock in (client, upstream):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             session = Session(conn_id, out, names, lock, full)
+            session.phase = phase
             Pipe(session, "serverbound", client, upstream).start()
             Pipe(session, "clientbound", upstream, client).start()
     server.close()
 
 
-def start_background(listen, target, out_path, full=False):
+def start_background(listen, target, out_path, full=False, phase=None):
     """Run the proxy on a thread; returns the stop event."""
     ready, stop = threading.Event(), threading.Event()
-    threading.Thread(target=serve, args=(listen, target, out_path, full, ready, stop),
+    threading.Thread(target=serve, args=(listen, target, out_path, full, ready, stop, phase),
                      daemon=True).start()
     ready.wait(5)
     return stop
