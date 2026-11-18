@@ -692,6 +692,16 @@ SCENARIOS = {
         setup=[f'setblock 0 {FLOOR} 3 minecraft:end_portal'],
         ticks=140, steps={0: ['key w down'], 12: ['key w up'],
                           110: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
+    # The End portal entered in one state by both clients (item 93: in end_portal the server teleported them at
+    # different points of the fall into the portal, so they arrived with different motions). Falling fast from 5
+    # blocks up, and standing still with the portal placed where the player stands.
+    'end_portal_drop': dict(
+        setup=[f'setblock 0 {FLOOR} 3 minecraft:end_portal'],
+        ticks=120, steps={0: [f'command tp @s 0.5 {FLOOR + 6} 3.5'],
+                          100: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
+    'end_portal_inside': dict(
+        ticks=110, steps={0: [f'command setblock 0 {FLOOR + 1} 0 minecraft:end_portal'],
+                          90: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
     # Mobs' and projectiles' pushes (item 130): a shulker's bullets (levitation), a ghast's fireball, a breeze's
     # wind charge.
     'shulker_bullets': dict(
