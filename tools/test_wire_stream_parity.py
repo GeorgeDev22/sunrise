@@ -702,8 +702,11 @@ SCENARIOS = {
         setup=[f'setblock 0 {FLOOR} 3 minecraft:end_portal'],
         ticks=120, steps={0: [f'command tp @s 0.5 {FLOOR + 6} 3.5'],
                           100: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
+    # The portal goes once the player has gone through: left at the spawn point, it sent the next client to join
+    # (after the last scenario, before any reset) straight into the End.
     'end_portal_inside': dict(
         ticks=110, steps={0: [f'command setblock 0 {FLOOR + 1} 0 minecraft:end_portal'],
+                          5: [f'command execute in minecraft:overworld run setblock 0 {FLOOR + 1} 0 minecraft:air'],
                           90: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
     # Mobs' and projectiles' pushes (item 130): a shulker's bullets (levitation), a ghast's fireball, a breeze's
     # wind charge.
