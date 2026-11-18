@@ -1385,7 +1385,7 @@ mod clamp_rotation_tests {
     /// -179.99998. Expected values from Java's float arithmetic.
     #[test]
     fn the_view_rounds_as_vanilla_adds_and_subtracts() {
-        assert_eq!(clamp_boat_rotation(-179.99998, -75.123456).0, -180.0);
+        assert_eq!(clamp_boat_rotation(-179.99998, -75.12346).0, -180.0);
         // Past 105 degrees the view is held at the limit.
         assert_eq!(clamp_boat_rotation(200.0, 0.0), (255.0, 55.0));
     }
