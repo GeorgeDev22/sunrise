@@ -129,6 +129,7 @@ def main():
     parser.add_argument('--orb-lava-fixture', action='store_true', help='guarded server orb lava contact scene')
     parser.add_argument('--orb-lava-raw-diagnostic', action='store_true', help='retain random Pos/Motion as exact raw diagnostics')
     parser.add_argument('--orb-fire-fixture', action='store_true', help='server orb saved Fire and its burn, tick by tick')
+    parser.add_argument('--lava-fire-fixture', action='store_true', help='lava sets Fire on projectiles, falling blocks and orbs')
     parser.add_argument('--mob-home-fixture', action='store_true')
     parser.add_argument('--mob-home-holder-removal-diagnostic', action='store_true')
     parser.add_argument('--mob-home-late-detach-control', action='store_true')
@@ -383,6 +384,12 @@ def main():
         except ImportError:
             from orb_fire_corpus import orb_fire
         groups = [('setup', corpus_module.group_setup()), ('orb fire', orb_fire())]
+    if args.lava_fire_fixture:
+        try:
+            from .lava_fire_corpus import lava_fire
+        except ImportError:
+            from lava_fire_corpus import lava_fire
+        groups = [('setup', corpus_module.group_setup()), ('lava fire', lava_fire())]
     if args.mob_home_fixture:
         try:
             from .mob_home_corpus import mob_home
