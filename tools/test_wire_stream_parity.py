@@ -1027,6 +1027,20 @@ SCENARIOS = {
     # (the server's default) at the end.
     'afk_30min': dict(setup=['difficulty peaceful'], ticks=36040,
                       steps={36000: ['key w down'], 36010: ['key w up'], 36030: ['command difficulty easy']}),
+    # A controller (item 90) on Sunrise against the keyboard and mouse on vanilla: the left stick walks, south jumps,
+    # the left stick's click sprints, the right trigger attacks. On a server the stick moves as the keys it sets do.
+    'pad_walk_jump_attack': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=6.5), SWORD], ticks=60,
+        steps={0: ['key w down'], 10: ['key space tap'], 20: ['key ctrl down'], 30: ['mouse left click'],
+               36: ['key ctrl up'], 45: ['key w up'], 50: ['mouse left click']},
+        sunrise_steps={0: ['pad connection connected', 'pad stick left 0 1'], 10: ['pad south tap'],
+                       20: ['pad ls down'], 30: ['pad rt tap'], 36: ['pad ls up'], 45: ['pad stick left 0 0'],
+                       50: ['pad rt tap'], 58: ['pad connection disconnected']}),
+    # Half a tilt of the stick forward and to the side: on a server the keys it sets, at full speed.
+    'pad_half_stick': dict(
+        ticks=50, steps={0: ['key w down', 'key d down'], 30: ['key w up', 'key d up']},
+        sunrise_steps={0: ['pad connection connected', 'pad stick left 0.45 0.45'], 30: ['pad stick left 0 0'],
+                       48: ['pad connection disconnected']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
     'death_respawn': dict(
@@ -1385,7 +1399,8 @@ def sunrise_lines(lines):
 
 def script(name, spec, sunrise):
     steps = {0: ['key 1 tap', 'key w down'], 2: ['key w up']}
-    for tick, lines in spec['steps'].items():
+    # `sunrise_steps`: what Sunrise does instead (a controller), where vanilla has only the keyboard and mouse.
+    for tick, lines in (spec.get('sunrise_steps', spec['steps']) if sunrise else spec['steps']).items():
         steps.setdefault(tick + PRELUDE, []).extend(sunrise_lines(lines) if sunrise else lines)
     return {'name': name, 'ticks': spec['ticks'] + PRELUDE, 'steps': {str(k): v for k, v in sorted(steps.items())}}
 
