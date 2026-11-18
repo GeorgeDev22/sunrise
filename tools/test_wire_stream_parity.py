@@ -1031,11 +1031,11 @@ SCENARIOS = {
     # the left stick's click sprints, the right trigger attacks. On a server the stick moves as the keys it sets do.
     'pad_walk_jump_attack': dict(
         setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=6.5), SWORD], ticks=60,
-        steps={0: ['key w down'], 10: ['key space tap'], 20: ['key ctrl down'], 30: ['mouse left click'],
+        steps={0: ['key w down'], 10: ['key space down'], 12: ['key space up'], 20: ['key ctrl down'], 30: ['mouse left click'],
                36: ['key ctrl up'], 45: ['key w up'], 50: ['mouse left click']},
         # The virtual pad is read at the start of the frame, before the tick's script lines: each line comes a
         # tick ahead, as a real pad's state, read between ticks, reaches the tick after it.
-        sunrise_steps={-2: ['pad connection connected'], -1: ['pad stick left 0 1'], 9: ['pad south tap'],
+        sunrise_steps={-2: ['pad connection connected'], -1: ['pad stick left 0 1'], 9: ['pad south down'], 11: ['pad south up'],
                        19: ['pad ls down'], 29: ['pad rt tap'], 35: ['pad ls up'], 44: ['pad stick left 0 0'],
                        49: ['pad rt tap'], 58: ['pad connection disconnected']}),
     # Half a tilt of the stick forward and to the side: on a server the keys it sets, at full speed.
