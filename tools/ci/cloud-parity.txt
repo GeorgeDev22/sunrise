@@ -1,0 +1,1 @@
+python3 tools/test_lava_fire_parity.py --binary bin/sunrise-client
