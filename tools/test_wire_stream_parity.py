@@ -108,6 +108,16 @@ KNOCKBACK = 'command damage @s 1 minecraft:mob_attack by @e[tag=far,limit=1]'
 FAR_HUSK = ('summon minecraft:husk 0.5 {y} 9.0 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Tags:["far"]}}'
             .format(y=FLOOR + 1))
 SWORD = f'item replace entity {PLAYER} weapon.mainhand with minecraft:diamond_sword'
+
+
+def lunge(slot, level=2):
+    """An iron spear with Lunge `level` in `slot` (an `item replace` slot: hotbar.1, weapon.mainhand...)."""
+    return (f'item replace entity {PLAYER} {slot} with '
+            f'minecraft:iron_spear[minecraft:enchantments={{"minecraft:lunge":{level}}}]')
+
+
+# A sword in the first hotbar slot and a Lunge spear in the second: the attribute swap's two items.
+SWAP_PAIR = [f'item replace entity {PLAYER} hotbar.0 with minecraft:diamond_sword', lunge('hotbar.1')]
 # A husk with its AI, 6 blocks ahead: it walks to the player and attacks (a thousand health, takes knockback).
 CHASER = ('summon minecraft:husk 0.5 {y} 6.5 {{PersistenceRequired:1b,Health:1000f,'
           'attributes:[{{id:"minecraft:max_health",base:1000.0}}]}}'.format(y=FLOOR + 1))
@@ -777,6 +787,93 @@ SCENARIOS = {
         setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=5.5), f'item replace entity {PLAYER} weapon.mainhand with minecraft:iron_spear'],
         ticks=90, steps={0: ['look 0 10'], 5: ['mouse left click'], 25: ['mouse left click'], 40: ['key ctrl down', 'key w down'],
                          42: ['mouse right down'], 70: ['mouse right up'], 75: ['key w up', 'key ctrl up']}),
+    # Lunge (sunrise-org/sunrise#808, #637): EnchantmentHelper.doPostPiercingAttackEffects runs on the server only,
+    # so the dash reaches the client as the server's set_entity_motion. Three jabs at the sky, turning between them
+    # to stay in the arena.
+    'lunge_plain': dict(
+        setup=[lunge('hotbar.0')],
+        ticks=90, steps={0: ['look 0 0'], 5: ['mouse left click'], 30: ['look 180 0'], 35: ['mouse left click'],
+                         60: ['look 0 0'], 65: ['mouse left click']}),
+    'lunge_plain_target': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=4.5), lunge('hotbar.0')],
+        ticks=90, steps={0: ['look 0 10'], 5: ['mouse left click'], 35: ['mouse left click'], 65: ['mouse left click']}),
+    # Lunge I, II and III, each after a hotbar switch and the spear's full charge.
+    'lunge_levels': dict(
+        setup=[lunge('hotbar.0', 1), lunge('hotbar.1', 2), lunge('hotbar.2', 3)],
+        ticks=130, steps={0: ['look 0 0'], 5: ['mouse left click'], 30: ['key 2 tap', 'look 180 0'],
+                          55: ['mouse left click'], 80: ['key 3 tap', 'look 0 0'], 105: ['mouse left click']}),
+    # The attribute swap: a fully charged sword, then the number key and the click on one tick. Player.tick resets
+    # the charge only after the tick's packets, and MultiPlayerGameMode.piercingAttack sends the slot first
+    # (ensureHasSentCarriedItem), so the server jabs with the spear on the sword's charge.
+    'lunge_swap_same_tick': dict(
+        setup=SWAP_PAIR,
+        ticks=95, steps={0: ['look 0 0'], 20: ['key 2 tap', 'mouse left click'], 45: ['key 1 tap', 'look 180 0'],
+                         70: ['key 2 tap', 'mouse left click']}),
+    # The control: the click a tick after the key finds the charge reset, and the spear refuses to jab.
+    'lunge_swap_next_tick': dict(
+        setup=SWAP_PAIR,
+        ticks=95, steps={0: ['look 0 0'], 20: ['key 2 tap'], 21: ['mouse left click'], 45: ['key 1 tap', 'look 180 0'],
+                         70: ['key 2 tap'], 71: ['mouse left click']}),
+    # Two number keys on one tick (#2072: keys 1-9 are read in order, the last one read wins): 3 and 2 end on slot
+    # 3 (stone, a plain swing), 2 and 1 on slot 2 (the spear jabs).
+    'lunge_swap_two_keys': dict(
+        setup=SWAP_PAIR + [f'item replace entity {PLAYER} hotbar.2 with minecraft:stone 4'],
+        ticks=75, steps={0: ['look 0 0'], 20: ['key 3 tap', 'key 2 tap', 'mouse left click'], 35: ['key 1 tap'],
+                         50: ['key 2 tap', 'key 1 tap', 'mouse left click']}),
+    # The swap over and over: spear and click, back to the sword, its charge filled again.
+    'lunge_swap_repeat': dict(
+        setup=SWAP_PAIR,
+        ticks=135, steps=merge({0: ['look 0 0']}, {t: ['key 2 tap', 'mouse left click'] for t in (20, 50, 80, 110)},
+                               {t: ['key 1 tap', f'look {180 * (t // 30 % 2)} 0'] for t in (25, 55, 85, 115)})),
+    # From an empty hand (#808's animation note): the empty hand's charge, then the spear.
+    'lunge_swap_from_empty': dict(
+        setup=[lunge('hotbar.1')],
+        ticks=45, steps={0: ['look 0 0'], 20: ['key 2 tap', 'mouse left click']}),
+    # The other way: the spear held, then the sword's key and a hit on a target on one tick.
+    'lunge_swap_away': dict(
+        setup=SWAP_PAIR + [TARGET.format(x=0.5, y=FLOOR + 1, z=2.5)],
+        ticks=60, steps={0: ['look 0 10'], 5: ['key 2 tap'], 35: ['key 1 tap', 'mouse left click']}),
+    # Lunge's requirements (enchantment data): no dash with 6 food or less outside creative, in water, riding or
+    # gliding; creative dashes on an empty food bar.
+    # Hunger 255 burns 1.28 exhaustion a tick: the reset's saturation and the full bar (40 points, 160
+    # exhaustion) are gone after ~125 ticks.
+    'lunge_hungry': dict(
+        setup=[f'effect give {PLAYER} minecraft:hunger 12 255 true', lunge('hotbar.0')],
+        ticks=190, steps={0: ['look 0 0'], 170: ['mouse left click']}),
+    'lunge_creative_hungry': dict(
+        setup=[f'effect give {PLAYER} minecraft:hunger 12 255 true', lunge('hotbar.0')],
+        ticks=200, steps={0: ['look 0 0'], 165: ['command gamemode creative'], 180: ['mouse left click']}),
+    'lunge_water': dict(
+        setup=[f'fill -4 {FLOOR + 1} -2 4 {FLOOR + 2} 8 minecraft:water', lunge('hotbar.0')],
+        ticks=60, steps={0: ['look 0 0'], 30: ['mouse left click']}),
+    'lunge_boat': dict(
+        setup=[f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 3.5', lunge('hotbar.0')],
+        ticks=60, steps={0: ['command ride @s mount @e[type=minecraft:oak_boat,limit=1]'], 10: ['look 0 0'],
+                         30: ['mouse left click'], 45: ['key shift down'], 49: ['key shift up']}),
+    'lunge_elytra': dict(
+        setup=[MACE_RESISTANCE, f'item replace entity {PLAYER} armor.chest with minecraft:elytra', lunge('hotbar.0')],
+        ticks=90, anchor='accept_teleportation',
+        steps={0: [f'command tp @s 0.5 {FLOOR + 30} 0.5 0 10'], 8: ['key space down'], 9: ['key space up'],
+               12: ['key space down'], 13: ['key space up'], 30: ['mouse left click'], 40: ['look 0 40']}),
+    # The swap after N ticks of the sword: the server judges the STAB with the attack speed the player still has,
+    # the sword's (detectEquipmentUpdates runs in the player's tick, after the packets): 12.5 ticks a charge,
+    # where the spear's would be 19. Only N changes from one to the next.
+    **{f'lunge_charge_{n}': dict(
+        setup=SWAP_PAIR,
+        ticks=10 + n + 25, steps={0: ['look 0 0'], 2: ['key 2 tap'], 10: ['key 1 tap'],
+                                  10 + n: ['key 2 tap', 'mouse left click']})
+       for n in (10, 12, 13, 14, 15, 16, 20)},
+    # The jab's damage: a plain spear's jab, a sword's hit, then the attribute swap's jab (the sword's attack
+    # damage on the spear's STAB), each read back from the husk's Health.
+    'lunge_swap_damage': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:diamond_sword',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:iron_spear',
+               TARGET.format(x=0.5, y=FLOOR + 1, z=3.5)],
+        ticks=125, steps={0: ['look 0 15'], 5: ['key 2 tap'], 30: ['mouse left click'],
+                          35: ['command data get entity @e[type=minecraft:husk,limit=1] Health'], 40: ['key 1 tap'],
+                          70: ['mouse left click'], 75: ['command data get entity @e[type=minecraft:husk,limit=1] Health'],
+                          105: ['key 2 tap', 'mouse left click'],
+                          110: ['command data get entity @e[type=minecraft:husk,limit=1] Health']}),
     # A happy ghast with a harness, ridden: up, forward, down (item 36).
     'happy_ghast_ride': dict(
         setup=[f'summon minecraft:happy_ghast 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,'
@@ -1743,6 +1840,11 @@ def run(args, out):
     scripts.mkdir()
     if os.environ.get('WIRE_STREAM_GRIM'):
         vanilla = grim_server(directory, jars)
+    # WIRE_STREAM_SUNRISE_SERVER=BIN: Sunrise's own dedicated server (BIN/sunrise-client --dedicated, the server
+    # code single player runs on its server thread) in place of vanilla's, to see what both clients get from it.
+    if os.environ.get('WIRE_STREAM_SUNRISE_SERVER'):
+        vanilla = [str(Path(os.environ['WIRE_STREAM_SUNRISE_SERVER']) / 'sunrise-client'), '--resources',
+                   str(resources), '--dedicated', '--nogui']
     server = Server(vanilla, directory, 'server')
     captures = {}
     try:
