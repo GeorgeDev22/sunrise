@@ -63,6 +63,12 @@ ATTRIBUTES = ('movement_speed', 'jump_strength', 'step_height', 'gravity', 'scal
 RESET = [
     'gamerule spawn_mobs false', 'gamerule advance_time false', 'gamerule advance_weather false', 'weather clear',
     f'fill -12 {FLOOR + 1} -12 12 {FLOOR + 12} 28 minecraft:air',
+    # The flat world's layers under the grass too: water_swim's pool replaces the bedrock, and the pits of
+    # jump_bridge and the clutches take the dirt. The clients play one after the other on the same world, so
+    # without these Sunrise met what vanilla's whole run had dug (it fell through water_swim's bedrock into the
+    # void in jump_bridge, item 93).
+    f'fill -12 {FLOOR - 3} -12 12 {FLOOR - 3} 28 minecraft:bedrock',
+    f'fill -12 {FLOOR - 2} -12 12 {FLOOR - 1} 28 minecraft:dirt',
     f'fill -12 {FLOOR} -12 12 {FLOOR} 28 minecraft:grass_block',
     'kill @e[type=!minecraft:player]', f'clear {PLAYER}', f'effect clear {PLAYER}', f'gamemode survival {PLAYER}',
     f'effect give {PLAYER} minecraft:saturation 1 20 true', f'effect give {PLAYER} minecraft:instant_health 1 5 true',
