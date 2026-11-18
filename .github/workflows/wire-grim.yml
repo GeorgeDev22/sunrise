@@ -17,9 +17,9 @@ concurrency:
 env:
   # cloud game build 44356788447: cb-next 9be2fa5 + #2866, #2867 and #2724's spear fix (d06827c).
   SUNRISE_RUN: '44356788447'
-  SHARDS: '2'
+  SHARDS: '5'
   # The scenario list this run plays (tools/ci/wire-grim-scenarios.txt: all of item 93).
-  SCENARIO_LIST: tools/ci/wire-grim-lunge.txt
+  SCENARIO_LIST: tools/ci/wire-grim-scenarios.txt
 jobs:
   grim:
     name: ${{ matrix.anticheat }} ${{ matrix.server }} r${{ matrix.round }} s${{ matrix.shard }}
@@ -29,11 +29,12 @@ jobs:
       fail-fast: false
       matrix:
         # grim or intave (Intave logs only: no kicks or bans; tools/test_wire_stream_parity.py intave_plugin).
-        anticheat: ['grim', 'intave', 'proxy']
+        # grim, intave, or proxy (item 6: the vanilla server behind Velocity, a server switch at the end).
+        anticheat: ['grim', 'intave']
         server: ['paper-26.3', 'via-1.21.11']
         # Three rounds of the whole list: a difference counts only when it comes back in each.
         round: [1, 2, 3]
-        shard: [0, 1]
+        shard: [0, 1, 2, 3, 4]
         # The proxy runs on the vanilla server: the ViaVersion half would repeat it.
         exclude:
           - anticheat: proxy
