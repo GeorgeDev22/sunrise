@@ -1682,8 +1682,10 @@ def run(args, out):
             client = None
             try:
                 if who != 'vanilla':
+                    # WIRE_STREAM_EXTRAS=key:value,... (item 89): the Sunrise client's sunrise-extras.txt.
+                    extras = os.environ.get('WIRE_STREAM_EXTRAS', '').replace(',', '\n') or None
                     client = SunriseClient(Path(args.bin).resolve(), resources, work / who, f'127.0.0.1:{listen}',
-                                           scripts, LEGACY_EXTRAS if who == 'sunrise-legacy' else None)
+                                           scripts, LEGACY_EXTRAS if who == 'sunrise-legacy' else extras)
                 else:
                     client = VanillaClient(f'127.0.0.1:{listen}', work / 'vanilla', out / 'vanilla-client.log')
                     if not client.ready.wait(900):
