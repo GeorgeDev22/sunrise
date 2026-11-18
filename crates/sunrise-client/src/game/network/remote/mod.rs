@@ -399,11 +399,12 @@ impl CartLerp {
 }
 
 /// `SteppedInterpolationHandler.doInterpolate`'s `setPos` and `setRot` on a
-/// mob: its yaw kept continuous (the same turn as vanilla's, without the
-/// wrap that would spin it in the frame between ticks), its pitch clamped.
+/// mob: the yaw turned the short way and kept within a turn (`yRot % 360.0F`),
+/// as a mount taken over next reports it; its draw lerps by the shortest angle,
+/// so the wrap does not spin it. Its pitch clamped.
 fn place_interpolated(m: &mut Mob, at: PosRot) {
     m.position = Vec3::new(at.position[0], at.position[1], at.position[2]);
-    m.yaw += wrap_degrees(at.yaw - m.yaw);
+    m.yaw = (m.yaw + wrap_degrees(at.yaw - m.yaw)) % 360.0;
     m.head_pitch = (at.pitch % 360.0).clamp(-90.0, 90.0);
 }
 
