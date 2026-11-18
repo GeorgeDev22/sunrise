@@ -1033,13 +1033,15 @@ SCENARIOS = {
         setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=6.5), SWORD], ticks=60,
         steps={0: ['key w down'], 10: ['key space tap'], 20: ['key ctrl down'], 30: ['mouse left click'],
                36: ['key ctrl up'], 45: ['key w up'], 50: ['mouse left click']},
-        sunrise_steps={0: ['pad connection connected', 'pad stick left 0 1'], 10: ['pad south tap'],
-                       20: ['pad ls down'], 30: ['pad rt tap'], 36: ['pad ls up'], 45: ['pad stick left 0 0'],
-                       50: ['pad rt tap'], 58: ['pad connection disconnected']}),
+        # The virtual pad is read at the start of the frame, before the tick's script lines: each line comes a
+        # tick ahead, as a real pad's state, read between ticks, reaches the tick after it.
+        sunrise_steps={-2: ['pad connection connected'], -1: ['pad stick left 0 1'], 9: ['pad south tap'],
+                       19: ['pad ls down'], 29: ['pad rt tap'], 35: ['pad ls up'], 44: ['pad stick left 0 0'],
+                       49: ['pad rt tap'], 58: ['pad connection disconnected']}),
     # Half a tilt of the stick forward and to the side: on a server the keys it sets, at full speed.
     'pad_half_stick': dict(
         ticks=50, steps={0: ['key w down', 'key d down'], 30: ['key w up', 'key d up']},
-        sunrise_steps={0: ['pad connection connected', 'pad stick left 0.45 0.45'], 30: ['pad stick left 0 0'],
+        sunrise_steps={-2: ['pad connection connected'], -1: ['pad stick left 0.45 0.45'], 29: ['pad stick left 0 0'],
                        48: ['pad connection disconnected']}),
     # Death and respawn (items 4, 143): killed, keys and clicks on the death screen (which take no action),
     # the respawn button, then walking again.
