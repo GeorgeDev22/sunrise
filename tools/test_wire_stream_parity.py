@@ -1652,7 +1652,9 @@ class VanillaClient:
         vanilla_client.write_options(args.game_dir, {
             # WIRE_STREAM_VANILLA_FPS: the frame cap. A tick is sent in a frame, so below 60 frames a second the ticks
             # snap to the frames (33/66 ms apart at 30) instead of 50 ms; headroom above 60 keeps them even.
-            'maxFps': os.environ.get('WIRE_STREAM_VANILLA_FPS', '60'), 'graphicsMode': '0', 'renderClouds': '"false"', 'ao': 'false',
+            'maxFps': os.environ.get('WIRE_STREAM_VANILLA_FPS', '60'), 'graphicsMode': '0',
+            # WIRE_STREAM_VANILLA_VSYNC=false: no vsync (on a virtual screen it can hold the frames to its refresh).
+            **({'enableVsync': 'false'} if os.environ.get('WIRE_STREAM_VANILLA_VSYNC') == 'false' else {}), 'renderClouds': '"false"', 'ao': 'false',
             'entityShadows': 'false', 'biomeBlendRadius': '0', 'mipmapLevels': '0',
             **extra_options()})
         command = vanilla_client.command(args)
