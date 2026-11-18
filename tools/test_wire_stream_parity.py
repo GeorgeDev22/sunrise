@@ -1110,12 +1110,15 @@ SCENARIOS = {
                'maxUses:12,xp:1,priceMultiplier:0.05f}]}}', f'give {PLAYER} minecraft:emerald 5'],
         ticks=34, steps={0: ['look 0 15'], 2: ['mouse right click'], 8: ['select-trade 0'],
                          14: ['click-slot 2 shift'], 22: ['key esc tap']}),
-    # A beacon (item 62) on a 3x3 iron pyramid: opened, an iron ingot paid, speed confirmed.
+    # A beacon (item 62) on a 3x3 iron pyramid: opened, an iron ingot paid, speed confirmed. The beacon counts its
+    # pyramid only every 80 game ticks (BeaconBlockEntity.tick), so the player waits 85 before opening it: on a
+    # level-0 beacon Paper refuses speed and disconnects the client ("tried to set invalid beacon effects"), which
+    # ended the whole-list Grim run (item 93) there.
     'beacon_set': dict(
         setup=[f'fill -1 {FLOOR} 2 1 {FLOOR} 4 minecraft:iron_block', f'setblock 0 {FLOOR + 1} 3 minecraft:beacon',
                f'give {PLAYER} minecraft:iron_ingot 1'],
-        ticks=30, steps={0: ['look 0 20'], 2: ['mouse right click'], 8: ['click-slot 28'], 12: ['click-slot 0'],
-                         18: ['beacon speed']}),
+        ticks=115, steps={0: ['look 0 20'], 87: ['mouse right click'], 93: ['click-slot 28'], 97: ['click-slot 0'],
+                          103: ['beacon speed']}),
     # Statistics (item 88): the pause menu's Statistics button (the stats request), back to the pause menu, out.
     'stats_open': dict(ticks=30, steps={2: ['open-stats'], 15: ['key esc tap'], 22: ['key esc tap']}),
     # 30 minutes standing (item 116): keep-alives, the 20-tick position reminder and the time over a long idle, then
