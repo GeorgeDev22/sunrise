@@ -2277,6 +2277,7 @@ sunrise-client game::remote::player_tick_tests::a_mod_that_does_not_listen_is_ne
 sunrise-client game::remote::player_tick_tests::client_player_ticks_on_the_death_screen_too lib daily resources
 sunrise-client game::remote::player_tick_tests::guest_tick_brackets_sleep_cooldowns_pickups_and_death lib daily resources
 sunrise-client game::remote::player_tick_tests::the_name_tag_over_a_player_shows_the_name_a_mod_formats lib daily resources
+sunrise-client game::remote::respawn_motion_tests::a_portals_respawn_keeps_the_players_motion_and_a_deaths_does_not lib daily resources
 sunrise-client game::remote::tables::tests::a_servers_block_and_item_tags_replace_the_games lib daily resources
 sunrise-client game::remote::tests::a_mod_chat_line_shows_locally_and_sends_nothing lib daily resources
 sunrise-client game::remote::tests::a_reconfiguring_client_plays_menu_music_and_never_indexes_past_the_biomes lib daily resources
