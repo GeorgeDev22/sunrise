@@ -329,6 +329,9 @@ pub struct Projectile {
     /// Non-arrow Projectile.hasBeenShot, independent of entity age.
     pub has_been_shot: bool,
     shoot_event: Option<Vec3>,
+    /// A shulker bullet lava hurt this tick (`ShulkerBullet.hurtServer` from
+    /// `Entity.lavaHurt`): gone, its hurt and burn left for the game to play.
+    lava_hurt: bool,
     /// The shooter's bow enchantments (Power, Punch, Flame, Piercing).
     pub bonus: crate::mobs::gear::ArrowBonus,
     /// Arrows' `AbstractArrow` state (ticked by `arrows::tick`).
@@ -649,6 +652,7 @@ impl Projectile {
             left_owner: false,
             has_been_shot: false,
             shoot_event: None,
+            lava_hurt: false,
             bonus: Default::default(),
             acceleration,
             needs_sync: false,
@@ -830,6 +834,15 @@ impl Projectile {
     /// `Entity.baseTick` counts down active fire after block effects. The two
     /// item fireballs then renew their own flame in `AbstractHurtingProjectile.tick`.
     fn fire_tick(&mut self, w: &impl ProjectileWorld, client_side: bool, from: Vec3) {
+        if matches!(self.kind, ProjectileKind::ShulkerBullet { .. }) {
+            // LavaFluid.entityInside: lavaIgnite, then lavaHurt, whose
+            // hurtServer destroys the bullet on the server.
+            if self.in_lava(w, from) {
+                self.ignite_for_ticks(300);
+                self.lava_hurt = !client_side;
+            }
+            return;
+        }
         if !(self.is_thrown()
             || self.kind == ProjectileKind::ExperienceBottle
             || self.is_fireball()
@@ -1651,7 +1664,7 @@ impl Projectile {
             self.first_tick_bubble_column(w);
         }
         let from = self.position;
-        let result = self.tick_inner(w, impact);
+        let mut result = self.tick_inner(w, impact);
         if self.applies_block_effects() {
             self.bubble_columns_along(w, from);
         }
@@ -1659,6 +1672,10 @@ impl Projectile {
         // (Game::sweep_projectile_inside), where the level host for a part's
         // contact is: this tick's world view is read-only.
         self.fire_tick(w, client_side, from);
+        if self.lava_hurt {
+            // `isAlive()` fails: a bullet lava destroyed hits nothing.
+            result = (false, Hit::None);
+        }
         self.stuck_tick(w, from);
         if !base_first {
             self.tick_shoot_event();
@@ -1706,6 +1723,10 @@ impl Projectile {
             self.has_been_shot = true;
             self.shoot_event = Some(self.position);
         }
+    }
+    /// Whether lava destroyed this shulker bullet in its last tick, once.
+    pub fn take_lava_hurt(&mut self) -> bool {
+        std::mem::take(&mut self.lava_hurt)
     }
     /// Drain the first-tick event for dispatch in the owner's game context.
     pub fn take_shoot_event(&mut self) -> Option<Vec3> {
@@ -2315,6 +2336,23 @@ mod tests {
         above.velocity = Vec3::ZERO;
         above.tick(&Lava);
         assert_eq!(above.fire_ticks, 0, "over the fluid's 8/9 box, not in it");
+    }
+    /// Lava's `lavaHurt` reaches `ShulkerBullet.hurtServer`, which destroys
+    /// the bullet on the server (#2689).
+    #[test]
+    fn lava_destroys_a_shulker_bullet() {
+        let kind = ProjectileKind::ShulkerBullet {
+            target: None,
+            dir: None,
+            steps: 0,
+            delta: [0.0; 3],
+            seed: 1,
+        };
+        let mut p = Projectile::new(kind, Vec3::new(0.5, 99.2, 0.5), None);
+        p.velocity = Vec3::ZERO;
+        assert_eq!(p.tick(&Lava), (false, Hit::None));
+        assert!(p.take_lava_hurt(), "the game plays its hurt and burn");
+        assert!(!p.take_lava_hurt(), "once");
     }
     /// `AbstractHurtingProjectile.tick` renews the fire after the base
     /// countdown, without shortening a longer fire.
