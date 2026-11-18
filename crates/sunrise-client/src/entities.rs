@@ -1330,21 +1330,13 @@ impl ExperienceOrb {
         if self.health <= 0 {
             return true;
         }
-        let contacts = orb_lava_contacts(self.previous, self.position, wanted, |p| {
-            let fluid = fluids.fluid(world.block(p.x, p.y, p.z));
-            if !fluid
-                .kind()
-                .same_family(sunrise_world::fluid::FluidKind::Lava)
-            {
-                return None;
-            }
-            let above = fluids.fluid(world.block(p.x, p.y + 1, p.z));
-            Some(if fluid.kind().same_family(above.kind()) {
-                1.0
-            } else {
-                f64::from(fluid.own_height())
-            })
-        });
+        let contacts = lava_contacts(
+            self.previous,
+            self.position,
+            Some(wanted),
+            ExperienceOrb::box_at,
+            |p| lava_height(&**world, fluids, p),
+        );
         for _ in 0..contacts {
             let dead = !invulnerable(world) && self.hurt(4.0);
             let pitch = 2.0 + next_float() * 0.4;
@@ -5355,12 +5347,37 @@ mod orb_lava_tests {
     }
 }
 
-/// `Entity.checkInsideBlocks` and `collidedWithFluid`: fluid AABB contacts
-/// along Entity.move's axis-ordered path, each block visited once.
-fn orb_lava_contacts(
+/// `FluidState.getHeight` of the lava at `p` (a full block under more of the same
+/// fluid, else its own height); None where there is no lava.
+pub fn lava_height(
+    world: &World,
+    fluids: &crate::motion::FluidResources,
+    p: BlockPos,
+) -> Option<f64> {
+    let fluid = fluids.fluid(world.block(p.x, p.y, p.z));
+    if !fluid
+        .kind()
+        .same_family(sunrise_world::fluid::FluidKind::Lava)
+    {
+        return None;
+    }
+    let above = fluids.fluid(world.block(p.x, p.y + 1, p.z));
+    Some(if fluid.kind().same_family(above.kind()) {
+        1.0
+    } else {
+        f64::from(fluid.own_height())
+    })
+}
+
+/// `Entity.checkInsideBlocks` and `collidedWithFluid`: the lava cells whose fluid
+/// box the entity's box (`bounds_at`) touches over its move, each visited once.
+/// `wanted` is `Entity.move`'s uncollided movement, whose axis order the path
+/// takes; None for a move set by position (`setPos`), swept in one segment.
+pub fn lava_contacts(
     from: Vec3,
     to: Vec3,
-    wanted: Vec3,
+    wanted: Option<Vec3>,
+    bounds_at: impl Fn(Vec3) -> Aabb,
     mut lava_height: impl FnMut(BlockPos) -> Option<f64>,
 ) -> usize {
     let delta = to.subtract(from);
@@ -5370,7 +5387,7 @@ fn orb_lava_contacts(
     let mut segment = |start: Vec3, end: Vec3, budget: i32| {
         let mut iterations = 0;
         let epsilon = f64::from(1.0e-5_f32);
-        let target = ExperienceOrb::box_at(end).deflate(Vec3::new(epsilon, epsilon, epsilon));
+        let target = bounds_at(end).deflate(Vec3::new(epsilon, epsilon, epsilon));
         let _ = sunrise_core::geometry::sweep_intersected_blocks(
             start,
             end,
@@ -5387,9 +5404,7 @@ fn orb_lava_contacts(
                 if let Some(height) = lava_height(p) {
                     let min = Vec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z));
                     let fluid = Aabb::new(min, min.add_vector(Vec3::new(1.0, height, 1.0)));
-                    if ExperienceOrb::box_at(start)
-                        .collided_along_vector(end.subtract(start), &[fluid])
-                    {
+                    if bounds_at(start).collided_along_vector(end.subtract(start), &[fluid]) {
                         visited.insert(p);
                         contacts += 1;
                     }
@@ -5399,7 +5414,7 @@ fn orb_lava_contacts(
         );
         iterations + 1
     };
-    if delta.length_squared() > 0.0 {
+    if let Some(wanted) = wanted.filter(|_| delta.length_squared() > 0.0) {
         // Direction.axisStepOrder uses the original, uncollided movement.
         let order = if wanted.x.abs() < wanted.z.abs() {
             [1, 2, 0]
@@ -5431,9 +5446,13 @@ mod orb_lava_shape_tests {
     use super::*;
 
     fn contacts(from: Vec3, to: Vec3) -> usize {
-        orb_lava_contacts(from, to, to.subtract(from), |p| {
-            (p == BlockPos::new(0, 0, 0)).then_some(f64::from(8.0_f32 / 9.0))
-        })
+        lava_contacts(
+            from,
+            to,
+            Some(to.subtract(from)),
+            ExperienceOrb::box_at,
+            |p| (p == BlockPos::new(0, 0, 0)).then_some(f64::from(8.0_f32 / 9.0)),
+        )
     }
 
     #[test]
@@ -5455,9 +5474,13 @@ mod orb_lava_shape_tests {
         let to = Vec3::new(0.7, 0.2, 0.7);
         assert_eq!(contacts(from, to), 1);
         assert_eq!(
-            orb_lava_contacts(from, to, Vec3::new(0.1, 0.1, 0.9), |p| {
-                (p == BlockPos::new(0, 0, 0)).then_some(1.0)
-            }),
+            lava_contacts(
+                from,
+                to,
+                Some(Vec3::new(0.1, 0.1, 0.9)),
+                ExperienceOrb::box_at,
+                |p| { (p == BlockPos::new(0, 0, 0)).then_some(1.0) }
+            ),
             1
         );
     }

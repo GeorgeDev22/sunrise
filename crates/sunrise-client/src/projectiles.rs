@@ -453,6 +453,11 @@ pub trait ProjectileWorld {
     fn ignites(&self, _p: [i32; 3]) -> bool {
         false
     }
+    /// `FluidState.getHeight` of the lava at `p`, the box `collidedWithFluid`
+    /// sweeps against; None where there is no lava.
+    fn lava_height(&self, _p: BlockPos) -> Option<f64> {
+        None
+    }
     /// `BubbleColumnBlock.entityInside`'s view of the block at `p`: a bubble
     /// column's `drag`, and whether nothing is above it (its surface, where
     /// it throws harder); None for any other block.
@@ -578,7 +583,11 @@ impl Projectile {
     /// `Entity.getBoundingBox`: its type's square box standing on its position,
     /// a wind charge's 0.15 lower (`AbstractWindCharge.makeBoundingBox`).
     pub fn bounds(&self) -> Aabb {
-        let (p, half) = (self.position, self.kind.size() / 2.0);
+        self.bounds_at(self.position)
+    }
+    /// `Entity.makeBoundingBox(at)`: [`Self::bounds`] with the projectile at `at`.
+    pub fn bounds_at(&self, p: Vec3) -> Aabb {
+        let half = self.kind.size() / 2.0;
         let height = self.kind.size();
         let bottom = match self.kind {
             ProjectileKind::WindCharge | ProjectileKind::BreezeWindCharge => {
@@ -820,7 +829,7 @@ impl Projectile {
     }
     /// `Entity.baseTick` counts down active fire after block effects. The two
     /// item fireballs then renew their own flame in `AbstractHurtingProjectile.tick`.
-    fn fire_tick(&mut self, w: &impl ProjectileWorld, client_side: bool) {
+    fn fire_tick(&mut self, w: &impl ProjectileWorld, client_side: bool, from: Vec3) {
         if !(self.is_thrown()
             || self.kind == ProjectileKind::ExperienceBottle
             || self.is_fireball()
@@ -841,6 +850,11 @@ impl Projectile {
             if self.fire_ticks >= 0 {
                 self.ignite_for_ticks(160);
             }
+        }
+        // LavaFluid.entityInside: Entity.lavaIgnite (none of these is fireImmune),
+        // then lavaHurt, which hurts no projectile. Llama spit takes no block effects.
+        if self.kind != ProjectileKind::LlamaSpit && self.in_lava(w, from) {
+            self.ignite_for_ticks(300);
         }
         if w.in_water(self.bounds()) {
             self.clear_fire();
@@ -864,6 +878,17 @@ impl Projectile {
         if self.kind.is_item_fireball() {
             self.ignite_for_ticks(20);
         }
+    }
+    /// `Entity.checkInsideBlocks` over its move from `from` (set by position,
+    /// so one segment): whether it touched any lava's fluid box.
+    fn in_lava(&self, w: &impl ProjectileWorld, from: Vec3) -> bool {
+        crate::entities::lava_contacts(
+            from,
+            self.position,
+            None,
+            |at| self.bounds_at(at),
+            |p| w.lava_height(p),
+        ) > 0
     }
     /// `Entity.checkInsideBlocks`: the blocks under the box, deflated by 1e-7
     /// so a box sitting exactly on a block boundary is not inside it.
@@ -1633,7 +1658,7 @@ impl Projectile {
         // The block sweep runs at the batch that ticks the projectile
         // (Game::sweep_projectile_inside), where the level host for a part's
         // contact is: this tick's world view is read-only.
-        self.fire_tick(w, client_side);
+        self.fire_tick(w, client_side, from);
         self.stuck_tick(w, from);
         if !base_first {
             self.tick_shoot_event();
@@ -2256,6 +2281,40 @@ mod tests {
             water: true,
         });
         assert_eq!(wet.fire_ticks, 0, "water puts the snowball out");
+    }
+    /// A lava source in the cell (0, 99, 0) under air: its fluid box is 8/9 of
+    /// a block tall.
+    struct Lava;
+    impl ProjectileWorld for Lava {
+        fn clip(&self, _: Vec3, _: Vec3) -> Option<(Vec3, [i32; 3], [i32; 3])> {
+            None
+        }
+        fn in_water(&self, _: Aabb) -> bool {
+            false
+        }
+        fn targets(&self) -> &[(Who, Aabb)] {
+            &[]
+        }
+        fn lava_height(&self, p: BlockPos) -> Option<f64> {
+            (p == BlockPos::new(0, 99, 0)).then_some(f64::from(8.0_f32 / 9.0))
+        }
+    }
+    /// `LavaFluid.entityInside` sets every entity it touches alight for 300
+    /// ticks (`Entity.lavaIgnite`), a snowball too; above the fluid's box it
+    /// stays out (#2689).
+    #[test]
+    fn a_snowball_in_lava_burns_for_lava_ignites_three_hundred_ticks() {
+        let mut p = Projectile::new(ProjectileKind::Snowball, Vec3::new(0.5, 99.2, 0.5), None);
+        p.velocity = Vec3::ZERO;
+        p.tick(&Lava);
+        // Ignited for 300, then `Entity.baseTick`'s countdown.
+        assert_eq!(p.fire_ticks, 299);
+        p.tick(&Lava);
+        assert_eq!(p.fire_ticks, 299, "lava renews it every tick it is inside");
+        let mut above = Projectile::new(ProjectileKind::Snowball, Vec3::new(0.5, 99.95, 0.5), None);
+        above.velocity = Vec3::ZERO;
+        above.tick(&Lava);
+        assert_eq!(above.fire_ticks, 0, "over the fluid's 8/9 box, not in it");
     }
     /// `AbstractHurtingProjectile.tick` renews the fire after the base
     /// countdown, without shortening a longer fire.
