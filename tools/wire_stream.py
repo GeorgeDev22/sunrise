@@ -117,6 +117,12 @@ def decode(name, data):
         return {'container': r.varint()}
     if name == 'chat_command':
         return {'command': r.string()}
+    if name in ('chat', 'chat_command_signed'):
+        # The timestamp (Instant.now) and the salt (a random long) differ on every send, on any client: left out.
+        # The signatures, the last-seen acknowledgements and their checksum stay raw.
+        text = r.string()
+        r.take(16)
+        return {'message' if name == 'chat' else 'command': text, 'raw': r.rest()}
     return {'raw': r.rest()} if data else {}
 
 
@@ -134,7 +140,8 @@ def scenarios(entries):
 
     A click's state id becomes `stale`: how far it is behind the last one the server sent for that container
     (0 = up to date). The ids themselves count every change the server made since the login, so two runs
-    whose earlier scenarios differed number the same click differently."""
+    whose earlier scenarios differed number the same click differently. Prediction sequences are numbered from
+    the client's last one before the scenario for the same reason (number_sequences)."""
     me = self_id(entries)
     play = [e for e in entries if e.get('state') == 'play' and 'name' in e and e.get('dir') in ('c2s', 's2c')]
     runs, current, server_state = [], None, {}
@@ -167,9 +174,27 @@ def scenarios(entries):
         tick['packets'].append((name, fields))
         if name == 'client_tick_end':
             current.append(new_tick())
+    before = 0
     for run in runs:
         name_entities(run)
+        before = number_sequences(run, before)
     return runs
+
+
+def number_sequences(run, before):
+    """Block prediction sequences (player_action, use_item, use_item_on) count every sequenced action since the
+    login: count them from the client's last one before the scenario (`before`, 0 at the login) instead, so one
+    extra sequenced packet in an earlier scenario doesn't make every later one differ. The scenario's first
+    sequence stays what it is past that one (a wrong start, or a reset that didn't happen, #365, still shows).
+    The client's last sequence, for the next scenario."""
+    last = before
+    for tick in run:
+        for _, fields in tick['packets']:
+            sequence = fields.get('sequence')
+            if isinstance(sequence, int) and sequence != 0:
+                last = sequence
+                fields['sequence'] = sequence - before
+    return last
 
 
 def first_frame(run, name):

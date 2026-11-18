@@ -146,7 +146,9 @@ impl Game<'_> {
     pub(super) fn toggle_held_elsewhere(&self, slot: usize, key: KeyCode, source: Source) -> bool {
         match source {
             // A pad's toggle-sneak isn't holding it: it has no release that would end it.
-            Source::Keyboard => {
+            // An agent's key stands in for the keyboard's: a controller holding the
+            // same mapping keeps it down.
+            Source::Keyboard | Source::Agent => {
                 !(slot == SNEAK && self.settings.controller.toggle_sneak)
                     && self.pad.holds_action(["key.sneak", "key.sprint"][slot])
             }
@@ -156,7 +158,7 @@ impl Game<'_> {
                     .translate_all(*physical)
                     .contains(&Ok(key))
             }),
-            Source::Agent | Source::Mod => false,
+            Source::Mod => false,
         }
     }
     /// Apply a physical key to every mapping bound to it.
