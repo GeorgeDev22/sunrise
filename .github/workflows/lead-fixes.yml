@@ -78,7 +78,7 @@ jobs:
       - name: Unit tests
         run: 'cargo test --locked -p sunrise-client-lib --lib -- projectiles:: orb_lava entities::'
       - name: Game unit tests
-        run: 'cargo test --locked -p sunrise-client --bins -- clamp_rotation_tests'
+        run: 'cargo test --locked -p sunrise-game --bins -- clamp_rotation_tests'
       - name: Clippy
         run: cargo clippy --locked -p sunrise-client-lib -p sunrise-client --lib --tests -- -D warnings
 
