@@ -473,6 +473,10 @@ pub struct Hub {
     chat_type: i32,
     dimension_type: i32,
     clock_ids: Vec<i32>,
+    /// The total and rate the guests are told of every clock but the Overworld's and the one
+    /// `World.day_time` follows, by registry id (`set_clock_state`). A clock the world has not
+    /// met is missing: the server holds it at 0, not advancing.
+    clock_states: std::collections::HashMap<i32, (i64, f32)>,
     item_ids: std::collections::HashMap<Arc<str>, i32>,
     entity_types: std::collections::HashMap<String, i32>,
     /// Each level's tracked entities, by dimension.
@@ -850,6 +854,7 @@ impl Hub {
             chat_type,
             dimension_type,
             clock_ids,
+            clock_states: Default::default(),
             item_ids: Default::default(),
             entity_types: Default::default(),
             entities: Default::default(),
@@ -2296,9 +2301,9 @@ impl Hub {
         }));
     }
 
-    /// ServerClockManager.createFullSyncPacket: every clock. Sunrise keeps the
-    /// overworld clock (the day time); the End's clock runs with the game
-    /// time. Clocks do not advance without the advance_time rule.
+    /// ServerClockManager.createFullSyncPacket: every clock, each with its own total and rate
+    /// (the Overworld's, the one the level in place follows, the others' from
+    /// `set_clock_state`). Clocks do not advance without the advance_time rule.
     pub(in crate::lan) fn time_packet(&self, world: &World, rate: f32) -> C {
         let overworld = self
             .sync
@@ -2331,16 +2336,27 @@ impl Hub {
                             rate: level_rate,
                         }
                     } else {
+                        let (total_ticks, rate) =
+                            self.clock_states.get(&id).copied().unwrap_or((0, 0.0));
                         play::ClockState {
                             clock: id,
-                            total_ticks: world.end_clock,
+                            total_ticks,
                             partial_tick: 0.0,
-                            rate: if rate > 0.0 { 1.0 } else { 0.0 },
+                            rate,
                         }
                     }
                 })
                 .collect(),
         })
+    }
+
+    /// The total of `clock` (a `minecraft:world_clock` id) and the rate its guests see, 0 while it
+    /// is paused or `advance_time` is off, for the full time packet. A clock no client was sent
+    /// is not kept.
+    pub fn set_clock_state(&mut self, clock: &str, total: i64, rate: f32) {
+        if let Some(id) = self.sync.id("minecraft:world_clock", clock) {
+            self.clock_states.insert(id, (total, rate));
+        }
     }
 
     /// ServerPlayer.initInventoryMenu / sendAllDataToRemote for the inventory menu.
@@ -5962,6 +5978,42 @@ mod tests {
         bob.dimension = "minecraft:overworld".into();
         hub.guests.push(bob);
         (hub, rx)
+    }
+
+    /// ServerClockManager.createFullSyncPacket: every clock goes with its own total and rate, so
+    /// a paused pack clock is not told to advance at the Overworld's rate, nor given the End's
+    /// total.
+    #[test]
+    fn a_full_time_sync_sends_each_clocks_own_state() {
+        let mut sync = SyncData::empty();
+        let clocks = [
+            "minecraft:overworld",
+            "minecraft:the_end",
+            "demo:moon",
+            "demo:unmet",
+        ];
+        sync.dynamic.registries.insert(
+            "minecraft:world_clock".into(),
+            clocks.iter().map(|n| (n.to_string(), None)).collect(),
+        );
+        let (mut hub, _rx) = hub_with_sync(sync);
+        hub.set_clock_state("minecraft:the_end", 700, 1.0);
+        hub.set_clock_state("demo:moon", 42, 0.0);
+        let mut world = World::new(sunrise_world::registry::BlockStateId(0), 0);
+        world.day_time = 1_000;
+        world.end_clock = 9_999;
+        let C::SetTime(time) = hub.time_packet(&world, 2.0) else {
+            panic!("not a time packet");
+        };
+        let states: Vec<_> = time
+            .clocks
+            .iter()
+            .map(|c| (c.clock, c.total_ticks, c.rate))
+            .collect();
+        assert_eq!(
+            states,
+            [(0, 1_000, 2.0), (1, 700, 1.0), (2, 42, 0.0), (3, 0, 0.0)]
+        );
     }
 
     #[test]

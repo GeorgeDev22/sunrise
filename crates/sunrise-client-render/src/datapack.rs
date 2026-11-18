@@ -718,7 +718,7 @@ pub struct DataStore {
     pub slot_source_tags: BTreeMap<String, Vec<TagEntryOf>>,
     /// The content tables' raw files from the packs after the built-in one:
     /// Server JSON resources (recipes, loot, enchantments, songs, instruments,
-    /// predicates, modifiers, advancements, registries, data maps and tags), by
+    /// predicates, modifiers, advancements, registries, world clocks, data maps and tags), by
     /// `<kind-dir>/<ns>:<path>`, each id's files in pack order. The tables
     /// merge them over what they read from the resource root.
     pub files: BTreeMap<String, Vec<Vec<u8>>>,
@@ -728,7 +728,7 @@ pub struct DataStore {
 /// `<kind-dir>/<ns>:<path>` for a pack file the content tables read:
 /// `recipe/`, `recipe_filter/`, `loot_table/`, `advancement/`, `trade_set/`,
 /// `villager_trade/`, `dialog/`, `damage_type/`, `dimension_type/`, `data_maps/`, enchantments, songs,
-/// instruments, predicates, item modifiers or `tags/<sub>/`, where the id keeps the sub
+/// instruments, predicates, item modifiers, world clocks or `tags/<sub>/`, where the id keeps the sub
 /// path so a nested tag kind stays addressable.
 fn content_id(file: &str) -> Option<String> {
     let rest = file.strip_prefix("data/")?;
@@ -737,7 +737,8 @@ fn content_id(file: &str) -> Option<String> {
     let kind = match kind {
         "recipe" | "recipe_filter" | "loot_table" | "advancement" | "trade_set"
         | "villager_trade" | "dialog" | "damage_type" | "dimension_type" | "data_maps"
-        | "enchantment" | "jukebox_song" | "instrument" | "predicate" | "item_modifier" => kind,
+        | "enchantment" | "jukebox_song" | "instrument" | "predicate" | "item_modifier"
+        | "world_clock" => kind,
         // A tag id is `{ns}:{path-under-tags}` (`tags/worldgen/biome/
         // test:sub/mytag`), the whole path after the namespace, so nested
         // registries keep their directory (`TagLoader`'s id shape).
@@ -883,6 +884,7 @@ impl DataStore {
                 "tags",
                 "trade_set",
                 "villager_trade",
+                "world_clock",
             ]) {
                 if !seen.insert(f.clone()) {
                     continue;

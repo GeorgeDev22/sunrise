@@ -1997,21 +1997,37 @@ impl Game<'_> {
             .ui
             .rules
             .bool_at(sunrise_client::gamerules::vanilla::ADVANCE_TIME);
-        let state = *self.command_clock_state(&active);
         // A paused clock, or `advance_time` off, is a rate of 0 to the guests, as for the Overworld's.
-        let rate = if advancing && !state.paused {
-            state.rate
-        } else {
-            0.0
-        };
-        if let Some(host) = self.lan.as_mut() {
-            if active == OVERWORLD_CLOCK {
-                host.hub.overworld_day = None;
-                host.hub.level_clock = None;
+        let guest_rate = |state: &WorldClock| {
+            if advancing && !state.paused {
+                state.rate
             } else {
-                host.hub.overworld_day = Some(overworld);
-                host.hub.level_clock = Some((active, rate));
+                0.0
             }
+        };
+        let rate = guest_rate(self.command_clock_state(&active));
+        let end_total = self.command_clock_time("minecraft:the_end");
+        let Some(host) = self.lan.as_mut() else {
+            return;
+        };
+        // The clocks neither field below covers: the End's and every other the world has met.
+        let others = std::iter::once(("minecraft:the_end", end_total, &self.ui.end_clock)).chain(
+            self.ui
+                .command_clocks
+                .iter()
+                .map(|(name, (total, state))| (name.as_str(), *total, state)),
+        );
+        for (name, total, state) in others {
+            if name != active && name != OVERWORLD_CLOCK {
+                host.hub.set_clock_state(name, total, guest_rate(state));
+            }
+        }
+        if active == OVERWORLD_CLOCK {
+            host.hub.overworld_day = None;
+            host.hub.level_clock = None;
+        } else {
+            host.hub.overworld_day = Some(overworld);
+            host.hub.level_clock = Some((active, rate));
         }
     }
     /// Makes `to` the clock `World.day_time` follows, as the level entered has it as its default
