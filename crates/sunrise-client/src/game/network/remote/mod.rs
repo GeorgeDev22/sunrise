@@ -81,7 +81,7 @@ use {
     sunrise_world::{
         level::InteractionResult,
         registry::BlockStateId,
-        stepped_interpolation::{Path, PosRot, Start, SteppedInterpolation},
+        stepped_interpolation::{Path, PosRot, Start, SteppedInterpolation, client_motion},
     },
 };
 
@@ -396,27 +396,6 @@ impl CartLerp {
         c.pitch = pitch;
         true
     }
-}
-
-/// `LivingEntity.aiStep`'s threshold: a player's horizontal motion under
-/// 0.003 (squared 9.0E-6) and any other mob's x or z under 0.003 drop to zero,
-/// and anyone's y under 0.003.
-fn drop_tiny_motion(v: Vec3, player: bool) -> Vec3 {
-    let (mut x, mut z) = (v.x, v.z);
-    if player {
-        if v.horizontal_distance_squared() < 9.0e-6 {
-            (x, z) = (0.0, 0.0);
-        }
-    } else {
-        if x.abs() < 0.003 {
-            x = 0.0;
-        }
-        if z.abs() < 0.003 {
-            z = 0.0;
-        }
-    }
-    let y = if v.y.abs() < 0.003 { 0.0 } else { v.y };
-    Vec3::new(x, y, z)
 }
 
 /// `SteppedInterpolationHandler.doInterpolate`'s `setPos` and `setRot` on a
@@ -7074,13 +7053,14 @@ impl Game<'_> {
                 place_interpolated(m, at);
             }
             // LivingEntity.aiStep for a mob this client does not simulate (the
-            // driven mount was skipped above): its velocity, the server's last
-            // set_entity_motion, keeps 0.98 of itself each tick it is not
-            // interpolating, then loses its tiny components.
-            if !stepped.get(&(m.id as i32)).is_some_and(|h| h.active()) {
-                m.velocity = m.velocity.scale(0.98);
-            }
-            m.velocity = drop_tiny_motion(m.velocity, player);
+            // driven mount was skipped above).
+            let interpolating = stepped.get(&(m.id as i32)).is_some_and(|h| h.active());
+            let v = client_motion(
+                [m.velocity.x, m.velocity.y, m.velocity.z],
+                interpolating,
+                player,
+            );
+            m.velocity = Vec3::new(v[0], v[1], v[2]);
             // `ClientLevel.tickNonPassenger`'s `commonTick` interpolated the
             // entity before `Player.tick`, which `Pre` precedes.
             if let Some(player) = player_ref {
