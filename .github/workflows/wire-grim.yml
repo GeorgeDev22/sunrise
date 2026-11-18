@@ -93,6 +93,7 @@ jobs:
           # A small vanilla window, so its CPU-drawn frames stay under a tick (even ticks, as on real hardware).
           WIRE_STREAM_VANILLA_SIZE: 256x144
           WIRE_STREAM_VANILLA_FPS: ${{ matrix.fps }}
+          WIRE_STREAM_VANILLA_VSYNC: 'false'
         run: |
           [ -n "$WIRE_STREAM_VIA" ] || unset WIRE_STREAM_VIA
           set +e
