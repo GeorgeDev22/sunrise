@@ -15,11 +15,11 @@ concurrency:
   group: wire-grim
   cancel-in-progress: true
 env:
-  # cloud game build 44356788447: cb-next 9be2fa5 + #2866, #2867 and #2724's spear fix (d06827c).
-  SUNRISE_RUN: '44356788447'
-  SHARDS: '5'
+  # lead fixes 44381753743: main + every open fix PR (#2322 #2478 #2595 #2650 #2698 #2724 #2866 #2867 #2094) + #2689 + leads AM, AA, boat clamp.
+  SUNRISE_RUN: '44381753743'
+  SHARDS: '4'
   # The scenario list this run plays (tools/ci/wire-grim-scenarios.txt: all of item 93).
-  SCENARIO_LIST: tools/ci/wire-grim-scenarios.txt
+  SCENARIO_LIST: tools/ci/wire-lead-scenarios.txt
 jobs:
   grim:
     name: ${{ matrix.anticheat }} ${{ matrix.server }} r${{ matrix.round }} s${{ matrix.shard }}
@@ -34,7 +34,7 @@ jobs:
         server: ['paper-26.3', 'via-1.21.11']
         # Three rounds of the whole list: a difference counts only when it comes back in each.
         round: [1, 2, 3]
-        shard: [0, 1, 2, 3, 4]
+        shard: [0, 1, 2, 3]
         # The proxy runs on the vanilla server: the ViaVersion half would repeat it.
         exclude:
           - anticheat: proxy

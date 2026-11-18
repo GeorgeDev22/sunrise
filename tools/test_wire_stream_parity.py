@@ -150,6 +150,41 @@ def mace_fall(height, enchantment=None, effects=(), target_z=5.2):
                     every(12, 12 + fall_ticks, 3, 'mouse left click')))
 
 
+# Section 24's break rows: (name, three blocks, tool, effects, extra setup).
+BREAK_SETS = [
+    ('stone_iron', ['stone', 'deepslate', 'cobblestone'], 'iron_pickaxe', (), ()),
+    ('ores_diamond', ['iron_ore', 'diamond_ore', 'deepslate_gold_ore'], 'diamond_pickaxe', (), ()),
+    ('soft_shovel', ['dirt', 'sand', 'gravel'], 'iron_shovel', (), ()),
+    ('wood_axe', ['oak_log', 'oak_planks', 'crafting_table'], 'iron_axe', (), ()),
+    ('by_hand', ['glass', 'oak_leaves', 'white_wool'], None, (), ()),
+    ('shears', ['oak_leaves', 'cobweb', 'white_wool'], 'shears', (), ()),
+    ('nether_efficiency', ['netherrack', 'end_stone', 'blackstone'],
+     'netherite_pickaxe[minecraft:enchantments={"minecraft:efficiency":3}]', (), ()),
+    ('haste_instant', ['stone', 'stone', 'stone'], 'diamond_pickaxe[minecraft:enchantments={"minecraft:efficiency":5}]',
+     ('minecraft:haste 60 1',), ()),
+    ('mining_fatigue', ['dirt', 'oak_planks', 'stone'], 'iron_pickaxe', ('minecraft:mining_fatigue 60 0',), ()),
+    ('underwater', ['stone', 'dirt', 'oak_planks'], 'iron_pickaxe', ('minecraft:water_breathing 60 0',),
+     (f'fill -2 {FLOOR + 1} -1 2 {FLOOR + 3} 1 minecraft:water',)),
+    ('underwater_aqua', ['stone', 'dirt', 'oak_planks'], 'iron_pickaxe', ('minecraft:water_breathing 60 0',),
+     (f'fill -2 {FLOOR + 1} -1 2 {FLOOR + 3} 1 minecraft:water',
+      f'item replace entity {PLAYER} armor.head with minecraft:diamond_helmet[minecraft:enchantments={{"minecraft:aqua_affinity":1}}]')),
+]
+
+
+def break_row(blocks, tool, effects=(), extra=()):
+    """Three blocks at (-1|0|1, floor + 1, 2), each looked at and held until it breaks (60 ticks at most)."""
+    setup = [f'setblock {x} {FLOOR + 1} 2 minecraft:{block}' for x, block in zip((-1, 0, 1), blocks)]
+    setup += [f'effect give {PLAYER} {effect} true' for effect in effects] + list(extra)
+    if tool:
+        setup.append(f'item replace entity {PLAYER} weapon.mainhand with minecraft:{tool}')
+    steps = {}
+    for i, yaw in enumerate((-25, 0, 25)):
+        start = 5 + 65 * i
+        steps[start] = [f'look {yaw} 40', 'mouse left down']
+        steps[start + 60] = ['mouse left up']
+    return dict(setup=setup, ticks=200, steps=steps)
+
+
 SCENARIOS = {
     'walk': dict(ticks=70, steps=merge(
         {0: ['key w down'], 20: ['look 30 0'], 30: ['look 30 15'], 40: ['key w up'], 50: ['look 0 0']})),
@@ -1474,7 +1509,103 @@ SCENARIOS = {
     'tnt_knockback': dict(
         setup=[MACE_RESISTANCE, f'summon minecraft:tnt 0.5 {FLOOR + 1} 3.0 {{fuse:80}}'],
         ticks=60, steps={}),
+    # Section 24 (2026-11-18): what no scenario covered yet.
+    # Break timing, which anticheats check tick by tick (FastBreak): three blocks a row ahead, each held until it breaks.
+    **{f'break_{name}': break_row(blocks, tool, effects, extra) for name, blocks, tool, effects, extra in BREAK_SETS},
+    # A potion drunk (32 ticks), then walking under its Speed.
+    'potion_drink_speed': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:potion[minecraft:potion_contents={{potion:"minecraft:swiftness"}}]'],
+        ticks=80, steps={0: ['look 0 0'], 5: ['mouse right down'], 40: ['mouse right up'], 45: ['key w down'], 70: ['key w up']}),
+    # A splash potion thrown straight down, and a lingering one ahead walked through.
+    'splash_potion_self': dict(
+        setup=[f'effect give {PLAYER} minecraft:instant_damage 1 0 true',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:splash_potion[minecraft:potion_contents={{potion:"minecraft:healing"}}]'],
+        ticks=50, steps={0: ['look 0 90'], 10: ['mouse right click']}),
+    'lingering_potion_walk': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:lingering_potion[minecraft:potion_contents={{potion:"minecraft:slowness"}}]'],
+        ticks=100, steps={0: ['look 0 45'], 5: ['mouse right click'], 30: ['key w down'], 70: ['key w up']}),
+    # A totem in the offhand stops a killing blow (EntityEvent 35, its effects), then the player walks.
+    'totem_pop': dict(
+        setup=[f'item replace entity {PLAYER} weapon.offhand with minecraft:totem_of_undying'],
+        ticks=70, steps={10: ['command damage @s 1000 minecraft:generic'], 30: ['key w down'],
+                         50: ['key w up']}),
+    # Falls of 4, 12 and 23 blocks onto stone (fall damage, landing), and 23 with Feather Falling IV.
+    **{f'fall_{height}{"_feather" if feather else ""}': dict(
+        setup=[f'effect give {PLAYER} minecraft:resistance 60 3 true', *([
+            f'item replace entity {PLAYER} armor.feet with minecraft:diamond_boots[minecraft:enchantments={{"minecraft:feather_falling":4}}]']
+            if feather else [])],
+        ticks=30 + 2 * height, anchor='accept_teleportation',
+        steps={0: [f'command tp @s 0.5 {FLOOR + 1 + height} 0.5 0 0']})
+       for height, feather in ((4, False), (12, False), (23, False), (23, True))},
+    # A Loyalty trident thrown at a wall comes back to the player.
+    'trident_loyalty_return': dict(
+        setup=[f'fill -2 {FLOOR + 1} 8 2 {FLOOR + 4} 8 minecraft:stone',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:trident[minecraft:enchantments={{"minecraft:loyalty":3}}]'],
+        ticks=100, steps={0: ['look 0 0'], 5: ['mouse right down'], 20: ['mouse right up']}),
+    # Multishot, and a firework loaded from the offhand.
+    'crossbow_multishot': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:crossbow[minecraft:enchantments={{"minecraft:multishot":1}}]',
+               f'give {PLAYER} minecraft:arrow 16'],
+        ticks=70, steps={0: ['look 0 -5'], 5: ['mouse right down'], 35: ['mouse right up'], 45: ['mouse right click']}),
+    'crossbow_firework': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:crossbow',
+               f'item replace entity {PLAYER} weapon.offhand with minecraft:firework_rocket[minecraft:fireworks={{flight_duration:1,explosions:[{{shape:"small_ball",colors:[I;16711680]}}]}}] 4'],
+        ticks=80, steps={0: ['look 0 -10'], 5: ['mouse right down'], 35: ['mouse right up'], 45: ['mouse right click']}),
+    # Sweeping Edge III across three mobs, the cooldown full each time.
+    'sweep_edge': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.6), TARGET.format(x=1.5, y=FLOOR + 1, z=2.6),
+               TARGET.format(x=-0.5, y=FLOOR + 1, z=2.6),
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:diamond_sword[minecraft:enchantments={{"minecraft:sweeping_edge":3}}]'],
+        ticks=70, steps=merge({0: ['look 0 15']}, every(5, 65, 15, 'mouse left click'))),
+    # Blindness stops a sprint from starting (and ends one); Slowness is no stop.
+    'sprint_blindness': dict(
+        setup=[f'effect give {PLAYER} minecraft:blindness 60 0 true'],
+        ticks=70, steps={0: ['key ctrl down', 'key w down'], 30: ['command effect clear @s minecraft:blindness'],
+                         35: ['key ctrl up'], 36: ['key ctrl down'], 60: ['key w up', 'key ctrl up']}),
+    'sprint_slowness': dict(
+        setup=[f'effect give {PLAYER} minecraft:slowness 60 2 true'],
+        ticks=60, steps={0: ['key ctrl down', 'key w down'], 10: ['key space down'], 40: ['key space up'],
+                         50: ['key w up', 'key ctrl up']}),
+    # Eating while sprinting: the use slows the player and ends the sprint (LocalPlayer.aiStep's isUsingItem).
+    'eat_while_sprinting': dict(
+        setup=[f'effect give {PLAYER} minecraft:hunger 2 255 true',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:cooked_beef 8'],
+        ticks=90, steps={0: ['key ctrl down', 'key w down'], 45: ['mouse right down'], 80: ['mouse right up'],
+                         85: ['key w up', 'key ctrl up']}),
+    # A bed's bounce (BedBlock.updateEntityMovementAfterFallOn) from 6 blocks, sneaking on the second fall.
+    'fall_onto_bed': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 0 minecraft:red_bed[facing=south,part=foot]',
+               f'setblock 0 {FLOOR + 1} 1 minecraft:red_bed[facing=south,part=head]'],
+        ticks=90, anchor='accept_teleportation',
+        steps={0: [f'command tp @s 0.5 {FLOOR + 8} 0.5 0 0'], 45: [f'command tp @s 0.5 {FLOOR + 8} 0.5 0 0', 'key shift down'],
+               85: ['key shift up']}),
+    # A goat horn's use (its cooldown) twice.
+    # An enchanting table with no bookshelves: sword and lapis in, the first offer taken (its seed is the server's),
+    # the sword shift-clicked out.
+    'enchanting_table_use': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:enchanting_table',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:iron_sword',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:lapis_lazuli 3', f'experience add {PLAYER} 30 levels'],
+        ticks=60, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 29 shift'], 15: ['click-slot 30 shift'],
+                         22: ['menu-button 0'], 28: ['click-slot 0 shift'], 36: ['key e tap']}),
+    # An anvil repairing a worn iron sword with an ingot (the cost the client shows), taken out.
+    'anvil_repair': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:anvil',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:iron_sword[minecraft:damage=200]',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:iron_ingot 2', f'experience add {PLAYER} 10 levels'],
+        ticks=60, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 30 shift'], 15: ['click-slot 31 shift'],
+                         22: ['click-slot 2 shift'], 32: ['key e tap']}),
+    # Lying down at night, Escape (InBedChatScreen.onClose: the wake-up), then a whole night slept through.
+    'sleep_and_wake': dict(
+        setup=['time set 13000', f'setblock 0 {FLOOR + 1} 2 minecraft:red_bed[facing=north,part=foot]',
+               f'setblock 0 {FLOOR + 1} 1 minecraft:red_bed[facing=north,part=head]'],
+        ticks=200, steps={0: ['look 0 45'], 5: ['mouse right click'], 30: ['key esc tap'], 40: ['look 0 45'],
+                          45: ['mouse right click'], 190: ['command time set 1000']}),
+    'goat_horn_use': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:goat_horn[minecraft:instrument="minecraft:ponder_goat_horn"]'],
+        ticks=60, steps={5: ['mouse right down'], 15: ['mouse right up'], 25: ['mouse right down'], 30: ['mouse right up']}),
 }
+
 
 
 # WIRE_STREAM_RANDOM=SEED,COUNT (item 91): COUNT generated scenarios, random_SEED_N, in an arena with steps, a pillar,
