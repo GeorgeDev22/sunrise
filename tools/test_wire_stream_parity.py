@@ -1637,8 +1637,12 @@ class VanillaClient:
         source = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaTickScript.java'
         subprocess.run(['javac', '--release', release, '-proc:none', '-nowarn', '-cp', jars, '-d', classes, source],
                        check=True, capture_output=True)
+        # WIRE_STREAM_VANILLA_SIZE=WxH: the window's size. Drawing on the CPU (a virtual screen without a GPU, as
+        # on hosted CI runners), a smaller window keeps each frame under a tick, so the client ticks every 50 ms
+        # rather than in pairs (item 93: 30-40/60-70 ms at 854x480). Nothing of it reaches the server.
+        width, height = map(int, os.environ.get('WIRE_STREAM_VANILLA_SIZE', '854x480').split('x'))
         args = argparse.Namespace(name=PLAYER, join=address, world=None, game_dir=work / 'client', assets=None,
-                                  heap='2G', width=854, height=480, lan_port=None, backend=None)
+                                  heap='2G', width=width, height=height, lan_port=None, backend=None)
         args.game_dir.mkdir()
         # 20 frames a second at least: a tick's lines then act in their own frame, as Sunrise's do. On a virtual
         # screen the frames are drawn on the CPU: the lightest graphics keep each well under a tick, or the client
