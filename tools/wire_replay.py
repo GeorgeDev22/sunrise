@@ -132,6 +132,9 @@ class Replay(threading.Thread):
         self.edges = []
         self.done = threading.Event()
         self.error = None
+        # The marks whose packets went out after the client had passed the tick vanilla took them on: when
+        # Sunrise took them is unknown.
+        self.overrun = set()
 
     def run(self):
         out = open(self.capture, 'w')
@@ -150,6 +153,9 @@ class Replay(threading.Thread):
                 if gate is not None:
                     self.wait(lambda gate=gate: (self.mark, self.ticks, self.sent) >= gate,
                               f'the client never reached mark {gate[0]} tick {gate[1]}', timeout=600)
+                    with self.cond:
+                        if (self.mark, self.ticks) > gate[:2] and gate[0] >= 0:
+                            self.overrun.add(gate[0])
                     if self.phase is not None:
                         with self.cond:
                             ended = self.end_times.get(gate[:2])
@@ -227,8 +233,9 @@ def replay(vanilla, scenarios, bin_dir, out, phase=None):
     """Plays `vanilla` (a run's vanilla.jsonl, of `scenarios` in that order) back to Sunrise from `bin_dir`;
     `out` gets sunrise.jsonl and a copy of vanilla.jsonl. Each scenario's problems, as `compare` gives them."""
     out = Path(out)
-    shutil.rmtree(out, ignore_errors=True)
-    out.mkdir(parents=True)
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise ws.Failed(f'{out} is not an empty folder: the replay writes its captures only into a new one')
+    out.mkdir(parents=True, exist_ok=True)
     rows = [json.loads(line) for line in open(vanilla)]
     shutil.copy(vanilla, out / 'vanilla.jsonl')
     plan = Plan(rows, phase)
@@ -275,7 +282,8 @@ def replay(vanilla, scenarios, bin_dir, out, phase=None):
             path = scripts / f'{name}-sunrise.json'
             path.write_text(json.dumps(ws.script(name, ws.SCENARIOS[name], True)))
             client.play(path, name, timeout=max(60, ws.SCENARIOS[name]['ticks'] / 20 + 30))
-        replay.done.wait(60)
+        if not replay.done.wait(60):
+            raise ws.Failed("the replay never finished sending vanilla's server stream")
     finally:
         if client:
             client.close()
@@ -289,13 +297,16 @@ def replay(vanilla, scenarios, bin_dir, out, phase=None):
             else:
                 os.environ[var] = value
     if replay.error:
-        print(f'replay: {replay.error}')
+        raise ws.Failed(f'replay: {replay.error}')
     if replay.late:
         print(f'replay: {replay.late} packets went out more than 20 ms after their phase point (Sunrise was ahead)')
     if replay.edges:
         print(f'packets vanilla got {REPLAY_LATE * 1000:.0f}-{REPLAY_EDGE * 1000:.0f} ms before a tick-end (their tick is uncertain): '
               + ', '.join(f'{n} at mark {g[0]} tick {g[1]}' for g, n in replay.edges if g[0] >= 0))
-    return ws.compare({'vanilla': out / 'vanilla.jsonl', 'sunrise': out / 'sunrise.jsonl'}, scenarios)
+    results = ws.compare({'vanilla': out / 'vanilla.jsonl', 'sunrise': out / 'sunrise.jsonl'}, scenarios, True)
+    return [(name, [f'{ws.INCONCLUSIVE} a server packet reached Sunrise after the tick vanilla took it on, so '
+                    'which tick Sunrise took it on is unknown', *problems] if index in replay.overrun else problems)
+            for index, (name, problems) in enumerate(results)]
 
 
 def main():
@@ -312,7 +323,7 @@ def main():
         sys.exit(f'FAIL: {e}')
     print(f'\nreplayed vanilla server stream, vanilla vs Sunrise; captures in {args.out}')
     for name, problems in results:
-        print(f'  {"pass" if not problems else "FAIL"}  {name}')
+        print(f'  {ws.verdict(problems)}  {name}')
         for p in problems:
             print(p)
     sys.exit(1 if any(p for _, p in results) else 0)
