@@ -1,0 +1,2 @@
+# A guest's slot change takes the new item's attributes at its tick, not during the tick's packets (#637, #808). Rows: PACKAGE TEST TARGET daily REASON, sorted.
+sunrise-client game::lan_actions::tick::equipment_tick_tests::a_new_slot_takes_its_items_attributes_at_the_guests_tick lib daily resources

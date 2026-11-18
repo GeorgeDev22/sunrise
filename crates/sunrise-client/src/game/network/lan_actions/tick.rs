@@ -220,7 +220,7 @@ impl Game<'_> {
                     );
                 }
                 // Player.tick: a different main-hand item resets the attack
-                // strength, and detectEquipmentUpdates gives the guest its modifiers.
+                // strength (its modifiers come with detectEquipmentUpdates below).
                 let g = &host.hub.guests[gi];
                 let held = crate::game::held_items::held_attack_item(&g.inventory, g.selected);
                 let play = host.play.entry(conn).or_default();
@@ -241,7 +241,18 @@ impl Game<'_> {
             // armor, experience and level objectives follow the guest.
             let mut recorded =
                 std::mem::take(&mut host.play.entry(conn).or_default().score_recorded);
+            // LivingEntity.tick's detectEquipmentUpdates, part of the body: the equipment
+            // changed since the last tick puts its modifiers on the guest in the turn below.
+            let equipment = body && {
+                let g = &host.hub.guests[gi];
+                let held = g.inventory.get(g.selected).and_then(Option::as_ref);
+                let play = host.play.entry(conn).or_default();
+                equipment_changed(&mut play.equipped, &g.armor, held)
+            };
             self.as_guest(conn, |g| {
+                if equipment {
+                    g.apply_equipment();
+                }
                 g.tick_fishing();
                 // Player.aiStep's Inventory.tick and doTick's statistics are the body's.
                 if body {
@@ -410,3 +421,7 @@ mod fall_sound_tests;
 #[cfg(test)]
 #[path = "tests/spectator_body_tick_tests.rs"]
 mod spectator_body_tick_tests;
+
+#[cfg(test)]
+#[path = "tests/equipment_tick_tests.rs"]
+mod equipment_tick_tests;
