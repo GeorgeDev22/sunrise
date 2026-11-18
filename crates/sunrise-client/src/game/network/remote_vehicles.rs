@@ -437,9 +437,8 @@ impl Game<'_> {
             // positionRider: the seat turns with the boat; clampRotation,
             // which moves `yRotO` (the held lead's old look) with the view.
             self.yaw += b.delta_rotation;
-            let delta = (self.yaw - b.yaw + 180.0).rem_euclid(360.0) - 180.0;
-            let clamped = delta.clamp(-105.0, 105.0) - delta;
-            self.yaw += clamped;
+            let (yaw, clamped) = clamp_boat_rotation(self.yaw, b.yaw);
+            self.yaw = yaw;
             self.rope_rot_old.0 += clamped;
             self.store_boat_back(i, b);
             // In front of a mob that shares the boat.
@@ -1312,5 +1311,30 @@ mod plugin_seat_tests {
         game.armor_stands.clear();
         assert!(!game.remote_ride(Keys::default(), 0).unwrap());
         assert_eq!(game.riding, None);
+    }
+}
+
+/// `AbstractBoat.clampRotation` for the player: the view kept within 105
+/// degrees of the boat (`Mth.wrapDegrees`, and `yRot + targetDelta - delta`
+/// in that order). Returns the new yaw and the turn it made.
+pub(in crate::game) fn clamp_boat_rotation(yaw: f32, boat_yaw: f32) -> (f32, f32) {
+    let delta = sunrise_client::camera::wrap_degrees(yaw - boat_yaw);
+    let target = delta.clamp(-105.0, 105.0);
+    (yaw + target - delta, target - delta)
+}
+
+#[cfg(test)]
+mod clamp_rotation_tests {
+    use super::clamp_boat_rotation;
+
+    /// `clampRotation` adds the clamped delta before taking the old one away
+    /// (`yRot + targetDelta - delta`, in floats): within the 105 degrees that
+    /// still moves this view to -180, where adding their difference kept it at
+    /// -179.99998. Expected values from Java's float arithmetic.
+    #[test]
+    fn the_view_rounds_as_vanilla_adds_and_subtracts() {
+        assert_eq!(clamp_boat_rotation(-179.99998, -75.123456).0, -180.0);
+        // Past 105 degrees the view is held at the limit.
+        assert_eq!(clamp_boat_rotation(200.0, 0.0), (255.0, 55.0));
     }
 }
