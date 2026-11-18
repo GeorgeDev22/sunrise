@@ -113,7 +113,9 @@ fn an_agents_release_keeps_the_sneak_the_pad_holds() {
         let shift = KeyCode::ShiftLeft;
         game.control_key_down(shift, shift).unwrap();
         pad_press(game, Button::RightStick, "key.sneak");
+        // As `key shift up` does: the agent's release, then its physical key.
         game.control_key_up(shift);
+        game.physical_keys.remove(&shift);
         assert!(game.keys.held(Action::Sneak), "R3 is still down");
         pad_release(game, Button::RightStick);
         assert!(!game.keys.held(Action::Sneak), "both let go");
