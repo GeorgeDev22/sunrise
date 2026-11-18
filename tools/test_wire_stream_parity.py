@@ -341,7 +341,7 @@ SCENARIOS = {
                          25: ['key w up'], 40: ['look 90 0'], 60: ['key s down'], 70: ['key s up'],
                          80: ['key shift down'], 84: ['key shift up']}),
     'horse_ride': dict(
-        setup=[f'summon minecraft:horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,Variant:0,'
+        setup=[f'summon minecraft:horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,Rotation:[0f,0f],Variant:0,'
                'equipment:{saddle:{id:"minecraft:saddle",count:1}},attributes:[{id:"minecraft:movement_speed",'
                'base:0.3},{id:"minecraft:jump_strength",base:0.8},{id:"minecraft:max_health",base:30.0}]}'],
         ticks=110, steps={0: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 6: ['key w down'],
@@ -772,7 +772,7 @@ SCENARIOS = {
                          84: ['key shift up']}),
     # A skeleton horse ridden and dismounted (item 131).
     'skeleton_horse_ride': dict(
-        setup=[f'summon minecraft:skeleton_horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,'
+        setup=[f'summon minecraft:skeleton_horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,Rotation:[0f,0f],'
                'equipment:{saddle:{id:"minecraft:saddle",count:1}}}'],
         ticks=80, steps={0: ['command ride @s mount @e[type=minecraft:skeleton_horse,limit=1]'], 6: ['key w down'],
                          20: ['key space down'], 30: ['key space up'], 50: ['key w up'], 60: ['key shift down'],
@@ -952,7 +952,7 @@ SCENARIOS = {
                          72: ['key shift up']}),
     # A server-opened screen (item 100): a chested donkey's inventory, opened with the inventory key while riding.
     'donkey_inventory': dict(
-        setup=[f'summon minecraft:donkey 0.5 {FLOOR + 1} 2.5 {{Tame:1b,ChestedHorse:1b,PersistenceRequired:1b,'
+        setup=[f'summon minecraft:donkey 0.5 {FLOOR + 1} 2.5 {{Tame:1b,ChestedHorse:1b,PersistenceRequired:1b,Rotation:[0f,0f],'
                'equipment:{saddle:{id:"minecraft:saddle",count:1}}}'],
         ticks=60, steps={0: ['command ride @s mount @e[type=minecraft:donkey,limit=1]'], 10: ['key e tap'],
                          20: ['click-slot 2'], 25: ['click-slot 20'], 35: ['key esc tap'], 45: ['key shift down'],
@@ -1105,7 +1105,7 @@ SCENARIOS = {
     # with a warped fungus; a boat the server teleports mid-ride; dismounting at a trench's edge and in water; a
     # minecart left while it runs on powered rails.
     'horse_jump_strengths': dict(
-        setup=[f'summon minecraft:horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,Variant:0,'
+        setup=[f'summon minecraft:horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,Rotation:[0f,0f],Variant:0,'
                'equipment:{saddle:{id:"minecraft:saddle",count:1}},attributes:[{id:"minecraft:jump_strength",base:0.8}]}'],
         ticks=120, steps={0: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 10: ['key space down'],
                           15: ['key space up'], 40: ['key space down'], 50: ['key space up'], 75: ['key space down'],
@@ -1124,7 +1124,7 @@ SCENARIOS = {
                          30: ['command execute as @e[type=minecraft:oak_boat] run tp @s ~ ~ ~4'], 60: ['key w up']}),
     'dismount_edge_and_water': dict(
         setup=[f'fill -3 {FLOOR - 2} 4 3 {FLOOR} 8 minecraft:air', f'fill -3 {FLOOR - 2} 9 3 {FLOOR} 14 minecraft:water',
-               f'summon minecraft:horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,Variant:0,'
+               f'summon minecraft:horse 0.5 {FLOOR + 1} 2.5 {{Tame:1b,PersistenceRequired:1b,Rotation:[0f,0f],Variant:0,'
                'equipment:{saddle:{id:"minecraft:saddle",count:1}}}'],
         ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 6: ['key w down'], 14: ['key w up'],
                          20: ['key shift down'], 22: ['key shift up'],
