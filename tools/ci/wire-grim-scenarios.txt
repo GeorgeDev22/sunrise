@@ -265,3 +265,5 @@ end_crystal_place
 armor_stand_interact
 mace_wind_charge
 tnt_knockback
+end_portal_drop
+end_portal_inside

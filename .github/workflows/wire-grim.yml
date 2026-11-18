@@ -18,9 +18,9 @@ env:
   # cloud game build 44324974257: cb-next 9be2fa5 + the player_loaded and respawn-motion fixes
   # (sunrise-org/sunrise#2755, #2766), 8c19744.
   SUNRISE_RUN: '44324974257'
-  SHARDS: '1'
+  SHARDS: '5'
   # The scenario list this run plays (tools/ci/wire-grim-scenarios.txt: all of item 93).
-  SCENARIO_LIST: tools/ci/wire-grim-portals.txt
+  SCENARIO_LIST: tools/ci/wire-grim-scenarios.txt
 jobs:
   grim:
     name: ${{ matrix.anticheat }} ${{ matrix.server }} r${{ matrix.round }} s${{ matrix.shard }}
@@ -34,7 +34,7 @@ jobs:
         server: ['paper-26.3', 'via-1.21.11']
         # Three rounds of the whole list: a difference counts only when it comes back in each.
         round: [1, 2, 3]
-        shard: [0]
+        shard: [0, 1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,6 +88,8 @@ jobs:
           WIRE_STREAM_GRIM: ${{ runner.temp }}/servers
           WIRE_STREAM_VIA: ${{ matrix.server == 'via-1.21.11' && '1.21.11' || '' }}
           WIRE_STREAM_ANTICHEAT: ${{ matrix.anticheat }}
+          # A small vanilla window, so its CPU-drawn frames stay under a tick (even ticks, as on real hardware).
+          WIRE_STREAM_VANILLA_SIZE: 256x144
         run: |
           [ -n "$WIRE_STREAM_VIA" ] || unset WIRE_STREAM_VIA
           set +e
