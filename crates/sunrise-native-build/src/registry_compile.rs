@@ -419,10 +419,10 @@ pub fn compile(
     plan.check_mods(&super::registry_lock::RegistryLock::parse(
         &super::read_lock(out)?,
     )?)?;
-    plan.allowed.check_partial_resolution(
-        &super::registry_lock::RegistryLock::parse(&super::read_lock(out)?)?,
-        &plan.game,
-    )?;
+    plan.allowed
+        .check_pins(&super::registry_lock::RegistryLock::parse(
+            &super::read_lock(out)?,
+        )?)?;
     let mut game_names = plan.game.game_package_names();
     for registry in patches.values() {
         for name in registry.as_table().expect("validated SDK patches").keys() {

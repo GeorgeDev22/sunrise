@@ -185,160 +185,67 @@ impl RegistryLock {
         Ok(())
     }
 
-    /// Authorize only same-version registry-to-SDK substitutions in mod-owned records.
-    /// Game records keep their original edges, and the registry identity being replaced
-    /// is removed so it cannot authorize a second, non-SDK copy of the patched crate.
-    pub fn allow_game_patch_edges(
+    /// Withholds the registry identity of each crate the SDK builds from its own source (`names`,
+    /// local in the game's lock), so a mod's pin cannot authorize a registry copy of it at the
+    /// SDK's version.
+    pub fn withhold_sdk_patched(
         &mut self,
         game: &Self,
         names: &std::collections::BTreeSet<String>,
     ) {
-        let replacements: BTreeMap<_, _> = game
-            .local
-            .keys()
-            .filter(|id| names.contains(&id.name))
-            .map(|id| {
-                (
-                    Identity {
-                        source: CRATES_IO.into(),
-                        ..id.clone()
-                    },
-                    id.clone(),
-                )
-            })
-            .collect();
-        self.packages.retain(|id, _| !replacements.contains_key(id));
-        for (id, record) in &mut self.packages {
-            if game.packages.contains_key(id) {
-                continue;
-            }
-            record.edges = record
-                .edges
-                .iter()
-                .map(|edge| replacements.get(edge).unwrap_or(edge).clone())
-                .collect();
-        }
+        self.packages.retain(|id, _| {
+            !names.contains(&id.name)
+                || !game
+                    .local
+                    .keys()
+                    .any(|sdk| sdk.name == id.name && sdk.version == id.version)
+        });
     }
 
-    /// Compare resolved identities and checksums, and normalize Cargo's optional dependency
-    /// qualifiers before comparing edges. Adding a second version qualifies existing edges.
-    #[cfg(test)]
-    pub fn check_resolution(&self, resolved: &Self, game: &Self) -> Result<(), String> {
-        self.check_resolved(resolved, game, true)
-    }
-
-    /// A mod-only workspace may omit game packages and their inactive optional edges.
-    pub fn check_partial_resolution(&self, resolved: &Self, game: &Self) -> Result<(), String> {
-        self.check_resolved(resolved, game, false)
-    }
-
-    fn check_resolved(
-        &self,
-        resolved: &Self,
-        game: &Self,
-        require_game: bool,
-    ) -> Result<(), String> {
-        // The prebuilt game retains its features. A narrower Cargo workspace may
-        // drop game-owned edges, but must never add edges or change identities.
-        for (id, record) in resolved.packages.iter().chain(resolved.local.iter()) {
-            let owners: Vec<_> = self
-                .packages
-                .iter()
-                .chain(self.local.iter())
-                .filter(|(old, _)| old.name == id.name)
-                .collect();
-            if owners.is_empty() {
-                continue;
-            }
-            if !owners.iter().any(|(old, pin)| {
-                *old == id
-                    && if let Some(owner) = game.packages.get(id).or_else(|| game.local.get(id)) {
-                        record.edges.is_subset(&owner.edges)
-                    } else {
-                        pin.edges == record.edges
-                    }
-            }) {
-                let labels = |edges: &std::collections::BTreeSet<Identity>| {
-                    edges
-                        .iter()
-                        .map(|edge| format!("{} {}", edge.name, edge.version))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
+    /// Checks a resolved build graph against these pins (the game's and the mods'): each registry
+    /// package in it is pinned here by version and checksum, and a package the SDK supplies itself
+    /// keeps the SDK's version.
+    ///
+    /// Dependency edges are not compared. A registry package in a mod's graph is compiled for the
+    /// mod and linked into the mod's library; the prebuilt game's libraries are never rebuilt or
+    /// relinked, so the features a mod turns on in its own copy of a package the game also uses
+    /// cannot reach the game.
+    pub fn check_pins(&self, resolved: &Self) -> Result<(), String> {
+        let versions = |ids: &BTreeMap<Identity, Record>, name: &str| {
+            ids.keys()
+                .filter(|id| id.name == name)
+                .map(|id| id.version.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        for id in resolved.local.keys() {
+            let sdk = versions(&self.local, &id.name);
+            if !sdk.is_empty() && !self.local.contains_key(id) {
                 return Err(format!(
-                    "Cargo.lock: game or pinned package {} moved or changed its dependency graph: [{}] -> [{}]",
-                    id.name,
-                    owners
-                        .iter()
-                        .map(|(old, pin)| format!(
-                            "{} {}: {}",
-                            old.name,
-                            old.version,
-                            labels(&pin.edges)
-                        ))
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                    labels(&record.edges)
+                    "Cargo.lock: the SDK supplies {} {sdk}, and the build resolved {} {}. A mod cannot replace a package of the game.",
+                    id.name, id.name, id.version
                 ));
             }
         }
         for (id, record) in &resolved.packages {
             let Some(pin) = self.packages.get(id) else {
-                let versions = game
-                    .packages
-                    .keys()
-                    .filter(|old| old.name == id.name)
-                    .map(|old| old.version.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let sdk = versions(&self.local, &id.name);
+                if !sdk.is_empty() {
+                    return Err(format!(
+                        "Cargo.lock: the SDK supplies {} {sdk} from its own source, and the build resolved {} {} from crates.io. A mod cannot replace a package of the game.",
+                        id.name, id.name, id.version
+                    ));
+                }
+                let pinned = versions(&self.packages, &id.name);
                 return Err(format!(
-                    "Cargo.lock: {} moved from [{}] to {}; resolution is not pinned by a mod lock",
-                    id.name, versions, id.version
+                    "Cargo.lock: {} {} is not pinned: the game's and the mods' locks pin [{pinned}]. A mod's Cargo.lock is older than its Cargo.toml; run native-lock with update on that mod.",
+                    id.name, id.version
                 ));
             };
             if pin.checksum != record.checksum {
                 return Err(format!(
-                    "Cargo.lock: checksum changed for {} {}",
+                    "Cargo.lock: the checksum of {} {} is not the pinned one. Run native-lock with update on the mod that brings it, and compare the new lock before trusting it.",
                     id.name, id.version
-                ));
-            }
-        }
-        if !require_game {
-            return Ok(());
-        }
-        for id in game.packages.keys().chain(game.local.keys()) {
-            let Some(record) = resolved.packages.get(id).or_else(|| resolved.local.get(id)) else {
-                let versions = resolved
-                    .packages
-                    .keys()
-                    .filter(|new| new.name == id.name)
-                    .map(|new| new.version.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(format!(
-                    "Cargo.lock: game crate {} moved from {} to [{}]",
-                    id.name, id.version, versions
-                ));
-            };
-            let original = game
-                .packages
-                .get(id)
-                .or_else(|| game.local.get(id))
-                .expect("game identity");
-            if !record.edges.is_subset(&original.edges) {
-                let labels = |edges: &std::collections::BTreeSet<Identity>| {
-                    edges
-                        .iter()
-                        .map(|id| format!("{} {}", id.name, id.version))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                return Err(format!(
-                    "Cargo.lock: game dependency graph changed for {} {}: [{}] -> [{}]",
-                    id.name,
-                    id.version,
-                    labels(&original.edges),
-                    labels(&record.edges)
                 ));
             }
         }
@@ -377,8 +284,9 @@ impl RegistryLock {
                     .collect::<Vec<_>>()
                     .join(", ");
                 return Err(format!(
-                    "{mod_id}: {} resolved to {}, but its own Cargo.lock pins [{}]",
-                    id.name, id.version, versions
+                    "{mod_id}: {name} resolved to {version}, but its own Cargo.lock pins [{versions}]. If its Cargo.toml changed since it was locked, run native-lock with update on it. Otherwise another mod in this build pins {name} {version}, and the two build together only once they pin the same version.",
+                    name = id.name,
+                    version = id.version
                 ));
             }
             pending.extend(
@@ -420,94 +328,105 @@ mod tests {
             "version = 4\n[[package]]\nname = 'itoa'\nversion = '1.0.15'\nsource = '{source}'\nchecksum = '{checksum}'\n"
         )
     }
-    fn patched_graph(version: &str, registry: bool) -> String {
-        let source = if registry {
-            "source='registry+https://github.com/rust-lang/crates.io-index'\nchecksum='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"
-        } else {
-            ""
-        };
+    /// A crates.io record of `name` at `version` depending on `dependencies`, with a checksum of `sum`s.
+    fn package(name: &str, version: &str, sum: char, dependencies: &[&str]) -> String {
         format!(
-            "version=4\n[[package]]\nname='allocator'\nversion='1.0.0'\nsource='registry+https://github.com/rust-lang/crates.io-index'\nchecksum='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'\ndependencies=['allocator-sys']\n[[package]]\nname='allocator-sys'\nversion='{version}'\n{source}\n"
+            "[[package]]\nname='{name}'\nversion='{version}'\nsource='{CRATES_IO}'\nchecksum='{}'\ndependencies={dependencies:?}\n",
+            sum.to_string().repeat(64)
         )
     }
-
-    #[test]
-    fn isolated_game_patch_version_movement_is_refused() {
-        let game =
-            RegistryLock::parse("version=4\n[[package]]\nname='allocator-sys'\nversion='0.1.49'\n")
-                .unwrap();
-        let moved =
-            RegistryLock::parse("version=4\n[[package]]\nname='allocator-sys'\nversion='0.1.50'\n")
-                .unwrap();
-        let error = game
-            .check_resolution(&moved, &RegistryLock::default())
-            .unwrap_err();
-        assert!(error.contains("allocator-sys"), "{error}");
+    fn parsed(records: &[String]) -> RegistryLock {
+        RegistryLock::parse(&format!("version=4\n{}", records.concat())).unwrap()
+    }
+    /// The game's pins and one mod's, as a build plan joins them.
+    fn allowed(game: &RegistryLock, pins: &RegistryLock) -> RegistryLock {
+        let mut allowed = game.clone();
+        allowed.extend(pins).unwrap();
+        allowed
     }
 
     #[test]
-    fn isolated_game_patch_registry_source_movement_is_refused() {
-        let game =
-            RegistryLock::parse("version=4\n[[package]]\nname='allocator-sys'\nversion='0.1.49'\n")
-                .unwrap();
-        let moved = RegistryLock::parse(&format!("version=4\n[[package]]\nname='allocator-sys'\nversion='0.1.49'\nsource='{CRATES_IO}'\nchecksum='{}'\n", "a".repeat(64))).unwrap();
-        let error = game
-            .check_resolution(&moved, &RegistryLock::default())
-            .unwrap_err();
-        assert!(error.contains("allocator-sys"), "{error}");
+    fn a_mods_copy_of_a_package_the_game_locks_takes_the_mods_features_and_dependencies() {
+        let game = parsed(&[
+            package("arbitrary", "1.5.0", 'a', &[]),
+            package("getrandom", "0.4.3", 'b', &["libc"]),
+            package("libc", "0.2.190", 'c', &[]),
+        ]);
+        // zip turns on arbitrary's `derive`, and the mod's lock moved libc under the game's getrandom.
+        let pins = parsed(&[
+            package("zip", "7.0.0", 'd', &["arbitrary", "getrandom"]),
+            package("arbitrary", "1.5.0", 'a', &["derive_arbitrary"]),
+            package("derive_arbitrary", "1.5.0", 'e', &[]),
+            package("getrandom", "0.4.3", 'b', &["libc"]),
+            package("libc", "0.2.191", 'f', &[]),
+        ]);
+        allowed(&game, &pins).check_pins(&pins).unwrap();
     }
 
     #[test]
-    fn registry_to_game_owned_local_patch_is_pinned_and_movement_refuses_by_name() {
-        let game = RegistryLock::parse(&patched_graph("0.1.49", false)).unwrap();
-        game.check_resolution(&game, &RegistryLock::default())
-            .unwrap();
-        for (version, registry) in [("0.1.50", false), ("0.1.49", true)] {
-            let moved = RegistryLock::parse(&patched_graph(version, registry)).unwrap();
-            let error = game
-                .check_resolution(&moved, &RegistryLock::default())
-                .unwrap_err();
-            assert!(error.contains("allocator-sys"), "{error}");
+    fn a_package_no_lock_pins_is_refused_by_name_with_the_way_out() {
+        let game = parsed(&[package("libc", "0.2.190", 'c', &[])]);
+        let pins = parsed(&[
+            package("zip", "9.1.3", 'd', &["libc"]),
+            package("libc", "0.2.190", 'c', &[]),
+        ]);
+        let resolved = parsed(&[
+            package("zip", "9.1.3", 'd', &["libc"]),
+            package("libc", "0.2.191", 'f', &[]),
+        ]);
+        let error = allowed(&game, &pins).check_pins(&resolved).unwrap_err();
+        for detail in ["libc 0.2.191", "0.2.190", "native-lock"] {
+            assert!(error.contains(detail), "{error}");
         }
     }
 
     #[test]
-    fn game_version_movement_is_named_and_added_versions_are_allowed() {
-        let game = RegistryLock::parse(&lock(CRATES_IO, &"a".repeat(64))).unwrap();
-        let other =
-            RegistryLock::parse(&lock(CRATES_IO, &"b".repeat(64)).replace("1.0.15", "0.4.8"))
-                .unwrap();
-        let mut allowed = game.clone();
-        allowed.extend(&other).unwrap();
-        allowed.check_resolution(&allowed, &game).unwrap();
-        let error = allowed.check_resolution(&other, &game).unwrap_err();
-        assert!(
-            error.contains("itoa") && error.contains("1.0.15") && error.contains("0.4.8"),
-            "{error}"
-        );
+    fn a_pinned_package_with_another_checksum_is_refused() {
+        let game = parsed(&[package("libc", "0.2.190", 'c', &[])]);
+        let resolved = parsed(&[package("libc", "0.2.190", 'f', &[])]);
+        let error = game.check_pins(&resolved).unwrap_err();
+        assert!(error.contains("checksum of libc 0.2.190"), "{error}");
     }
 
     #[test]
-    fn a_local_game_edge_cannot_move_even_when_both_versions_remain_locked() {
-        let registry = lock(CRATES_IO, &"a".repeat(64));
-        let game = format!(
-            "{registry}\n[[package]]\nname='game'\nversion='1.0.0'\ndependencies=['itoa']\n"
-        );
-        let old = RegistryLock::parse(&game).unwrap();
-        let new_registry = lock(CRATES_IO, &"b".repeat(64)).replace("1.0.15", "0.4.8");
-        let moved = format!(
-            "{}\n{}",
-            game.replace("dependencies=['itoa']", "dependencies=['itoa 0.4.8']"),
-            new_registry.replace("version = 4\n", "")
-        );
-        let resolved = RegistryLock::parse(&moved).unwrap();
-        let mut allowed = old.clone();
-        allowed
-            .extend(&RegistryLock::parse(&new_registry).unwrap())
-            .unwrap();
-        let error = allowed.check_resolution(&resolved, &old).unwrap_err();
-        for detail in ["game", "itoa", "1.0.15", "0.4.8"] {
-            assert!(error.contains(detail), "{error}");
+    fn a_package_the_sdk_supplies_keeps_the_sdks_version_and_source() {
+        let sdk = |version: &str| format!("[[package]]\nname='naga'\nversion='{version}'\n");
+        let game = parsed(&[sdk("30.0.1")]);
+        let names = std::collections::BTreeSet::from(["naga".to_owned()]);
+        // A mod's own lock is made without the SDK's patches, so it pins the registry's naga.
+        let pins = parsed(&[
+            package("mod-parent", "1.0.0", 'a', &["naga 30.0.1"]),
+            package("naga", "30.0.1", 'b', &[]),
+            package("older", "1.0.0", 'c', &["naga 29.0.0"]),
+            package("naga", "29.0.0", 'd', &[]),
+        ]);
+        let mut allowed = allowed(&game, &pins);
+        allowed.withhold_sdk_patched(&game, &names);
+        let built = |naga: String| {
+            parsed(&[
+                package("mod-parent", "1.0.0", 'a', &["naga 30.0.1"]),
+                naga,
+                package("older", "1.0.0", 'c', &["naga 29.0.0"]),
+                package("naga", "29.0.0", 'd', &[]),
+            ])
+        };
+        // The SDK's naga, beside another version that is the mod's own.
+        allowed.check_pins(&built(sdk("30.0.1"))).unwrap();
+        let resourced = RegistryLock::parse(&format!(
+            "version=4\n{}{}",
+            package("mod-parent", "1.0.0", 'a', &["naga"]),
+            package("naga", "30.0.1", 'b', &[])
+        ))
+        .unwrap();
+        let moved = RegistryLock::parse(&format!(
+            "version=4\n{}{}",
+            package("mod-parent", "1.0.0", 'a', &["naga"]),
+            sdk("30.0.2")
+        ))
+        .unwrap();
+        for refused in [resourced, moved] {
+            let error = allowed.check_pins(&refused).unwrap_err();
+            assert!(error.contains("the SDK supplies naga 30.0.1"), "{error}");
         }
     }
 
