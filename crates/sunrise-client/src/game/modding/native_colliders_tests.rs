@@ -428,9 +428,10 @@ fn siblings_riding_one_vehicle_share_a_stack() {
 }
 
 /// What a level's tick costs with 200 items over a collider at the box cap: with no collider,
-/// with one that stays, and with one that moves every tick (Create's normal case), each timed
-/// over the same ticks. The numbers go to stderr (`--nocapture`); the test holds the
-/// outcome: the items rest on the capped collider, moving or not.
+/// with one that stays, with one rebuilt every tick but moved before it begins, and with one
+/// that moves during the tick and carries all 200 (Create's normal case), each timed over the
+/// same ticks. The numbers go to stderr (`--nocapture`); the test holds the outcome: the items
+/// rest on the capped collider, moving or not, and go with it when it moves.
 #[test]
 #[ignore = "daily"]
 fn two_hundred_items_over_a_capped_collider_rest_and_the_tick_is_timed() {
@@ -502,8 +503,26 @@ fn two_hundred_items_over_a_capped_collider_rest_and_the_tick_is_timed() {
         };
         let moving = time(game, 40, Some(&mut step));
         assert_eq!(rests(game), 200, "and they still rest on it while it moves");
+        // The collider moves during the tick, after the bodies were placed, so the carry pass
+        // carries all 200 items (the phase above moves it before the tick: its pass sees none).
+        let from: Vec<f64> = on.iter().map(|id| item_at(game, *id).x).collect();
+        let began = Instant::now();
+        for _ in 0..40 {
+            tick_level_moving(game, |g| {
+                g.mobs.update(index, |m| m.position.x += 0.05);
+            });
+        }
+        let carried = began.elapsed().as_secs_f64() * 1000.0 / 40.0;
+        assert_eq!(rests(game), 200, "and they are carried with it");
+        for (id, x) in on.iter().zip(&from) {
+            let carried_by = item_at(game, *id).x - x;
+            assert!(
+                (carried_by - 2.0).abs() < 0.05,
+                "item {id} moved {carried_by} with a collider that moved 2.0"
+            );
+        }
         eprintln!(
-            "tick of the level, 200 items, ms per tick: no collider {open:.3}, capped collider still {still:.3}, capped collider moving {moving:.3}"
+            "tick of the level, 200 items, ms per tick: no collider {open:.3}, capped collider still {still:.3}, capped collider moved before the tick {moving:.3}, carried {carried:.3}"
         );
     });
 }

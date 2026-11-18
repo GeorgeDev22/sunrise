@@ -219,6 +219,93 @@ impl PartialEq for StackData {
             && wire == &other.wire
     }
 }
+impl std::hash::Hash for StackData {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Exhaustive like `eq`: whatever `eq` ignores or compares loosely is hashed to match.
+        let Self {
+            damage_set,
+            banner_patterns_set,
+            enchantments,
+            stored_enchantments,
+            repair_cost,
+            explicit_zero_damage,
+            custom_name,
+            kinetic_weapon,
+            consumable,
+            death_protection,
+            potion,
+            potion_extra,
+            trim,
+            container,
+            charged,
+            fireworks,
+            map_id,
+            writable_pages,
+            written,
+            banner_patterns,
+            base_color,
+            ominous_banner,
+            ominous_amplifier,
+            dyed_color,
+            firework_explosion,
+            pot_decorations,
+            bundle_contents,
+            bundle_selected: _,
+            stew_effects,
+            map_post_processing,
+            other: preserved,
+            wire: _,
+        } = self;
+        damage_set.hash(state);
+        banner_patterns_set.hash(state);
+        hash_enchantments(enchantments, state);
+        hash_enchantments(stored_enchantments, state);
+        repair_cost.hash(state);
+        explicit_zero_damage.hash(state);
+        custom_name.hash(state);
+        kinetic_weapon.as_ref().map(|k| k.raw()).hash(state);
+        consumable.as_ref().map(|c| &c.raw).hash(state);
+        // ConsumeEffect holds floats, so only the effects' kinds are hashed.
+        death_protection
+            .as_ref()
+            .map(|effects| effects.len())
+            .hash(state);
+        for effect in death_protection.iter().flat_map(|effects| effects.iter()) {
+            std::mem::discriminant(effect).hash(state);
+        }
+        potion.hash(state);
+        potion_extra.hash(state);
+        trim.hash(state);
+        container.hash(state);
+        charged.hash(state);
+        fireworks.hash(state);
+        map_id.hash(state);
+        writable_pages.hash(state);
+        written.hash(state);
+        banner_patterns.hash(state);
+        base_color.hash(state);
+        ominous_banner.hash(state);
+        ominous_amplifier.hash(state);
+        dyed_color.hash(state);
+        firework_explosion.hash(state);
+        pot_decorations.hash(state);
+        bundle_contents.hash(state);
+        stew_effects.hash(state);
+        map_post_processing.hash(state);
+        preserved.hash(state);
+    }
+}
+
+/// Hashes enchantments as `enchantments_equal` compares them: as a multiset.
+fn hash_enchantments<H: std::hash::Hasher>(levels: &Levels, state: &mut H) {
+    use std::hash::Hash;
+    if levels.len() < 2 {
+        return levels.hash(state);
+    }
+    let mut sorted: Vec<_> = levels.iter().collect();
+    sorted.sort();
+    sorted.hash(state);
+}
 
 /// ItemEnchantments is a map, but keeps its written order for display. Compare
 /// without allocating or reordering either component. The usual same-order
@@ -541,7 +628,7 @@ fn ominous_tooltip_display() -> Tag {
 }
 
 /// `WrittenBookContent` with the pages as plain text.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Hash)]
 pub struct WrittenBook {
     pub title: String,
     pub author: String,
@@ -1965,6 +2052,42 @@ fn prototype_items() -> &'static crate::items::Items {
 mod tests {
     use super::*;
     use crate::banner_layer::BannerLayer;
+
+    #[test]
+    fn stack_data_that_compares_equal_hashes_equal() {
+        use std::hash::{BuildHasher, RandomState};
+        let rocket = |count: u32, patch: &[u8], selected: i32, order: [&str; 2]| {
+            let mut sword = ItemStack::new("minecraft:diamond_sword", 1);
+            sword.data_mut().enchantments = order.iter().map(|id| ((*id).into(), 1)).collect();
+            let mut stack = ItemStack::new("minecraft:firework_rocket", count);
+            let data = stack.data_mut();
+            data.fireworks = Some((2, Vec::new()));
+            data.container = vec![(0, sword)];
+            data.bundle_selected = BundleSelected(selected);
+            let decoded = stack.clone();
+            stack.data_mut().wire = Wire::new(decoded, patch.into());
+            stack
+        };
+        let full = rocket(
+            64,
+            &[1, 64],
+            0,
+            ["minecraft:sharpness", "minecraft:mending"],
+        );
+        let half = rocket(
+            32,
+            &[1, 32],
+            -1,
+            ["minecraft:mending", "minecraft:sharpness"],
+        );
+        let (full, half) = (full.data().unwrap(), half.data().unwrap());
+        assert_eq!(full, half);
+        let hasher = RandomState::new();
+        assert_eq!(hasher.hash_one(full), hasher.hash_one(half));
+        let mut other = half.clone();
+        other.fireworks = Some((3, Vec::new()));
+        assert_ne!(hasher.hash_one(full), hasher.hash_one(&other));
+    }
 
     #[test]
     fn enchantment_component_equality_ignores_entry_order_but_not_levels() {

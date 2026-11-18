@@ -948,9 +948,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             if b.table.bool(state, p.open) != power {
                 let data = b.data(state);
                 let sound = if power {
-                    data.gate_open.clone()
+                    data.gate_open[super::data::GateSoundSite::Redstone as usize].clone()
                 } else {
-                    data.gate_close.clone()
+                    data.gate_close[super::data::GateSoundSite::Redstone as usize].clone()
                 };
                 let pitch = self.random().next_float() * 0.1 + 0.9;
                 if let Some(sound) = sound {

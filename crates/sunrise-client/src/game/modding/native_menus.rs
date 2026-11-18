@@ -251,7 +251,7 @@ impl GuestMenus {
 
 /// What a mount's inventory is called, as vanilla's `HorseInventoryMenu` has
 /// no menu type.
-const MOUNT_MENU: &str = "sunrise:mount_inventory";
+pub(super) const MOUNT_MENU: &str = "sunrise:mount_inventory";
 
 /// The menu `conn` has open, whichever way the game keeps it: a block's
 /// container, a trade, a crafting table, a workstation, a lectern or a

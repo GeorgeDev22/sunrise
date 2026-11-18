@@ -357,7 +357,6 @@ impl Opt {
                 "options.modelPart.right_pants_leg",
                 "options.modelPart.hat",
             ][i],
-            Opt::SkinLayers3d => "sunrise.options.three_d_skin_layers",
             Opt::MainHand => "options.mainHand",
             Opt::AllowServerListing => "options.allowServerListing",
             Opt::RealmsNotifications => "options.realmsNotifications.button",
@@ -846,11 +845,6 @@ impl Opt {
             } else {
                 "options.key.hold"
             }),
-            Opt::SkinLayers3d => tr(if s.extras.three_d_skin_layers {
-                "options.on"
-            } else {
-                "options.off"
-            }),
             Opt::ToggleAttack => tr(if s.toggle_attack {
                 "options.key.toggle"
             } else {
@@ -1164,7 +1158,6 @@ impl Opt {
             Opt::ChunkBuilder => s.prioritize_chunk_updates = next(s.prioritize_chunk_updates, 3),
             Opt::ToggleCrouch => s.toggle_crouch = !s.toggle_crouch,
             Opt::ToggleSprint => s.toggle_sprint = !s.toggle_sprint,
-            Opt::SkinLayers3d => s.extras.three_d_skin_layers = !s.extras.three_d_skin_layers,
             Opt::ToggleAttack => s.toggle_attack = !s.toggle_attack,
             Opt::ToggleUse => s.toggle_use = !s.toggle_use,
             Opt::AutoJump => s.auto_jump = !s.auto_jump,
@@ -2911,8 +2904,6 @@ impl OptionsUi {
             Page::Skin => {
                 // SkinCustomizationScreen: the seven layers, then Main Hand.
                 let mut opts: Vec<Opt> = (0..MODEL_PART_KEYS.len()).map(Opt::ModelPart).collect();
-                // Sunrise's own: the outer layer as real pixels, not one box.
-                opts.push(Opt::SkinLayers3d);
                 opts.push(Opt::MainHand);
                 pairs(&opts)
             }
@@ -5323,9 +5314,9 @@ mod tests {
             vec![Event::ButtonClick, Event::OpenModFolder]
         );
         // Config does nothing until a native mod with settings is picked from the list
-        // (Minecraft, Sunrise, then Trails).
+        // (Minecraft, then Trails: no about hook is registered in this test).
         assert!(click(&mut ui, &mut s, 397.0, 192.0).is_empty());
-        assert!(click(&mut ui, &mut s, 61.0, 104.0).is_empty());
+        assert!(click(&mut ui, &mut s, 61.0, 76.0).is_empty());
         let events = click(&mut ui, &mut s, 397.0, 192.0);
         // Its labels were made with the list, maybe in another language.
         assert_eq!(events, vec![Event::ButtonClick, Event::NativeSettings(0)]);

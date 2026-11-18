@@ -19,6 +19,25 @@ pub(in crate::game) fn push_reaction(
     }
 }
 
+impl TryIntoEngine<()> for mod_api::GateSound {
+    type Engine = engine::GateSound;
+    type Error = String;
+    fn try_into_engine(&self, _: &()) -> Result<Self::Engine, Self::Error> {
+        Ok(match self {
+            Self::All(sound) => engine::GateSound::All(sound.clone()),
+            Self::Sites {
+                on_use,
+                on_explosion,
+                on_redstone,
+            } => engine::GateSound::Sites {
+                on_use: on_use.clone(),
+                on_explosion: on_explosion.clone(),
+                on_redstone: on_redstone.clone(),
+            },
+        })
+    }
+}
+
 impl TryIntoEngine<()> for mod_api::BlockProperties {
     type Engine = engine::BlockProperties;
     type Error = String;
@@ -59,6 +78,7 @@ impl TryIntoEngine<()> for mod_api::BlockProperties {
             }),
             max_horizontal_offset: self.max_horizontal_offset,
             max_vertical_offset: self.max_vertical_offset,
+            vegetation: self.vegetation,
         })
     }
 }
@@ -149,8 +169,16 @@ impl TryIntoEngine<()> for mod_api::Block {
                 .collect(),
             default_state: self.default_state.clone(),
             item: self.item,
-            open_sound: self.open_sound.clone(),
-            close_sound: self.close_sound.clone(),
+            open_sound: self
+                .open_sound
+                .as_ref()
+                .map(|sound| sound.try_into_engine(&()))
+                .transpose()?,
+            close_sound: self
+                .close_sound
+                .as_ref()
+                .map(|sound| sound.try_into_engine(&()))
+                .transpose()?,
             block_item: self.block_item.clone(),
             components: component_patch("block", &self.id, &self.components)?,
             connects_to: self.connects_to.clone(),

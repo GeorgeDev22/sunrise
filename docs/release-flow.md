@@ -123,10 +123,10 @@ dispatches it (`-f commit=<sha>`, `-f dry_run=false` to write). One run runs and
 dispatch replaces an older waiting one. The schedule stops when main's head already has a completed real daily run;
 a hand dispatch never does, so it retries a run whose tag move, issues or nightly failed. Its legs are the workflows that left main pushes:
 the ignored-tests data shards (`ignored-tests.yml`), the wasm fixture and guest stacks (`wasm-mods.yml`),
-`fn-replace-check.yml`, the native linkage probe (`native-dylib-probe.yml`), the launcher's Windows runtime-lease
-tests (`launcher-windows-check.yml`), the machine sample built against the commit's mod API (`machine-sample.yml`)
-and the prebuilt SDK of the commit
-(`prebuilt-game-build.yml`; each leg packs its slices, and `sdk-publish` signs and publishes them as the mod SDK's
+`fn-replace-check.yml`, the launcher's Windows runtime-lease tests (`launcher-windows-check.yml`), the machine sample
+built against the commit's mod API (`machine-sample.yml`) and the prebuilt SDK of the commit
+(`prebuilt-game-build.yml`; each leg packs its slices after the checks, including the [native linkage probe](native-dylib-probe.md)
+on the Linux and Windows client builds. `sdk-publish` signs and publishes the slices as the mod SDK's
 release `sdk-<sha>` (`sdk-publish.yml`) only when its own legs are green on a real run on main, before the Nightly that
 needs them; a failed publish files one issue, `Daily: sdk-publish did not complete`), each called
 with the commit. The [vanilla parity leg](#parity-on-main) runs after the shards when applicable. Its
@@ -141,7 +141,7 @@ summary (`tools/ci/daily_summary.py`) reads each leg's result and its sanitised 
   sample is no break: its one issue, `Daily: update the machine sample for the mod API change`, asks for the sample
   to follow the API change and its pin to move.
 
-The SDK publishes on its own legs (`sdk`, `linkage`, `machine-sample`, `fn-replace-check`: the summary's `sdk_green`) until a runner with prepared data exists (umceko, 2026-11-16).
+The SDK publishes on its own legs (`sdk`, `machine-sample`, `fn-replace-check`: the summary's `sdk_green`) until a runner with prepared data exists (umceko, 2026-11-16). A red linkage probe fails its `sdk / build linux` or `sdk / build windows` job and blocks publication.
 
 Only a run on `main` with `dry_run` false moves the tag, files issues or publishes; any other run prints what it
 would do. On Sunrise a Nightly ships a commit of main with its dyna-checks gate green and its SDK, `sdk-<sha>`, published

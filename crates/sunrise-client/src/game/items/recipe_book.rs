@@ -525,7 +525,7 @@ impl Game<'_> {
         }
         self.ensure_recipe_search();
     }
-    fn ensure_recipe_search(&mut self) {
+    pub(super) fn ensure_recipe_search(&mut self) {
         if self.recipe_ui.search.is_none() {
             let mut search = EditBox::new(0.0, 0.0, 81.0, 14.0);
             search.message = super::screen_info::tr("itemGroup.search", &[]);

@@ -930,6 +930,7 @@ fn run(
     recorder: &RecorderSlot,
     payloads: &Arc<crate::raw_payloads::Transport>,
 ) -> Result<Reason, Reason> {
+    let singleplayer = local.is_some();
     let (host, port, mut c) = if let Some(pipe) = local {
         (address.to_owned(), 0, Connection::local(pipe))
     } else {
@@ -1081,15 +1082,13 @@ fn run(
     status(send, &tr(lang, "connect.joining"));
     // ClientHandshakePacketListenerImpl.handleLoginFinished: the brand, then
     // the client information.
-    c.send(
-        &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
-            channel: "minecraft:brand".into(),
-            data: brand(),
-        })
-        .try_encode()
-        .map_err(e)?,
-    )
-    .map_err(e)?;
+    // The window's own server thread is no join to an address: it hears vanilla's identity.
+    let identity = if singleplayer {
+        sunrise_hooks::ClientIdentity::vanilla()
+    } else {
+        sunrise_hooks::engine::client_identity(address)
+    };
+    send_identity(&mut c, &identity).map_err(e)?;
     c.send(&cfg::Serverbound::ClientInformation(info).encode())
         .map_err(e)?;
     let (mut reader, writer) = c.split();
@@ -1538,11 +1537,29 @@ fn receive_brand(payload: &cfg::CustomPayload, send: &ingress::Producer<Event>) 
     }
 }
 
-/// `ClientBrandRetriever.getClientModName`: vanilla's default client brand.
-fn brand() -> Vec<u8> {
-    let mut w = sunrise_protocol::buf::Writer::new();
-    w.string("vanilla");
-    w.data
+/// `ClientBrandRetriever.getClientModName`, then the identity's configuration payloads, in order.
+fn send_identity(
+    c: &mut Connection,
+    identity: &sunrise_hooks::ClientIdentity,
+) -> Result<(), sunrise_protocol::Error> {
+    let mut brand = sunrise_protocol::buf::Writer::new();
+    brand.string(&identity.brand);
+    let brand = ("minecraft:brand", brand.data);
+    for (channel, data) in std::iter::once(brand).chain(
+        identity
+            .payloads
+            .iter()
+            .map(|(channel, data)| (channel.as_str(), data.clone())),
+    ) {
+        c.send(
+            &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+                channel: channel.into(),
+                data,
+            })
+            .try_encode()?,
+        )?;
+    }
+    Ok(())
 }
 
 /// Flatten a JSON chat component (login disconnects are JSON).
@@ -1818,6 +1835,47 @@ mod tests {
                 "missing response"
             }));
             std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn identity_sends_the_brand_then_its_payloads_in_order() {
+        for (payloads, expected) in [
+            (vec![], vec![("minecraft:brand", b"\x07vanilla".to_vec())]),
+            (
+                vec![
+                    ("a:one".to_owned(), vec![1, 1, 0]),
+                    ("a:two".to_owned(), vec![]),
+                ],
+                vec![
+                    ("minecraft:brand", b"\x03abc".to_vec()),
+                    ("a:one", vec![1, 1, 0]),
+                    ("a:two", vec![]),
+                ],
+            ),
+        ] {
+            let brand = if payloads.is_empty() {
+                "vanilla"
+            } else {
+                "abc"
+            };
+            let identity = sunrise_hooks::ClientIdentity {
+                brand: brand.to_owned(),
+                payloads,
+            };
+            let (client, server) = sunrise_protocol::connection::Pipe::pair();
+            let mut client = Connection::local(client);
+            send_identity(&mut client, &identity).unwrap();
+            let mut server = Connection::local(server);
+            for (channel, data) in expected {
+                let (id, body) = server.recv().unwrap();
+                let cfg::Serverbound::CustomPayload(p) =
+                    cfg::Serverbound::decode(id, &body).unwrap()
+                else {
+                    panic!("expected a custom payload")
+                };
+                assert_eq!((p.channel.as_str(), p.data), (channel, data));
+            }
         }
     }
 

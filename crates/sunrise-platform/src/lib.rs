@@ -66,8 +66,8 @@ pub mod hooks {
         PlayerModel, PlayerModels, Quad, SpriteStore, Sprites, View,
     };
     pub use sunrise_hooks::{
-        Activity, Client, Dimension, GameMode, GetTheGame, Hooks, Play, Started, TooLate, perf,
-        register, seat, tunnel,
+        Activity, Client, ClientIdentity, Dimension, GameMode, GetTheGame, Hooks, Play, Started,
+        TooLate, perf, register, seat, tunnel,
     };
 }
 
@@ -86,6 +86,43 @@ pub mod pages {
 /// registries").
 pub mod lang {
     pub use sunrise_hooks::lang::{Files, register};
+}
+
+/// Rows a crate adds to the Mods screen (docs/layers.md, "Platform registries").
+pub mod mod_rows {
+    pub use sunrise_hooks::mod_rows::{Row, register};
+}
+
+/// The game's own release: [`release::VERSION`] is what its Mods screen row shows.
+pub use sunrise_core::release;
+
+/// Input and drawing on an open container screen, for the extras that act on one (docs/layers.md,
+/// "Container screens"); offered through [`hooks::Hooks::containers`].
+pub mod containers {
+    pub use sunrise_hooks::containers::{
+        Button, Click, Container, ContainerHooks, Panel, Role, Slot, SlotId, Stack,
+    };
+
+    // Compiled with the tests: a crate on the platform alone implements every hook.
+    #[cfg(test)]
+    mod consumer {
+        use super::{Button, Click, Container, ContainerHooks, SlotId};
+
+        struct PickOnRelease;
+        impl ContainerHooks for PickOnRelease {
+            fn press(&self, _: &mut dyn Container, _: Option<SlotId>, b: Button) -> bool {
+                b == Button::Middle
+            }
+            fn release(&self, c: &mut dyn Container, slot: Option<SlotId>, _: Button) -> bool {
+                slot.is_some_and(|s| c.click(s, Click::QuickMove))
+            }
+            fn drag(&self, _: &mut dyn Container, _: Option<SlotId>, b: Button) -> bool {
+                matches!(b, Button::Other(_))
+            }
+        }
+
+        const _: &dyn ContainerHooks = &PickOnRelease;
+    }
 }
 
 /// Drawing on the HUD (docs/layers.md, "Platform registries").

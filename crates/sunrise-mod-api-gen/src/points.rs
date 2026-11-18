@@ -938,11 +938,6 @@ fn place_items(places: &[(String, String, mod_call::Name)]) -> proc_macro2::Toke
             pub const fn id(self) -> u64 {
                 match self { #(PointId::#variants => #place_ids,)* PointId::__Count => 0 }
             }
-            /// The place named `name`.
-            #[doc(hidden)]
-            pub fn named(name: &str) -> Option<PointId> {
-                match name { #(#names => Some(PointId::#variants),)* _ => None }
-            }
             /// The place at `index` in the catalog, which is `Place::index`.
             #[doc(hidden)]
             pub fn from_index(index: usize) -> Option<PointId> {

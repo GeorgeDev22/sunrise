@@ -1,6 +1,7 @@
 //! winit's `ApplicationHandler` for the game window: window and device events, shutting down,
 //! and the idle step (`about_to_wait`).
 use super::*;
+use sunrise_client::window::PointerSample;
 
 impl Game<'_> {
     /// A run that a person's stray key, click or mouse move would spoil: a screenshot sequence, a
@@ -113,6 +114,17 @@ impl Game<'_> {
         event: WindowEvent,
         origin: input_trace::InputOrigin,
     ) {
+        self.handle_window_event_with_sample(event_loop, id, event, origin, None);
+    }
+
+    pub(super) fn handle_window_event_with_sample(
+        &mut self,
+        event_loop: &dyn EventLoopCtl,
+        id: WindowId,
+        event: WindowEvent,
+        origin: input_trace::InputOrigin,
+        retained_sample: Option<PointerSample>,
+    ) {
         let input = matches!(
             event,
             WindowEvent::KeyboardInput { .. }
@@ -121,7 +133,7 @@ impl Game<'_> {
                 | WindowEvent::Ime(_)
         );
         self.with_user_input(input, |game| {
-            game.handle_window_event_as(event_loop, id, event, origin);
+            game.handle_window_event_as(event_loop, id, event, origin, retained_sample);
         });
     }
 
@@ -131,6 +143,7 @@ impl Game<'_> {
         id: WindowId,
         mut event: WindowEvent,
         origin: input_trace::InputOrigin,
+        retained_sample: Option<PointerSample>,
     ) {
         // A headless game has no window: its events (the frame, the control socket's input)
         // carry `WindowId::dummy()`.
@@ -168,9 +181,22 @@ impl Game<'_> {
         {
             *button = MouseButton::Right;
         }
+        let cursor_sample = if let WindowEvent::CursorMoved { position, .. } = &event {
+            Some(retained_sample.unwrap_or_else(|| {
+                // Only the coordinate scale matters here, not the screen extent.
+                let window = self.pointer_space([1, 1]);
+                if origin == input_trace::InputOrigin::User {
+                    window.os_sample(*position)
+                } else {
+                    window.physical_sample(*position)
+                }
+            }))
+        } else {
+            None
+        };
         // Who caused it, before the event is handled: the trace wants the
         // window's own keys, never the ones the socket made up.
-        self.trace_window_event(origin, &event);
+        self.trace_window_event(origin, &event, cursor_sample);
         if let WindowEvent::KeyboardInput { event, .. } = &event
             && let PhysicalKey::Code(key) = event.physical_key
         {
@@ -194,9 +220,14 @@ impl Game<'_> {
         if let WindowEvent::MouseInput { state, button, .. } = &event {
             if *state == ElementState::Pressed {
                 self.physical_buttons.insert(*button);
+                self.physical_presses += 1;
             } else {
                 self.physical_buttons.remove(button);
             }
+            // A container hook's press latch ends here, before any hook can cancel the release.
+            self.container_owned_up = *state == ElementState::Released
+                && !self.pad_synthetic_input()
+                && self.container_button_up(*button);
         }
         let mouse = if !self.pad_synthetic_input()
             && let WindowEvent::MouseInput { state, button, .. } = &event
@@ -222,7 +253,7 @@ impl Game<'_> {
             self.mod_mappings_button(*button, *state == ElementState::Pressed);
         }
         let resized = matches!(event, WindowEvent::Resized(_));
-        self.handle_window_event_inner(event_loop, event);
+        self.handle_window_event_inner(event_loop, event, cursor_sample);
         if resized {
             self.notify_window_resize();
         }

@@ -1,10 +1,10 @@
 name: daily
 run-name: daily ${{ inputs.commit || github.sha }}${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run || github.ref != 'refs/heads/main') && ' (dry run)' || '' }}
 # The daily tier (CI tiers, owner 2026-11-13; docs/release-flow.md "Daily run"): every in-game test, once a day on
-# main's head and by root's dispatch. Its legs are the workflows that used to run on main pushes, called unchanged:
-# the ignored-tests data shards, the wasm fixture and guest stacks, fn-replace-check and the native linkage probe,
-# plus the launcher's Windows runtime-lease tests (launcher-windows-check.yml), the machine sample built against this
-# API (machine-sample.yml) and the prebuilt SDK of the commit (prebuilt-game-build.yml), which the nightly needs.
+# main's head and by root's dispatch. Its legs include the ignored-tests data shards, the wasm fixture and guest
+# stacks, fn-replace-check, the launcher's Windows runtime-lease tests (launcher-windows-check.yml), the machine
+# sample built against this API (machine-sample.yml) and the prebuilt SDK of the commit (prebuilt-game-build.yml),
+# which the nightly needs. The SDK's Linux and Windows client jobs run the native linkage probe before packing.
 # The summary then moves the tag `daily-green` to the commit when every leg passed, or files one issue per failing
 # test (tools/ci/daily_summary.py), and on all green the nightly is published from that commit (release.yml).
 # Only a run on main with dry_run false writes anything: tags, issues, the nightly.
@@ -67,11 +67,23 @@ jobs:
       skip: ${{ steps.commit.outputs.skip }}
       dry_run: ${{ steps.commit.outputs.dry_run }}
       parity_required: ${{ steps.commit.outputs.parity_required }}
+      self_hosted: ${{ steps.route.outputs.self_hosted }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
+      # The pool's routing for a leg that starts late (fn-replace-check waits for the SDK's Linux legs), decided now:
+      # the run's lease snapshot is judged only within an hour of the run's creation (tools/ci/dyna_ci_route.sh), and
+      # a route of its own an hour or more later sent fn-replace-check to GitHub's runners (daily 44065326913, 44145360054).
+      - id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VARS_ENABLED: ${{ vars.DYNA_CI_SELF_HOSTED }}
+          VARS_LEASE: ${{ vars.DYNA_CI_POOL_UNTIL }}
+          SAME_REPO: true
+          EVENT: ${{ github.event_name }}
+        run: bash tools/ci/dyna_ci_route.sh >> "$GITHUB_OUTPUT"
       - id: commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -134,15 +146,7 @@ jobs:
     uses: ./.github/workflows/fn-replace-check.yml
     with:
       commit: ${{ needs.resolve.outputs.commit }}
-  linkage:
-    needs: resolve
-    if: needs.resolve.outputs.skip == 'false'
-    permissions:
-      contents: read
-      actions: read  # its routing reads this run's creation time (tools/ci/dyna_ci_route.sh)
-    uses: ./.github/workflows/native-dylib-probe.yml
-    with:
-      commit: ${{ needs.resolve.outputs.commit }}
+      self_hosted: ${{ needs.resolve.outputs.self_hosted }}
   # The launcher's Windows tests that start child processes: the runtime leases and the debug
   # launcher binary's subprocess tests (launcher-windows-check.yml launcher-processes).
   windows-runtime-leases:
@@ -199,7 +203,7 @@ jobs:
   summary:
     # The resolved commit names the job: what a scheduled run's lookup (daily_summary.py --seen) matches.
     name: summary ${{ needs.resolve.outputs.commit }}${{ needs.resolve.outputs.dry_run == 'true' && ' (dry run)' || '' }}
-    needs: [resolve, shards, wasm-mods, fn-replace-check, linkage, windows-runtime-leases, machine-sample, sdk,
+    needs: [resolve, shards, wasm-mods, fn-replace-check, windows-runtime-leases, machine-sample, sdk,
             sdk-windows-macos, parity]
     # Not on a cancelled run: its legs did not fail, they were stopped, and a stopped leg says nothing about the commit.
     if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.skip == 'false' }}

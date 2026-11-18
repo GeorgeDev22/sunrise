@@ -7,9 +7,9 @@ mod tests {
         native_entity_refs::tests as fixture,
     };
     use mod_api::{
-        BlockPart, BlockToolModificationEvent, DispenseMethodEvent, Dispensed, Flow, Hooks, Host,
-        LevelWriteHost, Registrar, RegistrationContext, ServerHost, TickBlockEvent, ToolAbility,
-        ToolModifiedStateEvent,
+        BlockPart, BlockToolModificationEvent, CanBeHydratedEvent, DispenseMethodEvent, Dispensed,
+        Flow, Hooks, Host, LevelWriteHost, Registrar, RegistrationContext, ServerHost,
+        TickBlockEvent, ToolAbility, ToolModifiedStateEvent,
     };
     use std::sync::{
         Arc, Mutex,
@@ -23,6 +23,7 @@ mod tests {
     };
 
     const POS: BlockPos = BlockPos::new(3, 64, 5);
+    const CARPET: &str = "inert_test_extra:carpet";
 
     #[derive(Default)]
     struct ToolProbe {
@@ -58,12 +59,52 @@ mod tests {
             Some((Some(remainder), 0))
         }
     }
+    struct HydratesWithWater;
+    #[mod_api::sunrise_part]
+    impl BlockPart for HydratesWithWater {
+        fn can_be_hydrated(
+            &self,
+            _: &dyn mod_api::LevelHost,
+            event: &mut CanBeHydratedEvent,
+        ) -> Option<bool> {
+            (mod_api::__private::fluid_id(event.fluid.fluid) == Some("minecraft:water"))
+                .then_some(true)
+        }
+    }
+
+    struct HydratesWithLava;
+    #[mod_api::sunrise_part]
+    impl BlockPart for HydratesWithLava {
+        fn can_be_hydrated(
+            &self,
+            _: &dyn mod_api::LevelHost,
+            event: &mut CanBeHydratedEvent,
+        ) -> Option<bool> {
+            (mod_api::__private::fluid_id(event.fluid.fluid) == Some("minecraft:lava"))
+                .then_some(true)
+        }
+    }
+
+    struct HydratesWithAnyFluid;
+    #[mod_api::sunrise_part]
+    impl BlockPart for HydratesWithAnyFluid {
+        fn can_be_hydrated(
+            &self,
+            _: &dyn mod_api::LevelHost,
+            _: &mut CanBeHydratedEvent,
+        ) -> Option<bool> {
+            Some(true)
+        }
+    }
+
     struct EnabledPrefix(Arc<Probe>);
     #[mod_api::__subscriptions]
     impl Hooks for EnabledPrefix {
         fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
             let block = r.block_key("inert_test:machine");
             r.block_part(block, Earlier(self.0.clone()));
+            let farmland = r.block_key("inert_test:farmland");
+            r.block_part(farmland, HydratesWithWater);
         }
     }
 
@@ -127,7 +168,7 @@ mod tests {
         fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
             let block = r.block_key("inert_test:machine");
             r.block_part(block, Machine(self.0.clone()));
-            let carpet = r.block_key("inert_test:carpet");
+            let carpet = r.block_key(CARPET);
             r.block_part(carpet, Survival);
             let sand = r.block_key("inert_test:sand");
             r.block_part(sand, Survival);
@@ -135,12 +176,14 @@ mod tests {
             r.block_part(plant, Plant);
             let soil = r.block_key("inert_test:soil");
             r.block_part(soil, Soil);
+            let farmland = r.block_key("inert_test:farmland");
+            r.block_part(farmland, HydratesWithLava);
         }
         fn blocks(&self, _: &RegistrationContext, e: &mut mod_api::BlocksEvent<'_>) {
             e.blocks.push(
                 mod_api::Block::new("inert_test:machine", "minecraft:observer").with_item(false),
             );
-            let mut carpet = mod_api::Block::new("inert_test:carpet", "minecraft:white_carpet");
+            let mut carpet = mod_api::Block::new(CARPET, "minecraft:white_carpet");
             carpet.properties.push_reaction = Some(mod_api::PushReaction::PushPull);
             e.blocks.push(carpet);
             e.blocks
@@ -150,11 +193,18 @@ mod tests {
             e.blocks.push(plant);
             e.blocks
                 .push(mod_api::Block::new("inert_test:soil", "minecraft:stone"));
+            for id in ["inert_test:farmland", "inert_test:unsubscribed_farmland"] {
+                e.blocks.push(mod_api::Block::new(id, "minecraft:farmland"));
+            }
         }
     }
     struct Observer(Arc<Probe>);
     #[mod_api::__subscriptions]
     impl Hooks for Observer {
+        fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+            let farmland = r.block_key("inert_test:farmland");
+            r.block_part(farmland, HydratesWithAnyFluid);
+        }
         fn block_tool_modification(
             &self,
             _: &dyn Host,
@@ -176,24 +226,67 @@ mod tests {
         }
     }
 
+    struct ConflictingCode;
+    #[mod_api::__subscriptions]
+    impl Hooks for ConflictingCode {}
+
     fn with_inert_block(name: &str, test: impl FnOnce(&mut Game<'_>, BlockStateId, &Probe)) {
         let name = format!("game::disabled_block_tests::tests::{name}");
         if fixture::run_fresh_cases(&name, "SUNRISE_INERT_BLOCK_CHILD", &["valid"]) {
             return;
         }
+        use mod_api::__private::native::BuiltMod;
+        use sunrise_mod_package::{mod_list::NATIVE_DIR, runtime::Runtime};
+        const BUILT: &[BuiltMod] = &[
+            BuiltMod {
+                id: "inert_test",
+                version: "1.0.0",
+                side: mod_api::Side::Both,
+            },
+            BuiltMod {
+                id: "namespace_claimant",
+                version: "1.0.0",
+                side: mod_api::Side::Both,
+            },
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        // Both packages declare the same alias. The dependency orders admission; the
+        // later package's compiled code stays installed when its content is refused.
+        for (package, dependencies) in BUILT.iter().zip(["", "[dependencies]\ninert_test='*'"]) {
+            let id = package.id;
+            let path = dir.path().join(NATIVE_DIR).join(id);
+            std::fs::create_dir_all(path.join("src")).unwrap();
+            std::fs::write(path.join("sunrise-mod.toml"), format!(
+                "id='{id}'\nname='{id}'\nversion='1.0.0'\napi='0.2'\nside='both'\ncapabilities=['registries']\nnamespaces=['inert_test_extra']\n{dependencies}\n[native]\ngame='26.3'\nsunrise='{}'\nmixins='{}'\n",
+                "a".repeat(40), "b".repeat(40),
+            )).unwrap();
+            std::fs::write(
+                path.join("Cargo.toml"),
+                format!("[package]\nname='{id}'\nversion='1.0.0'\n"),
+            )
+            .unwrap();
+            std::fs::write(path.join("src/lib.rs"), "").unwrap();
+        }
+        let sources = super::super::mods::ModsState {
+            native: Arc::new(Runtime::load(&dir.path().join("sunrise-client"), BUILT).unwrap()),
+            ..Default::default()
+        };
         let probe = Arc::new(Probe::default());
         let mods: mod_api::Mods = vec![
             mod_api::ModEntry::new("enabled_prefix", Box::new(EnabledPrefix(probe.clone()))),
             mod_api::ModEntry::new("inert_test", Box::new(Owner(probe.clone()))),
+            mod_api::ModEntry::new("namespace_claimant", Box::new(ConflictingCode)),
             mod_api::ModEntry::new("enabled_observer", Box::new(Observer(probe.clone()))),
         ]
         .into();
         mod_platform::testing::with_mods(mods.clone(), || {
+            crate::game::api_values::install_test_platform();
+            crate::game::api_values::install_packages(sources.native.packages(), &[]).unwrap();
             crate::game::api_values::install_parts(&mods).unwrap();
             mod_api::__private::mark_game_thread();
             let base =
                 std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
-            let root = super::super::mods::content_root(&base, &Default::default()).unwrap();
+            let root = super::super::mods::content_root(&base, &sources).unwrap();
             fixture::with_game_at(root.prepared().to_owned(), |game| {
                 game.options.dedicated = Some(Vec::new());
                 game.native_level_opened(Dim::Overworld);
@@ -282,6 +375,107 @@ mod tests {
 
     #[test]
     #[ignore = "daily"]
+    fn disabled_hydration_holds_farmland_until_the_owner_returns() {
+        with_inert_block(
+            "disabled_hydration_holds_farmland_until_the_owner_returns",
+            |game, _, _| {
+                let registry = game.pack.assets.registry;
+                let state = |id| registry.default_state(id).unwrap();
+                let (air, dirt, water, lava) = (
+                    state("minecraft:air"),
+                    state("minecraft:dirt"),
+                    state("minecraft:water"),
+                    state("minecraft:lava"),
+                );
+                let dry = state("inert_test:farmland");
+                let control = state("inert_test:unsubscribed_farmland");
+                let [two, three, wet] = game.with_level(|b, _, _| {
+                    [2, 3, 7].map(|moisture| b.table.set_int(dry, b.props.moisture, moisture))
+                });
+                let fluid_pos = POS.offset(2, 0, 0);
+                let tick = |game: &mut Game<'_>, initial, fluid| {
+                    game.with_level(|b, level, ticks| {
+                        level.set_raw(POS, initial);
+                        level.set_raw(fluid_pos, fluid);
+                        b.random_tick(level, ticks, POS);
+                        level.block_state(POS)
+                    })
+                };
+                let level = game.level(game.dim.id()).unwrap();
+                let at = [POS.x, POS.y, POS.z];
+                assert!(level.set_weather_levels(game, 0.0, 0.0));
+
+                assert!(mod_api::__private::set_mod_enabled("inert_test", false));
+                // The later Part accepts lava, but the disabled owner precedes it.
+                assert_eq!(tick(game, three, lava), three);
+                assert_eq!(tick(game, dry, lava), dry);
+                assert_eq!(tick(game, dry, air), dry);
+                assert_eq!(tick(game, control, lava), dirt);
+                assert_eq!(
+                    tick(game, dry, water),
+                    wet,
+                    "the earlier enabled Part can answer"
+                );
+                assert!(mod_api::__private::set_mod_enabled("enabled_prefix", false));
+                assert_eq!(tick(game, dry, water), dry);
+
+                {
+                    let _owner = mod_platform::content::crash::enter_native_mod(
+                        mod_api::content::crash::ModCall {
+                            id: "enabled_observer",
+                            hook: "test",
+                            part: None,
+                        },
+                    );
+                    let ticket = level
+                        .add_water_ticket(game, at, [POS.x + 1, POS.y + 1, POS.z + 1])
+                        .unwrap();
+                    assert_eq!(
+                        tick(game, three, air),
+                        wet,
+                        "an enabled mod's ticket waters it"
+                    );
+                    assert!(ticket.remove(game));
+                }
+
+                game.install_live_features();
+                let plains = game.res.biomes().id("minecraft:plains");
+                let mut chunk = Chunk::empty(0, 0);
+                for qy in 0..game.world.shape.height / 4 {
+                    for qx in 0..4 {
+                        for qz in 0..4 {
+                            chunk.set_biome_cell(qx, qy, qz, plains);
+                        }
+                    }
+                }
+                game.world.chunks.insert((0, 0), Arc::new(chunk));
+                assert!(level.set_weather_levels(game, 1.0, 0.0));
+                assert_eq!(
+                    level.is_raining_at(game, [POS.x, POS.y + 1, POS.z]),
+                    Some(true)
+                );
+                assert_eq!(
+                    tick(game, three, air),
+                    three,
+                    "rain does not wet held farmland"
+                );
+
+                assert!(mod_api::__private::set_mod_enabled(
+                    "enabled_observer",
+                    false
+                ));
+                assert!(mod_api::__private::set_mod_enabled("inert_test", true));
+                assert_eq!(tick(game, three, air), wet, "rain wets unheld farmland");
+                assert!(level.set_weather_levels(game, 0.0, 0.0));
+                assert_eq!(tick(game, dry, lava), wet);
+                assert_eq!(tick(game, three, air), two);
+                assert_eq!(tick(game, dry, air), dirt);
+            },
+        );
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn disabled_blocks_survive_piston_pushes_without_authorizing_placement() {
         with_inert_block(
             "disabled_blocks_survive_piston_pushes_without_authorizing_placement",
@@ -302,7 +496,7 @@ mod tests {
                 let moving = state("minecraft:moving_piston");
                 let redstone = state("minecraft:redstone_block");
                 let cases = [
-                    ("inert_test:carpet", "minecraft:stone", "minecraft:air"),
+                    (CARPET, "minecraft:stone", "minecraft:air"),
                     ("inert_test:plant", "minecraft:dirt", "minecraft:stone"),
                     ("inert_test:plant", "minecraft:dirt", "inert_test:soil"),
                 ]

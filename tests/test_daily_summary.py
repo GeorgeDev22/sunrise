@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -27,11 +28,11 @@ def job(name, conclusion="success", failed=()):
 GREEN_JOBS = [job("shards / plan"), job("shards / ignored-tests-shards (sunrise-world)"),
               job("wasm-mods / fixture"), job("wasm-mods / Guest stack / ubuntu-latest"),
               job("fn-replace-check / route"), job("fn-replace-check / fn-replace-check"),
-              job("linkage / route"), job("linkage / linkage x86_64-unknown-linux-gnu"),
               job("windows-runtime-leases / test"),
               job("windows-runtime-leases / runtime-leases"), job("windows-runtime-leases / launcher-processes"),
               job("machine-sample / route"), job("machine-sample / build"),
-              job("sdk / fresh"), job("sdk / build linux"), job("sdk / publish", "skipped"), job(PARITY_JOB)]
+              job("sdk / fresh"), job("sdk / build linux"), job("sdk / build linux-server"),
+              job("sdk / fresh"), job("sdk / build windows"), job("sdk / build macos"), job(PARITY_JOB)]
 # Every other shard of the daily matrix, green (the summary expects each by name: summary.expected_shards).
 GREEN_JOBS += [job(name) for name in summary.expected_shards() if name != "shards / ignored-tests-shards (sunrise-world)"]
 
@@ -312,17 +313,17 @@ class DailySummaryTests(unittest.TestCase):
         self.assertEqual([body["title"] for _, path, body in api.writes if path == "issues"],
                          ["Daily: sdk / build windows did not complete"])
 
-    def test_the_sdk_legs_other_call_is_part_of_the_sdk_leg(self):
-        # daily.yml names both calls `sdk`: a Windows leg that failed in the second call is the sdk leg's, by name.
-        jobs = [job for job in GREEN_JOBS if not job["name"].startswith("sdk")] + [
-            job("sdk / fresh"), job("sdk / build linux"), job("sdk / fresh"),
-            job("sdk / build windows", "failure", ["Build and collect"])]
+    def test_a_failed_probe_in_the_second_sdk_call_blocks_publication_and_names_the_step(self):
+        # Both daily.yml calls are named `sdk`, including the Windows job in the second call.
+        step = "Two mod libraries share the game's exact Rust state"
+        jobs = [j for j in GREEN_JOBS if j["name"] != "sdk / build windows"] + [
+            job("sdk / build windows", "failure", [step])]
         api = Api(jobs)
         _, out = self.run_summary(api, [shard_report()], results=dict(LEGS, **{"sdk-windows-macos": {"result": "failure"}}))
-        self.assertIn("green=false", out)
-        self.assertIn("sdk_green=false", out)
-        self.assertEqual([body["title"] for _, path, body in api.writes if path == "issues"],
-                         ["Daily: sdk / build windows did not complete"])
+        self.assertEqual(out.splitlines(), ["green=false", "sdk_green=false"])
+        created = [body for _, path, body in api.writes if path == "issues"]
+        self.assertEqual([body["title"] for body in created], ["Daily: sdk / build windows did not complete"])
+        self.assertIn(f"Failed steps: `{step}`.", created[0]["body"])
         # A second call that was cancelled before any of its jobs ran leaves the sdk leg not green either.
         jobs = [job for job in GREEN_JOBS if not job["name"].startswith("sdk")] + [job("sdk / fresh"), job("sdk / build linux")]
         _, out = self.run_summary(Api(jobs), [shard_report()], results=dict(LEGS, **{"sdk-windows-macos": {"result": "cancelled"}}))
@@ -668,13 +669,10 @@ class DailySummaryTests(unittest.TestCase):
         # Run 43900023409: every leg job still waited for a runner when the cancel came, with no step run.
         def waiting(name):
             return {"name": name, "conclusion": "cancelled", "steps": []}
-        jobs = [j for j in GREEN_JOBS if not j["name"].startswith(("machine-sample / ", "linkage / "))]
-        jobs += [waiting("machine-sample / route"), waiting("machine-sample / build"), waiting("linkage / route"),
-                 waiting("linkage / linkage x86_64-unknown-linux-gnu")]
+        jobs = [waiting(j["name"]) if j["name"].startswith("machine-sample / ") else j for j in GREEN_JOBS]
         issue = [{"number": 77, "title": "Daily: update the machine sample for the mod API change", "body": "> filed"}]
         api = Api(jobs, issues=issue)
-        _, out = self.run_summary(api, [shard_report()], results=dict(
-            LEGS, **{"machine-sample": {"result": "cancelled"}, "linkage": {"result": "cancelled"}}))
+        _, out = self.run_summary(api, [shard_report()], results=dict(LEGS, **{"machine-sample": {"result": "cancelled"}}))
         self.assertIn("green=false", out, "a leg that never ran is not green either")
         self.assertEqual(api.writes, [])
         # A leg cancelled after it started (a time limit, a lost runner) did run: it is still red.
@@ -732,7 +730,8 @@ class DailySummaryTests(unittest.TestCase):
     def test_an_unknown_job_or_a_leg_with_no_job_is_red(self):
         for jobs, title in (
                 (GREEN_JOBS + [job("surprise / something")], "Daily: surprise / something did not complete"),
-                ([j for j in GREEN_JOBS if not j["name"].startswith("linkage")], "Daily: linkage did not complete")):
+                ([j for j in GREEN_JOBS if not j["name"].startswith("fn-replace-check / ")],
+                 "Daily: fn-replace-check did not complete")):
             with self.subTest(title=title):
                 api = Api(jobs)
                 _, out = self.run_summary(api, [shard_report()])
@@ -833,6 +832,42 @@ class DailyWorkflowTests(unittest.TestCase):
         self.assertEqual(writer["run"], "python3 tools/ci/daily_summary.py")
         self.assertEqual(writer["env"]["DRY_RUN"], "${{ needs.resolve.outputs.dry_run }}")
         self.assertTrue(jobs["summary"]["name"].startswith("summary ${{ needs.resolve.outputs.commit }}"))
+
+    def test_daily_checks_linkage_on_the_linux_and_windows_client_sdks_before_pack(self):
+        from tests.test_ci_concurrency import ROOT, expression_value, yaml
+        jobs = self.workflow["jobs"]
+        self.assertNotIn("linkage", jobs)
+        self.assertNotIn("linkage", jobs["summary"]["needs"])
+        sdk = "./.github/workflows/prebuilt-game-build.yml"
+        self.assertEqual(jobs["sdk"]["uses"], sdk)
+        self.assertEqual(jobs["sdk-windows-macos"]["uses"], sdk)
+        workflow = yaml.load((ROOT / sdk).read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(set(workflow["on"]), {"workflow_call"})
+        legs = next(step for step in workflow["jobs"]["fresh"]["steps"] if step.get("id") == "legs")
+        steps = workflow["jobs"]["build"]["steps"]
+        toolchain = next(step for step in steps if step.get("uses", "").startswith("dtolnay/rust-toolchain@"))
+        probe = next(step for step in steps if step.get("name") == "Two mod libraries share the game's exact Rust state")
+        api = next(step for step in steps if step.get("name") ==
+                   "The starter mod checks against the API source alone, host and wasm32")
+        for leg in json.loads(legs["env"]["ALL"]):
+            with self.subTest(leg=leg["name"]):
+                wants_probe = leg["name"] in ("linux", "windows")
+                self.assertEqual(bool(expression_value(probe["if"], {}, matrix=leg)), wants_probe)
+                self.assertEqual(expression_value(toolchain["with"]["components"][3:-2], {}, matrix=leg),
+                                 "clippy" if wants_probe else "")
+                self.assertEqual(bool(expression_value(api["if"], {}, matrix=leg)), leg["name"] == "linux")
+        self.assertEqual(shlex.split(probe["run"]), ["python", "tools/native_dylib_probe.py", "--sdk", "prebuilt",
+                                                     "--output", "target/native-dylib-probe"])
+        commands = {step["run"].split()[2]: i for i, step in enumerate(steps)
+                    if step.get("run", "").startswith("python tools/prebuilt_game.py ")}
+        self.assertLess(max(commands[command] for command in ("build", "smoke", "start", "exports")), steps.index(probe))
+        self.assertLess(steps.index(probe), steps.index(api))
+        self.assertLess(steps.index(api), commands["pack"])
+        api_commands = api["run"].splitlines()
+        self.assertLess(api_commands.index("rustup target add wasm32-unknown-unknown"),
+                        api_commands.index("python tools/sdk_api_source.py build target/api-source"))
+        self.assertLess(api_commands.index("python tools/sdk_api_source.py build target/api-source"),
+                        api_commands.index("python tools/sdk_api_source.py check target/api-source"))
 
     def test_the_sdk_build_packs_exactly_the_archives_a_release_needs(self):
         from tests.test_ci_concurrency import ROOT, yaml

@@ -34,10 +34,8 @@ impl ListenIndex {
             .iter()
             .map(|table| {
                 let mut bits = Vec::new();
-                for (key, parts) in table.iter().flat_map(|table| &table.block_keys) {
-                    if !parts.is_empty() {
-                        set(&mut bits, *key);
-                    }
+                for key in table.iter().flat_map(|table| table.block_keys.keys()) {
+                    set(&mut bits, *key);
                 }
                 (!bits.is_empty()).then(|| bits.into_boxed_slice())
             })
@@ -46,8 +44,12 @@ impl ListenIndex {
         let resistance = hooks
             .get(HookId::ExplosionResistance as usize)
             .and_then(Option::as_ref);
-        for (key, parts) in resistance.iter().flat_map(|table| &table.block_keys) {
-            if !parts.iter().all(|a| a.part.explosion_resistance_is_pure()) {
+        for (key, entry) in resistance.iter().flat_map(|table| &table.block_keys) {
+            if !entry
+                .parts()
+                .iter()
+                .all(|a| a.part.explosion_resistance_is_pure())
+            {
                 set(&mut impure, *key);
             }
         }
@@ -185,25 +187,97 @@ pub fn worldgen_block_key_listens(hook: HookId, key: crate::BlockKey) -> bool {
         .is_some_and(|table| !table.block_key(Some(key)).is_empty())
 }
 
+/// A resolved block's subscribers for one hook, in dispatch order.
+#[derive(Clone)]
+pub(crate) struct BlockHookParts {
+    parts: Vec<Attached<dyn BlockPart>>,
+    /// The content owner's first subscribed Part, regardless of whether it is currently enabled.
+    owner_slot: Option<usize>,
+}
+
+impl BlockHookParts {
+    pub(crate) fn new(id: &str, parts: &[Attached<dyn BlockPart>]) -> Self {
+        let owner_slot = crate::runtime::content_owner_index(id)
+            .and_then(|owner| parts.iter().position(|part| part.mod_index == owner));
+        Self {
+            parts: parts.to_vec(),
+            owner_slot,
+        }
+    }
+
+    pub(crate) fn parts(&self) -> &[Attached<dyn BlockPart>] {
+        &self.parts
+    }
+
+    pub(crate) fn disabled_owner_slot(&self) -> Option<usize> {
+        self.owner_slot
+            .filter(|&slot| !crate::mod_index_on(self.parts[slot].mod_index))
+    }
+}
+
 impl HookParts {
     /// Prepared subscribers for an API block key; missing keys have no subscribers.
     pub fn block_key(&self, key: Option<crate::BlockKey>) -> &[Attached<dyn BlockPart>] {
         key.and_then(|key| self.block_keys.get(&key))
-            .map_or(&[], |parts| parts.as_slice())
+            .map_or(&[], BlockHookParts::parts)
     }
     /// Parts for a checked API state. Key lookup does not depend on world state numbers.
     pub fn block_value(&self, state: crate::BlockState) -> &[Attached<dyn BlockPart>] {
-        let Some(blocks) = crate::__private::block_definitions() else {
-            return &[];
-        };
-        let Some(definition) = blocks.definitions.get(state.block().0 as usize) else {
-            return &[];
-        };
-        if definition.property(state.ordinal(), "").is_err() {
-            return &[];
-        }
-        self.block_key(Some(state.block()))
+        self.block_entry(state).map_or(&[], BlockHookParts::parts)
     }
+
+    pub(crate) fn block_entry(&self, state: crate::BlockState) -> Option<&BlockHookParts> {
+        let blocks = crate::__private::block_definitions()?;
+        let key = state.block();
+        let definition = blocks.definitions.get(key.0 as usize)?;
+        definition.property(state.ordinal(), "").ok()?;
+        self.block_keys.get(&key)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn cached_slot_tracks_the_first_owner_in_dispatch_order_and_live_toggles() {
+    struct Quiet;
+    #[mod_api::__subscriptions]
+    impl crate::Hooks for Quiet {}
+    struct Probe;
+    #[mod_api::sunrise_part]
+    impl BlockPart for Probe {}
+
+    crate::testing::with_dispatch(
+        vec![
+            ModEntry::new("other", Box::new(Quiet)),
+            ModEntry::new("owner", Box::new(Quiet)),
+        ]
+        .into(),
+        || {
+            let attach = |mod_index, mod_id, order, type_name| Attached::<dyn BlockPart> {
+                mod_id,
+                mod_index,
+                order,
+                type_name,
+                part: Arc::new(Probe),
+            };
+            let other = attach(0, "other", 0, "Other");
+            let owner = attach(1, "owner", 0, "Owner");
+            let second = attach(1, "owner", 1, "Second");
+            let first = BlockHookParts::new("other:first", &[other.clone(), owner.clone()]);
+            let later = BlockHookParts::new("owner:later", &[other.clone(), owner, second]);
+            let absent = BlockHookParts::new("owner:absent", &[other]);
+
+            assert_eq!(later.disabled_owner_slot(), None);
+            assert!(crate::set_mod_enabled("owner", false));
+            assert_eq!(first.disabled_owner_slot(), None);
+            assert_eq!(later.disabled_owner_slot(), Some(1));
+            assert_eq!(absent.disabled_owner_slot(), None);
+            assert!(crate::set_mod_enabled("other", false));
+            assert_eq!(first.disabled_owner_slot(), Some(0));
+            assert_eq!(absent.disabled_owner_slot(), None);
+            assert!(crate::set_mod_enabled("owner", true));
+            assert_eq!(later.disabled_owner_slot(), None);
+        },
+    );
 }
 
 impl dyn Registrar + '_ {

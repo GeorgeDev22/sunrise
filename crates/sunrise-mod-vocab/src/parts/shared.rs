@@ -1,4 +1,5 @@
 //! Shared table state, cross-kind registration and common test fixtures only.
+use super::blocks::BlockHookParts;
 use super::*;
 use std::cell::Cell;
 use std::sync::{PoisonError, RwLock, atomic::AtomicU64};
@@ -124,7 +125,7 @@ pub struct Parts {
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct HookParts {
     pub(crate) blocks: HashMap<Box<str>, Vec<Attached<dyn BlockPart>>>,
-    pub(crate) block_keys: HashMap<crate::BlockKey, Vec<Attached<dyn BlockPart>>>,
+    pub(crate) block_keys: HashMap<crate::BlockKey, BlockHookParts>,
     pub(crate) block_entities: HashMap<Box<str>, Vec<Attached<dyn BlockEntityPart>>>,
     pub(crate) block_entity_kinds: HashMap<Box<str>, Vec<Attached<dyn BlockEntityPart>>>,
     pub(crate) items: HashMap<Box<str>, Vec<Attached<dyn ItemPart>>>,
@@ -451,7 +452,7 @@ pub fn prepare_parts(
             .iter()
             .map(|(name, attached)| {
                 crate::content::registry_keys::block_key(name)
-                    .map(|key| (key, attached.clone()))
+                    .map(|key| (key, BlockHookParts::new(name, attached)))
                     .ok_or_else(|| {
                         ResolvePartsError::Parts(vec![format!(
                             "block metadata unavailable for {name}"

@@ -57,9 +57,9 @@ UNFINISHED = " did not complete"
 DISCLOSURE = "> 🤖 Filed by Aria's agent swarm, Dyna, not by Aria."
 # daily.yml's leg jobs (each a called workflow), and the called workflows' own routing jobs, which test nothing.
 PARITY = "parity"
-LEGS = ("shards", "wasm-mods", "fn-replace-check", "linkage", "windows-runtime-leases", "machine-sample", "sdk", PARITY)
+LEGS = ("shards", "wasm-mods", "fn-replace-check", "windows-runtime-leases", "machine-sample", "sdk", PARITY)
 # The legs sdk-publish waits for (output sdk_green) until a runner with prepared data exists (owner, 2026-11-16).
-SDK_LEGS = ("sdk", "linkage", "machine-sample", "fn-replace-check")
+SDK_LEGS = ("sdk", "machine-sample", "fn-replace-check")
 # Legs whose red is an action for someone, not a break: their one issue is titled as the action, and says what to do.
 ACTIONS = {
     "machine-sample": ("update the machine sample for the mod API change",

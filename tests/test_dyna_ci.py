@@ -78,6 +78,29 @@ class DynaRoutingTests(unittest.TestCase):
                 self.assertIn("actions: read", text)
 
     @unittest.skipUnless(POSIX_BASH, "needs a bash that is not WSL's")
+    def test_the_daily_routes_fn_replace_check_at_its_start(self):
+        # fn-replace-check starts after the SDK's Linux legs, an hour or more into the run: routing there judged the
+        # lease snapshot too late and sent every daily's check to GitHub's runners (runs 44065326913, 44145360054).
+        from test_ci_concurrency import yaml
+        daily = yaml.load((ROOT / ".github/workflows/daily.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]
+        route = next(step for step in daily["resolve"]["steps"] if step.get("id") == "route")
+        self.assertIn("dyna_ci_route.sh", route["run"])
+        self.assertEqual(daily["resolve"]["outputs"]["self_hosted"], "${{ steps.route.outputs.self_hosted }}")
+        self.assertEqual(daily["fn-replace-check"]["with"]["self_hosted"], "${{ needs.resolve.outputs.self_hosted }}")
+        check = yaml.load((ROOT / ".github/workflows/fn-replace-check.yml").read_text(), Loader=yaml.BaseLoader)
+        script = next(step for step in check["jobs"]["route"]["steps"] if step.get("id") == "runner")["run"]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            for given, status, expected in (("true", 0, "self_hosted=true\n"), ("false", 0, "self_hosted=false\n"),
+                                            ("yes", 1, "")):
+                with self.subTest(given=given):
+                    output.write_text("")
+                    result = subprocess.run(["bash", "-e", "-c", script], cwd=ROOT, capture_output=True, text=True,
+                                            env=dict(os.environ, GIVEN=given, GITHUB_OUTPUT=str(output)))
+                    self.assertEqual(result.returncode, status, result.stdout)
+                    self.assertEqual(output.read_text(), expected)
+
+    @unittest.skipUnless(POSIX_BASH, "needs a bash that is not WSL's")
     def test_snapshot_lease_is_bounded_by_run_age(self):
         # source, lease, created, now, expected: values independent of wall clock.
         cases = [

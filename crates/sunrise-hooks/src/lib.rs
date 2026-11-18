@@ -14,11 +14,14 @@
 //!
 //! The platform registries (docs/layers.md, "Platform registries") have the same shape:
 //! [`settings`] for the settings each crate keeps in its own lines, [`pages`] for its settings
-//! pages, [`hud`] for what it draws on the HUD, [`lang`] for the lang files with its text.
+//! pages, [`hud`] for what it draws on the HUD, [`lang`] for the lang files with its text,
+//! [`mod_rows`] for the rows it adds to the Mods screen.
 #![forbid(unsafe_code)]
 
+pub mod containers;
 pub mod hud;
 pub mod lang;
+pub mod mod_rows;
 pub mod pages;
 pub mod perf;
 pub mod players;
@@ -29,6 +32,26 @@ pub mod tunnel;
 use registry::Registry;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// How the client presents itself to the server it joins: its brand and the custom payloads it
+/// sends in the configuration phase, after the brand, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientIdentity {
+    /// The `minecraft:brand` (`ClientBrandRetriever.getClientModName`).
+    pub brand: String,
+    /// Configuration-phase custom payloads: channel and data.
+    pub payloads: Vec<(String, Vec<u8>)>,
+}
+
+impl ClientIdentity {
+    /// Vanilla's: the brand `vanilla`, no payloads.
+    pub fn vanilla() -> Self {
+        Self {
+            brand: "vanilla".to_owned(),
+            payloads: Vec::new(),
+        }
+    }
+}
 
 /// What a crate above the engine hears from the game. Every method has an empty default:
 /// implement only those you need. Hooks run on the game's thread (the render thread) unless a
@@ -70,6 +93,16 @@ pub trait Hooks: Sync {
         None
     }
 
+    /// How this client presents itself to the server it is joining: the brand it reports
+    /// (`ClientBrandRetriever.getClientModName`, the `minecraft:brand` payload) and the custom
+    /// payloads it sends in the configuration phase after it. `server` is the address the player
+    /// joined as typed (host or host:port), before SRV or DNS resolution. The first hook that
+    /// answers is used; none answering is [`ClientIdentity::vanilla`]. Unlike the other methods
+    /// this runs on the network thread, once per join (a transfer is a new join).
+    fn client_identity(&self, _server: &str) -> Option<ClientIdentity> {
+        None
+    }
+
     /// How the camera stands in third person, each frame. The first hook that answers is used.
     fn camera(&self, _own: &players::CameraView) -> Option<players::CameraOverride> {
         None
@@ -91,6 +124,12 @@ pub trait Hooks: Sync {
 
     /// Opens and shares saved performance captures ([`perf`]); the first hook that offers one is used.
     fn captures(&self) -> Option<&dyn perf::Captures> {
+        None
+    }
+
+    /// What this crate does on a container screen ([`containers`]); the engine dispatches only to
+    /// hooks that offer one, and builds nothing when none does.
+    fn containers(&self) -> Option<&dyn containers::ContainerHooks> {
         None
     }
 
@@ -250,6 +289,8 @@ pub mod engine {
         crate::pages::engine::all();
         crate::hud::engine::all();
         crate::lang::all();
+        crate::mod_rows::engine::all();
+        crate::containers::engine::any();
     }
 
     /// [`Hooks::started`].
@@ -329,6 +370,14 @@ pub mod engine {
     /// [`Hooks::player_mark`].
     pub fn player_mark(uuid: u128) -> Option<players::Mark> {
         all().iter().find_map(|h| h.player_mark(uuid))
+    }
+
+    /// [`Hooks::client_identity`]: the first answer, or vanilla's.
+    pub fn client_identity(server: &str) -> ClientIdentity {
+        all()
+            .iter()
+            .find_map(|h| h.client_identity(server))
+            .unwrap_or_else(ClientIdentity::vanilla)
     }
 
     /// [`Hooks::player_layers`].
@@ -427,6 +476,12 @@ mod tests {
         }
         fn player_mark(&self, uuid: u128) -> Option<players::Mark> {
             (uuid == 9).then_some(MARK)
+        }
+        fn client_identity(&self, server: &str) -> Option<ClientIdentity> {
+            (server == "first.example").then(|| ClientIdentity {
+                brand: "first".to_owned(),
+                payloads: vec![("recorder:hello".to_owned(), vec![1, 2])],
+            })
         }
         fn camera(&self, own: &players::CameraView) -> Option<players::CameraOverride> {
             Some(players::CameraOverride::new(own.age / 10.0))
@@ -576,12 +631,24 @@ mod tests {
     struct Silent;
     impl Hooks for Silent {}
 
+    /// Registered after the recorder: answers for two servers, one the recorder answers too.
+    struct Later;
+    impl Hooks for Later {
+        fn client_identity(&self, server: &str) -> Option<ClientIdentity> {
+            matches!(server, "first.example" | "second.example").then(|| ClientIdentity {
+                brand: "later".to_owned(),
+                payloads: Vec::new(),
+            })
+        }
+    }
+
     static RECORDER: Recorder = Recorder(StdMutex::new(Vec::new()));
 
     #[test]
     fn registered_hooks_hear_the_game_and_late_ones_are_refused() {
         register(&RECORDER).unwrap();
         register(&Silent).unwrap();
+        register(&Later).unwrap();
         engine::started(&Started::new("0.2.31", std::path::Path::new("game")));
         // Changes only: the same state every frame is said once.
         for open in [false, true, true, true, false, false] {
@@ -618,6 +685,15 @@ mod tests {
         assert_eq!(engine::player_mark(8), None);
         let camera = engine::camera(&players::CameraView::new(5.0));
         assert_eq!(camera.map(|c| c.distance), Some(0.5));
+        // The first answer wins, a later hook answers what the first leaves, none gives vanilla.
+        let first = engine::client_identity("first.example");
+        assert_eq!(first.brand, "first");
+        assert_eq!(first.payloads, [("recorder:hello".to_owned(), vec![1, 2])]);
+        assert_eq!(engine::client_identity("second.example").brand, "later");
+        assert_eq!(
+            engine::client_identity("other.example"),
+            ClientIdentity::vanilla()
+        );
         let mut canvas = Canvas::default();
         engine::player_layers(&model(players::Kind::Player), &mut canvas);
         assert_eq!(
@@ -645,6 +721,10 @@ mod tests {
                 "shutdown",
                 "frame 4"
             ]
+        );
+        assert!(
+            !containers::engine::any(),
+            "no registrant offers containers()"
         );
         assert_eq!(register(&Silent), Err(TooLate));
     }

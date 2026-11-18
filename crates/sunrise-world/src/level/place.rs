@@ -330,7 +330,16 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             Some(None) => return None,
             _ => {}
         }
-        self.placement_at(block, 0, ctx)
+        let placed = self.placement_at(block, 0, ctx)?;
+        if self.b.block_data(block).declared_waterlogged {
+            Some(self.b.table.set_bool(
+                placed,
+                self.b.props.waterlogged,
+                fluid.kind() == crate::fluid::FluidKind::Water,
+            ))
+        } else {
+            Some(placed)
+        }
     }
 
     fn placement_at(
@@ -939,18 +948,19 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 }
                 None
             }
-            Class::Farmland => {
-                if !self.can_survive(default, pos) {
-                    Some(b.default_of(b.data(default).link.unwrap_or(n.dirt)))
-                } else {
+            Class::Farmland | Class::Path => {
+                let data = b.data(default);
+                // Declared plants keep their candidate so the final survival check can
+                // reject unsupported placement instead of placing another block.
+                if data.declared_vegetation || self.can_survive(default, pos) {
                     sup!()
-                }
-            }
-            Class::Path => {
-                if !self.can_survive(default, pos) {
-                    Some(b.default_of(n.dirt))
                 } else {
-                    sup!()
+                    let fallback = if class == Class::Farmland {
+                        data.link.unwrap_or(n.dirt)
+                    } else {
+                        n.dirt
+                    };
+                    Some(b.default_of(fallback))
                 }
             }
             Class::Fence => {

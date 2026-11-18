@@ -14,7 +14,11 @@
 //!
 //! The loaders need no mod code, vanilla state ids never move, and with no
 //! content mod the root is the base root itself.
-use crate::{Result, blocks::MAP_COLORS};
+use crate::{
+    Result,
+    blocks::MAP_COLORS,
+    mobs::data::{PartAnswers, PathComputationType, VALID_EMPTY_SPAWN},
+};
 use serde::{Deserialize, Serialize, de};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -35,7 +39,9 @@ use sunrise_mod_package::manifest::{
     JarInputsError, JarRef, collect_jar_requirements, missing_jars,
 };
 use sunrise_world::{
-    block_collision::ScaffoldingCollision, block_properties::BlockDefinitionProperties,
+    block_collision::ScaffoldingCollision,
+    block_properties::BlockDefinitionProperties,
+    fluid::{FluidKind, FluidState},
 };
 
 /// A content mod to put in the root: its id, its content, and the Java jars
@@ -755,6 +761,8 @@ struct NewBlock<'a> {
     item: Option<String>,
     shapes: Option<Vec<VoxelShape>>,
     collision_shapes: Option<Vec<VoxelShape>>,
+    /// The template's `isAir` property, which precedes the fluid check in the walk evaluator.
+    is_air: bool,
     /// Whether each shaped state contains fluid, including intrinsic template fluids.
     has_fluid: Vec<bool>,
     /// Resolved per-state limits; template inheritance is resolved once at load.
@@ -1093,9 +1101,33 @@ impl<'a> Plan<'a> {
         // use the resolved state's fluid, not the template's cached dry answer.
         let mut skylight_rules = BTreeMap::new();
         let mut custom_dampening = BTreeSet::new();
+        let needs_waterlogging = mods.iter().any(|m| {
+            m.content
+                .blocks
+                .iter()
+                .any(|b| b.state_properties.contains_key("waterlogged"))
+        });
+        let mut water_states = Vec::new();
+        let mut liquid_templates = BTreeSet::new();
         let mut speleothems = BTreeSet::new();
         if base.join("block-behaviours.json").exists() {
             let behaviors = read_json(&base.join("block-behaviours.json"))?;
+            if needs_waterlogging {
+                let Some(J::Arr(states)) = behaviors.get("states") else {
+                    return Err("block-behaviours.json has no state fluids".into());
+                };
+                for state in states {
+                    // Compact state row column 2 is the exported fluid registry ordinal,
+                    // also decoded by sunrise_world::level::data::build_with_gameplay.
+                    let kind = match state {
+                        J::Arr(row) => row.get(2).and_then(J::as_u32),
+                        _ => None,
+                    }
+                    .and_then(|index| FluidKind::ALL.get(index as usize))
+                    .ok_or("block-behaviours.json has an invalid state fluid")?;
+                    water_states.push(matches!(kind, FluidKind::Water | FluidKind::FlowingWater));
+                }
+            }
             let Some(J::Arr(blocks)) = behaviors.get("blocks") else {
                 return Err("block-behaviours.json has no blocks".into());
             };
@@ -1134,6 +1166,9 @@ impl<'a> Plan<'a> {
                     .any(|class| matches!(*class, "LeavesBlock" | "TintedGlassBlock"))
                 {
                     custom_dampening.insert(name.clone());
+                }
+                if needs_waterlogging && classes.contains(&"LiquidBlock") {
+                    liquid_templates.insert(name.clone());
                 }
             }
         }
@@ -1311,6 +1346,10 @@ impl<'a> Plan<'a> {
                 let Some(J::Arr(rows)) = facts.get("states") else {
                     unreachable!()
                 };
+                let is_air = matches!(
+                    rows.get(default as usize),
+                    Some(J::Arr(row)) if matches!(row.get(1), Some(J::Bool(true)))
+                );
                 let properties = |id: u32| -> Option<&J> {
                     let J::Arr(row) = rows.get(id as usize)? else {
                         return None;
@@ -1324,6 +1363,23 @@ impl<'a> Plan<'a> {
                             decl.id, decl.template
                         )
                         .into());
+                    }
+                }
+                if decl.state_properties.contains_key("waterlogged") {
+                    if liquid_templates.contains(&decl.template) {
+                        return Err(format!(
+                            "{}: state_properties.waterlogged cannot be added: template {} is a standalone liquid block",
+                            decl.id, decl.template
+                        ).into());
+                    }
+                    let template_water = water_states
+                        .get(states.start as usize..states.end as usize)
+                        .ok_or("block-behaviours.json is missing template state fluids")?;
+                    if template_water.iter().all(|water| *water) {
+                        return Err(format!(
+                            "{}: state_properties.waterlogged cannot be added: every state of template {} already holds water",
+                            decl.id, decl.template
+                        ).into());
                     }
                 }
                 let combos = combinations(&decl.state_properties, &decl.default_state)
@@ -1508,9 +1564,10 @@ impl<'a> Plan<'a> {
                     item: None,
                     shapes,
                     collision_shapes,
-                    template_occlusion_full,
+                    is_air,
                     has_fluid,
                     offset_limits: Vec::new(),
+                    template_occlusion_full,
                     skylight: skylight_rules
                         .get(&decl.template)
                         .copied()
@@ -1697,9 +1754,9 @@ impl<'a> Plan<'a> {
         out
     }
 
-    /// Appends each new block's copies of the template's states to `list`;
-    /// `gameplay` rows get their index and the declared overrides.
-    fn states(&self, list: &mut Vec<J>, ids: bool, gameplay: bool) -> Result<()> {
+    /// Appends each new block's copies of the template's states to `list`,
+    /// writing the declared overrides in the table's row format.
+    fn states(&self, list: &mut Vec<J>, ids: bool, name: &str) -> Result<()> {
         if list.len() != self.states {
             return Err(format!("{} states, not {}", list.len(), self.states).into());
         }
@@ -1716,7 +1773,57 @@ impl<'a> Plan<'a> {
                 if !combo.is_empty() {
                     set_state_properties(&mut row, combo);
                 }
-                if gameplay {
+                if matches!(
+                    name,
+                    "block-behaviours.json"
+                        | "facts.json"
+                        | "mob-data.json"
+                        | "worldgen/block_flags.json"
+                ) && combo
+                    .iter()
+                    .any(|(key, value)| key == "waterlogged" && value == "true")
+                {
+                    let J::Arr(columns) = &mut row else {
+                        return Err(format!("{name}: missing state row {id}").into());
+                    };
+                    if name == "block-behaviours.json" {
+                        let fluid = columns
+                            .get_mut(2..5)
+                            .ok_or("block-behaviours.json: missing state fluid")?;
+                        let water = FluidState::WATER;
+                        let ordinal = FluidKind::ALL
+                            .iter()
+                            .position(|&kind| kind == water.kind())
+                            .expect("source water belongs to the vanilla fluid registry");
+                        fluid.clone_from_slice(&[
+                            J::Num(ordinal.into()),
+                            J::Num(water.amount().into()),
+                            J::Bool(water.falling()),
+                        ]);
+                    } else if name == "mob-data.json" {
+                        let [path, flags, ..] = columns.as_mut_slice() else {
+                            return Err("mob-data.json: missing state pathfinding data".into());
+                        };
+                        // Only the walk evaluator's generic OPEN result looks at the fluid here.
+                        // Air, blocked and special paths keep their template's answer.
+                        if !b.is_air && path.as_str() == Some("OPEN") {
+                            *path = J::Str("WATER".into());
+                        }
+                        let mask = flags.as_u32().ok_or("mob-data.json: invalid state flags")?;
+                        // Inherited waterlogged properties never take this branch: their exported
+                        // WATER answer is kept. For a new declaration use BlockBehaviour's default.
+                        let water =
+                            u32::from(PartAnswers::pathfindable_bit(PathComputationType::Water));
+                        *flags = J::Num(((mask | water) & !u32::from(VALID_EMPTY_SPAWN)).into());
+                    } else {
+                        let has_fluid = if name == "facts.json" { 2 } else { 1 };
+                        *columns
+                            .get_mut(has_fluid)
+                            .ok_or_else(|| format!("{name}: missing state fluid flag"))? =
+                            J::Bool(true);
+                    }
+                }
+                if name == "gameplay-facts.json" {
                     row.set("id", J::Num(next.into()));
                     if let Some(item) = b.item_row() {
                         row.set("item", J::Str(item.into()));
@@ -1999,15 +2106,15 @@ impl<'a> Plan<'a> {
 
     /// One JSON table, rewritten.
     fn json(&self, name: &str, doc: &mut J) -> Result<()> {
-        let states = |doc: &mut J, path: &str, ids: bool, gameplay: bool| -> Result<()> {
+        let states = |doc: &mut J, path: &str, ids: bool| -> Result<()> {
             match doc.at(path) {
-                Some(J::Arr(a)) => self.states(a, ids, gameplay),
+                Some(J::Arr(a)) => self.states(a, ids, name),
                 _ => Err(format!("no list at /{path}").into()),
             }
         };
         match name {
             "facts.json" => {
-                states(doc, "states", false, false)?;
+                states(doc, "states", false)?;
                 let defaults = doc.at("defaults").ok_or("no defaults")?;
                 for b in &self.blocks {
                     let default = b.default;
@@ -2015,10 +2122,10 @@ impl<'a> Plan<'a> {
                     defaults.set(&b.decl.id, J::Num(id.into()));
                 }
             }
-            "gameplay-facts.json" => states(doc, "states", false, true)?,
+            "gameplay-facts.json" => states(doc, "states", false)?,
             "creative-inventory.json" => self.creative_tabs(doc)?,
             "block-behaviours.json" => {
-                states(doc, "states", false, false)?;
+                states(doc, "states", false)?;
                 self.declared_solid(doc);
                 let Some(J::Arr(blocks)) = doc.at("blocks") else {
                     return Err("no blocks".into());
@@ -2034,6 +2141,14 @@ impl<'a> Plan<'a> {
                         if let Some(item) = b.item_row() {
                             v.set("item", J::Str(item.into()));
                         }
+                        if b.decl.state_properties.contains_key("waterlogged") {
+                            if let Some(J::Arr(interfaces)) = v.at("interfaces") {
+                                interfaces.push(J::Str("SimpleWaterloggedBlock".into()));
+                            }
+                            if let Some(fields) = v.at("fields") {
+                                fields.set("declaredWaterlogged", J::Bool(true));
+                            }
+                        }
                         // `SignBlock.getWoodType`: the wood's name is what
                         // the editor reads of it.
                         if let Some(wood) = &b.decl.wood_type
@@ -2041,13 +2156,39 @@ impl<'a> Plan<'a> {
                         {
                             *name = J::Str(wood.clone());
                         }
-                        // `new FenceGateBlock(woodType, ..)`: the gate's own sounds replace its wood's.
-                        if let Some(fields) = v.at("fields/type") {
-                            if let Some(sound) = &b.decl.open_sound {
-                                fields.set("fenceGateOpen", J::Str(sound.clone()));
-                            }
-                            if let Some(sound) = &b.decl.close_sound {
-                                fields.set("fenceGateClose", J::Str(sound.clone()));
+                        // Resolve each gate site against the untouched template wood sound.
+                        if let Some(fields) = v.at("fields") {
+                            for (key, sound) in [
+                                ("gateOpenSounds", &b.decl.open_sound),
+                                ("gateCloseSounds", &b.decl.close_sound),
+                            ] {
+                                let Some(sound) = sound else { continue };
+                                use sunrise_mod_package::content::GateSound;
+                                let sites = match sound {
+                                    GateSound::All(sound) => {
+                                        [Some(sound), Some(sound), Some(sound)]
+                                    }
+                                    GateSound::Sites {
+                                        on_use,
+                                        on_explosion,
+                                        on_redstone,
+                                    } => [
+                                        on_use.as_ref(),
+                                        on_explosion.as_ref(),
+                                        on_redstone.as_ref(),
+                                    ],
+                                };
+                                fields.set(
+                                    key,
+                                    J::Arr(
+                                        sites
+                                            .into_iter()
+                                            .map(|sound| {
+                                                sound.map_or(J::Null, |sound| J::Str(sound.clone()))
+                                            })
+                                            .collect(),
+                                    ),
+                                );
                             }
                         }
                         // `createDefaultSignText`: the colour and glow a new sign's text starts with.
@@ -2082,6 +2223,9 @@ impl<'a> Plan<'a> {
                                 .unwrap_or(J::Obj(Default::default()));
                             fields.set("connectsTo", J::Str(tag.clone()));
                             v.set("fields", fields);
+                        }
+                        if b.decl.properties.vegetation {
+                            v.set("declared_vegetation", J::Bool(true));
                         }
                         blocks.push(v);
                     }
@@ -2259,11 +2403,11 @@ impl<'a> Plan<'a> {
                     ids.extend(new_types());
                 }
             }
-            "mob-data.json" => states(doc, "states", false, false)?,
-            "worldgen/block_flags.json" => states(doc, "", false, false)?,
+            "mob-data.json" => states(doc, "states", false)?,
+            "worldgen/block_flags.json" => states(doc, "", false)?,
             "worldgen/blocks/structure-blocks.json" => {
                 for key in ["rotate", "mirror", "full_block"] {
-                    states(doc, key, true, false)?;
+                    states(doc, key, true)?;
                 }
                 let added: usize = self
                     .blocks

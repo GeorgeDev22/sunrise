@@ -4,6 +4,47 @@
 use crate::ArmPose;
 use std::collections::BTreeMap;
 
+/// A fence gate's sound override, resolved once when content loads.
+/// A missing site keeps the template wood's sound for that site.
+// exhaustive: the declaration format has exactly an all-sites sound or named-site overrides.
+#[derive(Clone, Debug, PartialEq, sunrise_mod_api_macros::Wire)]
+pub enum GateSound {
+    /// Use one sound event at every site.
+    All(String),
+    /// Override only the named sites.
+    Sites {
+        /// Player interaction, including client prediction.
+        on_use: Option<String>,
+        /// An explosion that triggers an unpowered gate.
+        on_explosion: Option<String>,
+        /// A redstone power change that changes the open state.
+        on_redstone: Option<String>,
+    },
+}
+
+#[cfg(test)]
+mod gate_sound_tests {
+    use super::GateSound;
+    use crate::wire::{Reader, Wire, Writer};
+
+    #[test]
+    fn both_gate_sound_forms_cross_wire() {
+        for sound in [
+            GateSound::All("gate:open".into()),
+            GateSound::Sites {
+                on_use: Some("gate:use".into()),
+                on_explosion: None,
+                on_redstone: Some("gate:wire".into()),
+            },
+        ] {
+            let mut out = Writer::default();
+            sound.put(&mut out);
+            let back: GateSound = Reader::decode(&out.into_bytes()).unwrap();
+            assert_eq!(back, sound);
+        }
+    }
+}
+
 /// BlockProperties in a load-time content declaration.
 #[derive(Clone, Debug, PartialEq, Default)]
 // exhaustive: declaration drafts mirror the closed content schema and support record construction.
@@ -48,6 +89,10 @@ pub struct BlockProperties {
     pub max_horizontal_offset: Option<f32>,
     /// Maximum downward displacement, 0 to 0.2 (default 0.2 for XYZ; XZ has no vertical offset).
     pub max_vertical_offset: Option<f32>,
+    /// Opt into `VegetationBlock` survival and neighbour checks independently of the
+    /// template. Templates that already inherit `VegetationBlock` keep their rules.
+    /// Otherwise the default support is `minecraft:supports_vegetation`.
+    pub vegetation: bool,
 }
 
 /// Vanilla's per-column offset mode (`BlockBehaviour.OffsetType`).
@@ -213,16 +258,24 @@ pub struct Block {
     /// `collision_context_shapes` of their own. `None` when unset.
     pub context_collision: Option<ContextCollision>,
     /// State properties of its own, which its template does not have.
+    /// A boolean `waterlogged` adds SimpleWaterloggedBlock behaviour: buckets fill
+    /// and drain it, placement copies source water at the cell, and shape updates schedule
+    /// a water tick. The placement and shape Part answers override those defaults.
+    /// Refused if `waterlogged` is an enum or the template already has it, is a
+    /// standalone liquid such as lava, or already holds water in every state.
+    /// A double plant keeps its class and companion-half behaviour.
     pub state_properties: BTreeMap<String, BlockStateProperty>,
     /// State properties overlaid on the template default.
     pub default_state: BTreeMap<String, String>,
     /// Also add a block item with the same id; true unless set false, as in a file.
     pub item: bool,
-    /// The sound event a fence gate plays opening, instead of its wood's
-    /// (`WoodType.fenceGateOpen`); needs a `*_fence_gate` template.
-    pub open_sound: Option<String>,
-    /// The sound event a fence gate plays closing (`WoodType.fenceGateClose`).
-    pub close_sound: Option<String>,
+    /// A fence gate's opening sounds (`WoodType.fenceGateOpen`). `All` replaces
+    /// every site; `Sites` keeps the template wood's sound for each missing site.
+    /// Needs a `*_fence_gate` template.
+    pub open_sound: Option<GateSound>,
+    /// A fence gate's closing sounds (`WoodType.fenceGateClose`), with the same
+    /// per-site fallback as `open_sound`.
+    pub close_sound: Option<GateSound>,
     /// The item this block is, for pick-block and `Block.asItem`, when
     /// it is not a block item of its own: an item of this mod (a bare name is
     /// this mod's) or a vanilla one (`minecraft:<path>`), checked to exist when

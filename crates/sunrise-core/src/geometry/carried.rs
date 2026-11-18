@@ -94,6 +94,37 @@ impl FrameLog {
         Some(f0.interpolate(&f1, (at - t0 as f64) / (t1 - t0) as f64))
     }
 
+    /// The corners of the box holding every place the world position `to` has in the
+    /// collider's frame over the ages `lo` to `hi`, when the collider only moved over them (no
+    /// entry in that stretch turns): the position then moves along straight lines between the
+    /// recorded ticks, so the box of its places at the ends and at each tick between is the
+    /// box of them all. `None` when the collider turned, or was never recorded.
+    pub fn local_sweep(&self, now: u64, lo: f64, hi: f64, to: Vec3) -> Option<(Vec3, Vec3)> {
+        let first = self.frame_at(now, lo)?;
+        let last = self.frame_at(now, hi)?;
+        if !first.same_turn(&last) {
+            return None;
+        }
+        let (from_tick, to_tick) = (now as f64 - hi.max(0.0), now as f64 - lo.max(0.0));
+        let mut min = first.to_local(to);
+        let mut max = min;
+        let mut take = |frame: &Frame| {
+            let p = frame.to_local(to);
+            min = Vec3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+            max = Vec3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+        };
+        take(&last);
+        for (tick, frame) in &self.entries {
+            if (*tick as f64) > from_tick && (*tick as f64) < to_tick {
+                if !first.same_turn(frame) {
+                    return None;
+                }
+                take(frame);
+            }
+        }
+        Some((min, max))
+    }
+
     /// The box holding every place `local` (a box in the collider's frame) has been in over the
     /// log, for finding the colliders a position can have stood on.
     pub fn swept(&self, local: Aabb) -> Option<Aabb> {
@@ -126,9 +157,30 @@ pub enum Footing {
     Above,
 }
 
+/// Whether feet anywhere in the box `lo` to `hi` (in the collider's frame) can stand to the
+/// boxes in any way [`footing`] answers: false only when every one of those places is too far
+/// to the side of all the boxes, or is above them all by more than the jump reach, or has its
+/// body below them all. A little slack keeps rounding from ever refusing a place that fits.
+fn may_meet(boxes: &ColliderBoxes, lo: Vec3, hi: Vec3, body: Body) -> bool {
+    const SLACK: f64 = 0.01;
+    let Some(all) = boxes.bounds() else {
+        return false;
+    };
+    let side = (body.half_width + TOP_TOLERANCE).max(EDGE_MARGIN) + SLACK;
+    hi.x >= all.min.x - side
+        && lo.x <= all.max.x + side
+        && hi.z >= all.min.z - side
+        && lo.z <= all.max.z + side
+        && lo.y - all.max.y <= JUMP_REACH + TOP_TOLERANCE + SLACK
+        && hi.y + body.height + TOP_TOLERANCE + SLACK >= all.min.y
+}
+
 /// How the feet at `local` (in the collider's frame) stand to `boxes`: `None` when the body is
 /// inside a box deeper than [`TOP_TOLERANCE`], or not over any box at or above its top.
 pub fn footing(boxes: &ColliderBoxes, local: Vec3, body: Body) -> Option<Footing> {
+    if !may_meet(boxes, local, local, body) {
+        return None;
+    }
     let around = Aabb::new(
         Vec3::new(
             local.x - body.half_width,
@@ -247,6 +299,12 @@ pub fn judge(
             footing,
         })
     };
+    // A position that over the whole window never comes near the boxes fits at no age.
+    if let Some((lo, hi)) = log.local_sweep(now, ages.lo, ages.hi, to)
+        && !may_meet(boxes, lo, hi, body)
+    {
+        return None;
+    }
     let steps = ((ages.hi - ages.lo) / STEP).ceil() as usize;
     for j in 0..=steps {
         let d = j as f64 * STEP;
@@ -491,5 +549,248 @@ mod tests {
             accepted > 1000,
             "the generator reaches the deck: {accepted}"
         );
+    }
+
+    /// [`footing`] as the definition reads, over every box and with no early return: the proof the
+    /// bounds test and the grid only skip what cannot fit.
+    fn footing_by_definition(boxes: &ColliderBoxes, local: Vec3, body: Body) -> Option<Footing> {
+        let around = Aabb::new(
+            Vec3::new(
+                local.x - body.half_width,
+                local.y,
+                local.z - body.half_width,
+            ),
+            Vec3::new(
+                local.x + body.half_width,
+                local.y + body.height,
+                local.z + body.half_width,
+            ),
+        );
+        let solid = |b: &&Aabb| b.max.x > b.min.x && b.max.y > b.min.y && b.max.z > b.min.z;
+        if boxes.boxes().iter().filter(solid).any(|b| {
+            around.intersects(Aabb::new(
+                b.min,
+                Vec3::new(b.max.x, b.max.y - TOP_TOLERANCE, b.max.z),
+            ))
+        }) {
+            return None;
+        }
+        let mut result = None;
+        for b in boxes.boxes().iter().filter(solid) {
+            let over = local.x >= b.min.x - EDGE_MARGIN
+                && local.x <= b.max.x + EDGE_MARGIN
+                && local.z >= b.min.z - EDGE_MARGIN
+                && local.z <= b.max.z + EDGE_MARGIN;
+            let height = local.y - b.max.y;
+            if over && height.abs() <= TOP_TOLERANCE {
+                result = Some(Footing::Standing);
+            } else if over && height > TOP_TOLERANCE && height <= JUMP_REACH && result.is_none() {
+                result = Some(Footing::Above);
+            }
+        }
+        result
+    }
+
+    /// [`judge`] as it was before the sweep test: every age, nearest the anchor first.
+    fn judge_by_definition(
+        log: &FrameLog,
+        now: u64,
+        boxes: &ColliderBoxes,
+        to: Vec3,
+        body: Body,
+        ages: Ages,
+        standing_only: bool,
+    ) -> Option<Fit> {
+        let steps = ((ages.hi - ages.lo) / STEP).ceil() as usize;
+        for j in 0..=steps {
+            let d = j as f64 * STEP;
+            for age in [ages.anchor - d, ages.anchor + d] {
+                if !(ages.lo..=ages.hi).contains(&age) {
+                    continue;
+                }
+                let frame = log.frame_at(now, age)?;
+                let local = frame.to_local(to);
+                if let Some(footing) = footing_by_definition(boxes, local, body)
+                    && (!standing_only || footing == Footing::Standing)
+                {
+                    return Some(Fit {
+                        age,
+                        frame,
+                        local,
+                        footing,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    struct Dice(u64);
+
+    impl Dice {
+        fn unit(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        fn pick<T: Copy>(&mut self, of: &[T]) -> T {
+            of[(self.unit() * of.len() as f64) as usize % of.len()]
+        }
+    }
+
+    /// Colliders of every grain: a deck, a lump of unit boxes, a lump of tiny boxes, a mixed
+    /// heap with a box that has no volume, and one of cauldron-sized boxes.
+    fn colliders() -> Vec<ColliderBoxes> {
+        let cube = |n: usize, size: f64, gap: f64| {
+            (0..n * n * n)
+                .map(|i| {
+                    let (x, y, z) = (i % n, i / n % n, i / n / n);
+                    let at = |k: usize| k as f64 * (size + gap) - n as f64 * size / 2.0;
+                    Aabb::new(
+                        Vec3::new(at(x), at(y) - 8.0, at(z)),
+                        Vec3::new(at(x) + size, at(y) - 8.0 + size, at(z) + size),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut mixed = cube(4, 1.0, 0.5);
+        mixed.push(Aabb::new(
+            Vec3::new(2.0, 1.0, 2.0),
+            Vec3::new(2.0, 3.0, 3.0),
+        ));
+        mixed.push(Aabb::new(
+            Vec3::new(-9.0, -2.0, -1.0),
+            Vec3::new(9.0, -1.0, 1.0),
+        ));
+        vec![
+            deck(),
+            ColliderBoxes::new(cube(6, 1.0, 0.0)),
+            ColliderBoxes::new(cube(5, 0.125, 0.25)),
+            ColliderBoxes::new(mixed),
+            ColliderBoxes::new(cube(3, 0.5, 0.0)),
+        ]
+    }
+
+    /// Places on and just off every edge of a collider's bounds: the sides, the support reach
+    /// above it and the body's height below it.
+    fn edge_place(dice: &mut Dice, bounds: Aabb) -> Vec3 {
+        let side = |dice: &mut Dice, lo: f64, hi: f64| {
+            let edge = dice.pick(&[lo, hi]);
+            let off = dice.pick(&[
+                -0.4, -0.36, -0.351, -0.35, -0.349, -0.31, -0.3, -0.29, 0.0, 0.29, 0.3, 0.31,
+                0.349, 0.35, 0.351, 0.36, 0.4,
+            ]);
+            if dice.unit() < 0.3 {
+                lo + dice.unit() * (hi - lo)
+            } else {
+                edge + off
+            }
+        };
+        let x = side(dice, bounds.min.x, bounds.max.x);
+        let z = side(dice, bounds.min.z, bounds.max.z);
+        let y = match dice.pick(&[0, 1, 2, 3]) {
+            0 => bounds.max.y + dice.pick(&[-0.06, -0.05, -0.049, 0.0, 0.049, 0.05, 0.051, 0.06]),
+            1 => {
+                bounds.max.y
+                    + JUMP_REACH
+                    + dice.pick(&[-0.06, -0.05, -0.049, 0.0, 0.049, 0.05, 0.051, 0.06, 0.3])
+            }
+            2 => {
+                bounds.min.y - BODY.height
+                    + dice.pick(&[-0.06, -0.05, -0.049, 0.0, 0.049, 0.05, 0.051, 0.06])
+            }
+            _ => bounds.min.y + dice.unit() * (bounds.max.y - bounds.min.y),
+        };
+        Vec3::new(x, y, z)
+    }
+
+    #[test]
+    fn the_bounds_test_and_the_grid_answer_what_the_definition_does() {
+        let mut dice = Dice(0x9e37_79b9_7f4a_7c15);
+        for boxes in colliders() {
+            let bounds = boxes.bounds().unwrap();
+            for _ in 0..2_000 {
+                let at = edge_place(&mut dice, bounds);
+                assert_eq!(
+                    footing(&boxes, at, BODY),
+                    footing_by_definition(&boxes, at, BODY),
+                    "{at:?} against {bounds:?}"
+                );
+            }
+        }
+    }
+
+    /// Across every grain of collider, straight, turning, stalled and starting logs, and places
+    /// near the bounds' edges and the reach, the search answers what trying every age does.
+    #[test]
+    fn the_age_search_with_its_sweep_test_answers_what_trying_every_age_does() {
+        let mut dice = Dice(0x2545_f491_4f6c_dd1d);
+        let logs = {
+            let mut straight = FrameLog::default();
+            let mut turning = FrameLog::default();
+            let mut stalled = FrameLog::default();
+            let mut starting = FrameLog::default();
+            for t in 0..=40u64 {
+                let f = t as f64;
+                straight.record(t, Frame::translation(Vec3::new(1.0, 64.0, 2.0 * f)));
+                let half = crate::jmath::sin(0.05 * f) / 2.0;
+                turning.record(
+                    t,
+                    Frame::from_quaternion(
+                        Vec3::new(1.0, 64.0, 1.5 * f),
+                        [0.0, half, 0.0, (1.0 - half * half).sqrt()],
+                    ),
+                );
+                stalled.record(
+                    t,
+                    Frame::translation(Vec3::new(1.0, 64.0, if t < 25 { 2.0 * f } else { 50.0 })),
+                );
+                starting.record(
+                    t,
+                    Frame::translation(Vec3::new(
+                        1.0,
+                        64.0 + if t > 30 { f - 30.0 } else { 0.0 },
+                        0.0,
+                    )),
+                );
+            }
+            [straight, turning, stalled, starting]
+        };
+        let mut fitted = 0;
+        for boxes in colliders() {
+            let bounds = boxes.bounds().unwrap();
+            for log in &logs {
+                for _ in 0..120 {
+                    // A place in some age's frame near the bounds, or anywhere around it.
+                    let age = dice.unit() * 26.0;
+                    let frame = log.frame_at(40, age).unwrap();
+                    let local = if dice.unit() < 0.2 {
+                        Vec3::new(
+                            dice.unit() * 80.0 - 40.0,
+                            dice.unit() * 40.0 - 20.0,
+                            dice.unit() * 80.0 - 40.0,
+                        )
+                    } else {
+                        edge_place(&mut dice, bounds)
+                    };
+                    let to = frame.to_world(local);
+                    let ages = Ages::new(
+                        (dice.unit() * 1300.0) as i32,
+                        dice.pick(&[None, Some(0), Some(3), Some(9), Some(40)]),
+                    );
+                    let standing_only = dice.unit() < 0.5;
+                    let got = judge(log, 40, &boxes, to, BODY, ages, standing_only);
+                    let want = judge_by_definition(log, 40, &boxes, to, BODY, ages, standing_only);
+                    assert_eq!(
+                        got.map(|f| (f.age, f.footing)),
+                        want.map(|f| (f.age, f.footing))
+                    );
+                    fitted += usize::from(got.is_some());
+                }
+            }
+        }
+        assert!(fitted > 100, "the cases include many that fit: {fitted}");
     }
 }

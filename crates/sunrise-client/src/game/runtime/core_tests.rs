@@ -195,7 +195,7 @@ fn client_modifier_snapshot_tracks_focus_loss() {
         assert!(snapshot.alt());
         assert!(!snapshot.control());
         assert!(!snapshot.super_key());
-        game.handle_window_event_inner(&TestLoop, WindowEvent::Focused(false));
+        game.handle_window_event_inner(&TestLoop, WindowEvent::Focused(false), None);
         assert_eq!((game as &dyn ClientHost).modifiers().bits, 0);
         assert_eq!(snapshot.bits, 5);
     });

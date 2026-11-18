@@ -7,7 +7,8 @@
 //! uniform grid over the boxes in the collider's frame.
 
 use super::{Aabb, Axis, COLLISION_EPSILON, Vec3};
-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use rustc_hash::FxHashMap;
+use std::{cell::RefCell, sync::Arc};
 
 /// The most boxes one collider holds.
 pub const MAX_BOXES: usize = 32_768;
@@ -48,8 +49,13 @@ thread_local! {
     static CANDIDATES: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Side of a grid cell in the collider's frame, in blocks.
-const CELL: f64 = 4.0;
+/// Bounds of the side of a grid cell in the collider's frame, in blocks: the grid is built with
+/// a side of [`CELL_PER_BOX`] times the median longest edge of the boxes, kept inside them, so a
+/// cell of unit boxes holds a few of them and one of whole decks is not split to dust.
+const CELL_MIN: f64 = 1.0;
+const CELL_MAX: f64 = 8.0;
+/// The grid's cell side per block of the median box's longest edge.
+const CELL_PER_BOX: f64 = 2.0;
 /// A box covering more cells than this is not stored per cell; every query tests it.
 const OVERSIZED_CELLS: i64 = 4096;
 /// An axis whose squared length is below this (parallel edges) separates nothing new.
@@ -132,6 +138,11 @@ impl Frame {
         }
     }
 
+    /// Whether the two frames point their axes the same way (they differ only in origin).
+    pub fn same_turn(&self, other: &Self) -> bool {
+        self.axes == other.axes
+    }
+
     pub fn to_world(&self, local: Vec3) -> Vec3 {
         Vec3::new(
             self.origin.x
@@ -192,23 +203,46 @@ impl Frame {
 #[derive(Clone, Debug, Default)]
 pub struct ColliderBoxes {
     boxes: Vec<Aabb>,
-    cells: HashMap<[i32; 3], Vec<u32>>,
+    cells: FxHashMap<[i32; 3], Vec<u32>>,
+    /// The side of a cell, from the boxes alone.
+    cell: f64,
     oversized: Vec<u32>,
     /// The indices of the boxes with volume: the only ones a query can meet.
     solid: Vec<u32>,
     bounds: Option<Aabb>,
 }
 
-fn cell_range(b: Aabb) -> ([i64; 3], [i64; 3]) {
+/// The side of the grid cell for these boxes: [`CELL_PER_BOX`] times their median longest edge,
+/// within [`CELL_MIN`] and [`CELL_MAX`]. Deterministic, and 4 blocks when there are no boxes.
+fn cell_side(boxes: &[Aabb]) -> f64 {
+    let mut edges: Vec<f64> = boxes
+        .iter()
+        .filter(|b| (0..3).all(|i| b.max(Axis::ALL[i]) > b.min(Axis::ALL[i])))
+        .map(|b| {
+            (0..3)
+                .map(|i| b.max(Axis::ALL[i]) - b.min(Axis::ALL[i]))
+                .fold(0.0, f64::max)
+        })
+        .collect();
+    if edges.is_empty() {
+        return 4.0;
+    }
+    let middle = edges.len() / 2;
+    let (_, median, _) = edges.select_nth_unstable_by(middle, f64::total_cmp);
+    (*median * CELL_PER_BOX).clamp(CELL_MIN, CELL_MAX)
+}
+
+fn cell_range(b: Aabb, cell: f64) -> ([i64; 3], [i64; 3]) {
     let (lo, hi) = (b.min, b.max);
-    let f = |v: f64| (v / CELL).floor() as i64;
+    let f = |v: f64| (v / cell).floor() as i64;
     ([f(lo.x), f(lo.y), f(lo.z)], [f(hi.x), f(hi.y), f(hi.z)])
 }
 
 impl ColliderBoxes {
     /// Builds the grid. The boxes must be finite; callers refuse anything else first.
     pub fn new(boxes: Vec<Aabb>) -> Self {
-        let mut cells: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
+        let cell = cell_side(&boxes);
+        let mut cells: FxHashMap<[i32; 3], Vec<u32>> = FxHashMap::default();
         let mut oversized = Vec::new();
         let mut solid = Vec::new();
         let mut bounds: Option<Aabb> = None;
@@ -219,7 +253,7 @@ impl ColliderBoxes {
             }
             solid.push(index as u32);
             bounds = Some(bounds.map_or(*b, |all| all.union_bounds(*b)));
-            let (lo, hi) = cell_range(*b);
+            let (lo, hi) = cell_range(*b, cell);
             let count = (0..3).map(|i| hi[i] - lo[i] + 1).product::<i64>();
             if count > OVERSIZED_CELLS {
                 oversized.push(index as u32);
@@ -239,6 +273,7 @@ impl ColliderBoxes {
         Self {
             boxes,
             cells,
+            cell,
             oversized,
             solid,
             bounds,
@@ -268,7 +303,7 @@ impl ColliderBoxes {
         if self.solid.is_empty() {
             return;
         }
-        let (lo, hi) = cell_range(local);
+        let (lo, hi) = cell_range(local, self.cell);
         let count = (0..3).map(|i| hi[i] - lo[i] + 1).product::<i64>();
         if count > self.cells.len() as i64 {
             self.solid.iter().any(|&index| f(index));
@@ -294,7 +329,7 @@ impl ColliderBoxes {
         if self.solid.is_empty() {
             return;
         }
-        let (lo, hi) = cell_range(local);
+        let (lo, hi) = cell_range(local, self.cell);
         let count = (0..3).map(|i| hi[i] - lo[i] + 1).product::<i64>();
         if count > self.cells.len() as i64 {
             // A query wider than the grid: every box is cheaper than every cell.
@@ -875,5 +910,62 @@ mod tests {
         assert!(!check_rotation([0.0, 0.0, 0.0, 1.01]));
         assert!(!check_rotation([0.0, 0.0, 0.0, 0.0]));
         assert!(!check_rotation([f64::INFINITY, 0.0, 0.0, 1.0]));
+    }
+
+    /// The grid's cell is picked from the boxes alone, inside its bounds, and whatever its size a
+    /// query names every box it meets.
+    #[test]
+    fn the_cell_follows_the_boxes_and_the_grid_names_every_box_a_query_meets() {
+        let cube = |n: usize, size: f64| {
+            (0..n * n * n)
+                .map(|i| {
+                    let at = |k: usize| k as f64 * size;
+                    let (x, y, z) = (i % n, i / n % n, i / n / n);
+                    b(
+                        [at(x), at(y), at(z)],
+                        [at(x) + size, at(y) + size, at(z) + size],
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let sets = [
+            (cube(6, 1.0), 2.0),
+            (cube(4, 0.125), CELL_MIN),
+            (cube(3, 40.0), CELL_MAX),
+            (vec![b([0.0, 0.0, 0.0], [3.0, 1.0, 20.0])], CELL_MAX),
+            (Vec::new(), 4.0),
+        ];
+        let mut state = 0x1234_5678_9abc_def1u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for (boxes, side) in sets {
+            let grid = ColliderBoxes::new(boxes.clone());
+            assert_eq!(grid.cell, side);
+            let mut out = Vec::new();
+            for _ in 0..500 {
+                let lo = Vec3::new(
+                    next() * 30.0 - 5.0,
+                    next() * 30.0 - 5.0,
+                    next() * 30.0 - 5.0,
+                );
+                let query = Aabb::new(
+                    lo,
+                    lo.add_vector(Vec3::new(next() * 3.0, next() * 3.0, next() * 3.0)),
+                );
+                grid.candidates(query, &mut out);
+                for (index, bx) in boxes.iter().enumerate() {
+                    if bx.intersects(query) {
+                        assert!(
+                            out.contains(&(index as u32)),
+                            "{index}: {bx:?} in {query:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
