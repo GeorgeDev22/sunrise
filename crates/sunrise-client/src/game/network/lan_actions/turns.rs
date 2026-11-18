@@ -392,8 +392,8 @@ impl Game<'_> {
         // waits for the guest's body tick (`equipment_changed`, tick.rs).
         if play.equipped.is_none() {
             let held = self.inventory.get(self.selected).and_then(Option::as_ref);
-            equipment_changed(&mut play.equipped, &self.armor, held);
-            self.apply_equipment();
+            equipment_changed(&mut play.equipped, &self.armor, held, self.offhand.as_ref());
+            self.put_equipment_modifiers();
         }
         // The player's effects are on the new body before anything it does
         // (the movement that brought it, a landing): vanilla keeps the same

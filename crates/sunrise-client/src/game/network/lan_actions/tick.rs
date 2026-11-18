@@ -230,6 +230,20 @@ impl Game<'_> {
                 }
             }
             self.guest_delayed_destroy(conn);
+            // LivingEntity.tick's detectEquipmentUpdates, part of the body: after the
+            // item use above and before aiStep's travel and updatePlayerPose, so a new
+            // scale modifier rebuilds the box this tick.
+            if body
+                && let Some(host) = self.lan.as_mut()
+                && {
+                    let g = &host.hub.guests[gi];
+                    let held = g.inventory.get(g.selected).and_then(Option::as_ref);
+                    let play = host.play.entry(conn).or_default();
+                    equipment_changed(&mut play.equipped, &g.armor, held, g.offhand.as_ref())
+                }
+            {
+                self.as_guest(conn, |g| g.put_equipment_modifiers());
+            }
             self.guest_server_tick(conn, body);
             // Player.tick's statistics and ServerPlayer.tick's triggers, then
             // PlayerAdvancements.flushDirty.
@@ -241,18 +255,7 @@ impl Game<'_> {
             // armor, experience and level objectives follow the guest.
             let mut recorded =
                 std::mem::take(&mut host.play.entry(conn).or_default().score_recorded);
-            // LivingEntity.tick's detectEquipmentUpdates, part of the body: the equipment
-            // changed since the last tick puts its modifiers on the guest in the turn below.
-            let equipment = body && {
-                let g = &host.hub.guests[gi];
-                let held = g.inventory.get(g.selected).and_then(Option::as_ref);
-                let play = host.play.entry(conn).or_default();
-                equipment_changed(&mut play.equipped, &g.armor, held)
-            };
             self.as_guest(conn, |g| {
-                if equipment {
-                    g.apply_equipment();
-                }
                 g.tick_fishing();
                 // Player.aiStep's Inventory.tick and doTick's statistics are the body's.
                 if body {
