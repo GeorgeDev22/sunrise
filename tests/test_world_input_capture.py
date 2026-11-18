@@ -67,7 +67,8 @@ class WorldInputCaptureTests(unittest.TestCase):
         self.assertIn("self.tick_remote_player(running, hold)", level_fn)
         level = method(remote, "tick_remote_player")
         self.assertLess(level.index("self.tick_client_load()"),
-                        level.index("self.tick_local_player("))
+                        level.index("self.tick_remote_own_player()"))
+        self.assertIn("self.tick_local_player(", method(remote, "tick_remote_own_player"))
         # The extracted local-player pass owns the movement input now.
         self.assertIn("let stick = self.pad_move()", method(remote, "tick_local_player"))
 

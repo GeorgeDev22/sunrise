@@ -401,6 +401,7 @@ sunrise-client-lib motion::tests::a_landing_glide_lasts_a_tick_so_a_jump_keeps_i
 sunrise-client-lib motion::tests::a_lava_cauldron_burns_the_player_inside_it lib daily resources
 sunrise-client-lib motion::tests::a_passenger_in_powder_snow_freezes_and_thaws lib daily resources
 sunrise-client-lib motion::tests::a_passenger_stops_swimming_and_stands lib daily resources
+sunrise-client-lib motion::tests::a_piston_push_leaves_the_local_player_off_the_ground_within_its_budget lib daily resources
 sunrise-client-lib motion::tests::a_player_lands_on_a_block_a_piston_is_moving lib daily resources
 sunrise-client-lib motion::tests::a_riders_own_move_follows_the_fluid_it_is_in_now lib daily resources
 sunrise-client-lib motion::tests::a_riders_own_move_takes_this_ticks_look lib daily resources

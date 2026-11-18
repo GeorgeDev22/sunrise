@@ -378,7 +378,7 @@ impl Game<'_> {
     /// at the blocks, the world border and the entities a body collides
     /// with), without a piston's per-tick travel limit or its noclip; a
     /// `noPhysics` body moves the whole way. The local player takes the
-    /// client's own move (`shulker_push_player`), an armor stand its own
+    /// client's own move (`block_push_player`), an armor stand its own
     /// (`shoves_armor_stand`), and a painting, an item frame or a cushion
     /// breaks (`lid_breaks_attached`).
     ///
@@ -431,7 +431,7 @@ impl Game<'_> {
         if self.lid_spares(lid, self.lid_root(lid), MoveWho::Player, false) {
             return;
         }
-        self.shulker_push_player(lid.mover(), movement);
+        self.block_push_player(lid.mover(), movement);
     }
 
     /// [`Self::lid_push_local`] for this tick's shulker box lids.
@@ -548,7 +548,7 @@ impl Game<'_> {
         stand_grid: &mut Option<sunrise_client::entities::ObstacleGrid>,
     ) {
         if target == MoveWho::Player {
-            self.shulker_push_player(mover, movement);
+            self.block_push_player(mover, movement);
             return;
         }
         // Armor stands arm their gate in their own collided shove.
@@ -642,12 +642,12 @@ impl Game<'_> {
         with_entity!(self, handle, entity => entity.position()).subtract(from)
     }
 
-    /// `Entity.move(mover, …)` for the local player, pushed by a lid: an
-    /// ordinary move, so the collision scan stops and steps it and its end
-    /// writes the ground state (`Entity.setOnGroundWithMovement`). A lid
-    /// lifting the body off the ground leaves it airborne, and the next tick's
-    /// gravity lands it on the lid instead of a stale ground flag holding it.
-    fn shulker_push_player(&mut self, mover: MoverType, movement: Vec3) {
+    /// `Entity.move(mover, …)` for the local player, pushed by a lid or a
+    /// piston: an ordinary move, so the collision scan stops and steps it and
+    /// its end writes the ground state (`Entity.setOnGroundWithMovement`). A
+    /// push lifting the body off the ground leaves it airborne, and the next
+    /// tick's gravity lands it instead of a stale ground flag holding it.
+    fn block_push_player(&mut self, mover: MoverType, movement: Vec3) {
         let entities = self.entity_collisions(Mover::Player);
         if let Some(player) = self.player.as_mut() {
             let _ = MotionWorld {
@@ -663,7 +663,7 @@ impl Game<'_> {
                 tag_items: Some(world_items!(self)),
                 block_registries: Some(&self.pack.block_registries),
             }
-            .lid_push(mover, movement);
+            .block_push(mover, movement);
         }
     }
 
@@ -989,6 +989,25 @@ impl Game<'_> {
         pricked: &mut Vec<u32>,
     ) {
         let cause = MoverType::Piston;
+        // The local player's push is its own `Entity.move(PISTON, …)`: the
+        // piston's budget, the collision, and what the move's end writes (the
+        // ground and collision flags the next `sendChanges` carries, the fall
+        // check, restitution and block speed).
+        if target == MoveWho::Player {
+            with_piston_noclip(piston_direction, || {
+                self.block_push_player(cause, movement);
+            });
+            let after = self.player.as_ref().map_or(before, |p| p.bounds());
+            if after != before
+                && let Ok(id) = u32::try_from(self.own_entity_id())
+            {
+                self.entity_section_moved_id(id);
+                self.tell_entity_sections();
+            }
+            self.piston_block_triggers(before, after);
+            self.piston_cactus_contact(target, before, after, pricked);
+            return;
+        }
         let mut gate = self.entity_move(target, cause, movement);
         if gate.skipped() {
             return;
@@ -1214,11 +1233,8 @@ impl Game<'_> {
     ) -> Option<Vec3> {
         let time = self.world.game_time;
         let limit = |state: &mut PistonMovement| state.limit(movement, || Ok::<i64, ()>(time)).ok();
+        // The local player's push limits itself in its own move (`block_push`).
         match target {
-            MoveWho::Player => {
-                let p = self.player.as_mut()?;
-                limit(&mut p.piston)
-            }
             MoveWho::Guest(conn) => {
                 let host = self.lan.as_mut()?;
                 limit(&mut host.hub.guests.motion_mut(conn)?.piston)

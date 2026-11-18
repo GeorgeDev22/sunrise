@@ -2064,13 +2064,14 @@ impl MotionWorld<'_, '_, '_> {
         }
         Ok(())
     }
-    /// `Entity.move(MoverType.SHULKER_BOX or SHULKER, movement)`: a shulker
-    /// box's or a shulker's lid pushed the player. An ordinary move — the
-    /// collision scan steps and reads the ground flag — whose end writes the
-    /// ground state (`Entity.setOnGroundWithMovement`): a lid lifting the body
-    /// off the ground leaves it airborne, and the next tick's gravity lands it
-    /// on the lid again instead of the client holding it on a stale ground.
-    pub fn lid_push(&mut self, mover: MoverType, movement: Vec3) -> Result<()> {
+    /// `Entity.move(MoverType.SHULKER_BOX, SHULKER or PISTON, movement)`: a
+    /// shulker box's or a shulker's lid, or a piston, pushed the player. An
+    /// ordinary move (a piston's limited by `limitPistonMovement`): the
+    /// collision scan steps and reads the ground flag, and the move's end writes
+    /// the ground and collision state (`Entity.setOnGroundWithMovement`), so a
+    /// push lifting the body off the ground or sideways leaves it airborne until
+    /// the next tick's own move lands it again.
+    pub fn block_push(&mut self, mover: MoverType, movement: Vec3) -> Result<()> {
         let gate = crate::move_gate::armed(
             self.loop_context,
             self.player.entity_id as u32,
@@ -4284,6 +4285,50 @@ mod tests {
             w.player.hurt_log
         );
         assert_eq!(w.player.health.health(), 20.0);
+    }
+
+    /// `Entity.move(PISTON, …)` for the local player: a sideways push leaves it
+    /// off the ground until its own move lands it again (the flags
+    /// `sendChanges` sends after the block entities ticked), and one tick's
+    /// pushes along an axis stop at 0.51 (`limitPistonMovement`).
+    #[test]
+    #[ignore = "daily"]
+    fn a_piston_push_leaves_the_local_player_off_the_ground_within_its_budget() {
+        let Some(v) = crate::test_fixtures::vanilla() else {
+            return;
+        };
+        let (assets, render, binding, resources) = (&v.assets, &v.render, &v.collision, &v.motion);
+        // On the scene's floor, clear of its stepped pyramid (|x|, |z| <= 10 from y = 4).
+        let mut scene = World::test_scene(assets, render, 2).unwrap();
+        let start = Vec3::new(20.5, 4.0, 20.5);
+        let mut player = PlayerMotion::new(resources, start).unwrap();
+        player.client_side = true;
+        player.ground.on_ground = true;
+        let mut world = MotionWorld {
+            tag_items: None,
+            block_registries: None,
+            loop_context: crate::test_resources::server_loop_context(),
+            damage_hooks: &crate::health::DamageHooks::NONE,
+            entities: &[],
+            player: &mut player,
+            scene: &mut scene,
+            assets,
+            collision_binding: binding,
+            resources,
+            health: &resources.health,
+        };
+        for _ in 0..2 {
+            world
+                .block_push(MoverType::Piston, Vec3::new(0.0, 0.0, 0.3))
+                .unwrap();
+        }
+        assert!(!player.ground.on_ground);
+        assert!(!player.collision.horizontal);
+        assert!(
+            (player.position.z - (start.z + 0.51)).abs() < 1e-9,
+            "{}",
+            player.position.z
+        );
     }
 
     #[test]
