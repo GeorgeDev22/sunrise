@@ -1,0 +1,2 @@
+env CARGO_TARGET_DIR=/home/runner/work/sunrise/sunrise/.local/parity-target CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_DEV_OPT_LEVEL=3 cargo test --locked -p sunrise-client --lib --no-run
+python3 tools/parity.py --fresh --timeout 5400 source_silence
