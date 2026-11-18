@@ -1,0 +1,4 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client-render -p sunrise-client --lib --tests --examples -- -D warnings
+env CARGO_TARGET_DIR=/home/runner/work/sunrise/sunrise/.local/parity-target CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_DEV_OPT_LEVEL=3 cargo build --locked -p sunrise-client-lib --example client_probe
+python3 tools/parity.py --fresh camera
