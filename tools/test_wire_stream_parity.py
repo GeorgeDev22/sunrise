@@ -1036,8 +1036,9 @@ SCENARIOS = {
         # The virtual pad is read at the start of the frame, before the tick's script lines: each line comes a
         # tick ahead, as a real pad's state, read between ticks, reaches the tick after it.
         sunrise_steps={-2: ['pad connection connected'], -1: ['pad stick left 0 1'], 9: ['pad south down'], 11: ['pad south up'],
-                       19: ['pad ls down'], 29: ['pad rt tap'], 35: ['pad ls up'], 44: ['pad stick left 0 0'],
-                       49: ['pad rt tap'], 58: ['pad connection disconnected']}),
+                       19: ['pad ls down'], 29: ['pad trigger right 1'], 30: ['pad trigger right 0'], 35: ['pad ls up'],
+                       44: ['pad stick left 0 0'], 49: ['pad trigger right 1'], 50: ['pad trigger right 0'],
+                       58: ['pad connection disconnected']}),
     # Half a tilt of the stick forward and to the side: on a server the keys it sets, at full speed.
     'pad_half_stick': dict(
         ticks=50, steps={0: ['key w down', 'key d down'], 30: ['key w up', 'key d up']},
