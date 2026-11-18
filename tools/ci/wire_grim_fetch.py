@@ -8,7 +8,8 @@ in the runner's temp folder, is checked against a pinned checksum, and is never 
   JSON research-lock.json accepts, the client jar, the libraries, the asset index and the assets other than
   sounds and music (no client plays sound here). The server jar goes to `--servers`/server.jar.
 - Paper 26.3-253 and 1.21.11-132 (fill.papermc.io), Grim 2.3.75-8ec9b7d and ViaVersion 5.12.3-SNAPSHOT+1119
-  (Modrinth's CDN) into `--servers`, the files the local runs used (same sha256 / sha512).
+  (Modrinth's CDN) into `--servers`, the files the local runs used (same sha256 / sha512); Intave and ProtocolLib
+  (Modrinth, ProtocolLib's GitHub release) for the Intave runs.
 """
 import argparse
 import concurrent.futures
@@ -33,6 +34,13 @@ SERVERS = [
      'https://cdn.modrinth.com/data/LJNGWSvH/versions/z1TwCHQr/grimac-bukkit-2.3.75-8ec9b7d.jar'),
     ('ViaVersion-5.12.3-SNAPSHOT.jar', 'sha256', '5d0ee19b454ba1484a6f877e4028211ac397bc45b45b1d599aabb7a0703395fc',
      'https://cdn.modrinth.com/data/P1OZGk5p/versions/agKgcGJR/ViaVersion-5.12.3-SNAPSHOT.jar'),
+    # Intave dev-4f18a06dce40 (Modrinth, 2026-11-04; 1.8 - 26.3) and the ProtocolLib it fetches itself for 1.21.10+
+    # and 26.x (its GitHub dev-build release, the file of 2026-11-04).
+    ('Intave-dev-4f18a06dce40.jar', 'sha512',
+     'a86bbe29995bb685464648ff087621c749e522c308b01e24ff26e33ebb734b5ecd3ce7b0c96af9dd2f0f471c0c415631b75d173e6f'
+     '64e73b158ba4dcd51a2442', 'https://cdn.modrinth.com/data/4zi91sqi/versions/DGfwdJGc/Intave.jar'),
+    ('ProtocolLib-dev-build-20261104.jar', 'sha256', '736a9d6054032871d593aa2c0a0bf65e117557aadc11830394e5e8b757ae05b2',
+     'https://github.com/dmulloy2/ProtocolLib/releases/download/dev-build/ProtocolLib-Spigot.jar'),
 ]
 
 

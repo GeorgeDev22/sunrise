@@ -20,12 +20,14 @@ env:
   SHARDS: '5'
 jobs:
   grim:
-    name: ${{ matrix.server }} r${{ matrix.round }} s${{ matrix.shard }}
+    name: ${{ matrix.anticheat }} ${{ matrix.server }} r${{ matrix.round }} s${{ matrix.shard }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
+        # grim or intave (Intave logs only: no kicks or bans; tools/test_wire_stream_parity.py intave_plugin).
+        anticheat: ['intave']
         server: ['paper-26.3', 'via-1.21.11']
         # Three rounds of the whole list: a difference counts only when it comes back in each.
         round: [1, 2, 3]
@@ -82,6 +84,7 @@ jobs:
           SUNRISE_LAUNCHER_NO_SELF_UPDATE: '1'
           WIRE_STREAM_GRIM: ${{ runner.temp }}/servers
           WIRE_STREAM_VIA: ${{ matrix.server == 'via-1.21.11' && '1.21.11' || '' }}
+          WIRE_STREAM_ANTICHEAT: ${{ matrix.anticheat }}
         run: |
           [ -n "$WIRE_STREAM_VIA" ] || unset WIRE_STREAM_VIA
           set +e
@@ -97,7 +100,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: grim-${{ matrix.server }}-r${{ matrix.round }}-${{ matrix.shard }}
+          name: ${{ matrix.anticheat }}-${{ matrix.server }}-r${{ matrix.round }}-${{ matrix.shard }}
           path: out
           retention-days: 7
           if-no-files-found: warn
