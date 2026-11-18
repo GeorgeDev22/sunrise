@@ -15,8 +15,8 @@ concurrency:
   group: wire-grim
   cancel-in-progress: true
 env:
-  # cloud game build 44233017935: cb-next 9be2fa5, the build item 93 ran with on 2026-11-18.
-  SUNRISE_RUN: '44233017935'
+  # cloud game build 44314384240: cb-next 9be2fa5 + the player_loaded fix (sunrise-org/sunrise#2755), 8fdab66.
+  SUNRISE_RUN: '44314384240'
   SHARDS: '5'
 jobs:
   grim:
