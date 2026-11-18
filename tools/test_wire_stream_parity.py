@@ -322,11 +322,14 @@ SCENARIOS = {
         ticks=120, steps={10: ['key w down'],
                           30: ['key space down'], 34: ['key space up'], 60: ['key ctrl down'], 70: ['key ctrl up'], 85: ['key w up'],
                           110: ['key shift down'], 114: ['key shift up']}),
+    # Mounted in the setup, facing 0 (item 93): left alone, the mob turned at random before the mount and the rides
+    # differed between the two clients' runs.
     'pig_carrot': dict(
-        setup=[f'summon minecraft:pig 0.5 {FLOOR + 1} 2.5 {{PersistenceRequired:1b,'
+        setup=[f'summon minecraft:pig 0.5 {FLOOR + 1} 2.5 {{PersistenceRequired:1b,Rotation:[0f,0f],'
                'equipment:{saddle:{id:"minecraft:saddle",count:1}}}',
+               f'ride {PLAYER} mount @e[type=minecraft:pig,limit=1]',
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:carrot_on_a_stick'],
-        ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:pig,limit=1]'], 10: ['look 30 10'],
+        ticks=90, steps={10: ['look 30 10'],
                          30: ['mouse right click'], 50: ['look -20 10'], 75: ['key shift down'], 79: ['key shift up']}),
     # Mounting turns the rider (AbstractHorse.addPassenger's absSnapRotationTo; a boat's yaw when boarding): the
     # boat and the horse face 123 degrees, the player 0, so the rider's first look and the vehicle's moves show it.
@@ -894,10 +897,13 @@ SCENARIOS = {
                           105: ['key 2 tap', 'mouse left click'],
                           110: ['command data get entity @e[type=minecraft:husk,limit=1] Health']}),
     # A happy ghast with a harness, ridden: up, forward, down (item 36).
+    # Mounted in the setup, facing 0 (item 93): left alone, the mob turned at random before the mount and the rides
+    # differed between the two clients' runs.
     'happy_ghast_ride': dict(
-        setup=[f'summon minecraft:happy_ghast 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,'
-               'equipment:{body:{id:"minecraft:white_harness",count:1}}}'],
-        ticks=100, steps={0: ['command ride @s mount @e[type=minecraft:happy_ghast,limit=1]'], 8: ['key space down'],
+        setup=[f'summon minecraft:happy_ghast 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,Rotation:[0f,0f],'
+               'equipment:{body:{id:"minecraft:white_harness",count:1}}}',
+               f'ride {PLAYER} mount @e[type=minecraft:happy_ghast,limit=1]'],
+        ticks=100, steps={8: ['key space down'],
                           28: ['key space up', 'key w down'], 60: ['key w up', 'key shift down'], 62: ['key shift up']}),
     # A boat shared with a pig (item 37): the player takes the second seat and paddles.
     'shared_boat': dict(
@@ -1066,11 +1072,14 @@ SCENARIOS = {
         ticks=120, steps={0: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 10: ['key space down'],
                           15: ['key space up'], 40: ['key space down'], 50: ['key space up'], 75: ['key space down'],
                           95: ['key space up']}),
+    # Mounted in the setup, facing 0 (item 93): left alone, the mob turned at random before the mount and the rides
+    # differed between the two clients' runs.
     'strider_lava': dict(
         setup=[f'fill -3 {FLOOR} 1 3 {FLOOR} 20 minecraft:lava',
-               f'summon minecraft:strider 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,equipment:{{saddle:{{id:"minecraft:saddle",count:1}}}}}}',
+               f'summon minecraft:strider 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,Rotation:[0f,0f],equipment:{{saddle:{{id:"minecraft:saddle",count:1}}}}}}',
+               f'ride {PLAYER} mount @e[type=minecraft:strider,limit=1]',
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:warped_fungus_on_a_stick'],
-        ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:strider,limit=1]'], 10: ['look 0 10'],
+        ticks=90, steps={10: ['look 0 10'],
                          30: ['mouse right click'], 55: ['look 25 10'], 80: ['key shift down'], 82: ['key shift up']}),
     'boat_teleported': dict(
         setup=[f'fill -5 {FLOOR} 1 5 {FLOOR} 26 minecraft:water', f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 3.5'],
