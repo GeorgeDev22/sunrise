@@ -75,6 +75,11 @@ ATTRIBUTES = ('movement_speed', 'jump_strength', 'step_height', 'gravity', 'scal
 RESET = [
     'gamerule spawn_mobs false', 'gamerule advance_time false', 'gamerule advance_weather false', 'weather clear',
     f'fill -12 {FLOOR + 1} -12 12 {FLOOR + 12} 28 minecraft:air',
+    # The flat world's layers under the grass too: water_swim's pool replaces the bedrock, and the pits of
+    # jump_bridge and the clutches take the dirt. The clients play one after the other on one world, so without
+    # these Sunrise met what vanilla's run had dug (it fell through water_swim's bedrock in jump_bridge).
+    f'fill -12 {FLOOR - 3} -12 12 {FLOOR - 3} 28 minecraft:bedrock',
+    f'fill -12 {FLOOR - 2} -12 12 {FLOOR - 1} 28 minecraft:dirt',
     f'fill -12 {FLOOR} -12 12 {FLOOR} 28 minecraft:grass_block',
     'kill @e[type=!minecraft:player]', f'clear {PLAYER}', f'effect clear {PLAYER}', f'gamemode survival {PLAYER}',
     f'effect give {PLAYER} minecraft:saturation 1 20 true', f'effect give {PLAYER} minecraft:instant_health 1 5 true',
@@ -1026,11 +1031,13 @@ SCENARIOS = {
         ticks=34, steps={0: ['look 0 15'], 2: ['mouse right click'], 8: ['select-trade 0'],
                          14: ['click-slot 2 shift'], 22: ['key esc tap']}),
     # A beacon on a 3x3 iron pyramid: opened, an iron ingot paid, speed confirmed.
+    # The beacon counts its pyramid only every 80 game ticks (BeaconBlockEntity.tick), so the player waits 85
+    # before opening it: Paper disconnects a client that asks a level-0 beacon for speed.
     'beacon_set': dict(
         setup=[f'fill -1 {FLOOR} 2 1 {FLOOR} 4 minecraft:iron_block', f'setblock 0 {FLOOR + 1} 3 minecraft:beacon',
                f'give {PLAYER} minecraft:iron_ingot 1'],
-        ticks=30, steps={0: ['look 0 20'], 2: ['mouse right click'], 8: ['click-slot 28'], 12: ['click-slot 0'],
-                         18: ['beacon speed']}),
+        ticks=115, steps={0: ['look 0 20'], 87: ['mouse right click'], 93: ['click-slot 28'], 97: ['click-slot 0'],
+                          103: ['beacon speed']}),
     # Statistics: the pause menu's Statistics button (the stats request), back to the pause menu, out.
     'stats_open': dict(ticks=30, steps={2: ['open-stats'], 15: ['key esc tap'], 22: ['key esc tap']}),
     # 30 minutes standing: keep-alives, the 20-tick position reminder and the time over a long idle, then
