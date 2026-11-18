@@ -1,0 +1,5 @@
+cargo fmt --all -- --check
+cargo test --locked -p sunrise-client-render --lib level_loading
+cargo test --locked -p sunrise-client-render --lib gfx::tests::the_players_section_shows
+cargo test --locked -p sunrise-client-render --lib gfx::tests::chunk_fade_is_vanillas_get_visibility
+cargo clippy --locked -p sunrise-client-render -p sunrise-client --lib --tests -- -D warnings
