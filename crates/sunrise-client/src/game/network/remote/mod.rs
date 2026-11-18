@@ -689,6 +689,10 @@ pub(super) struct Remote {
     /// holds its abilities from the login on; here the player is made at
     /// the first teleport, which takes them then.
     abilities: Option<play::PlayerAbilities>,
+    /// The old player's motion, from a Respawn with KEEP_ENTITY_DATA
+    /// (`handleRespawn`: `newPlayer.setDeltaMovement(oldPlayer.getDeltaMovement())`),
+    /// for the player made at the next teleport: a portal's teleport adds to it.
+    respawn_velocity: Option<Vec3>,
     loaded_sent: bool,
     /// The dimension of the client level the mods heard made
     /// (`native_client_level_load`), to be told dropped once.
@@ -1288,6 +1292,7 @@ impl Game<'_> {
             was_living_flags: 0,
             last_recorded_pose: None,
             abilities: None,
+            respawn_velocity: None,
             loaded_sent: false,
             heard_level: None,
             level_load: sunrise_client::level_loading::LevelLoadTracker::new(0),
@@ -1535,6 +1540,7 @@ impl Game<'_> {
             last_recorded_pose: None,
             carried: std::cell::Cell::new(None),
             abilities: None,
+            respawn_velocity: None,
             loaded_sent: false,
             heard_level: None,
             level_load: sunrise_client::level_loading::LevelLoadTracker::new(0),
@@ -3421,6 +3427,16 @@ impl Game<'_> {
                 // After a death (no KEEP_ENTITY_DATA) the new LocalPlayer
                 // rides nothing: the server pairs a vehicle again with its
                 // passengers. A dimension change keeps the vehicle it travels in.
+                // handleRespawn: KEEP_ENTITY_DATA gives the new player the old
+                // one's motion, `resetPos` none.
+                let kept_velocity = if p.keep & 2 != 0 {
+                    self.player.as_ref().map(|pl| pl.velocity)
+                } else {
+                    None
+                };
+                if let Some(r) = self.remote.as_mut() {
+                    r.respawn_velocity = kept_velocity;
+                }
                 if p.keep & 2 == 0 {
                     self.riding = None;
                     // KEEP_ENTITY_DATA copies the old player's synched data
@@ -6035,10 +6051,12 @@ impl Game<'_> {
             .as_ref()
             .map(|pl| (true, pl.position))
             .unwrap_or((false, Vec3::ZERO));
+        let respawn_velocity = self.remote.as_mut().and_then(|r| r.respawn_velocity.take());
         let velocity = self
             .player
             .as_ref()
             .map(|pl| pl.velocity)
+            .or(respawn_velocity)
             .unwrap_or(Vec3::ZERO);
         let pick = |bit: i32, base: f64, v: f64| if p.relatives & bit != 0 { base + v } else { v };
         let position = Vec3::new(
@@ -10391,6 +10409,8 @@ mod level_sound_tests;
 mod attachment_query_tests;
 #[cfg(test)]
 mod passage_cross_tests;
+#[cfg(test)]
+mod respawn_motion_tests;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::super::api_values::TryIntoApi;
