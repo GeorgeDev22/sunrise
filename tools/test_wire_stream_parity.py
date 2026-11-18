@@ -314,10 +314,13 @@ SCENARIOS = {
                           20: ['key space down'], 30: ['key space up'], 45: ['key a down'], 55: ['key a up'],
                           60: ['key ctrl down'], 62: ['key space down'], 64: ['key space up'], 80: ['key ctrl up'],
                           85: ['key w up'], 100: ['key shift down'], 104: ['key shift up']}),
+    # Mounted in the setup, facing 0: a camel left alone turns its head at random before the player mounts, and a
+    # rider steering it takes its head's yaw, so the two clients dashed different ways.
     'camel_dash': dict(
-        setup=[f'summon minecraft:camel 0.5 {FLOOR + 1} 2.5 {{PersistenceRequired:1b,Tame:1b,'
-               'equipment:{saddle:{id:"minecraft:saddle",count:1}}}'],
-        ticks=120, steps={0: ['command ride @s mount @e[type=minecraft:camel,limit=1]'], 10: ['key w down'],
+        setup=[f'summon minecraft:camel 0.5 {FLOOR + 1} 2.5 {{PersistenceRequired:1b,Tame:1b,Rotation:[0f,0f],'
+               'equipment:{saddle:{id:"minecraft:saddle",count:1}}}',
+               f'ride {PLAYER} mount @e[type=minecraft:camel,limit=1]'],
+        ticks=120, steps={10: ['key w down'],
                           30: ['key space down'], 34: ['key space up'], 60: ['key ctrl down'], 70: ['key ctrl up'], 85: ['key w up'],
                           110: ['key shift down'], 114: ['key shift up']}),
     'pig_carrot': dict(
