@@ -1651,7 +1651,9 @@ class VanillaClient:
         # screen the frames are drawn on the CPU: the lightest graphics keep each well under a tick, or the client
         # runs its missed ticks in bursts and takes the server's packets on other ticks than a smooth one would.
         vanilla_client.write_options(args.game_dir, {
-            'maxFps': '60', 'graphicsMode': '0', 'renderClouds': '"false"', 'ao': 'false',
+            # WIRE_STREAM_VANILLA_FPS: the frame cap. A tick is sent in a frame, so below 60 frames a second the ticks
+            # snap to the frames (33/66 ms apart at 30) instead of 50 ms; headroom above 60 keeps them even.
+            'maxFps': os.environ.get('WIRE_STREAM_VANILLA_FPS', '60'), 'graphicsMode': '0', 'renderClouds': '"false"', 'ao': 'false',
             'entityShadows': 'false', 'biomeBlendRadius': '0', 'mipmapLevels': '0',
             **extra_options()})
         command = vanilla_client.command(args)
