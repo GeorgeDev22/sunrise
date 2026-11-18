@@ -2919,7 +2919,8 @@ impl Game<'_> {
         // copy in the mob list draws nothing: given the move, it kept the
         // dragon where it spawned (#2083).
         let dragon = self.dragon.as_ref().is_some_and(|d| d.id as i32 == id);
-        let driven = self.driven_mount().is_some_and(|m| m.id as i32 == id);
+        let driven = self.driven_mount().is_some_and(|m| m.id as i32 == id)
+            || u32::try_from(id).is_ok_and(|id| self.controls_boat(id));
         let mob = self
             .mob_index
             .get_mut(&mut self.mobs, id as u32)
@@ -2943,10 +2944,10 @@ impl Game<'_> {
                 t.position = position;
             }
             if driven {
-                // handleMoveEntity, handleEntityPositionSync: the mount this
-                // client moves (isLocalInstanceAuthoritative) keeps its own
+                // handleMoveEntity, handleEntityPositionSync: the mount or boat
+                // this client moves (isLocalInstanceAuthoritative) keeps its own
                 // position. An interpolation it had going runs on
-                // (`interpolate_driven_mount`), with no new steps.
+                // (`interpolate_driven_mount`, the boat's own), with no new steps.
                 return;
             }
             if let Some(m) = mob {
@@ -10647,6 +10648,16 @@ impl ClientMenu {
 }
 
 impl Remote {
+    /// The interpolation a boat or other object `id` had toward the server's
+    /// position, taken out: its target, rotation and steps to go.
+    pub(super) fn take_object_lerp(
+        &mut self,
+        id: u32,
+    ) -> Option<([f64; 3], Option<(f32, f32)>, u32)> {
+        self.lerps
+            .remove(&(id as i32))
+            .map(|l| (l.target, l.rotation, l.steps))
+    }
     pub(super) fn set_menu_title(&mut self, title: Option<sunrise_client::text::Text>) {
         self.menu_title_snapshot = title.try_into_api().ok().flatten().map(Arc::new);
         self.menu_title = title;

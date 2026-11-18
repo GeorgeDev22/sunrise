@@ -420,6 +420,14 @@ impl Game<'_> {
             // server is sent; this tick's keys are latched after it ticked.
             let mut b = self.boats[i].clone();
             if self.controls_boat(id) {
+                // A boat taken over while it eased toward the server's position keeps
+                // easing (the handler stays the entity's), and reports where it goes.
+                if let Some((to, rotation, steps)) =
+                    self.remote.as_mut().and_then(|r| r.take_object_lerp(id))
+                {
+                    let rotation = rotation.unwrap_or((b.yaw, b.pitch));
+                    b.go_on_easing(Vec3::new(to[0], to[1], to[2]), rotation, steps);
+                }
                 b = self.tick_boat(b, true);
                 b.input = [keys.left, keys.right, keys.forward, keys.backward];
             }
