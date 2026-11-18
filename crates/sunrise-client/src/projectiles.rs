@@ -882,7 +882,7 @@ impl Projectile {
     /// `Entity.checkInsideBlocks` over its move from `from` (set by position,
     /// so one segment): whether it touched any lava's fluid box.
     fn in_lava(&self, w: &impl ProjectileWorld, from: Vec3) -> bool {
-        crate::entities::lava_contacts(
+        crate::entities::fluid_contacts(
             from,
             self.position,
             None,

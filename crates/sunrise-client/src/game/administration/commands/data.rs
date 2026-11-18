@@ -298,7 +298,12 @@ impl Game<'_> {
                     f.rotation,
                     uuid,
                 );
-                crate::game::persist::with_raw(tag, raw)
+                let mut tag = crate::game::persist::with_raw(tag, raw);
+                if let Tag::Compound(fields) = &mut tag {
+                    // Its simulated fire, not a saved copy's (`with_raw` keeps those).
+                    fields.insert("Fire".into(), Tag::Short(f.fire_ticks as i16));
+                }
+                tag
             }
             Target::Rocket(id) => {
                 let uuid = self.uuid_for(id);
@@ -699,6 +704,7 @@ impl Game<'_> {
                     falling.drop_item = drop_item;
                     falling.fall_distance = fall_distance;
                     falling.on_ground = entity_nbt::flag(&tag, "OnGround");
+                    falling.fire_ticks = crate::game::boats::saved_fire(&tag);
                     falling.damage = damage;
                     // Keep id/join, start_pos, portal state and stuck multiplier.
                     set_key(&mut tag, "UUID", Tag::IntArray(uuid.to_vec()));

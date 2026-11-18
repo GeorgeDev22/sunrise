@@ -2191,6 +2191,8 @@ impl Game<'_> {
         let mut tag = with_raw(tag, raw.as_ref());
         if let Tag::Compound(fields) = &mut tag {
             fields.insert("PortalCooldown".into(), Tag::Int(f.portal.cooldown));
+            // Its simulated fire, not a saved copy's (`with_raw` keeps those).
+            fields.insert("Fire".into(), Tag::Short(f.fire_ticks as i16));
         }
         Some((chunk_of(f.position), tag))
     }
