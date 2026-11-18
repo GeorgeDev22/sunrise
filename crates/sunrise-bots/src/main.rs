@@ -978,36 +978,6 @@ fn raw_protocol_answer(
     }
 }
 
-/// ChunkBatchSizeCalculator: the chunks per tick a vanilla client asks for, from how long its batches take
-/// to arrive.
-struct BatchSize {
-    nanos_per_chunk: f64,
-    old_samples_weight: u32,
-    started: Instant,
-}
-
-impl BatchSize {
-    fn new() -> Self {
-        Self {
-            nanos_per_chunk: 2_000_000.0,
-            old_samples_weight: 1,
-            started: Instant::now(),
-        }
-    }
-    fn finished(&mut self, size: i32) {
-        if size > 0 {
-            let per_chunk = self.started.elapsed().as_nanos() as f64 / f64::from(size);
-            let clamped = per_chunk.clamp(self.nanos_per_chunk / 3.0, self.nanos_per_chunk * 3.0);
-            let weight = f64::from(self.old_samples_weight);
-            self.nanos_per_chunk = (self.nanos_per_chunk * weight + clamped) / (weight + 1.0);
-            self.old_samples_weight = (self.old_samples_weight + 1).min(49);
-        }
-    }
-    fn desired_chunks_per_tick(&self) -> f32 {
-        (7_000_000.0 / self.nanos_per_chunk) as f32
-    }
-}
-
 /// `--capture`: one record per play packet, little-endian: u32 milliseconds since the
 /// bot joined, i32 packet id, u32 body length, then the body (without the id).
 struct Capture {
@@ -1061,7 +1031,7 @@ fn read(
     use ids::play::serverbound as sb;
     let send = |body: Vec<u8>| lock(&writer).send(&body);
     let mut seen = HashSet::new();
-    let mut batch = BatchSize::new();
+    let mut batch = sunrise_protocol::chunk_batch::ChunkBatchSize::default();
     let mut teleports = 0u64;
     loop {
         if bot.deaf.load(Ordering::Relaxed) {
@@ -1137,11 +1107,11 @@ fn read(
                 Ok(())
             }
             cb::CHUNK_BATCH_START => {
-                batch.started = Instant::now();
+                batch.on_batch_start();
                 Ok(())
             }
             cb::CHUNK_BATCH_FINISHED => {
-                batch.finished(r.varint().unwrap_or(0));
+                batch.on_batch_finished(r.varint().unwrap_or(0));
                 send(
                     play::Serverbound::ChunkBatchReceived(play::ChunkBatchReceived {
                         chunks_per_tick: ack_rate

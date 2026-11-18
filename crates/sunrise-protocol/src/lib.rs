@@ -9,6 +9,7 @@ pub mod attachment_sync;
 pub mod buf;
 pub mod carry_age;
 pub mod chunk;
+pub mod chunk_batch;
 pub mod collider_sync;
 pub mod connection;
 pub mod crypto;

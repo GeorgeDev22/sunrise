@@ -2266,8 +2266,9 @@ impl Game<'_> {
     /// `Minecraft.runTick` handles every packet that came (`runAllTasks`)
     /// before the frame's ticks. What this frame's poll left for later (chunks
     /// past its budget or still decoding, and everything after them) is taken
-    /// when a tick is about to run, so the tick moves through those chunks and
-    /// a batch's `ChunkBatchReceived` goes out from it, as vanilla's does.
+    /// when a tick is about to run, so the tick moves through those chunks, as
+    /// vanilla's does. A batch's `ChunkBatchReceived` is not among them: the
+    /// network thread answers it (`net::receive_play`).
     pub(in crate::game) fn poll_remote_before_tick(&mut self) -> Result<()> {
         if self.remote.as_ref().is_none_or(|r| r.backlog.is_empty()) {
             return Ok(());
@@ -3522,12 +3523,6 @@ impl Game<'_> {
             // `poll_remote` forgets a run of them at once.
             C::ForgetLevelChunk(p) => {
                 self.forget_remote_columns(&mut [(p.pos[0], p.pos[1])].into_iter().collect(), true);
-            }
-            C::ChunkBatchFinished(_) => {
-                // ChunkBatchSizeCalculator's ceiling; meshing runs on workers.
-                self.send(S::ChunkBatchReceived(play::ChunkBatchReceived {
-                    chunks_per_tick: 64.0,
-                }));
             }
             C::BlockUpdate(p) => self.server_block(p.pos, p.state),
             C::AddTransientBlock(p) => self.add_transient_block(p.pos, p.state),

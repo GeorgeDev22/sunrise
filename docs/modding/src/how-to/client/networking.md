@@ -21,7 +21,11 @@ and drops the unsent tail.
 
 Disconnect, a protocol incarnation change, or an aborted dimension crossing discards the hold;
 its id then returns `Unknown`. Starting without a joined physical play connection returns `NoWorld`.
-Network-thread keep-alives, configuration packets, cookies and resource-pack answers bypass holds.
+Network-thread keep-alives, chunk batch acknowledgements, configuration packets, cookies and
+resource-pack answers bypass holds. The network thread answers each chunk batch as it arrives, as
+vanilla's `ClientPacketListener` does, so `client_packet` hears neither the batch's start nor its
+finish (it does hear the chunks between them), and `client_packet_send` neither sees nor can cancel
+the acknowledgement.
 No packet inspection or editing beyond the existing `ClientPacket` view is provided.
 
 ## Configuration tasks before play
