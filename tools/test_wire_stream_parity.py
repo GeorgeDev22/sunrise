@@ -1075,14 +1075,13 @@ SCENARIOS = {
         ticks=120, steps={0: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 10: ['key space down'],
                           15: ['key space up'], 40: ['key space down'], 50: ['key space up'], 75: ['key space down'],
                           95: ['key space up']}),
-    # Mounted in the setup, facing 0 (item 93): left alone, the mob turned at random before the mount and the rides
-    # differed between the two clients' runs.
+    # Facing 0 (item 93; summoned at random, the rides differed between the two clients' runs), mounted at tick 0:
+    # mounted in the setup, the strider took the walk before the scenario and dropped the player into the lava.
     'strider_lava': dict(
         setup=[f'fill -3 {FLOOR} 1 3 {FLOOR} 20 minecraft:lava',
                f'summon minecraft:strider 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,Rotation:[0f,0f],equipment:{{saddle:{{id:"minecraft:saddle",count:1}}}}}}',
-               f'ride {PLAYER} mount @e[type=minecraft:strider,limit=1]',
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:warped_fungus_on_a_stick'],
-        ticks=90, steps={10: ['look 0 10'],
+        ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:strider,limit=1]'], 10: ['look 0 10'],
                          30: ['mouse right click'], 55: ['look 25 10'], 80: ['key shift down'], 82: ['key shift up']}),
     'boat_teleported': dict(
         setup=[f'fill -5 {FLOOR} 1 5 {FLOOR} 26 minecraft:water', f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 3.5'],
