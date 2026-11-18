@@ -23,20 +23,18 @@ env:
   SCENARIO_LIST: tools/ci/wire-grim-scenarios.txt
 jobs:
   grim:
-    name: ${{ matrix.anticheat }} ${{ matrix.server }} r${{ matrix.round }} s${{ matrix.shard }} fps${{ matrix.fps }}
+    name: ${{ matrix.anticheat }} ${{ matrix.server }} r${{ matrix.round }} s${{ matrix.shard }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         # grim or intave (Intave logs only: no kicks or bans; tools/test_wire_stream_parity.py intave_plugin).
-        anticheat: ['grim']
-        # The vanilla client's frame cap (a test of even ticks).
-        fps: ['120', '260']
-        server: ['paper-26.3']
+        anticheat: ['grim', 'intave']
+        server: ['paper-26.3', 'via-1.21.11']
         # Three rounds of the whole list: a difference counts only when it comes back in each.
-        round: [1]
-        shard: [0]
+        round: [1, 2, 3]
+        shard: [0, 1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -92,8 +90,6 @@ jobs:
           WIRE_STREAM_ANTICHEAT: ${{ matrix.anticheat }}
           # A small vanilla window, so its CPU-drawn frames stay under a tick (even ticks, as on real hardware).
           WIRE_STREAM_VANILLA_SIZE: 256x144
-          WIRE_STREAM_VANILLA_FPS: ${{ matrix.fps }}
-          WIRE_STREAM_VANILLA_VSYNC: 'false'
         run: |
           [ -n "$WIRE_STREAM_VIA" ] || unset WIRE_STREAM_VIA
           set +e
@@ -111,7 +107,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ${{ matrix.anticheat }}-${{ matrix.server }}-r${{ matrix.round }}-${{ matrix.shard }}-fps${{ matrix.fps }}
+          name: ${{ matrix.anticheat }}-${{ matrix.server }}-r${{ matrix.round }}-${{ matrix.shard }}
           path: out
           retention-days: 7
           if-no-files-found: warn
