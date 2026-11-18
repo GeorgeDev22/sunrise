@@ -108,6 +108,29 @@ pub(super) struct GuestPlay {
     score_recorded: super::scoreboard::Recorded,
 }
 
+/// `LivingEntity.collectEquipmentChanges` for a guest: whether its `armor` or `held` item
+/// differs from what its modifiers were put on for (`equipped`), which then records them.
+/// The body tick asks (`detectEquipmentUpdates`), so the packets of a tick act with the
+/// modifiers from before it: a slot change and an attack sent in one tick hit with the old
+/// item's attack damage and charge speed (the attribute swap).
+fn equipment_changed(
+    equipped: &mut Option<Vec<Option<ItemStack>>>,
+    armor: &[Option<ItemStack>],
+    held: Option<&ItemStack>,
+) -> bool {
+    let unchanged = equipped.as_deref().is_some_and(|eq| {
+        eq.len() == armor.len() + 1
+            && eq[..armor.len()] == armor[..]
+            && eq[armor.len()].as_ref() == held
+    });
+    if !unchanged {
+        let mut now = armor.to_vec();
+        now.push(held.cloned());
+        *equipped = Some(now);
+    }
+    !unchanged
+}
+
 /// A guest's command waiting for the hub (`LanHost::commands`).
 pub(super) struct GuestCommand {
     pub(super) conn: u32,
