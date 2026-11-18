@@ -53,6 +53,16 @@ pub fn set_mod_enabled(id: &str, on: bool) -> bool {
     crate::set_mod_enabled(id, on)
 }
 
+/// Index the `(namespace, mod ID)` pairs admitted to the startup registries.
+pub fn install_content_owners<'a>(owners: impl IntoIterator<Item = (&'a str, &'a str)>) {
+    crate::runtime::install_content_owners(owners);
+}
+
+/// Whether the engine has bound content ownership for the installed dispatch.
+pub fn content_owners_published() -> bool {
+    crate::runtime::content_owners_published()
+}
+
 /// Whether the declaring package of this content is switched off.
 pub fn content_owner_disabled(id: &str) -> bool {
     crate::runtime::content_owner_disabled(id)
@@ -67,13 +77,11 @@ pub fn any_mod_disabled() -> bool {
 /// The scheduler uses the same pre-indexed table as dispatch, before consuming a tick.
 pub fn block_hook_inert(hook: HookId, state: BlockState) -> bool {
     let table = crate::parts(hook, "block_hook_inert");
-    table.for_hook(hook).is_some_and(|table| {
-        crate::disabled_owner_part(
-            table.block_value(state),
-            crate::content::registry_keys::block_id(state.block()),
-        )
+    table
+        .for_hook(hook)
+        .and_then(|table| table.block_entry(state))
+        .and_then(|entry| entry.disabled_owner_slot())
         .is_some()
-    })
 }
 
 /// Resolve a listener's owner once at load, for dispatch through [`mod_index_on`].

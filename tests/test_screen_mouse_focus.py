@@ -15,7 +15,7 @@ class ScreenMouseFocusTests(unittest.TestCase):
         game = (ROOT / "crates/sunrise-client/src/game.rs").read_text()
         pre = game.index("// ScreenEvent.MouseButtonPressed.Pre")
         focus = game.index("self.key_focus_mouse_press(&event)")
-        self.assertLess(game.index("self.key_focus_mouse(event_loop, &event)"), pre)
+        self.assertLess(game.index("self.key_focus_mouse("), pre)
         self.assertLess(game.index("if canceled {", pre), focus)
         self.assertIn("return Ok(());", game[game.index("if canceled {", pre):focus])
         self.assertLess(focus, game.index("match event {", pre))

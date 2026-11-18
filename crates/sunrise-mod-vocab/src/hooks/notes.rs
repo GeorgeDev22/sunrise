@@ -1736,10 +1736,10 @@ still go on each event or registrar.
   from the shape update of a block whose template checks it (a plant, a torch, a sign: `Some(false)` breaks it with its
   drops when a neighbour changes), and wherever else vanilla asks. `state` may not be in the world yet, so decide from
   `state`. `may_place_on(dimension, state, ground, ground_pos, may)` answers `VegetationBlock.mayPlaceOn` for a
-  mod plant (a block whose template is a vanilla plant, such as a crop): the blocks it can stand on, which its
-  template's `canSurvive` asks, so it is refused elsewhere and pops off when its ground changes. Answer only for your
-  own blocks and leave the answer empty otherwise; the level is read-only. Both run on every shape update of such a
-  block: keep them short.
+  mod plant, whose block declaration opts into vegetation or whose template inherits it. The soil's `can_sustain_plant`
+  decides first, then the plant; an empty answer keeps the plant's rule. Placement refuses unsupported ground and
+  neighbour updates pop the plant off. Answer only for your own blocks. The level is read-only; both run on shape
+  updates, so keep them short.
 
 - Drawing mod block entities on the client. `block_entity_submit(pos, block, state, entity, draw)` runs once a frame
   for each mod block entity in view, as vanilla's `BlockEntityRenderer.submit` does (within its view distance, 64 blocks

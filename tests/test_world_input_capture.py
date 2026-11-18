@@ -41,6 +41,13 @@ def function(source, name):
     return source[start:end]
 
 
+def pointer_projection_sources():
+    source = (ROOT / "crates/sunrise-client-input/src/window.rs").read_text(encoding="utf-8")
+    source = source[source.index("/// `Window.calculateScale`"):source.index("/// `InactivityFpsLimit`.")]
+    # The OS query is stubbed, not the projection or its rounding.
+    return source.replace(function(source, "from_window"), "")
+
+
 class WorldInputCaptureTests(unittest.TestCase):
     def test_loading_completion_wiring(self):
         game = "".join((ROOT / "crates/sunrise-client/src" / path).read_text(encoding="utf-8")
@@ -68,7 +75,6 @@ class WorldInputCaptureTests(unittest.TestCase):
     def test_capture_lifecycle(self):
         source = "".join((ROOT / "crates/sunrise-client/src" / path).read_text(encoding="utf-8")
                          for path in ("game.rs", "game/interface/pointer_capture.rs"))
-        mouse = (ROOT / "crates/sunrise-client-input/src/mouse.rs").read_text(encoding="utf-8")
         fixture = r'''
 use std::cell::Cell;
 #[derive(Clone, Copy, PartialEq)]
@@ -77,9 +83,12 @@ enum Screen { Playing, Paused, Inventory, Chat }
 enum CursorGrabMode { Locked, Confined, None }
 mod winit {
     pub mod dpi {
-        #[derive(Clone, Copy)]
+        #[derive(Clone, Copy, Debug)]
         pub struct PhysicalPosition<T> { pub x: T, pub y: T }
         impl<T> PhysicalPosition<T> { pub fn new(x: T, y: T) -> Self { Self { x, y } } }
+        #[derive(Clone, Copy, Debug)]
+        pub struct LogicalPosition<T> { pub x: T, pub y: T }
+        impl<T> LogicalPosition<T> { pub fn new(x: T, y: T) -> Self { Self { x, y } } }
         pub struct PhysicalSize<T> { pub width: T, pub height: T }
         impl From<PhysicalSize<u32>> for [u32; 2] {
             fn from(size: PhysicalSize<u32>) -> Self { [size.width, size.height] }
@@ -87,18 +96,27 @@ mod winit {
     }
 }
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-struct HudBatch { scale: f32 }
-struct GuiScale;
+extern crate self as sunrise_client;
+mod window {
+    use super::{Window, winit::dpi::{LogicalPosition, PhysicalPosition}};
+    POINTER_PROJECTION
+    impl PointerSpace {
+        pub fn from_window(window: &Window) -> Self { Self::new(window.inner_size().into(), 1.0) }
+    }
+}
+struct GuiScale { requested: u32, unicode: bool }
 struct Settings;
-impl Settings { fn gui_scale_inputs(&self) -> GuiScale { GuiScale } }
-impl HudBatch { fn new(_size: [u32; 2], _inputs: GuiScale) -> Self { Self { scale: 2.0 } } }
+impl Settings { fn gui_scale_inputs(&self) -> GuiScale { GuiScale { requested: 2, unicode: false } } }
 struct Config { width: u32, height: u32 }
 struct Renderer { config: Config }
 #[derive(Default)]
 struct Window { grabs: Cell<u32>, visible: Cell<bool>, fail: bool, warps: Cell<u32>, at: Cell<(f64, f64)>,
-                focus: Cell<bool> }
+                focus: Cell<bool>, size: Option<[u32; 2]> }
 impl Window {
-    fn inner_size(&self) -> PhysicalSize<u32> { PhysicalSize { width: 854, height: 480 } }
+    fn inner_size(&self) -> PhysicalSize<u32> {
+        let [width, height] = self.size.unwrap_or([854, 480]);
+        PhysicalSize { width, height }
+    }
     fn set_cursor_position(&self, position: PhysicalPosition<f64>) -> Result<(), ()> {
         self.warps.set(self.warps.get() + 1);
         self.at.set((position.x, position.y));
@@ -139,28 +157,30 @@ struct Options { offscreen: bool }
 #[derive(Default)]
 struct ServerPacks { prompt: Option<()> }
 struct Game {
-    focused: bool, agent_pointer: bool, window: Option<Window>, mouse: Mouse,
+    focused: bool, agent_pointer: bool, window: Option<Box<Window>>, mouse: Mouse,
     captured: bool, capture_mode: Option<CursorGrabMode>, regrab_on_refocus: bool, title: Option<()>, screen: Screen,
     remote: Option<Remote>,
     studio: Studio, replay: Replay,
     mining: bool, lan_acting: Option<u32>, renderer: Option<Renderer>, cursor: (f32, f32),
+    window_cursor: Option<window::PointerSample>,
+    window_pointer_space: std::cell::OnceCell<window::PointerSpace>,
     server_packs: ServerPacks, command_prompt: Option<()>, options: Options, settings: Settings,
     unclaimed_window: bool, scripted: bool, focus_after_run: Option<bool>, applied_focus: Vec<bool>,
     unclaimed_modifiers: Option<u8>, applied_modifiers: Vec<u8>,
 }
 impl Default for Game {
     fn default() -> Self {
-        Self { focused: true, agent_pointer: false, window: Some(Window::default()),
+        Self { focused: true, agent_pointer: false, window: Some(Box::default()),
             mouse: Mouse::default(), captured: false, capture_mode: None, regrab_on_refocus: false, title: None,
             screen: Screen::Playing, remote: None, studio: Studio::default(), replay: Replay::default(),
             mining: false, lan_acting: None,
-            renderer: None, cursor: (0.0, 0.0), server_packs: ServerPacks::default(),
+            renderer: None, cursor: (0.0, 0.0), window_cursor: None,
+            window_pointer_space: std::cell::OnceCell::new(), server_packs: ServerPacks::default(),
             command_prompt: None, options: Options::default(), settings: Settings,
             unclaimed_window: false, scripted: false, focus_after_run: None, applied_focus: Vec::new(),
             unclaimed_modifiers: None, applied_modifiers: Vec::new() }
     }
 }
-HELPER
 impl Game {
     fn stop_mining(&mut self) { self.mining = false; }
     fn studio_up(&self) -> bool { self.replay.playing() || self.studio.flying() }
@@ -310,6 +330,7 @@ fn main() {
     // The native pointer and the GUI cursor are centred in their own units.
     {
         let mut game = Game::default();
+        game.window.as_mut().unwrap().size = Some([1000, 600]);
         game.renderer = Some(Renderer { config: Config { width: 1000, height: 600 } });
         game.capture(true);
         assert!(game.captured);
@@ -467,6 +488,8 @@ fn main() {
     // A grab warps once on every system: Windows before the Locked grab, which
     // clips the pointer where it is (#6076).
     let grab_warps = 1;
+    game.window.as_mut().unwrap().size = Some([1000, 600]);
+    game.window_pointer_space.take();
     game.renderer = Some(Renderer { config: Config { width: 1000, height: 600 } });
     game.capture(true);
     assert!(game.captured);
@@ -487,11 +510,11 @@ fn main() {
     assert!(game.window.as_ref().unwrap().visible.get());
 }
 '''
-        capture = method(source, "capture").replace(
-            "sunrise_client::mouse::mouse_position_after_grab_change",
-            "mouse_position_after_grab_change")
-        fixture = fixture.replace("HELPER", function(mouse, "mouse_position_after_grab_change"))
-        fixture = fixture.replace("METHODS", capture + "\n" +
+        fixture = fixture.replace("POINTER_PROJECTION", pointer_projection_sources())
+        fixture = fixture.replace("METHODS", method(source, "capture") + "\n" +
+                                  method(source, "pointer_space") + "\n" +
+                                  method(source, "pointer_projection") + "\n" +
+                                  method(source, "set_window_cursor") + "\n" +
                                   method(source, "capture_loaded_world") + "\n" +
                                   method(source, "regrab_on_refocus") + "\n" +
                                   method(source, "internal_grab") + "\n" +

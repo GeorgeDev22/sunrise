@@ -1292,15 +1292,27 @@ impl Game<'_> {
                 );
                 true
             }
-            TraceKind::Cursor { x, y } => {
-                self.handle_window_event(
+            TraceKind::Cursor { x, y, space } => {
+                let (position, sample) = if let Some(space) = space {
+                    let Some(sample) = space.sample(x, y) else {
+                        return false;
+                    };
+                    (
+                        self.pointer_space([1, 1]).physical_position(sample),
+                        Some(sample),
+                    )
+                } else {
+                    (PhysicalPosition::new(x, y), None)
+                };
+                self.handle_window_event_with_sample(
                     event_loop,
                     id,
                     WindowEvent::CursorMoved {
                         device_id,
-                        position: PhysicalPosition::new(x, y),
+                        position,
                     },
                     InputOrigin::Game,
+                    sample,
                 );
                 true
             }
@@ -1917,7 +1929,10 @@ mod tests {
             events[2].kind,
             TraceKind::Wheel { lines: true, .. }
         ));
-        assert!(matches!(events[3].kind, TraceKind::Cursor { .. }));
+        assert!(matches!(
+            events[3].kind,
+            TraceKind::Cursor { space: None, .. }
+        ));
         assert!(matches!(events[4].kind, TraceKind::Motion { .. }));
         assert!(matches!(events[5].kind, TraceKind::Pad { .. }));
         assert!(matches!(events[6].kind, TraceKind::Command { .. }));

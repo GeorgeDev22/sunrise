@@ -3,7 +3,7 @@
 //! stays exactly vanilla's, and the logic behind them. Every extra is off by
 //! default; see `docs/extras.md`. Sunrise's own switches outside the Extras page
 //! (No AI, Agent Control) are kept here too.
-use std::{collections::VecDeque, fs, path::Path};
+use std::{collections::VecDeque, path::Path};
 
 pub const FILE: &str = "sunrise-extras.txt";
 /// The name the options screen uses while the sort key waits for a key.
@@ -109,6 +109,11 @@ pub struct Extras {
     /// built-in track and leaving the off ones out (`musicPage`, off by
     /// default: vanilla plays exactly as before).
     pub music_page: bool,
+    /// Lines no setting here reads, by key and as written, kept in file order so a setting that moved to a store survives a run without it.
+    unknown: Vec<(String, String)>,
+    /// The file is there but couldn't be read whole (an I/O error, or bytes that aren't UTF-8):
+    /// it is never written over, so nothing in it is lost.
+    keep_file: bool,
     /// The PvP & HUD page's options (`pvp`).
     pub pvp: crate::pvp::Pvp,
 }
@@ -155,6 +160,8 @@ impl Default for Extras {
             wheel_cycles_settings: false,
             music_off: Vec::new(),
             music_page: false,
+            unknown: Vec::new(),
+            keep_file: false,
             pvp: Default::default(),
         }
     }
@@ -164,14 +171,16 @@ fn bool_text(v: bool) -> &'static str {
 }
 impl Extras {
     pub fn load(dir: &Path) -> Self {
-        fs::read_to_string(dir.join(FILE))
-            .map(|t| Self::parse(&t))
-            .unwrap_or_default()
+        let (text, keep) = Self::read_text(dir);
+        Self::from_text(&text, keep)
     }
     pub fn parse(text: &str) -> Self {
         let mut e = Self::default();
-        for line in text.lines() {
+        for raw in text.split_inclusive('\n') {
+            let line = raw.trim_end_matches(['\n', '\r']);
             let Some((key, value)) = line.split_once(':') else {
+                // Not `key:value`: no setting reads it, and it is kept as written.
+                e.unknown.push((String::new(), raw.to_owned()));
                 continue;
             };
             let value = value.trim();
@@ -186,7 +195,11 @@ impl Extras {
                 "fullbright" => e.fullbright = flag(e.fullbright),
                 "dynamicLights" => e.dynamic_lights = flag(e.dynamic_lights),
                 "zoom" => e.zoom = flag(e.zoom),
-                "zoomKey" if value.starts_with("key.") => e.zoom_key = value.to_owned(),
+                "zoomKey" => {
+                    if value.starts_with("key.") {
+                        e.zoom_key = value.to_owned();
+                    }
+                }
                 "zoomLevel" => {
                     if let Ok(v) = value.parse::<u8>() {
                         e.zoom_level = v.clamp(2, 10);
@@ -236,14 +249,18 @@ impl Extras {
                 "mouseTweaks" => e.mouse_tweaks = flag(e.mouse_tweaks),
                 "mouseTweaksWheel" => e.mouse_tweaks_wheel = flag(e.mouse_tweaks_wheel),
                 "sort" => e.sort = flag(e.sort),
-                "sortKey" if value.starts_with("key.") => e.sort_key = value.to_owned(),
+                "sortKey" => {
+                    if value.starts_with("key.") {
+                        e.sort_key = value.to_owned();
+                    }
+                }
                 "chatAnimation" => e.chat_animation = flag(e.chat_animation),
                 "chatIndicator" => e.chat_indicator = flag(e.chat_indicator),
                 sunrise_core::no_ai::KEY => e.no_ai = flag(e.no_ai),
                 "agentControl" => e.agent_control = flag(e.agent_control),
                 "reproKeys" => e.repro_keys = flag(e.repro_keys),
-                // A new name: `wheelCyclesSettings` was written as true by every
-                // install while it was the default, so it says nothing of a choice.
+                // Retired: every install wrote `wheelCyclesSettings` as true while it was the default.
+                "wheelCyclesSettings" => {}
                 "wheelCyclesListSettings" => {
                     e.wheel_cycles_settings = flag(e.wheel_cycles_settings)
                 }
@@ -257,62 +274,84 @@ impl Extras {
                 }
                 "musicPage" => e.music_page = flag(e.music_page),
                 key => {
-                    e.pvp.parse_line(key, value);
+                    if !e.pvp.parse_line(key, value) {
+                        e.unknown.push((key.to_owned(), raw.to_owned()));
+                    }
                 }
             }
         }
         e
     }
+    /// Every line, the kept ones included.
     pub fn serialize(&self) -> String {
-        let mut text = format!(
-            "packBrowser:{}\npregen:{}\nfullbright:{}\ndynamicLights:{}\nzoom:{}\nzoomKey:{}\nzoomLevel:{}\nzoomSmooth:{}\nzoomSensitivity:{}\nlodZoomDetail:{}\nfps:{}\nfpsCorner:{}\nfpsLows:{}\nkeystrokes:{}\nkeystrokesCorner:{}\nkeystrokesCps:{}\nmovedToMods:{}\nminimap:{}\nminimapCorner:{}\nminimapSize:{}\nminimapShape:{}\nminimapZoom:{}\nminimapRotate:{}\nautoReconnect:{}\nuiSoundReserve:{}\nownNameTag:{}\nskipModdedSplashesIfVanillaModified:{}\nhideBlockParticles:{}\nmouseTweaks:{}\nmouseTweaksWheel:{}\nsort:{}\nsortKey:{}\nchatAnimation:{}\nchatIndicator:{}\n{}:{}\nagentControl:{}\nreproKeys:{}\nwheelCyclesListSettings:{}\nmusicOff:{}\nmusicPage:{}\n",
-            bool_text(self.pack_browser),
-            bool_text(self.pregen),
-            bool_text(self.fullbright),
-            bool_text(self.dynamic_lights),
-            bool_text(self.zoom),
-            self.zoom_key,
-            self.zoom_level,
-            bool_text(self.zoom_smooth),
-            bool_text(self.zoom_sensitivity),
-            bool_text(self.lod_zoom_detail),
-            bool_text(self.fps),
-            self.fps_corner.name(),
-            bool_text(self.fps_lows),
-            bool_text(self.keystrokes),
-            self.keystrokes_corner.name(),
-            bool_text(self.keystrokes_cps),
-            self.moved.join(","),
-            bool_text(self.minimap),
-            self.minimap_corner.name(),
-            self.minimap_size,
-            if self.minimap_round {
+        self.serialize_but(&|_| false)
+    }
+    /// `serialize`, leaving out the kept lines `owned` claims: a store wrote those itself.
+    fn serialize_but(&self, owned: &dyn Fn(&str) -> bool) -> String {
+        let mut text = String::new();
+        let mut push = |key: &str, value: &dyn std::fmt::Display| {
+            text.push_str(&format!("{key}:{value}\n"));
+        };
+        push("packBrowser", &bool_text(self.pack_browser));
+        push("pregen", &bool_text(self.pregen));
+        push("fullbright", &bool_text(self.fullbright));
+        push("dynamicLights", &bool_text(self.dynamic_lights));
+        push("zoom", &bool_text(self.zoom));
+        push("zoomKey", &self.zoom_key);
+        push("zoomLevel", &self.zoom_level);
+        push("zoomSmooth", &bool_text(self.zoom_smooth));
+        push("zoomSensitivity", &bool_text(self.zoom_sensitivity));
+        push("lodZoomDetail", &bool_text(self.lod_zoom_detail));
+        push("fps", &bool_text(self.fps));
+        push("fpsCorner", &self.fps_corner.name());
+        push("fpsLows", &bool_text(self.fps_lows));
+        push("keystrokes", &bool_text(self.keystrokes));
+        push("keystrokesCorner", &self.keystrokes_corner.name());
+        push("keystrokesCps", &bool_text(self.keystrokes_cps));
+        push("movedToMods", &self.moved.join(","));
+        push("minimap", &bool_text(self.minimap));
+        push("minimapCorner", &self.minimap_corner.name());
+        push("minimapSize", &self.minimap_size);
+        push(
+            "minimapShape",
+            &if self.minimap_round {
                 "round"
             } else {
                 "square"
             },
-            self.minimap_zoom,
-            bool_text(self.minimap_rotate),
-            bool_text(self.auto_reconnect),
-            bool_text(self.ui_sound_reserve),
-            bool_text(self.own_name_tag),
-            bool_text(self.skip_modded_splashes_if_vanilla_modified),
-            bool_text(self.hide_block_particles),
-            bool_text(self.mouse_tweaks),
-            bool_text(self.mouse_tweaks_wheel),
-            bool_text(self.sort),
-            self.sort_key,
-            bool_text(self.chat_animation),
-            bool_text(self.chat_indicator),
-            sunrise_core::no_ai::KEY,
-            bool_text(self.no_ai),
-            bool_text(self.agent_control),
-            bool_text(self.repro_keys),
-            bool_text(self.wheel_cycles_settings),
-            self.music_off.join(","),
-            bool_text(self.music_page),
         );
+        push("minimapZoom", &self.minimap_zoom);
+        push("minimapRotate", &bool_text(self.minimap_rotate));
+        push("autoReconnect", &bool_text(self.auto_reconnect));
+        push("uiSoundReserve", &bool_text(self.ui_sound_reserve));
+        push("ownNameTag", &bool_text(self.own_name_tag));
+        push(
+            "skipModdedSplashesIfVanillaModified",
+            &bool_text(self.skip_modded_splashes_if_vanilla_modified),
+        );
+        push("hideBlockParticles", &bool_text(self.hide_block_particles));
+        push("mouseTweaks", &bool_text(self.mouse_tweaks));
+        push("mouseTweaksWheel", &bool_text(self.mouse_tweaks_wheel));
+        push("sort", &bool_text(self.sort));
+        push("sortKey", &self.sort_key);
+        push("chatAnimation", &bool_text(self.chat_animation));
+        push("chatIndicator", &bool_text(self.chat_indicator));
+        push(sunrise_core::no_ai::KEY, &bool_text(self.no_ai));
+        push("agentControl", &bool_text(self.agent_control));
+        push("reproKeys", &bool_text(self.repro_keys));
+        push(
+            "wheelCyclesListSettings",
+            &bool_text(self.wheel_cycles_settings),
+        );
+        push("musicOff", &self.music_off.join(","));
+        push("musicPage", &bool_text(self.music_page));
         self.pvp.serialize(&mut text);
+        // As written: only the file's last record can lack a line end, and nothing follows it here.
+        for (key, raw) in &self.unknown {
+            if !owned(key) {
+                text.push_str(raw);
+            }
+        }
         text
     }
     /// Binds the extra key `name` (`SORT_KEY`); false for
@@ -329,13 +368,54 @@ impl Extras {
     /// setup gains no file. The settings stores of this file follow these lines
     /// (`sunrise_hooks::settings`).
     pub fn save(&self, dir: &Path) {
+        let mut stores = String::new();
+        let stores_default = sunrise_hooks::settings::engine::append(FILE, &mut stores);
+        self.save_with(dir, &stores, stores_default);
+    }
+    /// `save` with the stores' lines of this file made: a kept line goes only when a store
+    /// wrote its key. A file that couldn't be read, or a failed write, leaves the old file.
+    fn save_with(&self, dir: &Path, stores: &str, stores_default: bool) {
+        use sunrise_hooks::settings::engine;
         let path = dir.join(FILE);
-        let mut text = self.serialize();
-        let stores_default = sunrise_hooks::settings::engine::append(FILE, &mut text);
-        if *self == Self::default() && stores_default && !path.exists() {
+        if self.keep_file || (*self == Self::default() && stores_default && !path.exists()) {
             return;
         }
-        let _ = fs::write(path, text);
+        let written = engine::keys(stores);
+        let mut text = self.serialize_but(&|key| written.contains(&key));
+        if !stores.is_empty() && !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(stores);
+        if let Err(e) = engine::replace(&path, &text) {
+            log::warn!("Sunrise: {FILE} is not saved: {e}");
+        }
+    }
+    /// The file's text in `dir` (empty when there is none), and whether the file must be kept
+    /// as it is: it couldn't be read (its settings stay at their defaults) or had bytes that
+    /// aren't UTF-8 (its other lines load).
+    pub fn read_text(dir: &Path) -> (String, bool) {
+        match sunrise_hooks::settings::engine::read(&dir.join(FILE)) {
+            Ok(None) => (String::new(), false),
+            Ok(Some(read)) => {
+                if read.lossy {
+                    log::warn!(
+                        "Sunrise: {FILE} has bytes that aren't UTF-8, so it won't be saved over"
+                    );
+                }
+                (read.text, read.lossy)
+            }
+            Err(e) => {
+                log::warn!("Sunrise: {FILE} could not be read, so it won't be saved over: {e}");
+                (String::new(), true)
+            }
+        }
+    }
+    /// The settings of `text` from [`Self::read_text`]; `keep` leaves the file as it is.
+    pub fn from_text(text: &str, keep: bool) -> Self {
+        Self {
+            keep_file: keep,
+            ..Self::parse(text)
+        }
     }
 }
 
@@ -743,10 +823,145 @@ impl Item {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn all_set() -> Extras {
+        Extras {
+            pack_browser: true,
+            pregen: true,
+            fullbright: true,
+            zoom: true,
+            zoom_key: "key.keyboard.c".into(),
+            fps_corner: Corner::BottomRight,
+            moved: vec!["fps_overlay".into(), "keystrokes".into()],
+            minimap_round: true,
+            minimap_size: 128,
+            minimap_zoom: 0.5,
+            music_off: vec!["a".into(), "b".into()],
+            own_name_tag: true,
+            ..Extras::default()
+        }
+    }
+
+    #[test]
+    fn serialize_keeps_the_format_of_main() {
+        let default = include_str!("../tests/fixtures/extras_default.txt");
+        assert_eq!(Extras::default().serialize(), default);
+        let set = include_str!("../tests/fixtures/extras_set.txt");
+        assert_eq!(all_set().serialize(), set);
+    }
+
+    #[test]
+    fn lines_nobody_owns_survive_a_load_and_save() {
+        let text = "ownNameTag:true\ndiscordPresence:true\nfutureKey:7\n";
+        let e = Extras::parse(text);
+        assert!(e.own_name_tag);
+        assert_eq!(
+            e.unknown,
+            [
+                ("discordPresence".into(), "discordPresence:true\n".into()),
+                ("futureKey".into(), "futureKey:7\n".into())
+            ]
+        );
+        let out = e.serialize();
+        assert!(out.contains("\nownNameTag:true\n"));
+        assert!(out.ends_with("discordPresence:true\nfutureKey:7\n"));
+        assert_eq!(Extras::parse(&out), e);
+        let dir = std::env::temp_dir().join(format!("extras-unknown-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let only_moved = Extras::parse("discordPresence:true\n");
+        only_moved.save(&dir);
+        assert!(
+            fs::read_to_string(dir.join(FILE))
+                .unwrap()
+                .contains("discordPresence:true\n")
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_bad_value_for_a_known_key_is_dropped_not_kept() {
+        for key in ["zoomKey", "sortKey"] {
+            let e = Extras::parse(&format!("{key}:foo\n"));
+            assert!(e.unknown.is_empty());
+            let out = e.serialize();
+            assert_eq!(out.matches(&format!("\n{key}:")).count(), 1, "{out}");
+            assert!(!out.contains("foo"));
+        }
+        let e = Extras::parse("hudEditorKey:foo\n");
+        assert!(e.unknown.is_empty());
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("extras-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_kept_line_goes_only_when_a_store_wrote_its_key() {
+        let dir = scratch("store-wrote");
+        let e = Extras::parse("discordPresence:true\nother:1\n");
+        // A store that skipped the key this time (another seat's save): the line stays.
+        e.save_with(&dir, "", false);
+        let text = fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(text.contains("\ndiscordPresence:true\nother:1\n"), "{text}");
+        // A store that wrote it: its line, once.
+        e.save_with(&dir, "discordPresence:false\n", false);
+        let text = fs::read_to_string(dir.join(FILE)).unwrap();
+        assert_eq!(text.matches("discordPresence:").count(), 1, "{text}");
+        assert!(text.ends_with("other:1\ndiscordPresence:false\n"), "{text}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn kept_lines_keep_their_spacing_and_line_ends() {
+        let e = Extras::parse("futureKey : 7 \r\nno colon here\nownNameTag:true\nlast:x");
+        let out = e.serialize();
+        assert!(out.contains("futureKey : 7 \r\nno colon here\n"), "{out:?}");
+        assert!(out.ends_with("\nlast:x"), "{out:?}");
+        assert!(e.own_name_tag);
+        // A store's lines after an unterminated last record start on a line of their own.
+        let dir = scratch("unterminated");
+        e.save_with(&dir, "discordPresence:true\n", false);
+        let text = fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(
+            text.ends_with("\nlast:x\ndiscordPresence:true\n"),
+            "{text:?}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_never_saved_over() {
+        let dir = scratch("unreadable");
+        // Bytes that aren't UTF-8 cost only themselves: every other line still loads, and a
+        // save leaves the file's bytes as they were.
+        let bytes = b"ownNameTag:true\nname:\xff\nno colon \xfe\n";
+        fs::write(dir.join(FILE), bytes).unwrap();
+        let mut e = Extras::load(&dir);
+        assert!(e.own_name_tag);
+        e.fullbright = true;
+        e.save(&dir);
+        assert_eq!(fs::read(dir.join(FILE)).unwrap(), bytes);
+        // A file that can't be read at all (a folder in its place) is left alone.
+        let other = scratch("unreadable-dir");
+        fs::create_dir_all(other.join(FILE).join("kept")).unwrap();
+        let e = Extras::load(&other);
+        assert!(e.keep_file);
+        let mut changed = e.clone();
+        changed.own_name_tag = true;
+        changed.save(&other);
+        assert!(other.join(FILE).join("kept").is_dir());
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(other);
+    }
 
     #[test]
     fn a_saved_wheel_setting_from_before_the_default_changed_is_dropped() {
-        assert!(!Extras::parse("wheelCyclesSettings:true\n").wheel_cycles_settings);
+        let old = Extras::parse("wheelCyclesSettings:true\n");
+        assert!(!old.wheel_cycles_settings && old.unknown.is_empty());
         let on = Extras {
             wheel_cycles_settings: true,
             ..Extras::default()

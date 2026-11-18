@@ -69,7 +69,8 @@ pub(crate) struct Installed {
     pub(crate) mods: Mods,
     pub(crate) subscribers: sunrise_mod_runtime::subscribers::Subscribers,
     pub(crate) disabled: Box<[std::sync::atomic::AtomicBool]>,
-    namespace_owners: std::collections::HashMap<Box<str>, usize>,
+    mod_id_owners: std::collections::HashMap<&'static str, usize>,
+    content_owners: OnceLock<std::collections::HashMap<Box<str>, Option<usize>>>,
     disabled_count: std::sync::atomic::AtomicUsize,
     /// The poison sets of the hooks whose dispatch isolates every listener
     /// (#2414 ruling): a listener that unwound is skipped by that one hook
@@ -109,20 +110,17 @@ impl Installed {
             .iter()
             .map(|_| std::sync::atomic::AtomicBool::new(false))
             .collect();
-        let mut namespace_owners = std::collections::HashMap::new();
-        for (index, entry) in mods.iter().enumerate() {
-            namespace_owners.insert(entry.id.into(), index);
-            if let Some(package) = crate::LoadedMods::new().get(entry.id) {
-                for namespace in package.namespaces() {
-                    namespace_owners.insert(namespace.into(), index);
-                }
-            }
-        }
+        let mod_id_owners = mods
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.id, index))
+            .collect();
         Self {
             mods,
             subscribers,
             disabled,
-            namespace_owners,
+            mod_id_owners,
+            content_owners: OnceLock::new(),
             disabled_count: std::sync::atomic::AtomicUsize::new(0),
             poisons: std::sync::Mutex::new(None),
             poison_free: std::sync::atomic::AtomicBool::new(true),
@@ -289,30 +287,42 @@ pub(crate) fn mod_index_on(index: usize) -> bool {
     })
 }
 
-/// Content ownership is resolved at installation, not by scanning mods on a tick.
-pub(crate) fn content_owner_disabled(id: &str) -> bool {
-    if !any_mod_disabled() {
-        return false;
+/// Freeze primary IDs first, then the first admitted owner of each alias.
+/// An admitted content-only owner reserves its aliases without a dispatch slot.
+pub(crate) fn install_content_owners<'a>(owners: impl IntoIterator<Item = (&'a str, &'a str)>) {
+    if let Some(installed) = installed() {
+        installed.content_owners.get_or_init(|| {
+            let mut by_namespace: std::collections::HashMap<Box<str>, _> = installed
+                .mod_id_owners
+                .iter()
+                .map(|(&id, &index)| (id.into(), Some(index)))
+                .collect();
+            for (namespace, owner) in owners {
+                by_namespace
+                    .entry(namespace.into())
+                    .or_insert_with(|| installed.mod_id_owners.get(owner).copied());
+            }
+            by_namespace
+        });
     }
-    let Some((namespace, _)) = id.split_once(':') else {
-        return false;
-    };
-    installed()
-        .and_then(|installed| installed.namespace_owners.get(namespace))
-        .is_some_and(|index| !mod_index_on(*index))
 }
 
-/// Find the disabled content owner's first subscribed Part, in dispatch order.
-pub(crate) fn disabled_owner_part<P: ?Sized>(
-    parts: &[Attached<P>],
-    id: Option<&str>,
-) -> Option<usize> {
-    let (namespace, _) = id?.split_once(':')?;
-    let owner = *installed()?.namespace_owners.get(namespace)?;
-    if mod_index_on(owner) {
-        return None;
+pub(crate) fn content_owners_published() -> bool {
+    installed().is_none_or(|installed| installed.content_owners.get().is_some())
+}
+
+/// Content ownership is resolved at startup, not by scanning mods on a tick.
+pub(crate) fn content_owner_disabled(id: &str) -> bool {
+    any_mod_disabled() && content_owner_index(id).is_some_and(|index| !mod_index_on(index))
+}
+
+pub(crate) fn content_owner_index(id: &str) -> Option<usize> {
+    let (namespace, _) = id.split_once(':')?;
+    let installed = installed()?;
+    match installed.content_owners.get() {
+        Some(owners) => owners.get(namespace).copied().flatten(),
+        None => installed.mod_id_owners.get(namespace).copied(),
     }
-    parts.iter().position(|part| part.mod_index == owner)
 }
 
 /// `mods` in order, each marked as running `hook` until the next one is (or the loop ends), so a

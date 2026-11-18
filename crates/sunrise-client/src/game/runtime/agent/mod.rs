@@ -28,7 +28,6 @@ use sunrise_client::{
 use sunrise_core::geometry::Vec3;
 use sunrise_world::registry::BlockStateId;
 use winit::{
-    dpi::PhysicalPosition,
     event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
     keyboard::KeyCode,
 };
@@ -1045,20 +1044,12 @@ impl Game<'_> {
         button: MouseButton,
     ) -> Result<()> {
         let id = self.window.as_ref().ok_or("no window yet")?.id();
-        let scale = self
-            .renderer
-            .as_ref()
-            .map(|r| {
-                sunrise_client::hud::HudBatch::new(
-                    [r.config.width, r.config.height],
-                    self.settings.gui_scale_inputs(),
-                )
-                .scale
-            })
+        let projection = self
+            .renderer_pointer_projection()
             .ok_or("no renderer yet")?;
         let device_id = DeviceId::dummy();
-        for (i, &(x, y)) in points.iter().enumerate() {
-            let position = PhysicalPosition::new(f64::from(x * scale), f64::from(y * scale));
+        for (i, &point) in points.iter().enumerate() {
+            let position = projection.window_pointer(point);
             self.handle_window_event(
                 event_loop,
                 id,
@@ -1645,19 +1636,11 @@ impl Game<'_> {
                 let (x, y) = (a.f64(0, "X")? as f32, a.f64(1, "Y")? as f32);
                 let steps = a.f64(2, "STEPS")? as f32;
                 let id = self.window.as_ref().ok_or("no window yet")?.id();
-                let scale = self
-                    .renderer
-                    .as_ref()
-                    .map(|r| {
-                        sunrise_client::hud::HudBatch::new(
-                            [r.config.width, r.config.height],
-                            self.settings.gui_scale_inputs(),
-                        )
-                        .scale
-                    })
+                let projection = self
+                    .renderer_pointer_projection()
                     .ok_or("no renderer yet")?;
                 let device_id = DeviceId::dummy();
-                let position = PhysicalPosition::new(f64::from(x * scale), f64::from(y * scale));
+                let position = projection.window_pointer((x, y));
                 self.handle_window_event(
                     event_loop,
                     id,

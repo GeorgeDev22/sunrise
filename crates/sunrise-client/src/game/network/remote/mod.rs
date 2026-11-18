@@ -8064,8 +8064,8 @@ impl Game<'_> {
     /// wooden or copper door, trapdoor or fence gate, a lever or a button;
     /// whatever else the use changes waits for the server.
     fn predict_use(&mut self, (changes, sounds): &DryUse, seq: i32) {
-        let facts = self.res.facts();
-        let predicted = |state: BlockStateId| hand_operated(&facts.get(state).name);
+        let behaviours = self.res.behaviours();
+        let predicted = |state: BlockStateId| hand_operated(behaviours, state);
         if changes.is_empty()
             || !changes
                 .iter()
@@ -9661,10 +9661,19 @@ type DryPlace = (sunrise_core::position::BlockPos, DryChanges);
 /// The blocks a guest's hand flips that its use predicts (and hears at once): a wooden or
 /// copper door, trapdoor or fence gate, a lever, a button or a cauldron, whose fill level
 /// changes as the bucket, bottle or dye lands. An iron door or trapdoor has no hand use.
-pub(super) fn hand_operated(name: &str) -> bool {
+pub(super) fn hand_operated(
+    behaviours: &sunrise_world::level::Behaviours,
+    state: BlockStateId,
+) -> bool {
+    behaviours
+        .data(state)
+        .is(sunrise_world::level::classes::Class::FenceGate)
+        || named_hand_operated(behaviours.table.name(state))
+}
+
+fn named_hand_operated(name: &str) -> bool {
     let name = name.trim_start_matches("minecraft:");
     ((name.ends_with("_door") || name.ends_with("_trapdoor")) && !name.starts_with("iron_"))
-        || name.ends_with("_fence_gate")
         || name.ends_with("_button")
         || name == "lever"
         || name.ends_with("cauldron")
@@ -13309,6 +13318,155 @@ pub(crate) mod tests {
 
     #[test]
     #[ignore = "daily"]
+    fn declared_gate_uses_its_class_for_blasts_and_predicted_use() {
+        use crate::game::native_guest_turn_tests::with_guests_at;
+        use std::sync::Arc;
+        use sunrise_client::{
+            chunk::Chunk,
+            lan::{Out, PlayerSender},
+            mod_content::{ContentMod, resource_root},
+        };
+        use sunrise_mod_package::{
+            content::{Block, Content, GateSound},
+            enabled::EnabledMods,
+        };
+        use sunrise_protocol::{buf::Reader, packets::play::Clientbound};
+
+        let base = std::path::PathBuf::from(
+            std::env::var_os("SUNRISE_TEST_RESOURCES").expect("prepared resources required"),
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let mut content = Content::declared("gates");
+        let use_sound = "gates:use.open";
+        let blast_sound = "gates:blast.close";
+        content
+            .declare(
+                &[Block {
+                    id: "gates:sites".into(),
+                    template: "minecraft:oak_fence_gate".into(),
+                    item: false,
+                    open_sound: Some(GateSound::All(use_sound.into())),
+                    close_sound: Some(GateSound::Sites {
+                        on_use: None,
+                        on_explosion: Some(blast_sound.into()),
+                        on_redstone: None,
+                    }),
+                    ..Default::default()
+                }],
+                &[],
+            )
+            .unwrap();
+        let root = resource_root(
+            &base,
+            scratch.path(),
+            &[ContentMod {
+                id: "gates".into(),
+                content,
+                jars: Vec::new(),
+            }],
+            scratch.path(),
+            &EnabledMods::new([("gates".into(), mod_api::Side::Both)]),
+        )
+        .unwrap();
+        with_guests_at(root, |game| {
+            let pos = [3, 64, 4];
+            let [x, y, z] = pos;
+            let hit = crate::game::Hit {
+                pos,
+                face: [0, 1, 0],
+                point: [3.5, 64.875, 4.5],
+                inside: false,
+            };
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            game.sync_tick_chunks();
+            let gate = game
+                .pack
+                .assets
+                .registry
+                .default_state("gates:sites")
+                .unwrap();
+            let open = |game: &crate::game::Game<'_>| {
+                let b = game.res.behaviours();
+                b.table.bool(game.world.block(x, y, z), b.props.open)
+            };
+            game.world.set(x, y, z, gate).unwrap();
+            game.audio.capture = Some(Vec::new());
+            let (answer, dry) = game.remote_block_reacts(&hit, None);
+            assert!(answer.consumes_action());
+            game.predict_use(&dry, 1);
+            assert!(
+                open(game),
+                "the declared gate opens without a server round trip"
+            );
+            let predicted = game.audio.capture.as_mut().unwrap().pop().unwrap();
+            assert_eq!(predicted.event, use_sound);
+            assert_eq!(predicted.source, mod_api::SoundSource::Blocks.index());
+            assert!(game.audio.capture.as_ref().unwrap().is_empty());
+
+            let [actor, other] = [12, 13].map(|conn| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .update_guest(conn, |guest| {
+                        guest.sender = PlayerSender::new(tx, Arc::default());
+                    })
+                    .unwrap();
+                rx
+            });
+            game.options.dedicated = Some(Vec::new());
+            game.world.set(x, y, z, gate).unwrap();
+            game.world.block_log = Some(Vec::new());
+            assert!(
+                game.guest_use_item_on(12, game.guest_index(12).unwrap(), hit, super::Hand::Main)
+                    .unwrap()
+            );
+            assert!(open(game));
+            game.lan_broadcast_effects();
+            let sounds = |rx: std::sync::mpsc::Receiver<Out>| {
+                rx.try_iter()
+                    .flat_map(|out| match out {
+                        Out::Packet(body) => vec![body],
+                        Out::Packets(bodies) => bodies,
+                        Out::Disconnect(_) => Vec::new(),
+                    })
+                    .filter_map(|body| {
+                        let mut reader = Reader::new(&body);
+                        let id = reader.varint().unwrap();
+                        match Clientbound::decode(id, reader.rest()).unwrap() {
+                            Clientbound::Sound(packet) => packet.sound.1.map(|(id, _)| id),
+                            _ => None,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert!(!sounds(actor).iter().any(|name| name == use_sound));
+            assert_eq!(
+                sounds(other)
+                    .iter()
+                    .filter(|name| *name == use_sound)
+                    .count(),
+                1
+            );
+
+            game.explosion_trigger_blocks(&mut [pos]).unwrap();
+            assert!(!open(game));
+            assert_eq!(game.audio.heard.get(blast_sound), Some(&1));
+            let powered = game
+                .with_props(gate, &[("open", "true"), ("powered", "true")])
+                .unwrap();
+            game.world.set(x, y, z, powered).unwrap();
+            game.explosion_trigger_blocks(&mut [pos]).unwrap();
+            assert_eq!(game.world.block(x, y, z), powered);
+            assert_eq!(game.audio.heard.get(blast_sound), Some(&1));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn block_alias_survival_consumption_and_client_prediction() {
         use crate::game::{Audio, Game, Options, Progress, Settings, World, load_resources};
         use std::{path::PathBuf, sync::Arc};
@@ -14155,9 +14313,9 @@ pub(crate) mod tests {
             "minecraft:lava_cauldron",
             "minecraft:powder_snow_cauldron",
         ] {
-            assert!(super::hand_operated(name), "{name}");
+            assert!(super::named_hand_operated(name), "{name}");
         }
-        assert!(!super::hand_operated("minecraft:water"));
+        assert!(!super::named_hand_operated("minecraft:water"));
     }
 
     /// An NPC plugin lists the NPC, spawns it, and takes the entry off the list:

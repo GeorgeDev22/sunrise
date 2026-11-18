@@ -30,13 +30,6 @@ mod content {
         }
     }
     pub(super) mod registry_keys {
-        pub(in crate::tests) fn block_id(key: super::super::BlockKey) -> Option<&'static str> {
-            use super::super::BlockKey;
-            match key {
-                BlockKey::Test => Some("test:block"),
-                BlockKey::Other => Some("test:other"),
-            }
-        }
         pub(in crate::tests) fn block_key(name: &str) -> Option<super::super::BlockKey> {
             match name {
                 "test:block" => Some(super::super::BlockKey::Test),
@@ -256,6 +249,7 @@ struct BehaviorRegistrar<'a> {
 #[derive(Default)]
 struct Parts {
     blocks: Vec<(BlockKey, Vec<&'static dyn BlockPart>)>,
+    owner_slot: Option<(BlockKey, usize)>,
     block_entities: Vec<&'static dyn BlockEntityPart>,
     items: Vec<&'static dyn ItemPart>,
     menus: Vec<&'static dyn MenuPart>,
@@ -264,6 +258,7 @@ struct Parts {
 }
 static NO_PARTS: Parts = Parts {
     blocks: Vec::new(),
+    owner_slot: None,
     block_entities: Vec::new(),
     items: Vec::new(),
     menus: Vec::new(),
@@ -304,6 +299,16 @@ impl Parts {
         }
         self.block_key(Some(state.block()))
     }
+    fn block_entry(&self, state: BlockState) -> Option<BlockHookParts<'_>> {
+        let parts = self.block_value(state);
+        (!parts.is_empty()).then_some(BlockHookParts {
+            parts,
+            owner_slot: self
+                .owner_slot
+                .filter(|(key, _)| *key == state.block())
+                .map(|(_, slot)| slot),
+        })
+    }
     fn block_key(&self, key: Option<BlockKey>) -> &[&'static dyn BlockPart] {
         key.and_then(|key| self.blocks.iter().find(|(block, _)| *block == key))
             .map_or(&[], |(_, parts)| parts.as_slice())
@@ -333,29 +338,32 @@ impl Parts {
         &self.entities
     }
 }
+struct BlockHookParts<'a> {
+    parts: &'a [&'static dyn BlockPart],
+    owner_slot: Option<usize>,
+}
+impl BlockHookParts<'_> {
+    fn parts(&self) -> &[&'static dyn BlockPart] {
+        self.parts
+    }
+    fn disabled_owner_slot(&self) -> Option<usize> {
+        self.owner_slot.filter(|&slot| {
+            DISABLED_BLOCK_PART.get() == Some(std::ptr::from_ref(self.parts[slot]).cast())
+        })
+    }
+}
 thread_local! {
-    // These fixtures use bare trait references. Give the disabled attachment an owner
-    // without changing the representation for every other fixture's Parts table.
-    static DISABLED_BLOCK_PART: std::cell::Cell<Option<(&'static str, *const ())>> = const { std::cell::Cell::new(None) };
+    // These fixtures use bare trait references, with at most one disabled attachment.
+    static DISABLED_BLOCK_PART: std::cell::Cell<Option<*const ()>> = const { std::cell::Cell::new(None) };
 }
 fn any_mod_disabled() -> bool {
     DISABLED_BLOCK_PART.get().is_some()
-}
-fn disabled_owner_part<P: ?Sized>(parts: &[&P], id: Option<&str>) -> Option<usize> {
-    let (owner, disabled) = DISABLED_BLOCK_PART.get()?;
-    let (namespace, _) = id?.split_once(':')?;
-    if owner != namespace {
-        return None;
-    }
-    parts
-        .iter()
-        .position(|part| std::ptr::from_ref(*part).cast() == disabled)
 }
 fn entered_parts<'a, P: ?Sized>(
     parts: &'a [&'a P],
     _: &'static str,
 ) -> impl Iterator<Item = &'a P> {
-    let disabled = DISABLED_BLOCK_PART.get().map(|(_, part)| part);
+    let disabled = DISABLED_BLOCK_PART.get();
     parts
         .iter()
         .copied()
@@ -388,10 +396,11 @@ fn a_disabled_owner_answers_only_at_its_dispatch_position() {
         Some(InteractionResult::SuccessServer),
         Default::default(),
     ));
-    DISABLED_BLOCK_PART.set(Some(("test", std::ptr::from_ref(owner).cast())));
+    DISABLED_BLOCK_PART.set(Some(std::ptr::from_ref(owner).cast()));
     let interact = |first: &'static dyn BlockPart| {
         install_parts(Parts {
             blocks: vec![(BlockKey::Test, vec![first, owner, after])],
+            owner_slot: Some((BlockKey::Test, 1)),
             ..Parts::default()
         });
         let mut answer = None;
@@ -426,8 +435,9 @@ fn inert_growth_answers_keep_subscribed_crop_and_soil() {
         id: 1,
         calls: Arc::default(),
     });
-    DISABLED_BLOCK_PART.set(Some(("test", std::ptr::from_ref(owner).cast())));
+    DISABLED_BLOCK_PART.set(Some(std::ptr::from_ref(owner).cast()));
     install_parts(Parts {
+        owner_slot: Some((BlockKey::Test, 0)),
         blocks: vec![
             (BlockKey::Test, vec![owner]),
             (BlockKey::Other, vec![non_owner]),
@@ -462,9 +472,10 @@ fn inert_support_signals_that_the_simulation_decides() {
         id: 0,
         calls: Arc::default(),
     });
-    DISABLED_BLOCK_PART.set(Some(("test", std::ptr::from_ref(owner).cast())));
+    DISABLED_BLOCK_PART.set(Some(std::ptr::from_ref(owner).cast()));
     install_parts(Parts {
         blocks: vec![(BlockKey::Test, vec![owner])],
+        owner_slot: Some((BlockKey::Test, 0)),
         ..Parts::default()
     });
     let other = BlockState::new(BlockKey::Other, 0);

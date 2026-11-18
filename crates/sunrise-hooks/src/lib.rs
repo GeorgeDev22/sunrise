@@ -14,11 +14,14 @@
 //!
 //! The platform registries (docs/layers.md, "Platform registries") have the same shape:
 //! [`settings`] for the settings each crate keeps in its own lines, [`pages`] for its settings
-//! pages, [`hud`] for what it draws on the HUD, [`lang`] for the lang files with its text.
+//! pages, [`hud`] for what it draws on the HUD, [`lang`] for the lang files with its text,
+//! [`mod_rows`] for the rows it adds to the Mods screen.
 #![forbid(unsafe_code)]
 
+pub mod containers;
 pub mod hud;
 pub mod lang;
+pub mod mod_rows;
 pub mod pages;
 pub mod perf;
 pub mod players;
@@ -121,6 +124,12 @@ pub trait Hooks: Sync {
 
     /// Opens and shares saved performance captures ([`perf`]); the first hook that offers one is used.
     fn captures(&self) -> Option<&dyn perf::Captures> {
+        None
+    }
+
+    /// What this crate does on a container screen ([`containers`]); the engine dispatches only to
+    /// hooks that offer one, and builds nothing when none does.
+    fn containers(&self) -> Option<&dyn containers::ContainerHooks> {
         None
     }
 
@@ -280,6 +289,8 @@ pub mod engine {
         crate::pages::engine::all();
         crate::hud::engine::all();
         crate::lang::all();
+        crate::mod_rows::engine::all();
+        crate::containers::engine::any();
     }
 
     /// [`Hooks::started`].
@@ -710,6 +721,10 @@ mod tests {
                 "shutdown",
                 "frame 4"
             ]
+        );
+        assert!(
+            !containers::engine::any(),
+            "no registrant offers containers()"
         );
         assert_eq!(register(&Silent), Err(TooLate));
     }

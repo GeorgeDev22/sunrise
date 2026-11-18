@@ -23,6 +23,7 @@ mod tests {
     };
 
     const POS: BlockPos = BlockPos::new(3, 64, 5);
+    const CARPET: &str = "inert_test_extra:carpet";
 
     #[derive(Default)]
     struct ToolProbe {
@@ -167,7 +168,7 @@ mod tests {
         fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
             let block = r.block_key("inert_test:machine");
             r.block_part(block, Machine(self.0.clone()));
-            let carpet = r.block_key("inert_test:carpet");
+            let carpet = r.block_key(CARPET);
             r.block_part(carpet, Survival);
             let sand = r.block_key("inert_test:sand");
             r.block_part(sand, Survival);
@@ -182,7 +183,7 @@ mod tests {
             e.blocks.push(
                 mod_api::Block::new("inert_test:machine", "minecraft:observer").with_item(false),
             );
-            let mut carpet = mod_api::Block::new("inert_test:carpet", "minecraft:white_carpet");
+            let mut carpet = mod_api::Block::new(CARPET, "minecraft:white_carpet");
             carpet.properties.push_reaction = Some(mod_api::PushReaction::PushPull);
             e.blocks.push(carpet);
             e.blocks
@@ -225,24 +226,67 @@ mod tests {
         }
     }
 
+    struct ConflictingCode;
+    #[mod_api::__subscriptions]
+    impl Hooks for ConflictingCode {}
+
     fn with_inert_block(name: &str, test: impl FnOnce(&mut Game<'_>, BlockStateId, &Probe)) {
         let name = format!("game::disabled_block_tests::tests::{name}");
         if fixture::run_fresh_cases(&name, "SUNRISE_INERT_BLOCK_CHILD", &["valid"]) {
             return;
         }
+        use mod_api::__private::native::BuiltMod;
+        use sunrise_mod_package::{mod_list::NATIVE_DIR, runtime::Runtime};
+        const BUILT: &[BuiltMod] = &[
+            BuiltMod {
+                id: "inert_test",
+                version: "1.0.0",
+                side: mod_api::Side::Both,
+            },
+            BuiltMod {
+                id: "namespace_claimant",
+                version: "1.0.0",
+                side: mod_api::Side::Both,
+            },
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        // Both packages declare the same alias. The dependency orders admission; the
+        // later package's compiled code stays installed when its content is refused.
+        for (package, dependencies) in BUILT.iter().zip(["", "[dependencies]\ninert_test='*'"]) {
+            let id = package.id;
+            let path = dir.path().join(NATIVE_DIR).join(id);
+            std::fs::create_dir_all(path.join("src")).unwrap();
+            std::fs::write(path.join("sunrise-mod.toml"), format!(
+                "id='{id}'\nname='{id}'\nversion='1.0.0'\napi='0.2'\nside='both'\ncapabilities=['registries']\nnamespaces=['inert_test_extra']\n{dependencies}\n[native]\ngame='26.3'\nsunrise='{}'\nmixins='{}'\n",
+                "a".repeat(40), "b".repeat(40),
+            )).unwrap();
+            std::fs::write(
+                path.join("Cargo.toml"),
+                format!("[package]\nname='{id}'\nversion='1.0.0'\n"),
+            )
+            .unwrap();
+            std::fs::write(path.join("src/lib.rs"), "").unwrap();
+        }
+        let sources = super::super::mods::ModsState {
+            native: Arc::new(Runtime::load(&dir.path().join("sunrise-client"), BUILT).unwrap()),
+            ..Default::default()
+        };
         let probe = Arc::new(Probe::default());
         let mods: mod_api::Mods = vec![
             mod_api::ModEntry::new("enabled_prefix", Box::new(EnabledPrefix(probe.clone()))),
             mod_api::ModEntry::new("inert_test", Box::new(Owner(probe.clone()))),
+            mod_api::ModEntry::new("namespace_claimant", Box::new(ConflictingCode)),
             mod_api::ModEntry::new("enabled_observer", Box::new(Observer(probe.clone()))),
         ]
         .into();
         mod_platform::testing::with_mods(mods.clone(), || {
+            crate::game::api_values::install_test_platform();
+            crate::game::api_values::install_packages(sources.native.packages(), &[]).unwrap();
             crate::game::api_values::install_parts(&mods).unwrap();
             mod_api::__private::mark_game_thread();
             let base =
                 std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
-            let root = super::super::mods::content_root(&base, &Default::default()).unwrap();
+            let root = super::super::mods::content_root(&base, &sources).unwrap();
             fixture::with_game_at(root.prepared().to_owned(), |game| {
                 game.options.dedicated = Some(Vec::new());
                 game.native_level_opened(Dim::Overworld);
@@ -452,7 +496,7 @@ mod tests {
                 let moving = state("minecraft:moving_piston");
                 let redstone = state("minecraft:redstone_block");
                 let cases = [
-                    ("inert_test:carpet", "minecraft:stone", "minecraft:air"),
+                    (CARPET, "minecraft:stone", "minecraft:air"),
                     ("inert_test:plant", "minecraft:dirt", "minecraft:stone"),
                     ("inert_test:plant", "minecraft:dirt", "inert_test:soil"),
                 ]

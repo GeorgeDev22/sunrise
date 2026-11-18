@@ -471,52 +471,68 @@ pub fn update(change: impl FnOnce(&mut Look));  // the player whose turn it is (
 
 ### Container screens (`sunrise_platform::containers`)
 
-Input and drawing on an open container screen (the inventory, chests, furnaces, crafting tables...), for the
-extras that act on one: Mouse Tweaks and sorting (M5).
+Input and drawing on any open menu screen: the inventory, chests, furnaces, crafting tables, anvils, merchants,
+a mount's inventory, a mod's menu. It is a general seam: its first users are Mouse Tweaks and sorting (M5),
+and nothing in it is shaped for them.
 
 ```rust
 /// The open screen's menu, for the length of one call. The engine implements it.
 pub trait Container {
-    fn menu(&self) -> &str;                     // "inventory", "minecraft:generic_9x3", "minecraft:furnace"...
+    fn menu(&self) -> &str;                     // "inventory", "minecraft:anvil", a mod's, "sunrise:mount_inventory"
     fn slots(&self) -> Vec<Slot>;               // every slot drawn, in the screen's order
-    fn stack(&mut self, slot: SlotId) -> Option<Stack>;
+    fn stack(&self, slot: SlotId) -> Option<Stack>;
     fn carried(&self) -> Option<Stack>;         // the stack on the cursor
+    fn name(&self, slot: SlotId) -> Option<String>;              // the stack's shown name
     fn takes_one(&mut self, slot: SlotId, of: &Stack) -> bool;  // the menu's rules: mayPlace, the slot's limit
     fn landing(&mut self, slot: SlotId) -> Vec<SlotId>;         // where quickMoveStack would put its items
     fn click(&mut self, slot: SlotId, click: Click) -> bool;    // one ordinary click, as vanilla sends it
     fn spread(&self) -> usize;                  // the slots vanilla's quick craft drag covers now
     fn cursor(&self) -> (f32, f32);             // GUI pixels, from the panel's corner
     fn shift(&self) -> bool;
-    fn order(&mut self, slot: SlotId) -> (u32, String);         // the creative tabs' order and the shown name
+    fn panel(&self) -> Panel;                   // imageWidth, imageHeight, title and inventory label tops
 }
 pub struct SlotId(pub u32);                     // opaque, stable while the screen is open
 pub struct Slot { pub id: SlotId, pub role: Role, pub x: f32, pub y: f32 }  // top left, from the panel's corner
-pub enum Role { Hotbar, Inventory, Storage, Input, Result, Equipment, Other }   // a crafting grid is Input
-pub struct Stack { pub item: String, pub count: u32, pub max: u32, pub kind: u64 }  // kind: equal for the same item and components
+pub enum Role { Hotbar, Inventory, Storage, Input, Result, Equipment, Other }   // by the open menu
+pub struct Stack { pub item: String, pub count: u32, pub max: u32, pub kind: u64, pub id: u64 }
+pub enum Button { Left, Right, Middle, Other(u16) }
 pub enum Click { Pick { right: bool }, QuickMove, Put { one: bool } }               // Put: a one-slot QUICK_CRAFT drag
 
-// In `Hooks`, each `false` (or nothing) by default, so vanilla's handling runs:
-fn container_press(&self, c: &mut dyn Container, slot: Option<SlotId>, right: bool) -> bool;
-fn container_drag(&self, c: &mut dyn Container, slot: Option<SlotId>) -> bool;  // the cursor moved, a button held
-fn container_release(&self, c: &mut dyn Container);
-fn container_wheel(&self, c: &mut dyn Container, slot: Option<SlotId>, steps: f32) -> bool;
-fn container_key(&self, c: &mut dyn Container, slot: Option<SlotId>, key: &str) -> bool;  // `key.keyboard.r`, `key.mouse.middle`
-fn container_draw(&self, c: &dyn Container, canvas: &mut dyn hud::Canvas);    // over the panel, from its corner
+// In `Hooks`: `fn containers(&self) -> Option<&dyn ContainerHooks>`; every `ContainerHooks` method
+// does nothing by default, so vanilla's handling runs:
+fn press(&self, c: &mut dyn Container, slot: Option<SlotId>, button: Button) -> bool;    // MouseButtonPressed.Pre
+fn release(&self, c: &mut dyn Container, slot: Option<SlotId>, button: Button) -> bool;  // MouseButtonReleased.Pre
+fn drag(&self, c: &mut dyn Container, slot: Option<SlotId>, button: Button) -> bool;     // MouseDragged.Pre
+fn wheel(&self, c: &mut dyn Container, slot: Option<SlotId>, steps: f32) -> bool;        // MouseScrolled.Pre
+fn key(&self, c: &mut dyn Container, slot: Option<SlotId>, key: &str) -> bool;           // KeyPressed.Pre, `key.keyboard.r`
+fn draw(&self, c: &dyn Container, canvas: &mut dyn hud::Canvas);                         // Render.Foreground
 ```
 
-- `true` means the hook took the input: vanilla's press, drag or wheel doesn't run, and a press or drag taken
-  ends vanilla's quick craft drag, as Mouse Tweaks' right-drag replaces it. Every hook hears `release`. The
-  first hook that returns `true` wins.
+- The hooks run at the screen events' own moments, the ones the mods' `screen_*_pre` and
+  `screen_render_foreground` hooks have: an input right after the mods' pre hook let it through and before
+  anything else reads it (the recipe book, the slots, vanilla's quick craft), the drawing after the slots and
+  under the tooltips and the carried stack.
+- `true` means the hook took the input: nothing else reads it. The first hook that returns `true` wins; every
+  hook hears `release` and draws. A press a hook took makes the button's release the hooks' too, so vanilla
+  never sees half a click; the latch ends at the physical button-up, whoever cancels the release. A drag or
+  a release a hook takes from vanilla's own press ends vanilla's quick craft drag without a click.
+- `drag` is asked only while a button is physically held. `key` is not asked while a text field has the focus
+  (a search box, an anvil's name), nor for a key's repeats. No input is offered while another screen covers
+  the menu (a server pack prompt, a dialog).
 - Each `click` is an ordinary slot click: the menu engine's on the player's own world, a `ContainerClick` on a
   server. So an extra built on it works wherever vanilla's clicks do, and anticheats see vanilla's packets.
-- The engine offers every menu screen's slots; the crate decides which menus it acts in, by `menu()` (Mouse
-  Tweaks stays out of those whose slots cost or trigger something: anvils, enchanting, merchants, beacons,
-  crafters). Creative's tabs are no container screen.
-- The reads that ask the menu's rules take `&mut self`, as the engine's do; drawing gets `&dyn Container`,
-  so it reads the rest only.
-- The engine builds a `Container` only when a hook is registered and a container screen gets input or draws.
+- Every menu screen is offered, with its menu type id; the crate decides which menus it acts in, by `menu()`.
+  Creative's tabs are not offered: they have no menu type. Drawing runs from the shared foreground phase,
+  so every menu screen that draws one (merchants and beacons too) draws the hooks.
+- A slot's role comes from the open menu: a furnace's or station's output, a mod menu's declared results and
+  its crafting result are `Result`. A `SlotId` that isn't the open menu's reads nothing and clicks nothing.
+- A `Stack`'s `kind` is equal for stacks that merge (`StackData`'s `Hash`, which matches its `PartialEq`); its
+  `id` is that exact stack, for `takes_one`.
+- The reads that ask the menu's rules take `&mut self`, as the engine's do; drawing gets `&dyn Container`, so
+  it reads the slots, stacks and names but clicks nothing.
+- The engine builds a `Container` only when a hook is registered and a menu screen gets input or draws.
   Without one there is no cost, and vanilla's handling is unchanged.
-- `order` is the only text: Sorting ranks by it. The rest is ids and numbers, so the API names no engine type
+- The only text is a stack's shown name. The rest is ids and numbers, so the API names no engine type
   (`ItemStack` stays in the engine).
 
 ### Lang files (`sunrise_platform::lang`)
@@ -542,6 +558,23 @@ sunrise_platform::lang::register(LANG)?;
 - `tools/lang_coverage.py` reports each crate's folder beside the engine's. A person's review of a crate's entry
   is kept in `tools/lang_review/<name>/<code>.json` ([translations.md](translations.md)).
 - With nothing registered, a language loads exactly as before.
+
+### Mods screen rows (`sunrise_platform::mod_rows`)
+
+A crate lists something the game ships that is not an installed mod on the Mods screen: a `&'static Row` of
+plain data (id, name, version, authors, licence and its link, homepage, issues, description). `authors` and
+`description` are translation keys; the rest are proper names, versions and addresses, shown as written.
+
+- The screen's entries are Minecraft, every registered row (registration order is their insertion order) and the
+  installed mods; it shows them sorted by name, reversed on request, as `ModListScreen` does. No row replaces
+  another.
+- With nothing registered (the plain `sunrise-game` and `sunrise-client` executables), the screen lists Minecraft
+  and the mods only.
+- A row's text belongs to the crate that registers it, in its own lang folder (`sunrise-official` ships the
+  Sunrise row's credit and description there).
+- This is how a Sunrise-layer crate adds a row: Sunrise crates register through the engine's generic registries
+  (umceko, 2026-11-18), not as built-in mods. The registry moves behind the engine's `extension-points` feature
+  once that lands (#2510). A mod's own row always comes from its metadata.
 
 ## Extras that may leave the game
 

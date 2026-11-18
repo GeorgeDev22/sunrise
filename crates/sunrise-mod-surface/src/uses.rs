@@ -1535,6 +1535,18 @@ impl<'a, 's, 't> Resolver<'a, 's, 't> {
         out
     }
 
+    /// Whether the name a path ends in is a member of a type (`Source::Block(..)`, a variant of
+    /// the mod's own enum or of an API one) and so no struct of that name: the segment before it
+    /// is `Self`, a type the mod defines, or a name the API gives to a record.
+    fn is_member(&self, path: &[&str]) -> bool {
+        path.len() >= 2 && {
+            let owner = path[path.len() - 2];
+            owner == "Self"
+                || self.module.types.contains(owner)
+                || self.index.by_name.contains_key(owner)
+        }
+    }
+
     /// The innermost impl in file `index` whose body holds `byte`: its target, `None` inside
     /// it when the scan cannot read the target, `None` outside any.
     fn impl_at(&self, index: usize, byte: usize) -> Option<Option<&'a Vec<&'t str>>> {
@@ -1727,7 +1739,10 @@ impl<'s, 't> Walk<'_, '_, 's, 't> {
             let own = unqualified && !resolved.aliased && resolver.own_in(index, name);
             let api = resolver.index;
             for &id in &resolved.ids {
-                if !api.struct_like(id) || own {
+                if !api.struct_like(id)
+                    || own
+                    || (!resolved.aliased && resolver.is_member(&build.path))
+                {
                     continue;
                 }
                 let full = match build.how {

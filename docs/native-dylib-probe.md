@@ -90,7 +90,11 @@ from the shared fixture: rustc correctly demanded unavailable rlibs. Adding the
 required game reference and SDK dylib extern fixed the harness; no SDK, profile,
 crate type or dependency architecture was changed.
 
-Windows GNU runs in `.github/workflows/native-dylib-probe.yml`; its result is
-recorded from that job's log, not here. Gameplay,
-launcher readiness, library descriptors, malicious/stale mod refusal before OS
-loading and performance acceptance are outside this probe's scope.
+CI runs the probe on the Linux and Windows GNU client legs of
+`.github/workflows/prebuilt-game-build.yml`, against each leg's own SDK before
+packing. Linux also checks the starter against the API source alone on the host
+and on wasm32. If the SDK for the commit is already published, the workflow skips
+the build and its checks.
+
+Gameplay, launcher readiness, library descriptors, malicious/stale mod refusal
+before OS loading and performance acceptance are outside this probe's scope.

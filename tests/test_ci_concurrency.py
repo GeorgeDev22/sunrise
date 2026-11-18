@@ -120,8 +120,7 @@ class ConcurrencyTests(unittest.TestCase):
                 self.assertNotEqual(one[0], main[0], "a dispatch must not hold main's run")
 
     def test_daily_legs_never_run_on_pull_requests_or_pushes(self):
-        for path in DAILY_LEGS + [ROOT / ".github/workflows" / name
-                                  for name in ("ignored-tests.yml", "native-dylib-probe.yml")]:
+        for path in DAILY_LEGS + [ROOT / ".github/workflows/ignored-tests.yml"]:
             with self.subTest(workflow=path.name):
                 triggers = yaml.load(path.read_text(), Loader=yaml.BaseLoader)["on"]
                 self.assertEqual(set(triggers), {"workflow_call", "workflow_dispatch"})

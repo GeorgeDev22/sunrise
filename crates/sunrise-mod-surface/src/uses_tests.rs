@@ -736,6 +736,55 @@ fn how_a_struct_is_built_is_read_from_literals_and_patterns() {
 }
 
 #[test]
+fn a_variant_of_the_mods_own_enum_is_not_a_literal_of_an_api_struct_of_the_same_name() {
+    let built = |source: &str, id: &str| entry(&scan_on(wider(), source), id).built;
+    let own =
+        "use mod_api::{Pos, Settings};\nenum Shape { Pos(i32, i32), Settings { height: i32 } }\n";
+    // Constructed and matched, the variants are the enum's, though the API's types share their names.
+    assert_eq!(
+        built(
+            &format!(
+                "{own}fn t(s: Shape) {{ let a = Shape::Pos(1, 2); let b = Shape::Settings {{ height: 1 }}; match s {{ Shape::Pos(x, y) => {{}} Shape::Settings {{ height }} => {{}} }} }}"
+            ),
+            "type:Pos"
+        ),
+        Some(Built::None)
+    );
+    assert_eq!(
+        built(
+            &format!(
+                "{own}fn t(s: Shape) {{ let b = Shape::Settings {{ height: 1 }}; match s {{ Shape::Settings {{ height }} => {{}} _ => {{}} }} }}"
+            ),
+            "type:Settings"
+        ),
+        Some(Built::None)
+    );
+    // An API enum's variant likewise is not the struct of its name.
+    assert_eq!(
+        built(
+            "use mod_api::{Pos, TextHover};\nfn t(h: TextHover) { match h { TextHover::Pos(p) => {} _ => {} } }",
+            "type:Pos"
+        ),
+        Some(Built::None)
+    );
+    // The API's own literals are still read, written out, imported, or through a module's path.
+    assert_eq!(
+        built(
+            "use mod_api::Pos;\nenum Shape { Pos(i32, i32) }\nfn t() { let a = Shape::Pos(1, 2); let b = Pos(3, 4); }",
+            "type:Pos"
+        ),
+        Some(Built::Full)
+    );
+    assert_eq!(
+        built(
+            "enum Shape { Settings { height: i32 } }\nfn t() { let a = mod_api::Settings { height: 1 }; }",
+            "type:Settings"
+        ),
+        Some(Built::Full)
+    );
+}
+
+#[test]
 fn a_type_that_gains_an_impl_fits_and_one_that_loses_one_is_named() {
     let uses = scan_on(wider(), "fn f(s: &Settings) {}");
     assert_eq!(entry(&uses, "type:Settings").impls, ["Clone", "Default"]);

@@ -1794,6 +1794,75 @@ fn a_fence_gate_plays_the_open_and_close_sound_of_its_data() {
 }
 
 #[test]
+#[ignore = "daily"]
+fn fence_gate_sites_play_distinct_sounds() {
+    let root = std::env::var_os("SUNRISE_RESOURCES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../.local/sunrise-client")
+                .join(sunrise_core::VANILLA_VERSION)
+        });
+    let registry = data::load_registry(&root).expect("prepared registry");
+    let mut behaviours = Behaviours::load(&registry, &root).expect("prepared behaviours");
+    let state = registry.default_state("minecraft:oak_fence_gate").unwrap();
+    let block = behaviours.table.block(state);
+    behaviours.blocks[block.0 as usize].gate_open =
+        ["gate:use.open", "gate:blast.open", "gate:wire.open"].map(|s| Some(s.into()));
+    behaviours.blocks[block.0 as usize].gate_close =
+        ["gate:use.close", "gate:blast.close", "gate:wire.close"].map(|s| Some(s.into()));
+    let f = Fixture {
+        registry,
+        behaviours,
+    };
+    let mut w = World::new(&f);
+    w.floor(0, 10, "stone");
+    let gate = w.id("oak_fence_gate", &[("facing", "north")]);
+    let sounds = |w: &World| {
+        w.level
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                LevelEvent::Sound { sound, .. } => Some(sound.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let pos = BlockPos::new(0, 1, 0);
+    w.put(pos, gate);
+    w.use_block(pos);
+    assert_eq!(sounds(&w), ["gate:use.open"]);
+    w.level.events.clear();
+    w.use_block(pos);
+    assert_eq!(sounds(&w), ["gate:use.close"]);
+    w.level.events.clear();
+    let powered = BlockPos::new(1, 1, 0);
+    w.set(powered, w.id("redstone_block", &[]));
+    assert_eq!(sounds(&w), ["gate:wire.open"]);
+    w.level.events.clear();
+    // Powered gates ignore explosions, with no sound or random pitch draw.
+    assert!(
+        !w.f.behaviours
+            .fence_gate_exploded(&mut w.level, &mut w.ticks, pos)
+    );
+    assert!(sounds(&w).is_empty());
+    w.set(powered, w.b().air());
+    assert_eq!(sounds(&w), ["gate:wire.close"]);
+    w.level.events.clear();
+    assert!(
+        w.f.behaviours
+            .fence_gate_exploded(&mut w.level, &mut w.ticks, pos)
+    );
+    assert_eq!(sounds(&w), ["gate:blast.open"]);
+    w.level.events.clear();
+    assert!(
+        w.f.behaviours
+            .fence_gate_exploded(&mut w.level, &mut w.ticks, pos)
+    );
+    assert_eq!(sounds(&w), ["gate:blast.close"]);
+}
+
+#[test]
 fn crops_grow_and_leaves_decay() {
     let mut w = world!();
     let farmland = w.id("farmland", &[("moisture", "7")]);

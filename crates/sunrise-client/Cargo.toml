@@ -77,7 +77,7 @@ socket2 = { version = "0.6", default-features = false, features = ["all"] }
 sha1 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
-# server.toml's [combat], which the dedicated server reads itself.
+# server.toml's sections the dedicated server reads itself ([entities], [chat_filter]...).
 toml = "1.1"
 # hlsl-out: the gfx.rs tests translate every shader as wgpu's DirectX 12 backend does. A normal feature,
 # not a dev-dependency's, so builds, tests and examples share one build of naga, wgpu and this crate.
@@ -172,6 +172,7 @@ path = "tests/it/main.rs"
 workspace = true
 
 [dev-dependencies]
+sunrise-hooks = { path = "../sunrise-hooks", features = ["test-support"] }
 sunrise-client-core = { path = "../sunrise-client-core", features = ["test-language-publication"] }
 sunrise-client-lib = { path = "../sunrise-client-lib", default-features = false, features = ["test-payload-probe", "test-publication-scope", "test-residency-observer"] }
 sunrise-mod-wasm = { path = "../sunrise-mod-wasm", features = ["runtime-fixture", "listener-fixture", "test-copy-probe"] }

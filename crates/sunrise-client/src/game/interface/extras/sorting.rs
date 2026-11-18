@@ -146,7 +146,7 @@ impl Game<'_> {
             inv_sort::plan(&views, &rank, &max)
         };
         for i in clicks {
-            self.tweak_click(slots[i], 0, Input::Pickup);
+            self.slot_click(slots[i], 0, Input::Pickup);
         }
     }
 }

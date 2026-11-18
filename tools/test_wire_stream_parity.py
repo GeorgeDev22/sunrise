@@ -25,8 +25,7 @@ to run).
 
 The second form plays the same scenarios with two Sunrise clients, the second set to the Legacy combat feel with
 every combat extra on (sunrise-extras.txt: `LEGACY_EXTRAS`), and compares their streams the same way: the feel
-changes what the player sees and hears, never what the client sends, and the 1.8 rules ("in worlds you host")
-never reach a server that isn't the player's own.
+changes what the player sees and hears, never what the client sends.
 
 Switches, in the environment: WIRE_STREAM_GRIM=DIR (Paper with Grim; WIRE_STREAM_VIA=VERSION an older Paper with
 ViaVersion), WIRE_STREAM_LATENCY=MS[~J] (a slow or changing connection), WIRE_STREAM_SERVER_TPS=N,
@@ -93,8 +92,8 @@ PRELUDE = 10
 # Client ticks between a reset's last teleport and the scenario: the player lands and stands still.
 SETTLE = 40
 # The Legacy client's sunrise-extras.txt (crates/sunrise-client-render/src/pvp.rs): the 1.8.9 feel, its
-# indicator and sounds, and the 1.8 rules, which only a world the player hosts may use.
-LEGACY_EXTRAS = 'combatFeel:legacy\ncombatIndicator:true\ncombatSounds:true\ncombatRules:true\n'
+# indicator and sounds.
+LEGACY_EXTRAS = 'combatFeel:legacy\ncombatIndicator:true\ncombatSounds:true\n'
 # The clients --clients may name: the first is the reference, the second must send what it sends.
 CLIENTS = {'vanilla': 'vanilla', 'sunrise': 'Sunrise', 'sunrise-legacy': 'Sunrise Legacy'}
 

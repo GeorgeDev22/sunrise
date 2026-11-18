@@ -182,9 +182,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     self.set_block(pos, next, 10);
                     let opens = table.bool(next, p.open);
                     let sound = if opens {
-                        data.gate_open.clone()
+                        data.gate_open[super::data::GateSoundSite::Use as usize].clone()
                     } else {
-                        data.gate_close.clone()
+                        data.gate_close[super::data::GateSoundSite::Use as usize].clone()
                     };
                     let pitch = self.random().next_float() * 0.1 + 0.9;
                     if let Some(sound) = sound {
@@ -828,9 +828,9 @@ impl Behaviours {
         }
         let open = self.table.bool(state, self.props.open);
         let sound = if open {
-            data.gate_close.clone()
+            data.gate_close[super::data::GateSoundSite::Explosion as usize].clone()
         } else {
-            data.gate_open.clone()
+            data.gate_open[super::data::GateSoundSite::Explosion as usize].clone()
         };
         let mut sim = self.sim(level, ticks);
         sim.set_block_and_update(pos, self.table.set_bool(state, self.props.open, !open));

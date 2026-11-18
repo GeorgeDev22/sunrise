@@ -19,7 +19,7 @@ use sunrise_core::{
     position::BlockPos,
     random::RandomSource,
 };
-use sunrise_world::level::PlayerContext;
+use sunrise_world::level::{PlayerContext, classes::Class};
 
 /// `WindCharge.RADIUS` and the knockback multiplier of its damage calculator.
 const PLAYER_RADIUS: f32 = 1.2;
@@ -176,9 +176,8 @@ pub(super) fn above_the_top(shape: LevelShape, y: f64) -> bool {
 /// Whether a block reacts to a wind charge's burst by being used.
 fn triggers(name: &str) -> bool {
     let n = name.trim_start_matches("minecraft:");
-    // Doors and trapdoors open unless iron; gates, buttons, levers and bells react.
+    // Doors and trapdoors open unless iron; buttons, levers and bells react.
     (n.ends_with("_door") || n.ends_with("_trapdoor")) && !n.starts_with("iron_")
-        || n.ends_with("_fence_gate")
         || n.ends_with("_button")
         || n == "lever"
         || n == "bell"
@@ -830,6 +829,16 @@ impl Game<'_> {
     /// buttons, levers and bells react as if used; candles go out.
     fn wind_trigger_block(&mut self, pos: [i32; 3]) -> Result<()> {
         let state = self.world.block(pos[0], pos[1], pos[2]);
+        // FenceGateBlock.onExplosionHit tests power and toggles the gate
+        // without turning it towards anyone, as a click would.
+        if self.res.behaviours().data(state).is(Class::FenceGate) {
+            if self.with_level(|b, level, ticks| {
+                b.fence_gate_exploded(level, ticks, BlockPos::new(pos[0], pos[1], pos[2]))
+            }) {
+                self.process_level_events()?;
+            }
+            return Ok(());
+        }
         let name = self.res.facts().get(state).name.clone();
         let prop = |game: &Self, key: &str| {
             game.pack
@@ -867,15 +876,6 @@ impl Game<'_> {
             return Ok(());
         }
         if prop(self, "powered").as_deref() == Some("true") && &*name != "minecraft:lever" {
-            return Ok(());
-        }
-        // FenceGateBlock.onExplosionHit toggles the gate without turning it
-        // towards anyone, as a click would.
-        if name.ends_with("_fence_gate") {
-            self.with_level(|b, level, ticks| {
-                b.fence_gate_exploded(level, ticks, BlockPos::new(pos[0], pos[1], pos[2]))
-            });
-            self.process_level_events()?;
             return Ok(());
         }
         let at = Vec3::new(

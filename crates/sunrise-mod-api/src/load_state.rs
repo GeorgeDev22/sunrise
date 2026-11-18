@@ -408,6 +408,66 @@ mod tests {
     }
 
     #[test]
+    fn admitted_owners_protect_primary_ids_in_either_install_order() {
+        crate::__private::initialize().unwrap();
+        use mod_vocab::__private::{
+            content_owner_disabled, install_content_owners, set_mod_enabled,
+        };
+
+        struct Quiet;
+        #[crate::__subscriptions]
+        impl crate::Hooks for Quiet {}
+
+        let packages = || {
+            [
+                ("owner", vec!["owner", "shared"]),
+                ("claimant", vec!["claimant", "shared", "owner"]),
+            ]
+            .into_iter()
+            .map(|(id, namespaces)| {
+                PackageInfo::new(
+                    id.into(),
+                    "1".into(),
+                    PackageKind::Code,
+                    crate::Side::Both,
+                    namespaces.into_iter().map(str::to_owned).collect(),
+                    vec![],
+                )
+            })
+            .collect()
+        };
+        let dispatch = |f: &dyn Fn()| {
+            crate::testing::with_dispatch(
+                vec![
+                    crate::ModEntry::new("owner", Box::new(Quiet)),
+                    crate::ModEntry::new("claimant", Box::new(Quiet)),
+                ]
+                .into(),
+                f,
+            );
+        };
+        let check = || {
+            assert_eq!(current_packages().len(), 2);
+            assert!(set_mod_enabled("owner", false));
+            assert!(content_owner_disabled("owner:machine"));
+            assert!(!content_owner_disabled("shared:machine")); // raw metadata is not admission
+
+            install_content_owners([
+                ("owner", "claimant"),
+                ("shared", "owner"),
+                ("shared", "claimant"),
+                ("assets_only", "content_only"),
+                ("assets_only", "owner"),
+            ]);
+            assert!(content_owner_disabled("owner:machine"));
+            assert!(content_owner_disabled("shared:machine"));
+            assert!(!content_owner_disabled("assets_only:machine"));
+        };
+        with_test_package_inventory(packages(), || dispatch(&check));
+        dispatch(&|| with_test_package_inventory(packages(), check));
+    }
+
+    #[test]
     fn inventory_keeps_first_content_package_after_code_mods() {
         crate::__private::initialize().unwrap();
         let native = [PackageInfo::new(

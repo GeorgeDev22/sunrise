@@ -16,8 +16,9 @@ use std::{
     sync::mpsc::Sender,
     time::{Duration, Instant},
 };
-use sunrise_client::{Result, keybinds};
+use sunrise_client::{Result, keybinds, window::PointerSample};
 use winit::{
+    dpi::{LogicalPosition, PhysicalPosition},
     event::{ElementState, MouseScrollDelta, WindowEvent},
     keyboard::PhysicalKey,
 };
@@ -98,11 +99,12 @@ pub(super) enum TraceKind {
         /// The window gave lines (a notched wheel) rather than pixels.
         lines: bool,
     },
-    /// The pointer's screen position, kept while a screen is open: GUI clicks
-    /// are replayed at it.
+    /// GUI clicks replay at this sample. Older traces carry only physical x/y.
     Cursor {
         x: f64,
         y: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<CursorSpace>,
     },
     /// Relative mouse motion, which turns the view.
     Motion {
@@ -119,7 +121,50 @@ pub(super) enum TraceKind {
     },
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub(super) enum CursorSpace {
+    Physical { backing_scale: f64 },
+    Wayland,
+}
+
+impl CursorSpace {
+    pub(super) fn sample(self, x: f64, y: f64) -> Option<PointerSample> {
+        match self {
+            Self::Physical { backing_scale }
+                if backing_scale.is_finite() && backing_scale > 0.0 =>
+            {
+                Some(PointerSample::Physical {
+                    position: PhysicalPosition::new(x, y),
+                    backing_scale,
+                })
+            }
+            Self::Physical { .. } => None,
+            Self::Wayland => Some(PointerSample::Wayland(LogicalPosition::new(x, y))),
+        }
+    }
+}
+
 impl TraceKind {
+    fn cursor(sample: PointerSample) -> Self {
+        let (x, y, space) = match sample {
+            PointerSample::Physical {
+                position,
+                backing_scale,
+            } => (
+                position.x,
+                position.y,
+                CursorSpace::Physical { backing_scale },
+            ),
+            PointerSample::Wayland(position) => (position.x, position.y, CursorSpace::Wayland),
+        };
+        Self::Cursor {
+            x,
+            y,
+            space: Some(space),
+        }
+    }
+
     pub(super) fn name(&self) -> &'static str {
         match self {
             TraceKind::Key { .. } => "key",
@@ -435,7 +480,12 @@ impl Game<'_> {
 
     /// Keep the window events that are input. Agent-made window events are left
     /// out: the control-socket line that caused them is recorded instead.
-    pub(super) fn trace_window_event(&mut self, origin: InputOrigin, event: &WindowEvent) {
+    pub(super) fn trace_window_event(
+        &mut self,
+        origin: InputOrigin,
+        event: &WindowEvent,
+        cursor_sample: Option<PointerSample>,
+    ) {
         if origin == InputOrigin::Agent || !self.tracing_input() {
             return;
         }
@@ -489,14 +539,10 @@ impl Game<'_> {
             }
             // GUI clicks land where the pointer is; in the world the pointer is
             // grabbed and turns the view through `device_event` instead.
-            WindowEvent::CursorMoved { position, .. } if self.screen != Screen::Playing => {
-                self.note_input(
-                    origin,
-                    TraceKind::Cursor {
-                        x: position.x,
-                        y: position.y,
-                    },
-                );
+            WindowEvent::CursorMoved { .. } if self.screen != Screen::Playing => {
+                if let Some(sample) = cursor_sample {
+                    self.note_input(origin, TraceKind::cursor(sample));
+                }
             }
             _ => {}
         }
@@ -512,6 +558,28 @@ mod tests {
             key: name.to_owned(),
             action: "down".to_owned(),
         }
+    }
+
+    #[test]
+    fn a_recorded_wayland_sample_replays_on_the_original_pixel_edge() {
+        use sunrise_client::window::{GuiSize, PointerProjection, PointerSpace};
+
+        let original = PointerSample::Wayland(LogicalPosition::new(30.0, 30.0));
+        let line = serde_json::to_string(&TraceKind::cursor(original)).unwrap();
+        let TraceKind::Cursor {
+            x,
+            y,
+            space: Some(space),
+        } = serde_json::from_str(&line).unwrap()
+        else {
+            panic!("the recording lost its cursor coordinate kind");
+        };
+        let projection = PointerProjection {
+            gui: GuiSize::new([546, 546], 1, false),
+            window: PointerSpace::new([546, 546], 140.0 / 120.0),
+        };
+        let sample = space.sample(x, y).unwrap();
+        assert_eq!(projection.project_pointer(sample).pixel(), (35.0, 35.0));
     }
 
     #[test]

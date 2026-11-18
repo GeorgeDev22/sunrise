@@ -95,17 +95,17 @@ impl Entry {
             ..Self::default()
         }
     }
-    fn sunrise() -> Self {
+    fn from_row(row: &sunrise_hooks::mod_rows::Row) -> Self {
         Self {
-            id: "sunrise".into(),
-            name: "Sunrise".into(),
-            version: sunrise_core::release::VERSION.into(),
-            authors: "Ludovic Marie and the Horizon contributors".into(),
-            license: "MIT".into(),
-            license_url: Some("https://github.com/sunrise-org/sunrise/blob/main/LICENSE".into()),
-            homepage: Some("https://playsunrise.net".into()),
-            issues: Some("https://github.com/sunrise-org/sunrise/issues".into()),
-            description: crate::lang::get("sunrise.mods.screen.sunrise.description"),
+            id: row.id.into(),
+            name: row.name.into(),
+            version: row.version.into(),
+            authors: crate::lang::get(row.authors),
+            license: row.license.into(),
+            license_url: row.license_url.map(Into::into),
+            homepage: row.homepage.map(Into::into),
+            issues: row.issues.map(Into::into),
+            description: crate::lang::get(row.description),
             ..Self::default()
         }
     }
@@ -259,10 +259,22 @@ pub struct ModsScreen {
 }
 
 impl ModsScreen {
-    /// `ModListScreen.init`: Minecraft, Sunrise, then the installed mods.
+    /// `ModListScreen.init`: Minecraft, the registered rows, then the installed mods.
     pub fn new(width: i32, height: i32, in_world: bool, mods: &ModList) -> Self {
+        let rows = sunrise_hooks::mod_rows::engine::all();
+        Self::with_rows(width, height, in_world, mods, rows)
+    }
+
+    fn with_rows(
+        width: i32,
+        height: i32,
+        in_world: bool,
+        mods: &ModList,
+        rows: &[&sunrise_hooks::mod_rows::Row],
+    ) -> Self {
         let mut icons = HashMap::new();
-        let mut entries = vec![Entry::minecraft(), Entry::sunrise()];
+        let mut entries = vec![Entry::minecraft()];
+        entries.extend(rows.iter().map(|row| Entry::from_row(row)));
         for (index, installed) in mods.installed.iter().enumerate() {
             let info = mods.info.get(&installed.id);
             let key = format!("mod/{index}/icon");
@@ -1217,12 +1229,12 @@ mod tests {
         let m = Measure(&atlas.font);
         let mut screen =
             ModsScreen::new(427, 240, false, &mods(&[installed("zoom", "Zoom", None)]));
-        assert_eq!(names(&screen), ["Minecraft", "Sunrise", "Zoom"]);
+        assert_eq!(names(&screen), ["Minecraft", "Zoom"]);
         // The sort button reverses the order.
         let (action, sound) =
             screen.click(&m, centre(screen.geo().sort).0, centre(screen.geo().sort).1);
         assert_eq!((action, sound), (Action::None, true));
-        assert_eq!(names(&screen), ["Zoom", "Sunrise", "Minecraft"]);
+        assert_eq!(names(&screen), ["Zoom", "Minecraft"]);
         // The search keeps the names that contain it, in any case.
         let (x, y) = centre(screen.geo().search);
         screen.click(&m, x, y);
@@ -1239,7 +1251,7 @@ mod tests {
             screen.erase(&m, 1);
         }
         // Everything is listed again and the selection stays.
-        assert_eq!(names(&screen).len(), 3);
+        assert_eq!(names(&screen).len(), 2);
         assert_eq!(screen.current().map(|e| e.id.as_str()), Some("zoom"));
         // A search that drops the selected mod leaves nothing selected.
         screen.type_text(&m, "x");
@@ -1357,6 +1369,46 @@ mod tests {
     }
 
     #[test]
+    fn every_registered_row_follows_minecraft_with_its_text_translated() {
+        let row = |id, name| sunrise_hooks::mod_rows::Row {
+            id,
+            name,
+            version: "1.2.3",
+            authors: "test.authors",
+            license: "PolyForm Shield 1.0.0",
+            license_url: Some("https://example.org/LICENSE"),
+            homepage: Some("https://example.org"),
+            issues: None,
+            description: "test.description",
+        };
+        let (first, second) = (row("first", "Alpha"), row("second", "Beta"));
+        let language = crate::lang::Language::of(
+            "en_us",
+            [
+                ("test.authors".to_owned(), "The Testers".to_owned()),
+                ("test.description".to_owned(), "A test row.".to_owned()),
+            ],
+        );
+        let (screen, _) = crate::lang::scoped(language, || {
+            ModsScreen::with_rows(427, 240, false, &ModList::default(), &[&first, &second])
+        });
+        let ids: Vec<_> = screen.entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["minecraft", "first", "second"]);
+        // The list itself is sorted by name, as ModListScreen's is.
+        assert_eq!(names(&screen), ["Alpha", "Beta", "Minecraft"]);
+        let entry = &screen.entries[1];
+        assert_eq!(
+            (entry.authors.as_str(), entry.description.as_str()),
+            ("The Testers", "A test row.")
+        );
+        assert_eq!(
+            (entry.version.as_str(), entry.license.as_str()),
+            ("1.2.3", "PolyForm Shield 1.0.0")
+        );
+        assert_eq!(entry.homepage.as_deref(), Some("https://example.org"));
+    }
+
+    #[test]
     fn the_arrow_keys_walk_the_list_and_scroll_it() {
         let list: Vec<_> = (0..20)
             .map(|i| installed(&format!("m{i:02}"), &format!("Mod {i:02}"), None))
@@ -1367,10 +1419,10 @@ mod tests {
         for _ in 0..21 {
             screen.step(1);
         }
-        assert_eq!(screen.current().map(|e| e.name.as_str()), Some("Sunrise"));
+        assert_eq!(screen.current().map(|e| e.name.as_str()), Some("Mod 19"));
         assert!(screen.list.amount > 0.0);
         screen.step(1);
-        assert_eq!(screen.current().map(|e| e.name.as_str()), Some("Sunrise"));
+        assert_eq!(screen.current().map(|e| e.name.as_str()), Some("Mod 19"));
         screen.step(-30);
         assert_eq!(screen.current().map(|e| e.name.as_str()), Some("Minecraft"));
         assert_eq!(screen.list.amount, 0.0);

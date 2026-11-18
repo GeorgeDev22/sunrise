@@ -7,6 +7,7 @@ use sunrise_client::{
     clipboard::{self, AppendSelection, SystemClipboard},
     options_ui::{Event, OptionsUi, Page},
     widgets::{Kind, Target},
+    window::{GuiSize, PointerProjection, PointerSample, PointerSpace},
 };
 use winit::{event::KeyEvent, keyboard::ModifiersState};
 
@@ -19,7 +20,8 @@ pub(super) struct StartupMenu {
     win: Option<(sunrise_client::win_screen::WinScreen, Instant)>,
     root: PathBuf,
     cursor: (f32, f32),
-    pointer: (f64, f64),
+    pointer: PointerSample,
+    window_pointer_space: std::cell::OnceCell<PointerSpace>,
     modifiers: ModifiersState,
     physical_keys: HashSet<KeyCode>,
     dragging: bool,
@@ -151,6 +153,9 @@ impl StartupMenu {
         game.perf = std::mem::take(&mut self.perf);
         game.mod_jobs = std::mem::take(&mut self.mod_jobs);
         game.cursor = self.cursor;
+        if self.key_focus.is_none() {
+            game.window_cursor = Some(self.pointer);
+        }
         game.modifiers = self.modifiers;
         game.physical_keys = std::mem::take(&mut self.physical_keys);
         game.clipboard = std::mem::take(&mut self.clipboard);
@@ -523,12 +528,31 @@ impl Loading {
         self.update_menu_cursor();
     }
 
-    fn update_menu_cursor(&mut self) {
-        let batch = HudBatch::new(self.menu_size(), self.settings.gui_scale_inputs());
-        self.menu.cursor = (
-            self.menu.pointer.0 as f32 / batch.scale,
-            self.menu.pointer.1 as f32 / batch.scale,
+    fn menu_pointer_projection(&self) -> PointerProjection {
+        let inputs = self.settings.gui_scale_inputs();
+        let size = self.menu_size();
+        let window = self.window.as_deref().map_or_else(
+            || PointerSpace::new(size, 1.0),
+            |window| {
+                *self
+                    .menu
+                    .window_pointer_space
+                    .get_or_init(|| PointerSpace::from_window(window))
+            },
         );
+        PointerProjection {
+            gui: GuiSize::new(size, inputs.requested, inputs.unicode),
+            window,
+        }
+    }
+
+    fn projected_menu_pointer(&self) -> sunrise_client::window::GuiPointer {
+        self.menu_pointer_projection()
+            .project_pointer(self.menu.pointer)
+    }
+
+    fn update_menu_cursor(&mut self) {
+        self.menu.cursor = self.projected_menu_pointer().subpixel();
     }
 
     fn menu_size(&self) -> [u32; 2] {
@@ -1137,10 +1161,15 @@ impl Loading {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
+                self.menu.window_pointer_space.take();
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
                 }
                 self.apply_menu_settings();
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.menu.window_pointer_space.take();
+                self.update_menu_cursor();
             }
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::ModifiersChanged(modifiers) => self.menu.modifiers = modifiers.state(),
@@ -1194,8 +1223,9 @@ impl Loading {
             WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
                 if self.menu.win.is_some() => {}
             WindowEvent::CursorMoved { position, .. } => {
-                self.menu.pointer = (position.x, position.y);
-                self.update_menu_cursor();
+                let projection = self.menu_pointer_projection();
+                self.menu.pointer = projection.window.os_sample(position);
+                self.menu.cursor = projection.project_pointer(self.menu.pointer).subpixel();
                 if self.menu.options_open && self.menu.dragging {
                     self.menu_options_click(true, false);
                 } else if let Some(title) = &mut self.menu.title {
@@ -1347,6 +1377,11 @@ impl Loading {
             sunrise_client::ui_theme::draw_boot(&self.boot, batch, &logs);
             return;
         };
+        let cursor = if self.menu.key_focus.is_some() {
+            self.menu.cursor
+        } else {
+            self.projected_menu_pointer().pixel()
+        };
         // `Gui.setScreen` clears the focus of the screen it leaves
         // (`Screen.clearFocus`): the title behind the options, and the one
         // that comes back, start with no button highlighted.
@@ -1390,10 +1425,8 @@ impl Loading {
                 .draw_background(&self.settings, output, batch, &gui.atlas);
             self.menu
                 .options
-                .draw_contents(&self.settings, batch, &gui.atlas, self.menu.cursor);
-            self.menu
-                .options
-                .draw_overlays(batch, &gui.atlas, self.menu.cursor);
+                .draw_contents(&self.settings, batch, &gui.atlas, cursor);
+            self.menu.options.draw_overlays(batch, &gui.atlas, cursor);
         } else if let Some(title) = &mut self.menu.title {
             title.poll_backup();
             if std::mem::take(&mut title.onboarding_finished) {
@@ -1415,7 +1448,7 @@ impl Loading {
                 &gui.atlas,
                 items,
                 batch,
-                self.menu.cursor,
+                cursor,
                 self.settings.file.bool("hideSplashTexts"),
                 self.settings.file.bool("hideServerAddress"),
                 &mut |_, _| {},
@@ -1630,7 +1663,10 @@ mod tests {
             assert_eq!(view(&second), (4.0, 240.0, 180.0));
         });
         first.settings.force_unicode = true;
-        first.menu.pointer = (400.0, 200.0);
+        first.menu.pointer = first
+            .menu_pointer_projection()
+            .window
+            .physical_sample(winit::dpi::PhysicalPosition::new(400.0, 200.0));
         first.apply_menu_settings();
         assert_eq!(view(&first), (4.0, 240.0, 180.0));
         assert_eq!(first.menu.cursor, (100.0, 50.0));
@@ -1726,6 +1762,7 @@ mod tests {
             game.handle_window_event_inner(
                 &Loop,
                 WindowEvent::DroppedFile(source.join("Game pack")),
+                None,
             );
             assert!(game.ui.options.pack_screen.as_ref().unwrap().confirming());
             assert!(!packs::packs_dir().join("Game pack").exists());
