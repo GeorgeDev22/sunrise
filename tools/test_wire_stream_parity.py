@@ -1351,12 +1351,18 @@ def grim_server(directory, jars):
     """The command for Paper and Grim in `directory`. Paperclip patches the Mojang server jar it finds in its cache,
     so it is given the prepared copy (the same jar its download-context names) and downloads nothing."""
     servers = Path(os.environ['WIRE_STREAM_GRIM'])
-    paper = next(servers.glob(f'paper-{lab.VERSION}-*.jar'))
+    # WIRE_STREAM_VIA=VERSION (items 155, 164): an older Paper with ViaVersion, which the 26.3 clients join through.
+    via = os.environ.get('WIRE_STREAM_VIA')
+    paper = next(servers.glob(f'paper-{via or lab.VERSION}-*.jar'))
     (directory / 'cache').mkdir()
-    # The bundled server.jar the user imported (jars['server'] is the unbundled game jar inside it).
-    shutil.copy(jars['server'].with_name('server.jar'), directory / 'cache' / f'mojang_{lab.VERSION}.jar')
+    if not via:
+        # The bundled server.jar the user imported (jars['server'] is the unbundled game jar inside it); an older
+        # Paper's paperclip fetches its own.
+        shutil.copy(jars['server'].with_name('server.jar'), directory / 'cache' / f'mojang_{lab.VERSION}.jar')
     (directory / 'plugins').mkdir()
     shutil.copy(next(servers.glob('grimac-bukkit-*.jar')), directory / 'plugins')
+    if via:
+        shutil.copy(next(servers.glob('ViaVersion-*.jar')), directory / 'plugins')
     shutil.copy(paper, directory / 'paper.jar')
     return ['java', '-Xmx1536m', '-jar', 'paper.jar', 'nogui']
 
