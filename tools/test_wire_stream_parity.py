@@ -1330,6 +1330,53 @@ SCENARIOS = {
 }
 
 
+# WIRE_STREAM_RANDOM=SEED,COUNT (item 91): COUNT generated scenarios, random_SEED_N, in an arena with steps, a pillar,
+# a gap, water and a target, each 120 ticks of random walking, sprinting, jumping, sneaking, turning, clicking and
+# hotbar changes. The same seed gives the same scenarios, so a difference found can be run again.
+def random_scenarios(seed, count):
+    import random
+    rng = random.Random(seed)
+    arena = [f'fill -3 {FLOOR + 1} 4 -1 {FLOOR + 1} 6 minecraft:stone', f'fill 2 {FLOOR + 1} 3 2 {FLOOR + 3} 3 minecraft:oak_planks',
+             f'fill -2 {FLOOR} 9 2 {FLOOR} 10 minecraft:air', f'fill 3 {FLOOR} 7 5 {FLOOR} 9 minecraft:water',
+             f'setblock -2 {FLOOR + 2} 5 minecraft:oak_slab', TARGET.format(x=0.5, y=FLOOR + 1, z=8.5), SWORD,
+             f'item replace entity {PLAYER} hotbar.1 with minecraft:oak_planks 64']
+    out = {}
+    for n in range(count):
+        held, steps = set(), {}
+        for tick in range(0, 110, 2):
+            if rng.random() < 0.45:
+                continue
+            kind = rng.choice(['move', 'move', 'jump', 'sprint', 'sneak', 'look', 'look', 'attack', 'use', 'slot'])
+            line = []
+            if kind == 'move':
+                key = rng.choice('wasd')
+                line.append(f'key {key} {"up" if key in held else "down"}')
+                held ^= {key}
+            elif kind == 'jump':
+                line.append('key space tap')
+            elif kind in ('sprint', 'sneak'):
+                key = 'ctrl' if kind == 'sprint' else 'shift'
+                line.append(f'key {key} {"up" if key in held else "down"}')
+                held ^= {key}
+            elif kind == 'look':
+                line.append(f'look {rng.randrange(-60, 61)} {rng.randrange(-30, 61)}')
+            elif kind == 'attack':
+                line.append('mouse left click')
+            elif kind == 'use':
+                line.append('mouse right click')
+            else:
+                line.append(f'key {rng.choice("12")} tap')
+            steps.setdefault(tick, []).extend(line)
+        steps.setdefault(112, []).extend(f'key {k} up' for k in sorted(held))
+        out[f'random_{seed}_{n}'] = dict(setup=arena, ticks=120, steps=steps)
+    return out
+
+
+if os.environ.get('WIRE_STREAM_RANDOM'):
+    _seed, _count = os.environ['WIRE_STREAM_RANDOM'].split(',')
+    SCENARIOS.update(random_scenarios(int(_seed), int(_count)))
+
+
 def sunrise_lines(lines):
     """A scenario's lines for Sunrise's tick script, which takes them as the vanilla driver does: click-slot names
     the menu's own slot (game/world/tick_script.rs)."""
