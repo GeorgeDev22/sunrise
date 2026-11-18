@@ -3552,12 +3552,6 @@ impl Game<'_> {
             C::ForgetLevelChunk(p) => {
                 self.forget_remote_columns(&mut [(p.pos[0], p.pos[1])].into_iter().collect(), true);
             }
-            C::ChunkBatchFinished(_) => {
-                // ChunkBatchSizeCalculator's ceiling; meshing runs on workers.
-                self.send(S::ChunkBatchReceived(play::ChunkBatchReceived {
-                    chunks_per_tick: 64.0,
-                }));
-            }
             C::BlockUpdate(p) => self.server_block(p.pos, p.state),
             C::AddTransientBlock(p) => self.add_transient_block(p.pos, p.state),
             // ClientPacketListener.handleBlockDestruction: another player's crack.
