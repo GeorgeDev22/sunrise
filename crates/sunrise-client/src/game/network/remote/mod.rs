@@ -399,13 +399,15 @@ impl CartLerp {
 }
 
 /// `SteppedInterpolationHandler.doInterpolate`'s `setPos` and `setRot` on a
-/// mob: the yaw turned the short way and kept within a turn (`yRot % 360.0F`),
-/// as a mount taken over next reports it; its draw lerps by the shortest angle,
-/// so the wrap does not spin it. Its pitch clamped.
+/// mob, through the entity's own `PosRot::set_rot` (the one
+/// test_stepped_interpolation_parity.py checks): the yaw within a turn, as a
+/// mount taken over next reports it; its draw lerps by the shortest angle, so
+/// the wrap does not spin it.
 fn place_interpolated(m: &mut Mob, at: PosRot) {
     m.position = Vec3::new(at.position[0], at.position[1], at.position[2]);
-    m.yaw = (m.yaw + wrap_degrees(at.yaw - m.yaw)) % 360.0;
-    m.head_pitch = (at.pitch % 360.0).clamp(-90.0, 90.0);
+    let mut placed = at;
+    placed.set_rot(at.yaw, at.pitch);
+    (m.yaw, m.head_pitch) = (placed.yaw, placed.pitch);
 }
 
 /// The packet a living entity's move came in.
