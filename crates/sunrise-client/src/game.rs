@@ -644,6 +644,9 @@ struct FallingBlock {
     fall_distance: f64,
     /// `Entity.onGround`: whether its last move was stopped going down.
     on_ground: bool,
+    /// `Entity.remainingFireTicks` (`Fire`): lava sets it, and it never counts
+    /// down, as `FallingBlockEntity.tick` runs no `baseTick`.
+    fire_ticks: i32,
     /// `Entity.stuckSpeedMultiplier`: a cobweb it is in scales its next move.
     stuck: Vec3,
     damage: sunrise_client::falling_block::Damage,
@@ -3794,6 +3797,7 @@ impl Game<'_> {
                         drop_item: true,
                         fall_distance: 0.0,
                         on_ground: false,
+                        fire_ticks: 0,
                         stuck: Vec3::ZERO,
                         damage,
                         saved: None,

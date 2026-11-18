@@ -695,6 +695,7 @@ fn a_falling_block_keeps_its_model_offset() {
     let at = Vec3::new(3.5, 70.25, -1.5);
     let falling = FallingBlock {
         on_ground: false,
+        fire_ticks: 0,
         attachment_lifetime: Default::default(),
         rotation: [0.0, 0.0],
         join: Default::default(),

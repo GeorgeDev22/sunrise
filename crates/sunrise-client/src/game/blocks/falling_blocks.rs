@@ -260,6 +260,32 @@ impl Game<'_> {
         if let Some(multiplier) = stuck {
             f.stuck = multiplier;
         }
+        // The same walk's fluids: LavaFluid.entityInside's LAVA_IGNITE (its
+        // lavaHurt only marks the block hurt), then WaterFluid's EXTINGUISH
+        // (`clearFire`). A block not on fire that nothing ignited is put at
+        // `-getFireImmuneTicks()`, 0.
+        let fluids = &self.res.motion().fluids;
+        let touches = |family| {
+            sunrise_client::entities::fluid_contacts(
+                from,
+                f.position,
+                recorded.then_some(wanted),
+                sunrise_client::falling_block::bounds,
+                |p| sunrise_client::entities::fluid_height(world, fluids, p, family),
+            ) > 0
+        };
+        let previous_fire = f.fire_ticks;
+        let mut fire = previous_fire;
+        if touches(sunrise_world::fluid::FluidKind::Lava) {
+            fire = fire.max(300);
+        }
+        if fire > 0 && touches(sunrise_world::fluid::FluidKind::Water) {
+            fire = 0;
+        }
+        if fire <= 0 && fire <= previous_fire {
+            fire = 0;
+        }
+        f.fire_ticks = fire;
         for pos in tops {
             self.bubble_column_particles(pos);
         }

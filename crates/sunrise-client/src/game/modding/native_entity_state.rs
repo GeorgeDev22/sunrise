@@ -993,6 +993,7 @@ mod tests {
             let falling = game.next_entity;
             game.falling.push(FallingBlock {
                 on_ground: false,
+                fire_ticks: 0,
                 attachment_lifetime: Default::default(),
                 rotation: [0.0, 0.0],
                 join: Default::default(),
@@ -1172,6 +1173,7 @@ mod tests {
             let id = game.next_entity;
             game.falling.push(FallingBlock {
                 on_ground: false,
+                fire_ticks: 0,
                 attachment_lifetime: Default::default(),
                 rotation: [0.0, 0.0],
                 join: Default::default(),

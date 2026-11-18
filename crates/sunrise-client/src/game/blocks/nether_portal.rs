@@ -1918,6 +1918,8 @@ impl Game<'_> {
         let mut tag = super::persist::with_raw(modelled, f.saved.as_ref().map(|s| &s.1));
         if let Tag::Compound(fields) = &mut tag {
             fields.insert("PortalCooldown".into(), Tag::Int(f.portal.cooldown));
+            // Its simulated fire, not a saved copy's (`with_raw` keeps those).
+            fields.insert("Fire".into(), Tag::Short(f.fire_ticks as i16));
             if f.no_gravity {
                 fields.insert("NoGravity".into(), Tag::Byte(1));
             } else {
