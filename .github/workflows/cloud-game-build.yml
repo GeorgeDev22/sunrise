@@ -120,3 +120,42 @@ jobs:
           name: sunrise-launcher-linux-x86_64
           path: sunrise-launcher-linux-x86_64.tar.gz
           retention-days: 7
+
+  tests:
+    # The fix check another session added (2026-11-18): rustfmt, the lib test binaries and clippy.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: The pinned Rust (tools/ci/rust-version)
+        id: rust
+        run: echo "version=$(cat tools/ci/rust-version)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+          components: clippy, rustfmt
+      - name: Room for target/ (the hosted image ships tools this build never uses)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - name: ALSA and udev headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cloud-game-tests
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: The lib test binaries
+        run: |
+          cargo test --locked -p sunrise-client --lib --no-run --message-format=json > tests.json
+          mkdir -p testbin
+          python3 -c "import json,shutil;[shutil.copy(m['executable'],'testbin/'+m['target']['name']+'-'+m['target']['kind'][0]) for m in map(json.loads,open('tests.json')) if m.get('reason')=='compiler-artifact' and m.get('profile',{}).get('test') and m.get('executable')]"
+          ls -la testbin
+          tar -czf sunrise-after-tests.tar.gz testbin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sunrise-after-tests
+          path: sunrise-after-tests.tar.gz
+          retention-days: 3
+      - name: Clippy
+        run: cargo clippy --locked -p sunrise-client --lib --tests --bins -- -D warnings
