@@ -2231,9 +2231,9 @@ mod link_cursor_tests {
 }
 #[cfg(test)]
 mod agent_book_key_tests {
-    use crate::game::event_loop::EventLoopCtl;
     use super::super::game_tests::tests::server_game;
     use super::BookScreen;
+    use crate::game::event_loop::EventLoopCtl;
     use sunrise_client::items::ItemStack;
     use winit::event_loop::ControlFlow;
 
