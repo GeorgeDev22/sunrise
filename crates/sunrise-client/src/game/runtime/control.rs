@@ -744,7 +744,11 @@ impl Game<'_> {
                 // A held edit modifier (`key super down`) and A/C/V/X: the
                 // open book's Select All, Copy, Paste or Cut.
                 if self.book.is_some() && arg(2)? != "up" {
-                    let held = |k: [KeyCode; 2]| k.iter().any(|k| self.keys.raw(k));
+                    // The physical modifier first, as the window's (KeyboardHandler's modifiers):
+                    // a Ctrl or Shift held from here on is what the book's shortcuts and
+                    // selection read, not the gameplay mappings it never reaches.
+                    self.press_modifier_key(key, true);
+                    let held = |k: [KeyCode; 2]| k.iter().any(|k| self.physical_keys.contains(k));
                     let edit = if cfg!(target_os = "macos") {
                         held([KeyCode::SuperLeft, KeyCode::SuperRight])
                     } else {
@@ -1395,7 +1399,7 @@ impl Game<'_> {
         Ok(())
     }
 
-    fn control_key_down(&mut self, key: KeyCode, raw: KeyCode) -> Result<()> {
+    pub(in crate::game) fn control_key_down(&mut self, key: KeyCode, raw: KeyCode) -> Result<()> {
         self.physical_keys.insert(key);
         // The window's shortcuts come before any screen, here too.
         if self.screenshot_shortcut(key, false) {
@@ -1429,10 +1433,12 @@ impl Game<'_> {
 
     /// `key ... up`: the script lets go. What it pressed as the keyboard's stand-in goes with it
     /// (a fixture's untagged press), and a controller's hold stays.
-    fn control_key_up(&mut self, key: KeyCode) {
+    pub(in crate::game) fn control_key_up(&mut self, key: KeyCode) {
         // Sneak and sprint: the toggle mappings take the release, as the window's (a toggled one stays down).
         if matches!(key, KeyCode::ShiftLeft | KeyCode::ControlLeft) {
             let _ = self.mapped_key(key, false, false, key, Source::Agent);
+            // Only the agent's own hold: a controller's stays (`toggle_held_elsewhere`).
+            self.keys.release(&key, Source::Agent);
             return;
         }
         self.keys.release(&key, Source::Agent);

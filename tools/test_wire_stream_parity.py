@@ -1837,8 +1837,10 @@ def anchored_diffs(v, h, ticks, anchor, problems, names=('vanilla', 'Sunrise')):
     return wire_stream.compare_answered(v, h, ticks, av, ah)
 
 
-def compare(captures, scenarios):
-    """Each scenario's problems, the second client's stream against the first's (`captures` in that order)."""
+def compare(captures, scenarios, replayed=False):
+    """Each scenario's problems, the second client's stream against the first's (`captures` in that order).
+    `replayed`: both clients got the same server stream on the same ticks (wire_replay.py), so no tick is
+    realigned to an answer and the replies to the server's packets compare with their fields and ticks."""
     (ref, ref_name), (new, new_name) = [(who, CLIENTS[who]) for who in captures]
     runs = {}
     for who, capture in captures.items():
@@ -1852,13 +1854,20 @@ def compare(captures, scenarios):
         v, h = runs[ref][name], runs[new][name]
         ticks = SCENARIOS[name]['ticks'] + PRELUDE
         problems = []
-        for i, vt, ht in anchored_diffs(v, h, ticks, SCENARIOS[name].get('anchor'), problems, (ref_name, new_name)):
+        anchor = None if replayed else SCENARIOS[name].get('anchor')
+        for i, vt, ht in anchored_diffs(v, h, ticks, anchor, problems, (ref_name, new_name)):
             problems.append(f'  tick {i}:\n  {ref_name}:\n{wire_stream.describe(vt)}\n  {new_name}:\n'
                             f'{wire_stream.describe(ht)}')
             problems += wire_stream.field_diff(vt, ht, (ref_name, new_name))
-        # The server decides when keep-alives and chunk batches come; the others answer what the scenario did.
-        frame = lambda run: [n for t in run[:ticks + 1] for n, _ in t['frame']  # noqa: E731
-                             if n not in ('keep_alive', 'chunk_batch_received')]
+        if replayed:
+            # The same keep-alives, pings and teleports reached both on the same ticks: each reply's tick and
+            # fields (a pong's id) compare. Only the chunk batch's rate is each client's own measurement.
+            frame = lambda run: [(i, n, f if n != 'chunk_batch_received' else None)  # noqa: E731
+                                 for i, t in enumerate(run[:ticks + 1]) for n, f in t['frame']]
+        else:
+            # The server decides when keep-alives and chunk batches come; the others answer what the scenario did.
+            frame = lambda run: [n for t in run[:ticks + 1] for n, _ in t['frame']  # noqa: E731
+                                 if n not in ('keep_alive', 'chunk_batch_received')]
         if frame(v) != frame(h):
             problems.append(f'  frame packets: {ref_name} {frame(v)}, {new_name} {frame(h)}')
         # An answer can belong inside a tick for both (a teleport's handler sends a dig abort between two pongs):
@@ -1868,6 +1877,15 @@ def compare(captures, scenarios):
             problems.append(f'  answers inside a tick: {ref_name} {misplaced(v)}, {new_name} {misplaced(h)}')
         results.append((name, problems))
     return results
+
+
+INCONCLUSIVE = '  inconclusive:'
+
+
+def verdict(problems):
+    if not problems:
+        return 'pass'
+    return 'INCONCLUSIVE' if problems[0].startswith(INCONCLUSIVE) else 'FAIL'
 
 
 def main():
@@ -1903,10 +1921,12 @@ def main():
     # and a transfer, which judge or move Sunrise itself.
     replayed = (args.clients == ['vanilla', 'sunrise'] and not args.live and not args.compare_only
                 and not os.environ.get('WIRE_STREAM_GRIM') and not os.environ.get('WIRE_STREAM_TRANSFER'))
+    replay_capture = False
     if args.compare_only:
         captures = {who: out / f'{who}.jsonl' for who in args.clients}
         if 'sunrise' in captures and not args.live and (out / 'replay' / 'sunrise.jsonl').exists():
             captures['sunrise'] = out / 'replay' / 'sunrise.jsonl'
+            replay_capture = True
     else:
         shutil.rmtree(out, ignore_errors=True)
         out.mkdir(parents=True)
@@ -1926,7 +1946,7 @@ def main():
             return
     try:
         if not replayed:
-            results = compare(captures, args.scenarios)
+            results = compare(captures, args.scenarios, replay_capture)
     except Failed as e:
         sys.exit(f'FAIL: {e}')
     if os.environ.get('WIRE_STREAM_TRANSFER'):
@@ -1945,7 +1965,7 @@ def main():
     print(f'\nserverbound play streams, {CLIENTS[args.clients[0]]} vs {CLIENTS[args.clients[1]]} ({how}); '
           f'captures in {out}')
     for name, problems in results:
-        print(f'  {"pass" if not problems else "FAIL"}  {name}')
+        print(f'  {verdict(problems)}  {name}')
         for p in problems:
             print(p)
     if any(p for _, p in results):
