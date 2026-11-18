@@ -20,13 +20,15 @@ env:
   SHARDS: '5'
 jobs:
   grim:
-    name: ${{ matrix.server }} ${{ matrix.shard }}
+    name: ${{ matrix.server }} r${{ matrix.round }} s${{ matrix.shard }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         server: ['paper-26.3', 'via-1.21.11']
+        # Three rounds of the whole list: a difference counts only when it comes back in each.
+        round: [1, 2, 3]
         shard: [0, 1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
@@ -95,7 +97,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: grim-${{ matrix.server }}-${{ matrix.shard }}
+          name: grim-${{ matrix.server }}-r${{ matrix.round }}-${{ matrix.shard }}
           path: out
           retention-days: 7
           if-no-files-found: warn
