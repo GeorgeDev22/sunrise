@@ -1405,8 +1405,9 @@ if os.environ.get('WIRE_STREAM_RANDOM'):
     _seed, _count = os.environ['WIRE_STREAM_RANDOM'].split(',')
     SCENARIOS.update(random_scenarios(int(_seed), int(_count)))
 
-# What a run plays unless --scenarios names others (`all`: every scenario above, ~3 h): the first sixteen, then the
-# moves an anticheat's movement, combat, block and inventory checks read closest, about 25 minutes in all.
+# What a run plays unless --scenarios names others (`all`: every scenario above, about two hours): the first
+# sixteen, then the moves an anticheat's movement, combat, block and inventory checks read closest, about ten
+# minutes in all.
 DEFAULT = [
     'walk', 'idle', 'sprint_jump', 'strafe', 'w_tap', 'sneak', 'hit_target', 'sprint_combo', 'block_hit', 'rod',
     'bow', 'eat', 'bridge', 'inventory', 'hotbar_swap', 'dig_teleport',
