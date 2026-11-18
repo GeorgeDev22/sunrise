@@ -429,6 +429,88 @@ fn place_interpolated(m: &mut Mob, at: PosRot) {
     m.head_pitch = (at.pitch % 360.0).clamp(-90.0, 90.0);
 }
 
+/// Where a mob is, as its `SteppedInterpolationHandler` sees it.
+fn mob_pos_rot(m: &Mob) -> PosRot {
+    PosRot {
+        position: [m.position.x, m.position.y, m.position.z],
+        yaw: m.yaw,
+        pitch: m.head_pitch,
+    }
+}
+
+impl Game<'_> {
+    /// `Entity.commonTick` for the mount this client drives, `mobs[i]`: an
+    /// interpolation it had going when the client took it over runs on, its
+    /// target carried along by the mount's own moves (where the mount fits).
+    /// The mount's pose before the step: its tick saves the old pose
+    /// (setOldPosAndRot) before the step in vanilla, so `drive_mount` puts this one
+    /// back as the old pose once the tick has run.
+    pub(super) fn interpolate_driven_mount(&mut self, i: usize) -> Option<(Vec3, f32, f32)> {
+        let id = self.mobs[i].id as i32;
+        let handler = self.remote.as_mut().and_then(|r| r.stepped.get_mut(&id))?;
+        let m = &mut self.mobs[i];
+        let mut scene = sunrise_client::collisions::SceneCollisions {
+            world: &self.world,
+            binding: self.collision,
+            subject: None,
+        };
+        handler.follow(mob_pos_rot(m), |to| {
+            let bounds = m.bounds_at(Vec3::new(to[0], to[1], to[2]));
+            scene.unobstructed(bounds).unwrap_or(false)
+        });
+        let before = (m.position, m.yaw, m.head_pitch);
+        let at = handler.interpolate()?;
+        place_interpolated(m, at);
+        // A step that crosses a section is filed where it happens.
+        let to = m.position;
+        if to != before.0 {
+            let from = before.0;
+            self.entity_section_step(id as u32, [from.x, from.y, from.z], [to.x, to.y, to.z]);
+        }
+        Some(before)
+    }
+    /// `Entity.getClientPositionAndRotation` of the mount this client drives:
+    /// while an interpolation runs, where it is going.
+    pub(super) fn driven_mount_heading(&self, m: &Mob) -> PosRot {
+        let at = mob_pos_rot(m);
+        self.remote
+            .as_ref()
+            .and_then(|r| r.stepped.get(&(m.id as i32)))
+            .map_or(at, |h| h.heading(at))
+    }
+    /// The mount this client drives teleported to `at` (`moveOrInterpolateTo`):
+    /// it eases there over its type's update interval.
+    pub(super) fn interpolate_driven_mount_to(&mut self, i: usize, at: PosRot) {
+        let m = &mut self.mobs[i];
+        let Some(r) = self.remote.as_mut() else {
+            return;
+        };
+        let handler = r.stepped.entry(m.id as i32).or_insert_with(|| {
+            let interval = sunrise_client::lan::tracking::settings(&m.kind.id).1;
+            SteppedInterpolation::new(interval as i32)
+        });
+        let entity = mob_pos_rot(m);
+        if let Start::Snap(to) = handler.interpolate_to(
+            entity,
+            Some(Path::Linear(at.position)),
+            Some((at.yaw, at.pitch)),
+        ) {
+            place_interpolated(m, to);
+        }
+    }
+    /// `handleMoveVehicle`'s `getInterpolation().cancel()` for the mount this
+    /// client drives.
+    pub(super) fn cancel_driven_mount_interpolation(&mut self, id: u32) {
+        if let Some(h) = self
+            .remote
+            .as_mut()
+            .and_then(|r| r.stepped.get_mut(&(id as i32)))
+        {
+            h.cancel();
+        }
+    }
+}
+
 /// The packet a living entity's move came in.
 #[derive(Clone, Copy, PartialEq)]
 enum MovePacket {
@@ -2786,7 +2868,9 @@ impl Game<'_> {
         // copy in the mob list draws nothing: given the move, it kept the
         // dragon where it spawned (#2083).
         let dragon = self.dragon.as_ref().is_some_and(|d| d.id as i32 == id);
-        let driven = self.driven_mount().is_some_and(|m| m.id as i32 == id);
+        let driven = self.driven_mount().is_some_and(|m| m.id as i32 == id)
+            || u32::try_from(id)
+                .is_ok_and(|id| self.controls_boat(id) && self.boats.iter().any(|b| b.id == id));
         let mob = self
             .mob_index
             .get_mut(&mut self.mobs, id as u32)
@@ -2810,10 +2894,10 @@ impl Game<'_> {
                 t.position = position;
             }
             if driven {
-                // handleMoveEntity, handleEntityPositionSync: the mount this
-                // client moves (isLocalInstanceAuthoritative) keeps its own
-                // position, and no steps pile up for after the ride.
-                r.stepped.remove(&id);
+                // handleMoveEntity, handleEntityPositionSync: the mount or boat
+                // this client moves (isLocalInstanceAuthoritative) keeps its own
+                // position. An interpolation it had going runs on
+                // (`interpolate_driven_mount`, the boat's own), with no new steps.
                 return;
             }
             if let Some(m) = mob {
@@ -9969,6 +10053,16 @@ impl ClientMenu {
 }
 
 impl Remote {
+    /// The interpolation a boat or other object `id` had toward the server's
+    /// position, taken out: its target, rotation and steps to go.
+    pub(super) fn take_object_lerp(
+        &mut self,
+        id: u32,
+    ) -> Option<([f64; 3], Option<(f32, f32)>, u32)> {
+        self.lerps
+            .remove(&(id as i32))
+            .map(|l| (l.target, l.rotation, l.steps))
+    }
     pub(super) fn set_menu_title(&mut self, title: Option<sunrise_client::text::Text>) {
         self.menu_title_snapshot = title.try_into_api().ok().flatten().map(Arc::new);
         self.menu_title = title;

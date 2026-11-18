@@ -118,6 +118,7 @@ sunrise-client game::boats::lifetime_tests::a_bound_boat_commits_the_driven_clie
 sunrise-client game::boats::lifetime_tests::a_bound_boat_keeps_its_registration_through_ticks_until_discard lib daily resources
 sunrise-client game::boats::lifetime_tests::a_bound_ridden_boat_commits_the_server_leash_tick lib daily resources
 sunrise-client game::boats::paddle_tests::a_paddled_boat_accelerates_by_the_sine_table_at_its_turned_yaw lib daily resources
+sunrise-client game::boats::tests::a_boat_taken_over_mid_way_goes_on_easing lib daily resources
 sunrise-client game::boats::tests::a_driven_boat_eases_to_a_teleport_and_reports_where_it_is_going lib daily resources
 sunrise-client game::boats::tests::destruction_and_underwater_ejection_snap_rejected_passenger_descendants lib daily resources
 sunrise-client game::books::book_escape_tests::enter_signs_a_title_of_spaces_but_not_an_empty_one lib daily resources
