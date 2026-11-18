@@ -1,0 +1,101 @@
+name: wire grim run
+# Wire parity item 93, on the fork only: the whole scenario list (tools/ci/wire-grim-scenarios.txt) played by the
+# real vanilla 26.3 client and by Sunrise on Paper + Grim, once on Paper 26.3 and once on Paper 1.21.11 through
+# ViaVersion, in parallel shards. Each shard uploads its captures, the server log and Grim's violation database.
+# The game files come from Mojang inside the job (tools/ci/wire_grim_fetch.py) and never leave it: nothing of
+# Mojang's is committed or uploaded. Sunrise is the "cloud game build" artifact named by SUNRISE_RUN.
+on:
+  push:
+    branches: ['wire-grim']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: wire-grim
+  cancel-in-progress: true
+env:
+  # cloud game build 44233017935: cb-next 9be2fa5, the build item 93 ran with on 2026-11-18.
+  SUNRISE_RUN: '44233017935'
+  SHARDS: '5'
+jobs:
+  grim:
+    name: ${{ matrix.server }} ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        server: ['paper-26.3', 'via-1.21.11']
+        shard: [0, 1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: X server, software OpenGL and Vulkan
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth x11-xkb-utils xkb-data libgl1-mesa-dri \
+            libegl1 libglx-mesa0 mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 libxcursor1 libxi6 libxrandr2 \
+            libasound2t64 sqlite3
+      - name: Sunrise (cloud game build ${{ env.SUNRISE_RUN }})
+        uses: actions/download-artifact@v4
+        with:
+          name: sunrise-linux-x86_64-fast
+          run-id: ${{ env.SUNRISE_RUN }}
+          github-token: ${{ github.token }}
+          path: bin
+      - name: Unpack Sunrise
+        run: |
+          cd bin
+          for t in *.tar.gz; do [ -e "$t" ] && tar -xzf "$t" && rm "$t"; done
+          find . -maxdepth 2 -type f | head -20
+          if [ ! -e sunrise-client ]; then mv */* . 2>/dev/null || true; fi
+          chmod +x sunrise-client sunrise-ctl sunrise-prepare
+          ls -la
+      - name: Game and server files from their official sources
+        run: python3 tools/ci/wire_grim_fetch.py --mc "$RUNNER_TEMP/mc" --servers "$RUNNER_TEMP/servers"
+      - name: Import vanilla and prepare Sunrise's resources
+        run: |
+          python3 tools/lab.py prepare --minecraft-dir "$RUNNER_TEMP/mc" --server-jar "$RUNNER_TEMP/servers/server.jar"
+          bin/sunrise-prepare --minecraft-dir "$RUNNER_TEMP/mc" --server-jar "$RUNNER_TEMP/servers/server.jar" \
+            --root "$PWD"
+          ls .local .local/sunrise-client
+      - name: Scenarios of this shard
+        id: shard
+        run: |
+          list=$(python3 -c "import sys;n=[l.strip() for l in open('tools/ci/wire-grim-scenarios.txt') if l.strip()];print(','.join(n[${{ matrix.shard }}::$SHARDS]))")
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "$list" | tr ',' '\n' | wc -l
+      - name: Both clients through Grim
+        env:
+          SUNRISE_NO_AUDIO: '1'
+          SUNRISE_LAUNCHER_NO_SELF_UPDATE: '1'
+          WIRE_STREAM_GRIM: ${{ runner.temp }}/servers
+          WIRE_STREAM_VIA: ${{ matrix.server == 'via-1.21.11' && '1.21.11' || '' }}
+        run: |
+          [ -n "$WIRE_STREAM_VIA" ] || unset WIRE_STREAM_VIA
+          set +e
+          python3 tools/ci/with_xvfb.py python3 tools/test_wire_stream_parity.py --bin bin --out out \
+            --scenarios "${{ steps.shard.outputs.list }}" 2>&1 | tee run.log
+          echo "harness exit: ${PIPESTATUS[0]}" | tee -a run.log
+          mkdir -p out && cp run.log out/
+          exit 0
+      - name: No Mojang files in the upload
+        run: |
+          find out -type f \( -name '*.jar' -o -name '*.class' -o -name '*.ogg' -o -name '*.png' \) -print -delete
+          du -sh out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: grim-${{ matrix.server }}-${{ matrix.shard }}
+          path: out
+          retention-days: 7
+          if-no-files-found: warn
