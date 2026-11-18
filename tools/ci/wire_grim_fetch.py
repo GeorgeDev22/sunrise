@@ -41,6 +41,10 @@ SERVERS = [
      '64e73b158ba4dcd51a2442', 'https://cdn.modrinth.com/data/4zi91sqi/versions/DGfwdJGc/Intave.jar'),
     ('ProtocolLib-dev-build-20261104.jar', 'sha256', '736a9d6054032871d593aa2c0a0bf65e117557aadc11830394e5e8b757ae05b2',
      'https://github.com/dmulloy2/ProtocolLib/releases/download/dev-build/ProtocolLib-Spigot.jar'),
+    # Velocity 4.3.1-45 (fill.papermc.io, 2026-10-27, stable) for the proxy runs (item 6).
+    ('velocity-4.3.1-45.jar', 'sha256', '0844bcabdcdb4f5b875906fd4c3365bc1bb76918e42bc595ed88ad195258dd75',
+     'https://fill-data.papermc.io/v1/objects/0844bcabdcdb4f5b875906fd4c3365bc1bb76918e42bc595ed88ad195258dd75/'
+     'velocity-4.3.1-45.jar'),
 ]
 
 

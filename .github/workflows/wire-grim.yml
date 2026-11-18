@@ -91,6 +91,12 @@ jobs:
           WIRE_STREAM_VANILLA_SIZE: 256x144
         run: |
           [ -n "$WIRE_STREAM_VIA" ] || unset WIRE_STREAM_VIA
+          # anticheat 'proxy' (item 6): the vanilla server, no anticheat, behind Velocity, and a server switch after
+          # the scenarios.
+          if [ "$WIRE_STREAM_ANTICHEAT" = proxy ]; then
+            export WIRE_STREAM_PROXY="$WIRE_STREAM_GRIM"
+            unset WIRE_STREAM_GRIM WIRE_STREAM_ANTICHEAT WIRE_STREAM_VIA
+          fi
           set +e
           python3 tools/ci/with_xvfb.py python3 tools/test_wire_stream_parity.py --bin bin --out out \
             --scenarios "${{ steps.shard.outputs.list }}" 2>&1 | tee run.log
