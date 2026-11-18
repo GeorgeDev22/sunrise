@@ -14,7 +14,7 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
-import sys
+import sys  # noqa: F401 - sys.exit below
 import time
 import urllib.request
 from pathlib import Path
@@ -79,9 +79,15 @@ def minecraft(mc, servers):
     version = lock['version']
     accepted = {lock['manifest_sha1'], *lock.get('accepted_manifest_sha1', [])}
     entry = next(v for v in read_json(MANIFEST)['versions'] if v['id'] == version)
-    if entry['sha1'] not in accepted:
-        sys.exit(f'Mojang now serves a {version} version JSON research-lock.json does not accept ({entry["sha1"]})')
-    manifest_path = fetch(entry['url'], mc / 'versions' / version / f'{version}.json', entry['sha1'])
+    sha1 = entry['sha1']
+    if sha1 not in accepted:
+        # Mojang republished the version JSON (so far only its asset index changed); its packages stay addressed
+        # by sha1, so the one research-lock.json pins is still there.
+        print(f'Mojang now serves a {version} version JSON the lock does not know ({sha1}); using the pinned one',
+              flush=True)
+        sha1 = lock['manifest_sha1']
+    url = f'https://piston-meta.mojang.com/v1/packages/{sha1}/{version}.json'
+    manifest_path = fetch(url, mc / 'versions' / version / f'{version}.json', sha1)
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     client, server = manifest['downloads']['client'], manifest['downloads']['server']
     if client['sha1'] != lock['client_sha1'] or server['sha1'] != lock['server_sha1']:
