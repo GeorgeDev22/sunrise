@@ -220,7 +220,7 @@ impl Game<'_> {
                     );
                 }
                 // Player.tick: a different main-hand item resets the attack
-                // strength, and detectEquipmentUpdates gives the guest its modifiers.
+                // strength (its modifiers come with detectEquipmentUpdates below).
                 let g = &host.hub.guests[gi];
                 let held = crate::game::held_items::held_attack_item(&g.inventory, g.selected);
                 let play = host.play.entry(conn).or_default();
@@ -230,6 +230,20 @@ impl Game<'_> {
                 }
             }
             self.guest_delayed_destroy(conn);
+            // LivingEntity.tick's detectEquipmentUpdates, part of the body: after the
+            // item use above and before aiStep's travel and updatePlayerPose, so a new
+            // scale modifier rebuilds the box this tick.
+            if body
+                && let Some(host) = self.lan.as_mut()
+                && {
+                    let g = &host.hub.guests[gi];
+                    let held = g.inventory.get(g.selected).and_then(Option::as_ref);
+                    let play = host.play.entry(conn).or_default();
+                    equipment_changed(&mut play.equipped, &g.armor, held, g.offhand.as_ref())
+                }
+            {
+                self.as_guest(conn, |g| g.put_equipment_modifiers());
+            }
             self.guest_server_tick(conn, body);
             // Player.tick's statistics and ServerPlayer.tick's triggers, then
             // PlayerAdvancements.flushDirty.
@@ -410,3 +424,7 @@ mod fall_sound_tests;
 #[cfg(test)]
 #[path = "tests/spectator_body_tick_tests.rs"]
 mod spectator_body_tick_tests;
+
+#[cfg(test)]
+#[path = "tests/equipment_tick_tests.rs"]
+mod equipment_tick_tests;
