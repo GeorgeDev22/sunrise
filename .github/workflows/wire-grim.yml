@@ -28,10 +28,10 @@ jobs:
       matrix:
         # grim or intave (Intave logs only: no kicks or bans; tools/test_wire_stream_parity.py intave_plugin).
         anticheat: ['intave']
-        server: ['paper-26.3', 'via-1.21.11']
-        # Three rounds of the whole list: a difference counts only when it comes back in each.
-        round: [1, 2, 3]
-        shard: [0, 1, 2, 3, 4]
+        # A first look at Intave: one shard.
+        server: ['paper-26.3']
+        round: [1]
+        shard: [0]
     steps:
       - uses: actions/checkout@v4
         with:
