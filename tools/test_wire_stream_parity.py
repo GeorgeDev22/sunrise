@@ -1761,9 +1761,11 @@ def compare(captures, scenarios):
                              if n not in ('keep_alive', 'chunk_batch_received')]
         if frame(v) != frame(h):
             problems.append(f'  frame packets: {ref_name} {frame(v)}, {new_name} {frame(h)}')
-        misplaced = [(i, t['misplaced']) for i, t in enumerate(h[:ticks + 1]) if t['misplaced']]
-        if misplaced:
-            problems.append(f'  {new_name} sent the server\'s answers inside a tick: {misplaced}')
+        # An answer can belong inside a tick for both (a teleport's handler sends a dig abort between two pongs):
+        # only a difference is one.
+        misplaced = lambda run: [(i, t['misplaced']) for i, t in enumerate(run[:ticks + 1]) if t['misplaced']]  # noqa: E731
+        if misplaced(h) != misplaced(v):
+            problems.append(f'  answers inside a tick: {ref_name} {misplaced(v)}, {new_name} {misplaced(h)}')
         results.append((name, problems))
     return results
 
