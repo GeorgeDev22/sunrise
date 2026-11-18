@@ -1875,6 +1875,77 @@ def transfer_stream(capture):
     return out
 
 
+# WIRE_STREAM_PROXY=DIR (item 6): Velocity (DIR/velocity-*.jar) in front of the server and of a second one like it,
+# with no player-info forwarding (the servers stay offline-mode). After the scenarios Velocity sends each client to
+# the second server, a proxy's server switch (ClientboundStartConfigurationPacket on the same connection), and the
+# client's packets from there are compared: its configuration again, then its first play ticks.
+PROXY_TICKS = 60
+
+
+def velocity_proxy(proxies, directory, backends):
+    """Velocity in `directory`, its first run writing the default velocity.toml, then edited to listen on a free port
+    and know `backends` (name -> port), the first of them the one players join. Returns (Server, port)."""
+    jar = next(Path(proxies).glob('velocity-*.jar'))
+    directory.mkdir()
+    shutil.copy(jar, directory / 'velocity.jar')
+    command = ['java', '-Xmx512m', '-jar', 'velocity.jar']
+    first = Server(command, directory, 'velocity-setup')
+    first.wait_for(r'Done \(', timeout=300)
+    first.console('shutdown')
+    first.process.wait(60)
+    config = (directory / 'velocity.toml').read_text(encoding='utf-8')
+    port = free_port()
+    config = re.sub(r'(?m)^bind = .*$', f'bind = "127.0.0.1:{port}"', config)
+    config = re.sub(r'(?m)^online-mode = .*$', 'online-mode = false', config)
+    config = re.sub(r'(?m)^player-info-forwarding-mode = .*$', 'player-info-forwarding-mode = "none"', config)
+    servers = ''.join(f'{name} = "127.0.0.1:{p}"\n' for name, p in backends.items())
+    first_name = next(iter(backends))
+    config = re.sub(r'(?ms)^\[servers\]\n.*?(?=^\[)',
+                    f'[servers]\n{servers}try = ["{first_name}"]\n\n', config)
+    config = re.sub(r'(?ms)^\[forced-hosts\]\n.*?(?=^\[)', '[forced-hosts]\n\n', config)
+    for needed in (f'bind = "127.0.0.1:{port}"', 'online-mode = false', 'player-info-forwarding-mode = "none"',
+                   f'try = ["{first_name}"]'):
+        if needed not in config:
+            raise Failed(f"velocity.toml: could not set {needed}")
+    (directory / 'velocity.toml').write_text(config, encoding='utf-8')
+    proxy = Server(command, directory, 'velocity')
+    proxy.wait_for(r'Done \(', timeout=300)
+    return proxy, port
+
+
+def proxy_switch(proxy, capture):
+    proxy.console(f'send {PLAYER} second')
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        if proxy_stream(capture).count('play client_tick_end') >= PROXY_TICKS:
+            return
+        time.sleep(1)
+    raise Failed(f'{capture.stem}: no {PROXY_TICKS} play ticks after the proxy\'s server switch')
+
+
+def proxy_stream(capture):
+    """The client's packets from the server switch on: those in the configuration it re-enters, then its play ticks'
+    up to PROXY_TICKS."""
+    out, ticks, switched = [], 0, False
+    for e in net_capture.load(capture):
+        if e.get('conn') != 1 or 'name' not in e:
+            continue
+        if e.get('dir') == 's2c' and e['name'] == 'start_configuration':
+            switched = True
+        if not switched or e.get('dir') != 'c2s':
+            continue
+        if e.get('state') == 'play' and e['name'] != 'configuration_acknowledged':
+            if ticks >= PROXY_TICKS:
+                break
+            ticks += e['name'] == 'client_tick_end'
+        data = e.get('data', '')
+        if e['name'] in ('keep_alive', 'chunk_batch_received', 'pong') or e.get('state') == 'play':
+            # The server's ids and the chunk rate the client measured differ run to run; in play the order counts.
+            data = ''
+        out.append(f"{e.get('state')} {e['name']} {data}".rstrip())
+    return out
+
+
 def run(args, out):
     lock, jars, libraries = base.verify_artifacts()
     deps = os.pathsep.join(map(str, [jars['server'], *libraries]))
@@ -1913,8 +1984,23 @@ def run(args, out):
                    str(resources), '--dedicated', '--nogui']
     server = Server(vanilla, directory, 'server')
     captures = {}
+    proxy = second = None
     try:
         server.wait_for(r'Done \(', timeout=900)
+        if os.environ.get('WIRE_STREAM_PROXY'):
+            second_dir = work / 'server2'
+            second_dir.mkdir()
+            second_port = free_port()
+            for name in ('eula.txt', 'ops.json'):
+                shutil.copy(directory / name, second_dir / name)
+            (second_dir / 'server.properties').write_text(
+                ''.join(f'{k}={v}\n' for k, v in dict(props, **{'server-port': str(second_port)}).items()),
+                encoding='iso-8859-1')
+            second_cmd = grim_server(second_dir, jars) if os.environ.get('WIRE_STREAM_GRIM') else vanilla
+            second = Server(second_cmd, second_dir, 'server2')
+            second.wait_for(r'Done \(', timeout=900)
+            proxy, port = velocity_proxy(os.environ['WIRE_STREAM_PROXY'], work / 'velocity',
+                                         {'first': int(props['server-port']), 'second': second_port})
         for who in args.clients:
             capture = out / f'{who}.jsonl'
             capture.touch()
@@ -1938,6 +2024,8 @@ def run(args, out):
                 play_all(client, server, args.scenarios, scripts, who != 'vanilla', capture)
                 if os.environ.get('WIRE_STREAM_TRANSFER'):
                     transfer_back(server, listen, capture)
+                if proxy:
+                    proxy_switch(proxy, capture)
             finally:
                 if client:
                     if who != 'vanilla' and client.game.log.exists():
@@ -1947,6 +2035,10 @@ def run(args, out):
                 stop.set()
             captures[who] = capture
     finally:
+        for extra in (proxy, second):
+            if extra:
+                extra.stop()
+                shutil.copy(extra.log_path, out / extra.log_path.name)
         server.stop()
         shutil.copy(server.log_path, out / server.log_path.name)
         grim_db = directory / 'plugins' / 'GrimAC' / 'data' / 'history.v1.db'
@@ -2050,6 +2142,12 @@ def main():
         problems = [f'  #{i}: {ref_name} {x}, {new_name} {y}'
                     for i, (x, y) in enumerate(itertools.zip_longest(a, b, fillvalue='-')) if x != y]
         results.append(('transfer_back', problems[:40]))
+    if os.environ.get('WIRE_STREAM_PROXY'):
+        (ref, ref_name), (new, new_name) = [(who, CLIENTS[who]) for who in captures]
+        a, b = proxy_stream(captures[ref]), proxy_stream(captures[new])
+        problems = [f'  #{i}: {ref_name} {x}, {new_name} {y}'
+                    for i, (x, y) in enumerate(itertools.zip_longest(a, b, fillvalue='-')) if x != y]
+        results.append(('proxy_switch', problems[:40]))
     if (out / 'grim.db').exists():
         for who, violations in grim_violations(out / 'grim.db', args.clients).items():
             counts = {}
