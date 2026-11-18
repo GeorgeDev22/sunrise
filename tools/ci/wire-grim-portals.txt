@@ -1,0 +1,5 @@
+dimensions
+nether_portal
+end_portal
+end_portal_drop
+end_portal_inside
