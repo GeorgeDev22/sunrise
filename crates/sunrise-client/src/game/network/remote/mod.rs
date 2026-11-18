@@ -2920,7 +2920,8 @@ impl Game<'_> {
         // dragon where it spawned (#2083).
         let dragon = self.dragon.as_ref().is_some_and(|d| d.id as i32 == id);
         let driven = self.driven_mount().is_some_and(|m| m.id as i32 == id)
-            || u32::try_from(id).is_ok_and(|id| self.controls_boat(id));
+            || u32::try_from(id)
+                .is_ok_and(|id| self.controls_boat(id) && self.boats.iter().any(|b| b.id == id));
         let mob = self
             .mob_index
             .get_mut(&mut self.mobs, id as u32)
