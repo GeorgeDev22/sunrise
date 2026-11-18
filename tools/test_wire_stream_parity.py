@@ -28,6 +28,7 @@ SUNRISE_LAUNCHER_HOME, XDG_*), with no audio and no self-update. Needs .local (t
 resources) and a built sunrise-client and sunrise-ctl (--bin DIR, default the parity target's fast build).
 """
 import argparse
+import itertools
 import json
 import os
 import re
@@ -1596,6 +1597,45 @@ def play_all(client, server, scenarios, scripts, sunrise, capture):
         time.sleep(0.5)
 
 
+# WIRE_STREAM_TRANSFER=1 (items 7, 6, 10): after the scenarios the server transfers each client back to its own
+# capture proxy (ClientboundTransferPacket; accepts-transfers), and the second connection the client makes is
+# compared: its handshake, login and configuration packets, then its first play ticks.
+TRANSFER_TICKS = 60
+
+
+def transfer_back(server, listen, capture):
+    server.console(f'transfer 127.0.0.1 {listen} {PLAYER}')
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        ticks = sum(e.get('conn') == 2 and e.get('name') == 'client_tick_end' for e in net_capture.load(capture))
+        if ticks >= TRANSFER_TICKS:
+            return
+        time.sleep(1)
+    raise Failed(f'{capture.stem}: no {TRANSFER_TICKS} play ticks on the connection after the transfer')
+
+
+def transfer_stream(capture):
+    """The client's packets on the connection after the transfer: those before play, then its play ticks' up to
+    TRANSFER_TICKS."""
+    out, ticks = [], 0
+    for e in net_capture.load(capture):
+        if e.get('conn') != 2 or e.get('dir') != 'c2s' or 'name' not in e:
+            continue
+        if e.get('state') == 'play':
+            if ticks >= TRANSFER_TICKS:
+                break
+            ticks += e['name'] == 'client_tick_end'
+        data = e.get('data', '')
+        if e['name'] == 'intention':
+            # Each client's proxy listens on its own port: the intent (3, a transfer) is what the client chose.
+            data = f'intent {data[-2:]}'
+        elif e['name'] in ('keep_alive', 'chunk_batch_received') or e.get('state') == 'play':
+            # The server's ids and the chunk rate the client measured differ run to run; in play the order counts.
+            data = ''
+        out.append(f"{e.get('state')} {e['name']} {data}".rstrip())
+    return out
+
+
 def run(args, out):
     lock, jars, libraries = base.verify_artifacts()
     deps = os.pathsep.join(map(str, [jars['server'], *libraries]))
@@ -1616,6 +1656,8 @@ def run(args, out):
         props['allow-flight'] = 'true'
     if os.environ.get('WIRE_STREAM_RESOURCE_PACK'):
         props.update(serve_resource_pack(work / 'pack'))
+    if os.environ.get('WIRE_STREAM_TRANSFER'):
+        props['accepts-transfers'] = 'true'
     (directory / 'server.properties').write_text(''.join(f'{k}={v}\n' for k, v in props.items()),
                                                  encoding='iso-8859-1')
     (directory / 'eula.txt').write_text('eula=true\n')
@@ -1648,6 +1690,8 @@ def run(args, out):
                         raise Failed('the vanilla client never got into the world')
                 time.sleep(3)
                 play_all(client, server, args.scenarios, scripts, who != 'vanilla', capture)
+                if os.environ.get('WIRE_STREAM_TRANSFER'):
+                    transfer_back(server, listen, capture)
             finally:
                 if client:
                     if who != 'vanilla' and client.game.log.exists():
@@ -1749,6 +1793,12 @@ def main():
         results = compare(captures, args.scenarios)
     except Failed as e:
         sys.exit(f'FAIL: {e}')
+    if os.environ.get('WIRE_STREAM_TRANSFER'):
+        (ref, ref_name), (new, new_name) = [(who, CLIENTS[who]) for who in captures]
+        a, b = transfer_stream(captures[ref]), transfer_stream(captures[new])
+        problems = [f'  #{i}: {ref_name} {x}, {new_name} {y}'
+                    for i, (x, y) in enumerate(itertools.zip_longest(a, b, fillvalue='-')) if x != y]
+        results.append(('transfer_back', problems[:40]))
     if (out / 'grim.db').exists():
         for who, violations in grim_violations(out / 'grim.db', args.clients).items():
             counts = {}
