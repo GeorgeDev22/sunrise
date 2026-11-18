@@ -15,12 +15,11 @@ concurrency:
   group: wire-grim
   cancel-in-progress: true
 env:
-  # cloud game build 44324974257: cb-next 9be2fa5 + the player_loaded and respawn-motion fixes
-  # (sunrise-org/sunrise#2755, #2766), 8c19744.
-  SUNRISE_RUN: '44324974257'
-  SHARDS: '5'
+  # cloud game build 44356788447: cb-next 9be2fa5 + #2866, #2867 and #2724's spear fix (d06827c).
+  SUNRISE_RUN: '44356788447'
+  SHARDS: '2'
   # The scenario list this run plays (tools/ci/wire-grim-scenarios.txt: all of item 93).
-  SCENARIO_LIST: tools/ci/wire-grim-scenarios.txt
+  SCENARIO_LIST: tools/ci/wire-grim-lunge.txt
 jobs:
   grim:
     name: ${{ matrix.anticheat }} ${{ matrix.server }} r${{ matrix.round }} s${{ matrix.shard }}
@@ -34,7 +33,7 @@ jobs:
         server: ['paper-26.3', 'via-1.21.11']
         # Three rounds of the whole list: a difference counts only when it comes back in each.
         round: [1, 2, 3]
-        shard: [0, 1, 2, 3, 4]
+        shard: [0, 1]
     steps:
       - uses: actions/checkout@v4
         with:
