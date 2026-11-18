@@ -323,11 +323,14 @@ SCENARIOS = {
         ticks=120, steps={10: ['key w down'],
                           30: ['key space down'], 34: ['key space up'], 60: ['key ctrl down'], 70: ['key ctrl up'], 85: ['key w up'],
                           110: ['key shift down'], 114: ['key shift up']}),
+    # Mounted in the setup, facing 0: left alone, the mob turned at random before the mount, so the two clients'
+    # rides differed.
     'pig_carrot': dict(
-        setup=[f'summon minecraft:pig 0.5 {FLOOR + 1} 2.5 {{PersistenceRequired:1b,'
+        setup=[f'summon minecraft:pig 0.5 {FLOOR + 1} 2.5 {{PersistenceRequired:1b,Rotation:[0f,0f],'
                'equipment:{saddle:{id:"minecraft:saddle",count:1}}}',
+               f'ride {PLAYER} mount @e[type=minecraft:pig,limit=1]',
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:carrot_on_a_stick'],
-        ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:pig,limit=1]'], 10: ['look 30 10'],
+        ticks=90, steps={10: ['look 30 10'],
                          30: ['mouse right click'], 50: ['look -20 10'], 75: ['key shift down'], 79: ['key shift up']}),
     # Mounting turns the rider (AbstractHorse.addPassenger's absSnapRotationTo; a boat's yaw when boarding): the
     # boat and the horse face 123 degrees, the player 0, so the rider's first look and the vehicle's moves show it.
@@ -693,6 +696,18 @@ SCENARIOS = {
         setup=[f'setblock 0 {FLOOR} 3 minecraft:end_portal'],
         ticks=140, steps={0: ['key w down'], 12: ['key w up'],
                           110: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
+    # The End portal entered in one state by both clients (in end_portal the server teleports them at different
+    # points of the fall into it): falling fast from 5 blocks up, and standing still with the portal placed where the
+    # player stands. The portal goes once the player is through: left at the spawn point, it sends the next client
+    # to join (after the last scenario, before any reset) straight into the End.
+    'end_portal_drop': dict(
+        setup=[f'setblock 0 {FLOOR} 3 minecraft:end_portal'],
+        ticks=120, steps={0: [f'command tp @s 0.5 {FLOOR + 6} 3.5'],
+                          100: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
+    'end_portal_inside': dict(
+        ticks=110, steps={0: [f'command setblock 0 {FLOOR + 1} 0 minecraft:end_portal'],
+                          5: [f'command execute in minecraft:overworld run setblock 0 {FLOOR + 1} 0 minecraft:air'],
+                          90: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
     # Mobs' and projectiles' pushes: a shulker's bullets (levitation), a ghast's fireball, a breeze's
     # wind charge.
     'shulker_bullets': dict(
@@ -798,10 +813,13 @@ SCENARIOS = {
         ticks=90, steps={0: ['look 0 10'], 5: ['mouse left click'], 25: ['mouse left click'], 40: ['key ctrl down', 'key w down'],
                          42: ['mouse right down'], 70: ['mouse right up'], 75: ['key w up', 'key ctrl up']}),
     # A happy ghast with a harness, ridden: up, forward, down.
+    # Mounted in the setup, facing 0: left alone, the mob turned at random before the mount, so the two clients'
+    # rides differed.
     'happy_ghast_ride': dict(
-        setup=[f'summon minecraft:happy_ghast 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,'
-               'equipment:{body:{id:"minecraft:white_harness",count:1}}}'],
-        ticks=100, steps={0: ['command ride @s mount @e[type=minecraft:happy_ghast,limit=1]'], 8: ['key space down'],
+        setup=[f'summon minecraft:happy_ghast 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,Rotation:[0f,0f],'
+               'equipment:{body:{id:"minecraft:white_harness",count:1}}}',
+               f'ride {PLAYER} mount @e[type=minecraft:happy_ghast,limit=1]'],
+        ticks=100, steps={8: ['key space down'],
                           28: ['key space up', 'key w down'], 60: ['key w up', 'key shift down'], 62: ['key shift up']}),
     # A boat shared with a pig: the player takes the second seat and paddles.
     'shared_boat': dict(
@@ -970,9 +988,11 @@ SCENARIOS = {
         ticks=120, steps={0: ['command ride @s mount @e[type=minecraft:horse,limit=1]'], 10: ['key space down'],
                           15: ['key space up'], 40: ['key space down'], 50: ['key space up'], 75: ['key space down'],
                           95: ['key space up']}),
+    # Facing 0 (summoned at random, the rides differed between the clients), mounted at tick 0: mounted in the
+    # setup, the strider took the walk before the scenario and dropped the player into the lava.
     'strider_lava': dict(
         setup=[f'fill -3 {FLOOR} 1 3 {FLOOR} 20 minecraft:lava',
-               f'summon minecraft:strider 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,equipment:{{saddle:{{id:"minecraft:saddle",count:1}}}}}}',
+               f'summon minecraft:strider 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,Rotation:[0f,0f],equipment:{{saddle:{{id:"minecraft:saddle",count:1}}}}}}',
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:warped_fungus_on_a_stick'],
         ticks=90, steps={0: ['command ride @s mount @e[type=minecraft:strider,limit=1]'], 10: ['look 0 10'],
                          30: ['mouse right click'], 55: ['look 25 10'], 80: ['key shift down'], 82: ['key shift up']}),
