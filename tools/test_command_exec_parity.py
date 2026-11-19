@@ -129,6 +129,8 @@ def main():
     parser.add_argument('--orb-lava-fixture', action='store_true', help='guarded server orb lava contact scene')
     parser.add_argument('--orb-lava-raw-diagnostic', action='store_true', help='retain random Pos/Motion as exact raw diagnostics')
     parser.add_argument('--orb-fire-fixture', action='store_true', help='server orb saved Fire and its burn, tick by tick')
+    parser.add_argument('--falling-first-tick-fixture', action='store_true',
+                        help='summoned falling blocks and TNT tick on their first tick, after a later orb too')
     parser.add_argument('--mob-home-fixture', action='store_true')
     parser.add_argument('--mob-home-holder-removal-diagnostic', action='store_true')
     parser.add_argument('--mob-home-late-detach-control', action='store_true')
@@ -383,6 +385,12 @@ def main():
         except ImportError:
             from orb_fire_corpus import orb_fire
         groups = [('setup', corpus_module.group_setup()), ('orb fire', orb_fire())]
+    if args.falling_first_tick_fixture:
+        try:
+            from .falling_first_tick_corpus import falling_first_tick
+        except ImportError:
+            from falling_first_tick_corpus import falling_first_tick
+        groups = [('setup', corpus_module.group_setup()), ('falling first tick', falling_first_tick())]
     if args.mob_home_fixture:
         try:
             from .mob_home_corpus import mob_home
