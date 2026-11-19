@@ -18,16 +18,25 @@ on:
       sunrise_run:
         description: 'The game build run to play Sunrise from (default: SUNRISE_RUN below)'
         required: false
+      shards:
+        description: 'Shards per server and round (default: 2); give shard_list too'
+        required: false
+      shard_list:
+        description: 'The shards as a JSON list, 0 .. shards-1 (default: [0, 1])'
+        required: false
+      rounds:
+        description: 'Rounds, as a JSON list (default: [1, 2, 3])'
+        required: false
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: wire-grim-${{ github.event_name }}-${{ inputs.list }}-${{ inputs.options }}-${{ inputs.sunrise_run }}
+  group: wire-grim-${{ github.event_name }}-${{ inputs.list }}-${{ inputs.options }}-${{ inputs.sunrise_run }}-${{ inputs.shards }}
   cancel-in-progress: true
 env:
   # lead fixes 44381753743: main + every open fix PR (#2322 #2478 #2595 #2650 #2698 #2724 #2866 #2867 #2094) + #2689 + leads AM, AA, boat clamp.
   SUNRISE_RUN: ${{ inputs.sunrise_run || '44381753743' }}
-  SHARDS: '2'
+  SHARDS: ${{ inputs.shards || '2' }}
   # The scenario list this run plays (tools/ci/wire-grim-scenarios.txt: all of item 93; wire-grim-audit-scenarios.txt:
   # what the Grim check audit found no scenario for).
   SCENARIO_LIST: ${{ inputs.list || 'tools/ci/wire-grim-audit-scenarios.txt' }}
@@ -47,8 +56,9 @@ jobs:
         anticheat: ['grim', 'intave']
         server: ['paper-26.3', 'via-1.21.11']
         # Three rounds of the whole list: a difference counts only when it comes back in each.
-        round: [1, 2, 3]
-        shard: [0, 1]
+        round: ${{ fromJSON(inputs.rounds || '[1, 2, 3]') }}
+        # 0 .. SHARDS-1 (the input shard_list, given with shards).
+        shard: ${{ fromJSON(inputs.shard_list || '[0, 1]') }}
         # The proxy runs on the vanilla server: the ViaVersion half would repeat it.
         exclude:
           - anticheat: proxy
