@@ -166,8 +166,6 @@ enum Slot {
     Items,
     Files,
 }
-/// The most memory the square frames of one decoded sprite may take.
-const MAX_FRAMES_BYTES: u64 = 1 << 30;
 /// Edge length of vanilla's block textures: the smallest array layer.
 pub const SPRITE_SIZE: u32 = 16;
 /// The largest sprite array (all layers of the top mip level) when the settings leave it to
@@ -811,38 +809,18 @@ impl Sprites {
         if width == 0 || height == 0 || png_width % width != 0 || png_height % height != 0 {
             return Err(format!("sprite {name} has invalid frame dimensions").into());
         }
-        let columns = png_width / width;
-        let count = u64::from(columns) * u64::from(png_height / height);
         // Layers are square; a frame of another shape is nearest-resampled to
         // its longer side so UVs (normalized per layer) are unchanged.
         let side = width.max(height);
-        // A pack or mod picks the dimensions: refuse what the square frames would not fit in
-        // before sizing any of them, and take their memory fallibly.
-        let frame_bytes = u64::from(side) * u64::from(side) * 4;
-        if count
-            .checked_mul(frame_bytes)
-            .is_none_or(|total| total > MAX_FRAMES_BYTES)
-        {
-            return Err(format!("sprite {name} is too large for its square frames").into());
-        }
-        let mut frames = Vec::new();
-        for index in 0..count as u32 {
-            let x = index % columns * width;
-            let y = index / columns * height;
-            let mut frame = Vec::new();
-            frame.try_reserve_exact(frame_bytes as usize)?;
-            for row in 0..side {
-                let source_row = y + row * height / side;
-                for column in 0..side {
-                    let offset = (u64::from(source_row) * u64::from(png_width)
-                        + u64::from(x + column * width / side))
-                        as usize
-                        * 4;
-                    frame.extend_from_slice(&pixels[offset..offset + 4]);
-                }
-            }
-            frames.push(frame);
-        }
+        let frames = square_frames(
+            &pixels,
+            png_width,
+            png_height,
+            width,
+            height,
+            side,
+            crate::hud::MAX_IMAGE_BYTES,
+        )?;
         let texture = texture_section(metadata.as_ref());
         Ok(crate::sprite_cache::Decoded {
             side,
@@ -965,19 +943,21 @@ fn read_rgba(source: &ResourceSource, path: &str) -> Result<(u32, u32, Vec<u8>)>
     decode_rgba(&source.read(path)?)
 }
 pub(crate) fn decode_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
+    use crate::hud::{MAX_IMAGE_BYTES, image_buffer};
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.ignore_checksums(true);
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info()?;
-    let mut bytes = vec![
-        0;
-        reader
-            .output_buffer_size()
-            .ok_or("sprite exceeds decoder limits")?
-    ];
+    crate::hud::check_pack_size(reader.info().width, reader.info().height)?;
+    let size = reader.output_buffer_size().unwrap_or(usize::MAX);
+    let mut bytes = image_buffer(&[size], MAX_IMAGE_BYTES)?;
+    bytes.resize(size, 0);
     let info = reader.next_frame(&mut bytes)?;
     let channels = info.color_type.samples();
-    let mut pixels = Vec::with_capacity(info.width as usize * info.height as usize * 4);
+    let mut pixels = image_buffer(
+        &[info.width as usize, info.height as usize, 4],
+        MAX_IMAGE_BYTES,
+    )?;
     for pixel in bytes[..info.buffer_size()].chunks_exact(channels) {
         let rgba = match info.color_type {
             png::ColorType::Rgba => [pixel[0], pixel[1], pixel[2], pixel[3]],
@@ -1034,21 +1014,49 @@ fn pbr_map(
     }
     let side = w.max(h);
     let output_side = side_within(side, LAYERS_AT_LEAST, max_map_bytes()).min(side);
-    let frames = (0..columns * rows)
-        .map(|index| {
-            let (x, y) = (index % columns * w, index / columns * h);
-            let mut frame = Vec::with_capacity((side * side * 4) as usize);
-            for row in 0..side {
-                for column in 0..side {
-                    let offset =
-                        (((y + row * h / side) * map_width + x + column * w / side) * 4) as usize;
-                    frame.extend_from_slice(&pixels[offset..offset + 4]);
-                }
-            }
-            resample(&frame, side, output_side)
-        })
-        .collect();
+    let frames = square_frames(
+        &pixels,
+        map_width,
+        map_height,
+        w,
+        h,
+        output_side,
+        crate::hud::MAX_IMAGE_BYTES,
+    )
+    .ok()?;
     Some((output_side, frames))
+}
+/// Each `width` x `height` frame of a `png_width` x `png_height` image, in
+/// row-major order, sampled to `output_side`. The table and all its pixels
+/// must fit `budget` before any frame is made.
+fn square_frames(
+    pixels: &[u8],
+    png_width: u32,
+    png_height: u32,
+    width: u32,
+    height: u32,
+    output_side: u32,
+    budget: usize,
+) -> Result<Vec<Vec<u8>>> {
+    let columns = png_width / width;
+    let count = columns * (png_height / height);
+    let side = output_side as usize;
+    let pixel_bytes = crate::hud::image_bytes(&[side, side, 4, count as usize], budget)?;
+    let mut frames = crate::hud::image_buffer(&[count as usize], budget - pixel_bytes)?;
+    for index in 0..count {
+        let (x, y) = (index % columns * width, index / columns * height);
+        frames.push(crate::hud::strip_frame(
+            pixels,
+            png_width,
+            x,
+            y,
+            width,
+            height,
+            output_side,
+            budget,
+        )?);
+    }
+    Ok(frames)
 }
 /// SpriteContents: the `.mcmeta` `texture` section (TextureMetadataSection's
 /// mipmap strategy and alpha cutoff bias).
@@ -1096,6 +1104,52 @@ pub(crate) fn sprite_mipmap_limit(requested: u32, size: u32, minimum: u32, avail
 mod tests {
     use super::*;
     use std::fs::{self, File};
+    /// A sprite is refused by the side its PNG header claims when no atlas
+    /// would take it, before the reader sizes a buffer from that header.
+    #[test]
+    fn a_sprite_png_claiming_a_side_no_atlas_takes_is_refused() {
+        let png = |width: u32| {
+            let mut bytes = Vec::new();
+            let mut encoder = png::Encoder::new(&mut bytes, width, 1);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&vec![0; width as usize]).unwrap();
+            writer.finish().unwrap();
+            bytes
+        };
+        assert_eq!(decode_rgba(&png(32_768)).unwrap().0, 32_768);
+        let refused = decode_rgba(&png(40_000)).map(|(width, height, _)| (width, height));
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| e.is::<crate::hud::OverSizeLimit>()),
+            "{refused:?}"
+        );
+    }
+    /// A narrow image's frames widen to squares: a 64x2 strip of 64x1 frames
+    /// makes two 64x64 layers, all of them held to the budget before any is
+    /// made.
+    #[test]
+    fn square_frames_of_a_narrow_strip_are_held_to_the_budget() {
+        let pixels = vec![5; 64 * 2 * 4];
+        let frames = |budget| square_frames(&pixels, 64, 2, 64, 1, 64, budget);
+        let budget = 2 * (64 * 64 * 4 + size_of::<Vec<u8>>());
+        let made = frames(budget).unwrap();
+        assert_eq!(made.len(), 2);
+        assert!(made.iter().all(|frame| frame.len() == 64 * 64 * 4));
+        assert!(frames(budget - 1).is_err_and(|e| e.is::<crate::hud::OverSizeLimit>()));
+    }
+
+    #[test]
+    fn shrinking_rectangular_frames_keeps_the_squared_frames_sampling() {
+        let pixels: Vec<u8> = (0..20).flat_map(|n| [n, 0, 0, 255]).collect();
+        let frames = square_frames(&pixels, 5, 4, 5, 4, 2, 16 + size_of::<Vec<u8>>()).unwrap();
+        assert_eq!(
+            frames,
+            [vec![0, 0, 0, 255, 2, 0, 0, 255, 5, 0, 0, 255, 7, 0, 0, 255]]
+        );
+    }
     #[test]
     fn archive_sprites_keep_deferred_reads_and_cache_on_their_reload_snapshot() -> Result<()> {
         use std::io::Write;

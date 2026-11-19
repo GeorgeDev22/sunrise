@@ -2008,7 +2008,10 @@ mod tests {
             r#"{"pack":{"description":"Moon","pack_format":1}}"#,
         );
         write("data/demo/world_clock/moon.json", "{}");
-        write("data/minecraft/world_clock/the_end.json", "{}");
+        write(
+            "data/minecraft/world_clock/the_end.json",
+            r#"{"from":"pack"}"#,
+        );
         write(
             "data/demo/dimension_type/moon.json",
             r##"{
@@ -2020,10 +2023,17 @@ mod tests {
             }"##,
         );
         let packs = crate::datapack::discover(&world);
-        let files: Vec<_> = crate::datapack::DataStore::load(&packs.iter().collect::<Vec<_>>())
-            .files
-            .into_iter()
-            .collect();
+        let mut files = crate::datapack::DataStore::load(&packs.iter().collect::<Vec<_>>()).files;
+        // Native contributions sit below the world's enabled packs.
+        files
+            .get_mut("world_clock/minecraft:the_end")
+            .unwrap()
+            .insert(
+                0,
+                br#"{"neoforge:conditions":[{"type":"neoforge:never"}]}"#.to_vec(),
+            );
+        files.insert("world_clock/test:frozen".into(), vec![b"{}".to_vec()]);
+        let files: Vec<_> = files.into_iter().collect();
         let _ = std::fs::remove_dir_all(&world);
         let sync = SyncData::load(
             &root,
@@ -2049,17 +2059,25 @@ mod tests {
             clocks
                 .iter()
                 .find(|e| e.id == name)
-                .map(|e| e.data.is_some())
+                .map(|e| e.data.as_ref())
         };
-        assert_eq!(
-            sent(&clock),
-            Some(true),
+        assert!(
+            sent(&clock).is_some_and(|data| data.is_some()),
             "no client knows the clock {clock} the dimension names"
         );
-        assert_eq!(sent("minecraft:the_end"), Some(true), "the replaced clock");
+        assert_eq!(
+            sent("minecraft:the_end"),
+            Some(Some(&json_to_nbt(&serde_json::json!({"from":"pack"})))),
+            "the enabled pack's clock wins over the false-conditioned native clock"
+        );
+        assert_eq!(
+            sent("test:frozen"),
+            Some(Some(&json_to_nbt(&serde_json::json!({})))),
+            "a clock only the native mod gives"
+        );
         assert_eq!(
             sent("minecraft:overworld"),
-            Some(false),
+            Some(None),
             "the untouched clock"
         );
     }

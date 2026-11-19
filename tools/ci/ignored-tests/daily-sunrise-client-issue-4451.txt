@@ -2285,6 +2285,7 @@ sunrise-client game::remote::player_tick_tests::client_player_ticks_on_the_death
 sunrise-client game::remote::player_tick_tests::guest_tick_brackets_sleep_cooldowns_pickups_and_death lib daily resources
 sunrise-client game::remote::player_tick_tests::the_name_tag_over_a_player_shows_the_name_a_mod_formats lib daily resources
 sunrise-client game::remote::respawn_motion_tests::a_portals_respawn_keeps_the_players_motion_and_a_deaths_does_not lib daily resources
+sunrise-client game::remote::rider_tick_tests::a_boat_clamps_the_riders_yaw_without_changing_the_previous_yaw lib daily resources
 sunrise-client game::remote::rider_tick_tests::a_riders_move_takes_the_look_of_the_tick_and_leaves_it_off_the_ground lib daily resources
 sunrise-client game::remote::tables::tests::a_servers_block_and_item_tags_replace_the_games lib daily resources
 sunrise-client game::remote::tests::a_servers_client_takes_its_speed_from_the_attributes_not_the_effect lib daily resources
