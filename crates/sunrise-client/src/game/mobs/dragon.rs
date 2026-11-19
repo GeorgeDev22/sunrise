@@ -527,49 +527,6 @@ fn shrugs(direct: Option<&ProjectileKind>) -> bool {
         Some(ProjectileKind::Arrow { .. } | ProjectileKind::Trident | ProjectileKind::WindCharge)
     )
 }
-/// `#minecraft:no_knockback` by the damage type's id: `dealDefaultKnockback` skips these.
-fn is_no_knockback_type(ty: &str) -> bool {
-    matches!(
-        ty.trim_start_matches("minecraft:"),
-        "explosion"
-            | "player_explosion"
-            | "bad_respawn_point"
-            | "in_fire"
-            | "lightning_bolt"
-            | "on_fire"
-            | "lava"
-            | "hot_floor"
-            | "sulfur_cube_hot"
-            | "in_wall"
-            | "cramming"
-            | "drown"
-            | "starve"
-            | "cactus"
-            | "fall"
-            | "ender_pearl"
-            | "fly_into_wall"
-            | "out_of_world"
-            | "generic"
-            | "magic"
-            | "wither"
-            | "dragon_breath"
-            | "dry_out"
-            | "sweet_berry_bush"
-            | "freeze"
-            | "stalagmite"
-            | "outside_border"
-            | "generic_kill"
-            | "campfire"
-            | "spear"
-    )
-}
-/// `#minecraft:is_explosion` by the damage type's id.
-fn is_explosion_type(ty: &str) -> bool {
-    matches!(
-        ty.trim_start_matches("minecraft:"),
-        "fireworks" | "explosion" | "player_explosion" | "bad_respawn_point"
-    )
-}
 /// `Vec3.normalize`: zero under a length of `1.0E-5F`.
 fn vanilla_normalize(v: glam::DVec3) -> glam::DVec3 {
     let len = v.length();
@@ -605,6 +562,69 @@ const ADJACENCY: [u32; 24] = [
     3166214, 2138120, 6373424, 4358208, 12910976, 9044480, 9706496, 15216640, 13688832, 11763712,
     8257536,
 ];
+/// A* over the dragon's 24 fixed nodes, in Minecraft's open-set order.
+fn search_dragon_path(
+    nodes: &[[i32; 3]; 24],
+    from: usize,
+    to: usize,
+    min: usize,
+    last: Option<[i32; 3]>,
+) -> Option<Path> {
+    use sunrise_client::mobs::path::heap::{Key, OpenSet};
+    let dist = |a: [i32; 3], b: [i32; 3]| {
+        (((a[0] - b[0]).pow(2) + (a[1] - b[1]).pow(2) + (a[2] - b[2]).pow(2)) as f32).sqrt()
+    };
+    let mut g = [f32::MAX; 24];
+    let mut came = [usize::MAX; 24];
+    let mut closed = [false; 24];
+    let mut keys = [Key::default(); 24];
+    let mut open = OpenSet::with_capacity(keys.len());
+    open.insert(&mut keys, from as u32, dist(nodes[from], nodes[to]));
+    g[from] = 0.0;
+    let mut closest = from;
+    while let Some(cur) = open.pop(&mut keys) {
+        let cur = cur as usize;
+        if cur == to {
+            closest = to;
+            break;
+        }
+        if dist(nodes[cur], nodes[to]) < dist(nodes[closest], nodes[to]) {
+            closest = cur;
+        }
+        closed[cur] = true;
+        for i in min..24 {
+            if ADJACENCY[cur] & (1 << i) != 0 && !closed[i] {
+                let tentative = g[cur] + dist(nodes[cur], nodes[i]);
+                if tentative < g[i] {
+                    g[i] = tentative;
+                    came[i] = cur;
+                    let f = tentative + dist(nodes[i], nodes[to]);
+                    if keys[i].is_open() {
+                        open.change_cost(&mut keys, i as u32, f);
+                    } else {
+                        open.insert(&mut keys, i as u32, f);
+                    }
+                }
+            }
+        }
+    }
+    if closest == from && from != to {
+        return None;
+    }
+    let mut list = vec![nodes[closest]];
+    let mut n = closest;
+    while came[n] != usize::MAX {
+        n = came[n];
+        list.insert(0, nodes[n]);
+    }
+    if let Some(l) = last {
+        list.push(l);
+    }
+    Some(Path {
+        nodes: list,
+        next: 0,
+    })
+}
 impl Dragon {
     /// `Entity.teleportSetPosition` with the command's relative motion flags.
     pub(super) fn teleport_motion(&mut self, relative: [bool; 3]) {
@@ -1559,12 +1579,19 @@ impl Game<'_> {
             d.strafe_after_crystal(target.as_ref());
         }
     }
+    /// The boxes of the living dragon's parts a projectile can hit, in `getSubEntities` order.
+    pub(super) fn dragon_part_boxes(&self) -> Option<[Aabb; 8]> {
+        self.dragon
+            .as_ref()
+            .filter(|d| d.alive())
+            .map(|d| std::array::from_fn(|i| d.part_box(i)))
+    }
     /// Targets for projectiles: dragon parts and crystals.
     pub(super) fn special_targets(&self) -> Vec<(u32, Aabb)> {
         let mut out = Vec::new();
-        if let Some(d) = self.dragon.as_ref().filter(|d| d.alive()) {
-            for i in 0..8 {
-                out.push((SPECIAL + i as u32, d.part_box(i)));
+        if let Some(boxes) = self.dragon_part_boxes() {
+            for (i, part) in boxes.into_iter().enumerate() {
+                out.push((SPECIAL + i as u32, part));
             }
         }
         for (i, c) in self.crystals.iter().enumerate() {
@@ -1700,12 +1727,15 @@ impl Game<'_> {
             direct: direct_entity,
             position: from.map(|p| [p.x, p.y, p.z]),
         };
+        // The world's tags, so a datapack type is classed as vanilla's are.
+        let explosion = self.damage_in_tag(ty, "minecraft:is_explosion");
+        let no_knockback = self.damage_in_tag(ty, "minecraft:no_knockback");
         let level = super::entity::damage_level_of!(self, self.combat.attack(), no_push, None);
         let reaches_base = self.dragon.as_ref().is_some_and(|d| {
             d.reaches_base_check(
                 BODY,
                 amount,
-                player.is_some() || is_explosion_type(ty),
+                player.is_some() || explosion,
                 shrugs(direct.as_ref()),
             )
         });
@@ -1741,9 +1771,9 @@ impl Game<'_> {
         let Some(d) = self.dragon.as_mut().filter(|d| d.id == id) else {
             return false;
         };
-        let counts = player.is_some() || is_explosion_type(ty);
+        let counts = player.is_some() || explosion;
         // With no source position the push has no direction (knockback(0.4, 0, 0)).
-        let knock = (!is_no_knockback_type(ty)).then(|| from.unwrap_or(d.position));
+        let knock = (!no_knockback).then(|| from.unwrap_or(d.position));
         let entity_id = match by {
             Some(Target::Projectile(id) | Target::Trident(id)) => Some(id as i32),
             _ => None,
@@ -1784,10 +1814,7 @@ impl Game<'_> {
             .filter(|t| matches!(t, Target::Player | Target::Guest(_)))
             .and_then(|t| self.for_player(t, |g| g.creative))
             .unwrap_or(false);
-        let bypass = matches!(
-            ty.trim_start_matches("minecraft:"),
-            "out_of_world" | "generic_kill"
-        ) || creative;
+        let bypass = self.damage_in_tag(ty, "minecraft:bypasses_invulnerability") || creative;
         let vanilla = (self.crystals[index].invulnerable && !bypass) || is_fire(kind);
         let entity_id = |target| match target {
             Some(Target::Player) => self.own_entity_id(),
@@ -1810,7 +1837,7 @@ impl Game<'_> {
         }
         // destroy_crystal keeps a crystal invulnerable to everything else.
         self.crystals[index].invulnerable = false;
-        let damage = if is_explosion_type(ty) {
+        let damage = if self.damage_in_tag(ty, "minecraft:is_explosion") {
             CrystalDamage::Explosion
         } else {
             CrystalDamage::Direct
@@ -2128,67 +2155,12 @@ impl Game<'_> {
     /// `findPath` (A* over the adjacency masks), optionally ending at `last`.
     fn dragon_path(&mut self, from: usize, to: usize, last: Option<[i32; 3]>) -> Option<Path> {
         let nodes = self.dragon_nodes();
-        let dist = |a: [i32; 3], b: [i32; 3]| {
-            (((a[0] - b[0]).pow(2) + (a[1] - b[1]).pow(2) + (a[2] - b[2]).pow(2)) as f32).sqrt()
-        };
         let min = if self.fight.alive_crystals == 0 {
             12
         } else {
             0
         };
-        let mut g = [f32::MAX; 24];
-        let mut came = [usize::MAX; 24];
-        let mut closed = [false; 24];
-        let mut open = vec![from];
-        g[from] = 0.0;
-        let mut closest = from;
-        while !open.is_empty() {
-            let (k, &cur) = open
-                .iter()
-                .enumerate()
-                .min_by(|a, b| {
-                    (g[*a.1] + dist(nodes[*a.1], nodes[to]))
-                        .total_cmp(&(g[*b.1] + dist(nodes[*b.1], nodes[to])))
-                })
-                .expect("open set");
-            open.swap_remove(k);
-            if cur == to {
-                closest = to;
-                break;
-            }
-            if dist(nodes[cur], nodes[to]) < dist(nodes[closest], nodes[to]) {
-                closest = cur;
-            }
-            closed[cur] = true;
-            for i in min..24 {
-                if ADJACENCY[cur] & (1 << i) != 0 && !closed[i] {
-                    let tentative = g[cur] + dist(nodes[cur], nodes[i]);
-                    if tentative < g[i] {
-                        g[i] = tentative;
-                        came[i] = cur;
-                        if !open.contains(&i) {
-                            open.push(i);
-                        }
-                    }
-                }
-            }
-        }
-        if closest == from && from != to {
-            return None;
-        }
-        let mut list = vec![nodes[closest]];
-        let mut n = closest;
-        while came[n] != usize::MAX {
-            n = came[n];
-            list.insert(0, nodes[n]);
-        }
-        if let Some(l) = last {
-            list.push(l);
-        }
-        Some(Path {
-            nodes: list,
-            next: 0,
-        })
+        search_dragon_path(&nodes, from, to, min, last)
     }
     fn next_target(&mut self, path: &mut Option<PathBox>) -> Option<Vec3> {
         let p = path.as_mut()?;
@@ -4161,6 +4133,7 @@ impl Game<'_> {
             spectator: false,
             watching: false,
             hidden: None,
+            general: false,
         })
     }
 }
@@ -4776,6 +4749,16 @@ impl Game<'_> {
     /// so it can be spawned in any dimension. Sunrise keeps one dragon per level, as `/summon`
     /// and loading do: with one already there, nothing spawns and the egg stays.
     pub(super) fn spawn_dragon_spawned(&mut self, at: [f64; 3], site: SpawnSite) -> Option<u32> {
+        self.spawn_dragon_facing(at, site, None)
+    }
+    /// [`spawn_dragon_spawned`](Self::spawn_dragon_spawned) snapped to `fixed_yaw` when
+    /// given (`snapTo(pos, yaw, 0)`), which takes no draw from the level.
+    pub(super) fn spawn_dragon_facing(
+        &mut self,
+        at: [f64; 3],
+        site: SpawnSite,
+        fixed_yaw: Option<f32>,
+    ) -> Option<u32> {
         if self.dragon.is_some() {
             return None;
         }
@@ -4783,8 +4766,11 @@ impl Game<'_> {
         // SummonCommand loads absent Rotation as zero before finalization. Only
         // EntityType.create's egg placement draws a random snapTo yaw.
         // Diverges from upstream: shared mod finalization also admits command dragons.
-        let yaw = match site {
-            SpawnSite::Finalizing(sunrise_client::mobs::spawn_rules::Reason::Command) => 0.0,
+        let yaw = match (fixed_yaw, site) {
+            (Some(yaw), _) => yaw,
+            (None, SpawnSite::Finalizing(sunrise_client::mobs::spawn_rules::Reason::Command)) => {
+                0.0
+            }
             _ => sunrise_client::camera::wrap_degrees(self.world.random.next_float() * 360.0),
         };
         let finalized = match site {
@@ -5118,6 +5104,44 @@ use death_render::{dissolve_color, dissolve_mask};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragon_search_preserves_equal_cost_heap_order() {
+        let xz = [
+            [60, -1],
+            [51, 29],
+            [29, 51],
+            [0, 60],
+            [-30, 51],
+            [-52, 30],
+            [-60, 0],
+            [-52, -31],
+            [-31, -52],
+            [-1, -60],
+            [29, -52],
+            [51, -30],
+            [40, -1],
+            [28, 28],
+            [0, 40],
+            [-29, 28],
+            [-40, 0],
+            [-29, -29],
+            [-1, -40],
+            [28, -29],
+            [20, -1],
+            [0, 20],
+            [-20, 0],
+            [-1, -20],
+        ];
+        let heights = [
+            83, 88, 75, 82, 86, 82, 87, 88, 83, 75, 78, 74, 80, 77, 79, 73, 74, 82, 74, 73, 85, 75,
+            75, 77,
+        ];
+        let nodes = std::array::from_fn(|i| [xz[i][0], heights[i], xz[i][1]]);
+        let path = search_dragon_path(&nodes, 18, 6, 0, None).unwrap();
+        // With crystals alive, the ruled array heap visits node 16 before 7 at a tie.
+        assert_eq!(path.nodes, [nodes[18], nodes[17], nodes[16], nodes[6]]);
+    }
 
     #[test]
     #[ignore = "daily"]

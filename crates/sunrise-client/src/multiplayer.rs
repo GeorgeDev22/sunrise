@@ -144,8 +144,9 @@ pub enum Screen {
     Disconnected {
         /// The server's or a mod's reason, rendered in the player's language when drawn.
         reason: Text,
-        /// Auto-reconnect's next attempt, until it is cancelled.
-        retry: Option<crate::reconnect::Retry>,
+        /// What the screen says about connecting again, while something asks to
+        /// (`sunrise_hooks::Hooks::retry`) and the player hasn't cancelled.
+        retry: Option<String>,
         /// Wrapped reason lines, set by the last draw; the buttons sit below them.
         lines: std::cell::Cell<usize>,
     },
@@ -159,10 +160,6 @@ pub fn title_entry() -> Option<Screen> {
         Some(page) => Some(Screen::Page(Form::open(page))),
         None => crate::net::joins_friends().then(|| Screen::friend(true)),
     }
-}
-/// Whether the title screen's Friends icon opens something ([`title_entry`]).
-pub fn has_title_entry() -> bool {
-    page::title_page().is_some() || crate::net::joins_friends()
 }
 
 /// What a click asks the title screen to do.
@@ -317,15 +314,7 @@ fn ping_all(servers: &[ServerEntry], pings: &Pings, icons: &Icons, file: &Path) 
                             }
                         }
                         // OnlineServerEntry: SUCCESSFUL only for this game's protocol.
-                        let joinable = protocol == i64::from(sunrise_protocol::PROTOCOL_VERSION)
-                            || (crate::net::older_servers_enabled()
-                                && i32::try_from(protocol)
-                                    .ok()
-                                    .and_then(
-                                        sunrise_protocol::adapter::ServerVersion::from_protocol,
-                                    )
-                                    .is_some());
-                        if joinable {
+                        if protocol == i64::from(sunrise_protocol::PROTOCOL_VERSION) {
                             Ping::Ok {
                                 motd,
                                 players,
@@ -1418,9 +1407,8 @@ impl Screen {
                 for (i, line) in wrapped.iter().enumerate() {
                     centered(batch, line, l.message + i as f32 * 9.0, u32::MAX);
                 }
-                if let Some(r) = retry {
-                    let text = r.text(std::time::Instant::now());
-                    centered(batch, &text, l.retry, rgba(170, 170, 170, 255));
+                if let Some(line) = retry {
+                    centered(batch, line, l.retry, rgba(170, 170, 170, 255));
                 }
             }
         }
@@ -1499,21 +1487,9 @@ impl Screen {
                     return Outcome::Connect { address, lan };
                 }
             }
-            (Self::List { .. }, Some(41)) => {
-                return Outcome::Open(Box::new(Self::Direct {
-                    address: String::new(),
-                }));
-            }
+            (Self::List { .. }, Some(41)) => return Outcome::Open(Box::new(Self::direct())),
             (Self::List { .. }, Some(47)) => return Outcome::Open(Box::new(Self::friend(false))),
-            (Self::List { .. }, Some(42)) => {
-                return Outcome::Open(Box::new(Self::Edit {
-                    index: None,
-                    name: crate::lang::get_or("selectServer.defaultName", "Minecraft Server"),
-                    address: String::new(),
-                    focus: 1,
-                    packs: None,
-                }));
-            }
+            (Self::List { .. }, Some(42)) => return Outcome::Open(Box::new(Self::add_server())),
             (
                 Self::List {
                     servers, selected, ..
@@ -1903,6 +1879,22 @@ impl Screen {
             Self::Edit { .. } | Self::Friend { .. } | Self::Page(_)
         )
     }
+    /// Add Server (`EditServerScreen` for a new `ServerData`), empty.
+    pub fn add_server() -> Self {
+        Self::Edit {
+            index: None,
+            name: crate::lang::get_or("selectServer.defaultName", "Minecraft Server"),
+            address: String::new(),
+            focus: 1,
+            packs: None,
+        }
+    }
+    /// Direct Connection (`DirectJoinServerScreen`), empty.
+    pub fn direct() -> Self {
+        Self::Direct {
+            address: String::new(),
+        }
+    }
     /// Join a friend, with the relay the player set before.
     pub fn friend(from_title: bool) -> Self {
         Self::Friend {
@@ -1911,16 +1903,6 @@ impl Screen {
             relay: crate::net::friends_relay_setting().unwrap_or_default(),
             focus: 0,
         }
-    }
-    /// Auto-reconnect's attempt, once its countdown is over.
-    pub fn due_retry(&mut self) -> Option<crate::reconnect::Retry> {
-        let Self::Disconnected { retry, .. } = self else {
-            return None;
-        };
-        if !retry.as_ref()?.due(std::time::Instant::now()) {
-            return None;
-        }
-        retry.take()
     }
     /// `ServerSelectionList.updateNetworkServers`' narration: for each LAN
     /// world found since the last call whose row is in the list's view,

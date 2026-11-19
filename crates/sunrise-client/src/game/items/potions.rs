@@ -982,35 +982,38 @@ impl Game<'_> {
         // trigger, with the stack as drunk (before it shrinks).
         self.award_stat("used", &stack.item, 1);
         self.trigger_item("minecraft:consume_item", stack);
-        self.post_entity_event("minecraft:drink", sunrise_client::mobs::Who::Player);
         if ominous {
-            self.drink_ominous_bottle(slot, stack);
-            return true;
+            self.drink_ominous_bottle(stack);
+        } else {
+            // PotionContents.onConsume: the potion's and the custom effects,
+            // at the stack's POTION_DURATION_SCALE.
+            let (lasting, now) = PlayerEffects::contents_effects(
+                &brewing::contents_effects(stack),
+                stack.potion_duration_scale(),
+            );
+            for e in lasting {
+                self.add_player_effect(e);
+            }
+            for a in now {
+                self.apply_effect_action(a);
+            }
         }
-        // PotionContents.onConsume: the potion's and the custom effects, at the
-        // stack's POTION_DURATION_SCALE.
-        let (lasting, now) = PlayerEffects::contents_effects(
-            &brewing::contents_effects(stack),
-            stack.potion_duration_scale(),
-        );
-        for e in lasting {
-            self.add_player_effect(e);
-        }
-        for a in now {
-            self.apply_effect_action(a);
-        }
-        if !self.creative {
+        self.apply_drink_effects(stack);
+        self.post_entity_event("minecraft:drink", sunrise_client::mobs::Who::Player);
+        if !self.creative && self.stack_in(slot) == Some(stack) {
             if let Some(s) = self.stack_in_mut(slot).as_mut() {
                 s.count -= 1;
                 if s.count == 0 {
                     *self.stack_in_mut(slot) = None;
                 }
             }
-            let bottle = ItemStack::new("minecraft:glass_bottle", 1);
-            if self.stack_in(slot).is_none() {
-                *self.stack_in_mut(slot) = Some(bottle);
-            } else if let Some(rest) = self.add_stack_to_inventory(bottle) {
-                self.spawn_item(rest, eye, [0.0, 0.1, 0.0], 40);
+            if !ominous {
+                let bottle = ItemStack::new("minecraft:glass_bottle", 1);
+                if self.stack_in(slot).is_none() {
+                    *self.stack_in_mut(slot) = Some(bottle);
+                } else if let Some(rest) = self.add_stack_to_inventory(bottle) {
+                    self.spawn_item(rest, eye, [0.0, 0.1, 0.0], 40);
+                }
             }
         }
         true
@@ -1155,7 +1158,7 @@ impl Game<'_> {
             }
             EffectAction::Hurt(source, amount) => {
                 let mut canceled = false;
-                if let Some(id) = self.motion.health.damage.id(source)
+                if let Some(id) = self.health_resources.damage.id(source)
                     && let Ok(o) = p.hurt_blocking(
                         crate::game::entity::damage_level_of!(
                             self,
@@ -1163,7 +1166,7 @@ impl Game<'_> {
                             no_push,
                             None
                         ),
-                        &self.motion.health,
+                        &self.health_resources,
                         rules,
                         id,
                         amount,
@@ -1186,7 +1189,7 @@ impl Game<'_> {
                             no_push,
                             None
                         ),
-                        &self.motion.health,
+                        &self.health_resources,
                         rules,
                         id,
                         1.0,
@@ -1323,7 +1326,7 @@ impl Game<'_> {
                             .iter()
                             .filter_map(|effect| effect.registry_index),
                     );
-                    let registry = &self.motion.health.damage;
+                    let registry = &self.health_resources.damage;
                     actions.extend(changes.into_iter().filter_map(|change| {
                         match change {
                             EffectTickChange::Heal(amount) => Some(EffectAction::Heal(amount)),
@@ -2777,7 +2780,7 @@ impl sunrise_client::mobs::ModEffectTicks for Game<'_> {
                 EffectTickChange::Heal(amount) => mob.heal(&self.loop_context, amount),
                 // An unregistered damage type hurts nothing.
                 EffectTickChange::Hurt(source, amount) => {
-                    let registry = &self.motion.health.damage;
+                    let registry = &self.health_resources.damage;
                     if registry.id(&source).is_some() {
                         let kind = Self::damage_kind(registry, &source);
                         mob.damage(level, amount, Damage::of(kind));

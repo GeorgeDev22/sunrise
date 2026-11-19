@@ -1,10 +1,11 @@
 //! Block state ids and names, and item tags, for native mods:
 //! registry queries with no level, so they answer anywhere a host is given.
-use super::Game;
+use super::{Game, WorldRest, api_values::TryIntoEngine};
 use mod_api::{
-    BlockEntityTypeKey, BlockKey, BlockSoundType, BlockStateRange, EffectKey, EnchantmentKey,
-    EntityTypeKey, FluidDefinition, FluidKey, FluidState, FluidStateError, FluidTypeProperties,
-    ItemKey, MenuKey, StateConstraint, StateMatchError, StateProperty,
+    BlockEntityTypeKey, BlockKey, BlockSoundType, BlockStateRange, BlockStateRecord, EffectKey,
+    EnchantmentKey, EntityTypeKey, FluidDefinition, FluidKey, FluidState, FluidStateError,
+    FluidTypeProperties, ItemKey, MenuKey, StateConstraint, StateMatchError, StateProperty,
+    WeatheringAge,
 };
 use std::sync::{Arc, Mutex};
 use sunrise_client::command::{Reader, args::Registries, block};
@@ -228,6 +229,61 @@ impl Game<'_> {
     pub(super) fn block_state_default(&self, block: BlockKey) -> Option<BlockStateId> {
         super::api_values::default_state(block)
     }
+    /// Convert the canonical ordinal before reading the published weathering tables.
+    fn weathering_state(&self, state: BlockStateRecord) -> Option<(&WorldRest, BlockStateId)> {
+        Some((
+            self.res.rest.get()?,
+            mod_api::BlockState::from(state).try_into_engine(&()).ok()?,
+        ))
+    }
+
+    pub(super) fn block_weathering_age(&self, state: BlockStateRecord) -> Option<WeatheringAge> {
+        let (rest, state) = self.weathering_state(state)?;
+        Some(match rest.behaviours.weathering_age(state)? {
+            0 => WeatheringAge::Unaffected,
+            1 => WeatheringAge::Exposed,
+            2 => WeatheringAge::Weathered,
+            3 => WeatheringAge::Oxidized,
+            _ => return None,
+        })
+    }
+
+    pub(super) fn block_next_weathering_stage(
+        &self,
+        state: BlockStateRecord,
+    ) -> Option<BlockStateId> {
+        let (rest, state) = self.weathering_state(state)?;
+        rest.behaviours.weathering_next(state)
+    }
+
+    pub(super) fn block_previous_weathering_stage(
+        &self,
+        state: BlockStateRecord,
+    ) -> Option<BlockStateId> {
+        let (rest, state) = self.weathering_state(state)?;
+        rest.behaviours.weathering_previous(state)
+    }
+
+    pub(super) fn block_state_waxed(&self, state: BlockStateRecord) -> Option<BlockStateId> {
+        let (_, state) = self.weathering_state(state)?;
+        self.honeycomb_waxed(state)
+    }
+
+    pub(super) fn block_state_unwaxed(&self, state: BlockStateRecord) -> Option<BlockStateId> {
+        let (rest, state) = self.weathering_state(state)?;
+        if let Some(unwaxed) = rest.behaviours.mapped_unwaxed(state) {
+            return Some(unwaxed);
+        }
+        let registry = self.pack.assets.registry;
+        registry
+            .resolve(
+                &rest
+                    .transformers
+                    .unwaxed(registry, registry.state(state)?)?,
+            )
+            .ok()
+    }
+
     /// `BlockState.canBeReplaced()`: whether placing a block where this state stands
     /// replaces it (air, grass, water, snow layers). None for an unknown state.
     pub(super) fn block_state_replaceable(&self, state: BlockStateId) -> Option<bool> {
@@ -287,6 +343,10 @@ impl Game<'_> {
     pub(super) fn block_state_is_solid_render(&self, state: BlockStateId) -> Option<bool> {
         self.pack.assets.registry.state(state)?;
         Some(self.res.facts().get(state).solid_render)
+    }
+    /// `BlockState.isRedstoneConductor` for a state alone, not a block in a level.
+    pub(super) fn block_state_is_redstone_conductor(&self, state: BlockStateId) -> Option<bool> {
+        self.res.behaviours().state_redstone_conductor(state)
     }
     /// The immutable local ordinals of `block`, independent of current world ID order.
     pub(super) fn block_states_of(&self, block: BlockKey) -> Option<BlockStateRange> {
@@ -1040,6 +1100,46 @@ mod facts_tests {
 
     #[test]
     #[ignore = "daily"]
+    fn weathering_and_wax_reads_keep_shared_properties() {
+        use mod_api::{WeatheringAge::*, prelude::BlockStatesHost};
+
+        super::super::native_entity_refs::tests::with_game(|game| {
+            let stairs = |name| {
+                let id = format!(
+                    "minecraft:{name}[facing=east,half=top,shape=inner_left,waterlogged=true]"
+                );
+                BlockStatesHost::block_state_id(game, &id).unwrap()
+            };
+            let fresh = stairs("cut_copper_stairs");
+            let exposed = stairs("exposed_cut_copper_stairs");
+            let weathered = stairs("weathered_cut_copper_stairs");
+            let oxidized = stairs("oxidized_cut_copper_stairs");
+            let waxed = stairs("waxed_exposed_cut_copper_stairs");
+            let facts = game.block_states();
+            assert_eq!(facts.weathering_age(fresh), Some(Unaffected));
+            assert_eq!(facts.weathering_age(exposed), Some(Exposed));
+            assert_eq!(facts.weathering_age(weathered), Some(Weathered));
+            assert_eq!(facts.weathering_age(oxidized), Some(Oxidized));
+            assert_eq!(facts.weathering_age(waxed), None);
+            assert_eq!(facts.next_weathering_stage(waxed), None);
+            assert_eq!(facts.previous_weathering_stage(waxed), None);
+            assert_eq!(facts.previous_weathering_stage(fresh), None);
+            assert_eq!(facts.next_weathering_stage(oxidized), None);
+            assert_eq!(facts.next_weathering_stage(fresh), Some(exposed));
+            assert_eq!(facts.previous_weathering_stage(oxidized), Some(weathered));
+            assert_eq!(facts.waxed(exposed), Some(waxed));
+            assert_eq!(facts.unwaxed(waxed), Some(exposed));
+            assert_eq!(facts.unwaxed(exposed), None);
+
+            let invalid = BlockStateRecord::new(exposed.block(), u16::MAX).into();
+            assert_eq!(facts.weathering_age(invalid), None);
+            assert_eq!(facts.next_weathering_stage(invalid), None);
+            assert_eq!(facts.waxed(invalid), None);
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn block_state_facts_read_vanillas_tables_through_the_host() {
         super::super::native_entity_refs::tests::with_game(|game| {
             let state = |name: &str| {
@@ -1090,6 +1190,19 @@ mod facts_tests {
             assert_eq!(
                 facts.is_solid_render(state("minecraft:stone_slab")),
                 Some(false)
+            );
+            assert_eq!(facts.is_redstone_conductor(stone), Some(true));
+            assert_eq!(
+                facts.is_redstone_conductor(state("minecraft:glass")),
+                Some(false)
+            );
+            assert_eq!(
+                facts.is_redstone_conductor(state("minecraft:moving_piston")),
+                Some(false)
+            );
+            assert_eq!(
+                facts.is_redstone_conductor(state("minecraft:red_shulker_box")),
+                None
             );
             // SoundType.STONE: its break event, at volume and pitch 1.
             let sound = facts.sound(stone).unwrap();

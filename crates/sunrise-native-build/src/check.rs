@@ -19,7 +19,7 @@ pub enum Verdict {
     Fits { made_for: String },
     /// It changes game code or names the game's internals (`why`: the table that does, or `internals`): it works on the build it was made for only.
     Exact { made_for: String, why: &'static str },
-    /// Its package doesn't say what it uses (an older tool, or a list for another build than its pin): it works on the build it was made for only.
+    /// Its package doesn't say what it uses (no list at all, a list for another build than its pin, or one an older tool wrote that holds no version of a hook this build has changed the meaning of at some time): it works on the build it was made for only.
     NoList { made_for: String },
     /// Items it uses changed in this build.
     DoesNotFit {
@@ -65,6 +65,10 @@ pub fn judge<E>(
         return Ok(Verdict::NoList { made_for });
     };
     let target = surface()?;
+    // A list an older tool wrote names no hook versions, and the build it was made for is not at hand here.
+    if table.lacks_a_hook_version(target.as_ref()) {
+        return Ok(Verdict::NoList { made_for });
+    }
     if let Fit::DoesNotFit(misfits) = uses::fits(&table.entries, target.as_ref()) {
         return Ok(Verdict::DoesNotFit { made_for, misfits });
     }

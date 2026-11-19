@@ -3,7 +3,6 @@ use crate::game::api_values::TryIntoApi;
 
 /// Helpers for native mods, kept as stable as the hook points.
 // Native mods use these; nothing in Sunrise does.
-#[allow(dead_code)]
 impl Game<'_> {
     /// Playing, with nothing over the world: keys and zoom apply.
     pub(in crate::game) fn playing(&self) -> bool {
@@ -50,10 +49,13 @@ impl Game<'_> {
         let &(_, key) = MAPPINGS.iter().find(|m| m.0 == name)?;
         Some(match key {
             Some(k) => self.movement_key_held(k),
-            // The button, or the mapping's own held state (a toggle, a pad, `set_mapping_down`).
+            // Attack and use read the logical mapping, not the physical mouse's state.
             None => {
-                let use_key = usize::from(name == "key.use");
-                self.mouse_held()[use_key] || [self.left, self.right][use_key]
+                if name == "key.use" {
+                    self.right
+                } else {
+                    self.left
+                }
             }
         })
     }

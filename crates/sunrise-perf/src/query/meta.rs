@@ -131,7 +131,6 @@ fn sunrise_options_info(h: &SunriseOptions) -> SunriseOptionsInfo {
     SunriseOptionsInfo {
         max_view_distance: h.max_view_distance,
         lod_distance: h.lod_distance,
-        anticheat: h.anticheat,
     }
 }
 

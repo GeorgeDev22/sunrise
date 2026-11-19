@@ -872,7 +872,7 @@ impl Game<'_> {
                         no_push,
                         None
                     ),
-                    &self.motion.health,
+                    &self.health_resources,
                     rules,
                     id,
                     amount,
@@ -1882,7 +1882,6 @@ impl Game<'_> {
         }
         // Block.onExplosionHit: the drops copy from the block entity, which
         // then spills its contents as the block turns to air.
-        let key = (pos[0], pos[1], pos[2]);
         let is_hive = matches!(&*name, "minecraft:beehive" | "minecraft:bee_nest");
         // BeehiveBlock.getDrops: the bees of a hive blown up by TNT, a
         // creeper, a wither skull, a wither or a TNT minecart come out.
@@ -1898,19 +1897,6 @@ impl Game<'_> {
                 sunrise_client::beehive::facing_step(facing.as_deref()),
                 sunrise_client::beehive::Release::Emergency,
             );
-        }
-        if let Some(entity) = self.world.block_entities.get(&key).cloned() {
-            let custom = self.world.block_names.get(&key).cloned();
-            self.pending.record(
-                pos,
-                &entity,
-                &name,
-                custom,
-                self.world.block_lock(key),
-                self.res.items(),
-            );
-        } else if let Some(tag) = super::spill::saved_entity(&self.world, pos) {
-            self.pending.record_saved(pos, &tag);
         }
         // Block.dropFromExplosion (only TntBlock refuses), or what the
         // block's parts answer: it gates spawnAfterBreak and the loot.
@@ -1937,15 +1923,17 @@ impl Game<'_> {
             }
         }
         if drops {
+            // Capture the entity the admitted roll actually sees. Spill, on removal below,
+            // uses the stored slots rather than the serializer's output.
+            if let Some(saved) = self.loot_block_entity(pos, &name) {
+                self.pending.record_from(&self.world, pos, saved);
+            }
             let dynamic = self.pending.dynamic(pos);
             // LootContextParams.EXPLOSION_RADIUS under DESTROY_WITH_DECAY: the
             // tables' survives_explosion and explosion_decay draw from their
             // random sequence.
             let decay = (interaction == BlockInteraction::DestroyWithDecay).then_some(radius);
-            let place = self.loot_place_at(
-                pos.map(|v| f64::from(v) + 0.5),
-                self.loot_block_entity(pos, &name),
-            );
+            let place = self.loot_place_at(pos.map(|v| f64::from(v) + 0.5), None);
             // `Explosion.getDirectSourceEntity`.
             let entity = self
                 .combat

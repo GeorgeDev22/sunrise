@@ -351,6 +351,19 @@ impl Game<'_> {
             self.sculk.tracker = WardenSpawnTracker::from_nbt(tag);
         }
     }
+    /// Whether a mod canceled the `ServerPlayer.tick` of the world's owner, whose warden spawn
+    /// tracker this is: looked up only when a Pre canceled a player.
+    fn owner_tick_canceled(&self) -> bool {
+        !self.creatures.canceled_players.is_empty()
+            && self
+                .lan
+                .as_ref()
+                .and_then(|host| {
+                    let uuid = host.owner.as_ref()?.uuid;
+                    host.hub.guests.iter().find(|g| g.uuid == uuid)
+                })
+                .is_some_and(|g| self.player_tick_canceled(g.conn))
+    }
     /// The tracker as saved, once it has been loaded.
     pub(super) fn warden_tracker_tag(&self) -> Option<sunrise_core::nbt::Tag> {
         self.sculk
@@ -1085,7 +1098,11 @@ impl Game<'_> {
         self.sculk_prepare();
         laps.lap("sculk_prepare");
         self.load_warden_tracker();
-        self.sculk.tracker.tick();
+        // ServerPlayer.tick's wardenSpawnTracker: the owner's, which a mod's Pre that canceled
+        // the owner's tick stops this tick (game/network/lan_actions/tick.rs).
+        if !self.owner_tick_canceled() {
+            self.sculk.tracker.tick();
+        }
         self.tick_darkness_blend();
         laps.lap("sculk_wardens");
         self.sculk_step_on();

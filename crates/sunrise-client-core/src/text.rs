@@ -1196,22 +1196,45 @@ pub(crate) fn format_translatable_origin(
     args: &[Text],
     origin: Origin,
 ) -> Text {
-    let template = match fallback {
-        Some(fallback) => lang::current()
-            .and_then(|language| language.get(key).map(str::to_owned))
-            .unwrap_or_else(|| fallback.to_owned()),
-        None => lang::get(key),
-    };
-    format_translation_origin(&template, args, origin)
+    let language = lang::current();
+    if let Some(language) = language.as_deref()
+        && let Some(component) = language.component(key)
+    {
+        return resolve_lang_component(language, component, origin)
+            .unwrap_or_else(|| format_translation_origin(fallback.unwrap_or(key), args, origin));
+    }
+    let template = language
+        .as_ref()
+        .and_then(|l| l.get(key))
+        .unwrap_or_else(|| {
+            if fallback.is_none() {
+                lang::missed(key);
+            }
+            fallback.unwrap_or(key)
+        });
+    format_translation_origin(template, args, origin)
+}
+
+/// Component references expand on the component renderer's work stack, independently of
+/// the caller's Rust stack. Budget the rendered result, not each reference that leads to it.
+pub(crate) fn resolve_lang_component(
+    language: &lang::Language,
+    component: &Value,
+    origin: Origin,
+) -> Option<Text> {
+    let text = crate::component::render_lang_component(component, origin, language)?;
+    (text.rendered.spans.len() <= MAX_TRANSLATION_SPANS
+        && crate::component::rendered_bytes(&text, None) <= MAX_TRANSLATION_BYTES)
+        .then_some(text)
 }
 /// The most spans one translation expands to. Vanilla's `TranslatableContents.decompose` keeps
 /// references to its arguments, so its cost stays linear in the input; copying them here makes
 /// nested `%1$s` templates multiply (`k` references nested `D` deep: `k^D` copies), and a server's
 /// `fallback` template is any text it likes.
-const MAX_TRANSLATION_SPANS: usize = 1 << 15;
+pub(crate) const MAX_TRANSLATION_SPANS: usize = 1 << 15;
 /// The most text one translation expands to: one long argument referenced many times multiplies
 /// bytes, not spans.
-const MAX_TRANSLATION_BYTES: usize = 1 << 22;
+pub(crate) const MAX_TRANSLATION_BYTES: usize = 1 << 22;
 
 /// TranslatableContents.decomposeTemplate: `%s` takes the next argument,
 /// `%n$s` a numbered one and `%%` is a percent sign. Malformed templates are
@@ -1279,7 +1302,7 @@ pub(crate) fn format_translation_origin(template: &str, args: &[Text], origin: O
                 };
                 bytes = bytes
                     .saturating_add(literal.len())
-                    .saturating_add(arg.rendered.spans.iter().map(|s| s.text.len()).sum());
+                    .saturating_add(crate::component::rendered_bytes(arg, None));
                 if out
                     .rendered
                     .spans

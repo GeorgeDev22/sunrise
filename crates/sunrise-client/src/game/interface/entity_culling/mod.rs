@@ -384,8 +384,8 @@ impl Game<'_> {
 /// entityDistanceScaling`. Every entity's draw distance is scaled by it, so
 /// a small mob is drawn nearer than a big one and a longer render distance
 /// draws both further away.
-pub(super) fn entity_view_scale(render_distance: i32, entity_distance: f32) -> f64 {
-    (f64::from(render_distance) / 8.0).clamp(1.0, 2.5) * f64::from(entity_distance)
+pub(super) fn entity_view_scale(render_distance: i32, entity_distance: f64) -> f64 {
+    (f64::from(render_distance) / 8.0).clamp(1.0, 2.5) * entity_distance
 }
 
 /// Entity.shouldRenderAtSqrDistance's default range: 64 times the bounding

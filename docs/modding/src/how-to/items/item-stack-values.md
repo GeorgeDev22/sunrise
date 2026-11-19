@@ -46,8 +46,11 @@ normalized just like `set_components`; malformed damage leaves the entire stack 
 including explicit zero damage. If `other` has no override, the target inherits too:
 no effective prototype value is materialized. `get` followed by `set` covers `update`.
 These owned-value operations require no host. To persist them on a whole stack, use
-server-side `ItemPlace::edit` inside a transaction; it preserves item/count and rolls
-back with its parent transaction instead of splitting one item off.
+server-side `ItemPlace::edit` inside a transaction. It preserves item/count, rolls
+back with its parent transaction and applies only changed components to player slots,
+hands and equipment without equipping the stack again. The cursor and virtual transfer
+wrappers do not support whole-stack edits. Use a normal slot write if you need to replace
+the item or change its count.
 
 `ItemResource::with_component` is also fallible for raw component values. Its default-value
 elision and `without_component` preserve the normal prototype-plus-patch semantics. The latter
@@ -57,7 +60,9 @@ records real NBT removal entries for default components; it is not an unknown-va
 
 A consume or death-protection override whose opaque native effect payload cannot be decoded
 refuses the whole stack write with `StackWriteError::InvalidEffectPayload`, before any
-resident state changes.
+resident state changes. A `villager_food` patch without positive nutrition is refused as
+`StackWriteError::InvalidComponents { reason: StackError::InvalidComponent { id } }`;
+`id` names `minecraft:villager_food`. An explicit removal remains valid.
 The items host area owns metadata reads such as `max_stack_size(ItemKey)` and
 `max_damage(ItemKey)`. A stack does not take a host just to read a maximum, and an unavailable
 maximum never turns into a fabricated limit of 64.

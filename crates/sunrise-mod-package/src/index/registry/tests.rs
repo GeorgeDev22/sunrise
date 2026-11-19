@@ -94,7 +94,7 @@ date = "2026-10-24"
 "#;
 
 /// The header of a PNG of `w`×`h` pixels: what the registry reads of an image.
-fn png(w: u32, h: u32) -> Vec<u8> {
+pub(super) fn png(w: u32, h: u32) -> Vec<u8> {
     let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
     b.extend(w.to_be_bytes());
     b.extend(h.to_be_bytes());
@@ -103,10 +103,10 @@ fn png(w: u32, h: u32) -> Vec<u8> {
 }
 
 /// A registry checkout and its downloaded files, in a scratch folder.
-struct Scratch(PathBuf);
+pub(super) struct Scratch(pub(super) PathBuf);
 
 impl Scratch {
-    fn new(name: &str) -> Scratch {
+    pub(super) fn new(name: &str) -> Scratch {
         let dir =
             std::env::temp_dir().join(format!("sunrise-registry-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -131,17 +131,17 @@ impl Scratch {
         s
     }
 
-    fn write(&self, path: &str, text: &str) {
+    pub(super) fn write(&self, path: &str, text: &str) {
         std::fs::write(self.0.join("repo").join(path), text).unwrap();
     }
 
-    fn write_bytes(&self, path: &str, bytes: &[u8]) {
+    pub(super) fn write_bytes(&self, path: &str, bytes: &[u8]) {
         let path = self.0.join("repo").join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
 
-    fn build(&self) -> Result<Index, Vec<String>> {
+    pub(super) fn build(&self) -> Result<Index, Vec<String>> {
         let (repo, files) = (self.0.join("repo"), self.0.join("files"));
         build(&Sources {
             registry: &repo,
@@ -169,6 +169,21 @@ fn builds_the_sample_index() {
     assert_eq!(built.generated, sample.generated);
     // What it writes reads back.
     Index::parse(&serde_json::to_string_pretty(&built).unwrap()).unwrap();
+}
+
+#[test]
+fn an_entry_with_a_short_version_label_takes_the_file_that_says_it_in_full() {
+    let s = Scratch::new("short");
+    s.write(
+        "mods/coords_hud.toml",
+        &hud_entry().replace("version = \"0.1.0\"", "version = \"0.1\""),
+    );
+    // The sample modpack still needs 0.1.0, which is the only problem left.
+    let errors = s.build().unwrap_err();
+    assert_eq!(
+        errors,
+        ["cozy 1.0.0: needs coords_hud 0.1.0, which is not in the index"]
+    );
 }
 
 #[test]
@@ -397,6 +412,40 @@ fn a_version_taken_down_by_hash_may_leave_its_entry() {
 }
 
 #[test]
+fn a_takedown_review_names_the_dependents_of_a_removed_version() {
+    let mut index = sample();
+    let base: Entry = toml::from_str(&hud_entry()).unwrap();
+    let mut fireflies = index.projects.remove(0);
+    fireflies.id = "fireflies".into();
+    fireflies.versions[0].dependencies = serde_json::from_value(serde_json::json!([
+        {"id": "coords_hud", "version": "^0.1"}
+    ]))
+    .unwrap();
+    let mut another = fireflies.clone();
+    another.id = "another".into();
+    another.versions[0].dependencies.as_mut().unwrap()[0].version = "^2".into();
+    let mut optional = fireflies.clone();
+    optional.id = "optional".into();
+    optional.versions[0].dependencies.as_mut().unwrap()[0].optional = true;
+    index.projects = vec![fireflies, another, optional];
+    index.revoked = vec![Revoked {
+        id: "coords_hud".into(),
+        sha256: Some(SMOD.into()),
+        reason: "test".into(),
+        date: String::new(),
+    }];
+    let notes = takedown_notes(std::slice::from_ref(&base), &[], &index);
+    assert_eq!(notes.len(), 1);
+    for word in ["fireflies", "0.1.0", "coords_hud", "^0.1"] {
+        assert!(notes[0].contains(word), "{notes:?}");
+    }
+    assert!(takedown_notes(std::slice::from_ref(&base), &index.revoked, &index).is_empty());
+    index.revoked[0].sha256 = None;
+    assert_eq!(takedown_notes(&[base], &[], &index), notes);
+    // `another` requires ^2, which never matched any affected version either way.
+}
+
+#[test]
 fn a_review_refuses_following_a_repository() {
     let pinned: Entry = toml::from_str(COZY).unwrap();
     let follows: Entry = toml::from_str(COZY_REPO).unwrap();
@@ -529,7 +578,6 @@ fn only_open_kinds_are_taken() {
     assert!(open(&Kind::DataPack).is_ok());
     assert!(open(&Kind::Other("world".into())).is_err());
     let mut submit: Entry = toml::from_str(COZY).unwrap();
-    submit.id = "submit".into();
     let dir = std::env::temp_dir();
     let src = Sources {
         registry: &dir,
@@ -538,7 +586,10 @@ fn only_open_kinds_are_taken() {
         site: "https://x.test/",
         generated: String::new(),
     };
-    assert!(project(&submit, &src).unwrap_err()[0].contains("reserved"));
+    for page in ["submit", "mine", "account", "policy"] {
+        submit.id = page.into();
+        assert!(project(&submit, &src).unwrap_err()[0].contains("reserved"));
+    }
     assert!(plain_version("1.0.0-beta.2") && !plain_version("../1") && !plain_version("1 0"));
     assert!(plain_date("2026-10-24") && !plain_date("24/10/2026"));
 }
@@ -642,6 +693,50 @@ fn a_project_listed_by_its_repository_takes_its_versions_from_releases() {
             .iter()
             .any(|e| e.contains("owner/name"))
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn screenshots_and_caches_refuse_linked_ancestor_directories() {
+    use std::{fs, os::unix::fs::symlink};
+    let s = Scratch::new("linked-screenshot-ancestor");
+    let root = s.0.join("repo");
+    let with_screenshot = hud_entry().replace(
+        "[[versions]]",
+        "screenshots = ['screenshots/coords_hud/view.png']\n\n[[versions]]",
+    );
+    s.write("mods/coords_hud.toml", &with_screenshot);
+    s.write_bytes("screenshots/coords_hud/view.png", &png(640, 360));
+    let index = s.build().unwrap();
+    assert_eq!(index.project("coords_hud").unwrap().screenshots.len(), 1);
+    let outside = s.0.join("outside-screenshots");
+    fs::rename(root.join("screenshots"), &outside).unwrap();
+    symlink(outside, root.join("screenshots")).unwrap();
+    let errors = s.build().unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("coords_hud") && e.contains("view.png")),
+        "{errors:?}"
+    );
+    fs::remove_file(root.join("screenshots")).unwrap();
+    s.write("mods/coords_hud.toml", &hud_entry());
+
+    s.write(
+        "mods/cozy.toml",
+        &format!("{COZY_REPO}name='Cozy'\nsummary='Calm.'\nlicense='MIT'\n"),
+    );
+    let cache = Cache {
+        versions: index.project("cozy").unwrap().versions.clone(),
+        ..Cache::default()
+    };
+    s.write_bytes("versions/cozy.json", &serde_json::to_vec(&cache).unwrap());
+    assert!(s.build().unwrap().project("cozy").is_some());
+    let outside = s.0.join("outside-versions");
+    fs::rename(root.join("versions"), &outside).unwrap();
+    symlink(outside, root.join("versions")).unwrap();
+    let errors = s.build().unwrap_err();
+    assert!(errors.iter().any(|e| e.contains("cozy.json")), "{errors:?}");
 }
 
 #[test]

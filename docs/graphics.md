@@ -50,8 +50,10 @@ Every preset also turns on the optimizations that leave the picture as it is: as
 | Performance | chunk builder | `options.txt` |
 | | chunk updates and upload budget per frame, worker threads, parallel tick, cave culling, GPU culling, entity and particle culling modes, leaf culling, battery mode, and the block-entity caches (shulker boxes, signs, decorated pots, bells, chests, banners, copper golem statues) | `sunrise-graphics.txt` |
 | Shaders | **Shader Packs...**: the list of shader packs, Sunrise's `.sshader` ones and `shaders/` folder ones ([shaders.md](shaders.md)), and the picked pack's options; shadow cache | `sunrise-graphics.txt`, the pack's own options file |
-| Advanced | present mode, frame pacing, graphics API, translucent batching, performance overlay (FPS, frame/CPU/GPU times, frame-time graph) | `sunrise-graphics.txt` |
+| Advanced | present mode, frame pacing, graphics API, translucent batching | `sunrise-graphics.txt` |
 | HDR | HDR, calibration, black level, peak brightness, paper white, UI brightness | `sunrise-graphics.txt` |
+
+In the official build, **Sunrise Settings → Extras** holds the performance overlay (FPS, frame/CPU/GPU times and frame-time graph).
 
 `options.txt` keeps exactly vanilla's keys and values, so the options harness still compares it with vanilla; Sunrise's settings live in `sunrise-graphics.txt` beside it. Their defaults render as vanilla does: cave culling on, GPU, entity, particle and leaf culling off, no upload budgets, sky, fog and weather on, 100% resolution, no anti-aliasing, HDR off, the present mode following VSync. VSync on always waits for the display (Fifo), in a window and in fullscreen, as in vanilla; the present mode setting chooses how frames are shown only while VSync is off. Frame pacing defaults to Efficient: the limiter sleeps through the last half millisecond where vanilla spins, and paces frames on a fixed grid of slots (vanilla starts each slot when the thread wakes up, so every late wake-up lengthens a frame), which changes timing, not pixels.
 

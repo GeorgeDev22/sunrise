@@ -81,7 +81,7 @@ impl Game<'_> {
     ) {
         let key = (chest[0], chest[1], chest[2]);
         if let Some(e) = self.world.block_entities.get_mut(&key)
-            && let Some(s) = e.slots_mut().get_mut(slot)
+            && let Some(s) = e.slot_mut(slot)
         {
             *s = stack;
             // TransportItemsBetweenContainers calls Container.setChanged.

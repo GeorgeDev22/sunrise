@@ -14,6 +14,13 @@
 //! survive and only what the game changed is replaced.
 use sunrise_core::nbt::{Compound, Tag};
 
+/// The unsigned-byte slot addressed by a saved `Items` row, if it names one.
+pub fn saved_item_slot(entry: &Tag) -> Option<usize> {
+    crate::nbt_value::number(entry.get("Slot"))
+        .filter(|slot| (-128..=255).contains(slot))
+        .map(|slot| usize::from(slot as u8))
+}
+
 fn string(s: &str) -> Tag {
     Tag::String(s.into())
 }

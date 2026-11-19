@@ -11,8 +11,8 @@
 use crate::HostTransaction;
 use crate::{
     BundleItems, Capability, Direction, ENTITY_ITEMS, EquipmentSlot, Hand, ITEMS, ItemResource,
-    ItemStack, LevelRef, MenuRef, MenuSlotBacking, ResourceHandler, ServerHost, Transaction,
-    backend_mut_of, backend_of,
+    ItemStack, LevelRef, MenuRef, MenuSlotBacking, ResourceHandler, ServerHost, StackWriteError,
+    Transaction, backend_mut_of, backend_of,
 };
 use std::{fmt::Debug, marker::PhantomData};
 
@@ -274,6 +274,36 @@ impl Drop for ItemPlace {
     }
 }
 
+/// Why [`ItemPlace::edit`] could not update a stack's components.
+#[derive(Clone, Debug, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum ItemPlaceEditError {
+    /// The place is empty or cannot be reached.
+    NotHeld,
+    /// The editor changed the item. Use a slot write to replace it.
+    ItemChanged,
+    /// The editor changed the count. Use a slot write to change it.
+    CountChanged,
+    /// The place has no whole-stack edit (a cursor or a virtual transfer wrapper).
+    UnsupportedPlace,
+    /// The backend, transaction or storage refused the write.
+    Unavailable,
+    /// The updated stack did not pass the game's write validation.
+    Stack(StackWriteError),
+}
+
+impl From<StackWriteError> for ItemPlaceEditError {
+    fn from(error: StackWriteError) -> Self {
+        Self::Stack(error)
+    }
+}
+
+impl crate::NoBackend for ItemPlaceEditError {
+    fn no_backend() -> Self {
+        Self::Unavailable
+    }
+}
+
 /// A mod's own places ([`ItemPlace::Mod`]), registered with
 /// [`Registrar::place_provider`](crate::ItemsRegistrar::place_provider): NeoForge's own `ItemAccess`s.
 /// Like a handler, it holds no borrow: its stacks live where the mod keeps them (a player's
@@ -523,7 +553,10 @@ impl ItemPlace {
     /// block entity's, an entity's or an item's slot's into that container's other slots
     /// (`forHandlerIndex`, refused instead around [`Strict`](Self::Strict)); a mod's place's
     /// where its [`PlaceProvider`] puts it; a [`Scratch`](Self::Scratch) stack's nowhere; a
-    /// [`ScratchSlots`](Self::ScratchSlots) stack's into its second slot.
+    /// [`ScratchSlots`](Self::ScratchSlots) stack's into its second slot. A player-backed place whose
+    /// player is in another level than the hook's (not a creative one) takes only what fits their
+    /// inventory, and nothing is dropped: the rest stays the caller's, and [`exchange`](Self::exchange)
+    /// rolls back when it cannot insert the whole replacement.
     pub fn insert(
         &self,
         host: &mut dyn ServerHost,
@@ -592,26 +625,72 @@ impl ItemPlace {
             .game_on_crafted_by(self, tx, amount)
     }
 
-    /// Edit the whole stack here, keeping its item and count. Unlike exchanging one,
-    /// this changes every item in the slot together, without splitting off a copy.
-    /// A missing stack, changed item/count or refused exchange returns false without
-    /// changing the place. Successful writes are journaled in `tx` like [`Self::exchange`].
+    /// Edit the components of the whole stack here, keeping its item and count. Player
+    /// slots (including armour and the off hand), hands, and a mob's or armour stand's equipment
+    /// update only the changed components in place, like `ItemStack.set`: no equip effects or
+    /// attribute reapplication. The usual slot sync sends the new stack. `Strict` preserves this
+    /// contract. Cursors, `OneByOne` and `InfiniteMaterials` refuse the edit because they do not
+    /// provide a synced whole-stack write. Other places use their usual exchange rules. A refusal
+    /// leaves the place unchanged; aborting `tx` restores a successful write.
     pub fn edit(
         &self,
         host: &mut dyn ServerHost,
         tx: &Transaction,
         edit: impl FnOnce(&mut ItemStack),
-    ) -> bool {
-        let Some(mut stack) = self.stack(host) else {
-            return false;
-        };
-        let item = stack.item();
-        let count = stack.count();
-        edit(&mut stack);
-        if stack.item() != item || stack.count() != count {
-            return false;
+    ) -> Result<(), ItemPlaceEditError> {
+        let mut place = self;
+        while let Self::Strict(inner) = place {
+            place = inner;
         }
-        self.exchange(host, tx, &ItemResource::of(&stack), count) == count
+        if matches!(
+            place,
+            Self::PlayerCursor { .. } | Self::OneByOne(_) | Self::InfiniteMaterials { .. }
+        ) {
+            return Err(ItemPlaceEditError::UnsupportedPlace);
+        }
+        let before = place.stack(host).ok_or(ItemPlaceEditError::NotHeld)?;
+        let mut stack = before.clone();
+        edit(&mut stack);
+        if stack.item() != before.item() {
+            return Err(ItemPlaceEditError::ItemChanged);
+        }
+        if stack.count() != before.count() {
+            return Err(ItemPlaceEditError::CountChanged);
+        }
+        if stack == before {
+            return Ok(());
+        }
+        if matches!(
+            place,
+            Self::PlayerSlot { .. } | Self::PlayerHand { .. } | Self::Equipment { .. }
+        ) {
+            let old = before.components().map(crate::Components::as_nbt);
+            let new = stack.components().map(crate::Components::as_nbt);
+            let mut changed: Vec<_> = old
+                .into_iter()
+                .flat_map(|patch| patch.keys())
+                .chain(new.into_iter().flat_map(|patch| patch.keys()))
+                .filter(|&key| old.and_then(|p| p.get(key)) != new.and_then(|p| p.get(key)))
+                .map(|key| {
+                    let key = key.to_string_lossy();
+                    key.strip_prefix('!').map(str::to_owned).unwrap_or(key)
+                })
+                .collect();
+            if before.damage_component() != stack.damage_component() {
+                changed.push("minecraft:damage".into());
+            }
+            changed.sort_unstable();
+            changed.dedup();
+            return backend_mut_of(host)
+                .ok_or(ItemPlaceEditError::Unavailable)?
+                .game_edit_stack(place, stack, &changed, tx);
+        }
+        let count = stack.count();
+        if self.exchange(host, tx, &ItemResource::of(&stack), count) == count {
+            Ok(())
+        } else {
+            Err(ItemPlaceEditError::Unavailable)
+        }
     }
 
     /// `insert` or `extract`: the wrappers undone, outermost first, in a loop rather than by

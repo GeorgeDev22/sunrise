@@ -1082,7 +1082,9 @@ pub fn mob_to_nbt(
             }
         }
         "minecraft:bat" => {
-            map.insert("BatFlags".into(), Tag::Byte(i8::from(m.extra.flag)));
+            // Bat.addAdditionalSaveData: the whole DATA_ID_FLAGS byte.
+            let flags = m.extra.bat_flags | u8::from(m.extra.flag);
+            map.insert("BatFlags".into(), Tag::Byte(flags as i8));
         }
         "minecraft:turtle" => {
             map.insert("has_egg".into(), Tag::Byte(i8::from(m.extra.flag)));
@@ -1868,6 +1870,17 @@ fn mob_from_nbt_at(
                         v,
                     )
                 }
+                // The attributes an effect's modifier changes (#1988).
+                "minecraft:safe_fall_distance"
+                | "minecraft:max_absorption"
+                | "minecraft:waypoint_transmit_range" => {
+                    use crate::mobs::finalize;
+                    if let Some(a) = finalize::command_attr(id.trim_start_matches("minecraft:"))
+                        && finalize::default_value(&m, a) != Some(v)
+                    {
+                        finalize::set_base(&mut m, a, v);
+                    }
+                }
                 _ => {}
             }
         }
@@ -2074,8 +2087,10 @@ fn mob_from_nbt_at(
         _ => 0,
     };
     if m.species() == crate::mobs::Species::Bat {
-        // Bat.readAdditionalSaveData: BatFlags bit 0, resting.
-        m.extra.flag = number(tag.get("BatFlags")).unwrap_or(0) & 1 != 0;
+        // Bat.readAdditionalSaveData: the raw BatFlags byte; bit 0 is resting.
+        let flags = number(tag.get("BatFlags")).unwrap_or(0) as u8;
+        m.extra.flag = flags & 1 != 0;
+        m.extra.bat_flags = flags & !1;
     }
     if m.species() == crate::mobs::Species::Creeper {
         m.extra.charged = flag(tag, "powered");
@@ -2532,7 +2547,10 @@ fn mob_from_nbt_at(
     ) {
         // AbstractCubeMob.readAdditionalSaveData: the size's attributes, then
         // the saved health, the max health when there is none.
-        crate::mobs::cube::set_size(&mut m, number(tag.get("Size")).unwrap_or(0) as i32 + 1);
+        crate::mobs::cube::set_size(
+            &mut m,
+            (number(tag.get("Size")).unwrap_or(0) as i32).wrapping_add(1),
+        );
         if let Some(h) = float(tag.get("Health")) {
             m.health = h as f32;
         }
@@ -2874,7 +2892,8 @@ pub fn orb_to_nbt(o: &ExperienceOrb, uuid: [i32; 4]) -> Tag {
         ("Fire", Tag::Short(o.fire_ticks as i16)),
         ("Health", Tag::Short(o.health as i16)),
         ("Air", Tag::Short(o.air as i16)),
-        ("Age", Tag::Short(o.age.min(i16::MAX as u32) as i16)),
+        // `putShort("Age", (short) age)`.
+        ("Age", Tag::Short(o.age as i16)),
         ("Value", Tag::Short(o.value as i16)),
         ("Count", Tag::Int(o.count.min(i32::MAX as u32) as i32)),
     ] {
@@ -2905,7 +2924,8 @@ pub fn orbs_from_nbt(tag: &Tag) -> Vec<ExperienceOrb> {
         velocity: motion(tag),
         // `getShortOr("Value", 0)`, unclamped.
         value: tag.get("Value").and_then(int_value).unwrap_or(0) as i16 as i32,
-        age: number(tag.get("Age")).unwrap_or(0).max(0) as u32,
+        // `getShortOr("Age", 0)`: a signed short, unclamped.
+        age: tag.get("Age").and_then(int_value).unwrap_or(0) as i16 as i32,
         on_ground: flag(tag, "OnGround"),
         count,
         ticks: 0,
@@ -3591,14 +3611,14 @@ pub fn falling_block_flags(tag: &Tag) -> (bool, bool) {
 
 /// `Cushion.addAdditionalSaveData`: the block it sits on and its colour.
 pub fn cushion_to_nbt(c: &Cushion, uuid: [i32; 4], raw: Option<&Tag>) -> Tag {
-    // A block-attached cushion does not update these: they stay as loaded.
+    // A block-attached cushion never moves or turns: Motion and pitch stay as loaded.
     let (on_ground, fall_distance) = raw.map_or((false, 0.0), ground_from_nbt);
     let base = Base {
         id: "minecraft:cushion",
         uuid,
         position: c.position,
-        motion: Vec3::ZERO,
-        rotation: [c.yaw, 0.0],
+        motion: raw.map_or(Vec3::ZERO, loaded_motion),
+        rotation: [c.yaw, raw.map_or(0.0, |raw| rotation(raw)[1])],
         on_ground,
         fall_distance,
     };
@@ -4659,6 +4679,37 @@ mod tests {
         };
         assert_eq!(id("body"), "minecraft:diamond_horse_armor");
         assert_eq!(id("head"), "minecraft:iron_helmet");
+    }
+
+    /// `Bat.readAdditionalSaveData` sets `DATA_ID_FLAGS` to the raw `BatFlags`
+    /// byte, `Bat.setResting` changes bit 0 only and `addAdditionalSaveData`
+    /// writes the byte back: `6b` saves `6b`, and `-1b` saves `-2b` once the
+    /// bat wakes. Saved without the loaded compound, so the bat itself keeps it.
+    #[test]
+    fn a_bat_saves_its_whole_flags_byte() {
+        let mut kind = crate::mobs::sensor_scan_tests::kind();
+        let ty = Arc::make_mut(&mut kind);
+        ty.id = "minecraft:bat".into();
+        ty.species = crate::mobs::Species::Bat;
+        let types = [("minecraft:bat".into(), kind)].into();
+        let load = |flags: i8| {
+            let raw = Tag::compound([
+                ("id", string("minecraft:bat")),
+                ("Pos", doubles(&[4.5, 220.0, 4.5])),
+                ("BatFlags", Tag::Byte(flags)),
+            ]);
+            mob_from_nbt(&raw, &types, 1, None).unwrap()
+        };
+        let saved = |m: &Mob| {
+            mob_to_nbt(m, [0; 4], None, None, |_| None, &Default::default())
+                .get("BatFlags")
+                .cloned()
+        };
+        assert_eq!(saved(&load(6)), Some(Tag::Byte(6)));
+        let mut m = load(-1);
+        assert!(crate::mobs::bat::resting(&m));
+        crate::mobs::bat::set_resting(&mut m, false);
+        assert_eq!(saved(&m), Some(Tag::Byte(-2)));
     }
 
     /// A body item taken off (`/item replace entity <cube> armor.body with minecraft:air`)
@@ -6296,6 +6347,23 @@ mod tests {
         assert_eq!(
             orb_to_nbt(&back[0], [0; 4]).get("Air"),
             Some(&Tag::Short(32767))
+        );
+    }
+    /// `ExperienceOrb.readAdditionalSaveData` reads `Age` with `getShortOr`,
+    /// unclamped, and `addAdditionalSaveData` writes `(short) age`: `Age:-100s`
+    /// loads as -100, saves `-99s` after one `++age`, and an age past a short
+    /// wraps.
+    #[test]
+    fn an_orb_keeps_a_negative_age() {
+        let at = ("Pos", doubles(&[1.0, 2.0, 3.0]));
+        let mut o = orbs_from_nbt(&Tag::compound([at, ("Age", Tag::Short(-100))])).remove(0);
+        assert_eq!(o.age, -100);
+        o.age += 1;
+        assert_eq!(orb_to_nbt(&o, [0; 4]).get("Age"), Some(&Tag::Short(-99)));
+        o.age = 40_000;
+        assert_eq!(
+            orb_to_nbt(&o, [0; 4]).get("Age"),
+            Some(&Tag::Short(-25_536))
         );
     }
     #[test]

@@ -34,6 +34,11 @@ impl Game<'_> {
             self.drain_entity_inside();
             result
         }));
+        // A panic interrupted this turn, and the swaps still open above it: the restore below
+        // clears the acting marker, so teardown learns of them from the record (#2704).
+        if result.is_err() {
+            self.record_open_turns();
+        }
         // Commit the guest's progress and restore the outer player before propagating a panic.
         self.leave_guest(swap);
         match result {
@@ -112,7 +117,27 @@ impl Game<'_> {
         }
         match result {
             Ok(result) => self.lan.is_some().then_some(result),
-            Err(payload) => std::panic::resume_unwind(payload),
+            Err(payload) => {
+                // `f`'s panic was caught inside the turn, which ended cleanly: record it here.
+                self.record_interrupted_turn(conn);
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    /// Record that a panic interrupted `conn`'s turn: the crash save keeps that player's last
+    /// saved file. The record clears at the start of the next server tick.
+    pub(in crate::game) fn record_interrupted_turn(&mut self, conn: u32) {
+        if !self.interrupted_turns.contains(&conn) {
+            self.interrupted_turns.push(conn);
+        }
+    }
+
+    /// Record every swap still open: a panic going through them leaves each of their players'
+    /// state displaced or half-done.
+    fn record_open_turns(&mut self) {
+        for i in 0..self.lan_guest_swaps.len() {
+            self.record_interrupted_turn(self.lan_guest_swaps[i]);
         }
     }
 
@@ -530,6 +555,10 @@ impl Game<'_> {
             unreachable!("LanHost dropped inside a guest turn; closes are deferred");
         };
         debug_assert_eq!(host.hub.guests.get(swap.i).map(|g| g.conn), Some(swap.conn));
+        // Recorded before the callbacks run, cleared only after a clean put-back (a record the
+        // turn's own panic made stays).
+        let already_recorded = self.interrupted_turns.contains(&swap.conn);
+        self.record_interrupted_turn(swap.conn);
         let turn_events = self
             .player
             .as_mut()
@@ -577,7 +606,10 @@ impl Game<'_> {
         }));
         let (totem, panic) = match callbacks {
             Ok(totem) => (totem, None),
-            Err(payload) => (None, Some(payload)),
+            Err(payload) => {
+                self.record_open_turns();
+                (None, Some(payload))
+            }
         };
         let GuestSwap {
             attachments,
@@ -1083,6 +1115,9 @@ impl Game<'_> {
         }
         if let Some(payload) = panic {
             std::panic::resume_unwind(payload);
+        }
+        if !already_recorded {
+            self.interrupted_turns.retain(|&c| c != conn);
         }
     }
 

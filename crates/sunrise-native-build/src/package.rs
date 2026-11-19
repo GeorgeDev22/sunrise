@@ -49,7 +49,7 @@ pub fn tool_manifest(bundle: &Bundle) -> Result<(), String> {
         "mod".into(),
         toml::Value::Table(toml::Table::from_iter([
             ("id".into(), bundle.manifest.id.clone().into()),
-            ("version".into(), bundle.manifest.version.clone().into()),
+            ("version".into(), bundle.manifest.version.to_string().into()),
         ])),
     );
     manifest.insert(

@@ -78,6 +78,7 @@ impl Game<'_> {
             if !quit {
                 return self.leave_server(None);
             }
+            self.connection_left(sunrise_hooks::connection::Left::Quit);
             self.client_logging_out();
             if let Some(mut remote) = self.remote.take() {
                 remote.session.disconnect();
@@ -428,13 +429,13 @@ impl Game<'_> {
         }
         let keys: Vec<_> = self.world.modified.iter().copied().collect();
         self.save.save_attachments(&self.world.attachments)?;
-        for key in &keys {
-            self.world.modified.remove(key);
-        }
         let chunks = self.with_entities(keys.iter().filter_map(|k| self.world.chunks.get(k)));
         self.native_full_chunk_snapshots(&chunks);
         self.save
             .save_later(&chunks, self.pack.assets.registry, world_biomes!(self))?;
+        for chunk in &chunks {
+            self.world.modified.remove(&(chunk.x, chunk.z));
+        }
         // Prepare entities while the chunk writer runs, then use one barrier.
         if !wait {
             self.world.modified.autosaved(&keys, Instant::now());

@@ -10,11 +10,20 @@ extra_mod = { version = "^2", optional = true }
 ```
 
 Requirements use Cargo semver syntax and are checked against each installed mod's `sunrise-mod.toml`
-`version`, not its Cargo package version. Content-only mods use these declarations to validate their
+`version`, not its Cargo package version. That version is semver, checked when the manifest is read,
+so a mod whose version isn't semver never loads, whatever requirement a dependent states. Content-only mods use these declarations to validate their
 requirements and, by default, load their layers after dependencies. Code dependencies additionally require
 API packages for the dependent and every installed dependency. Missing required dependencies,
 incompatible versions and cycles refuse resolution with the mods named. An absent optional dependency
 is permitted; an installed optional dependency must match its requirement.
+
+The [registry index and installers](../reference/registry-index.md#planning-installs-and-removals) use these
+same manifest declarations. A new submission must resolve with the listed dependencies on its Minecraft release.
+Optional dependencies never install automatically, but an installed or selected target must match the declared range.
+`cargo sunrise-mod check <file>` shows both kinds.
+
+A version such as `3.6.30-sunrise.1` is a SemVer prerelease, even when the mod author uses the suffix to name
+an ordinary port release. `^3.6` cannot select it. To require that release, declare `"=3.6.30-sunrise.1"`.
 
 Detailed rows also accept `side`, `order`, `reason` and `url`; see the
 [complete manifest schema](../reference/manifest.md). Side filters the declaration by installation

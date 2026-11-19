@@ -70,11 +70,19 @@ pub(super) fn network_recipes(
     defaults: &sunrise_world::item_defaults::ItemDefaults,
     sources: &sunrise_client::crafting::ResolvedSources,
     damage: sunrise_client_core::registries::RegistryIds,
+    packed: Option<&super::data::PackRegistryDefinitions>,
 ) -> crate::Result<(BTreeMap<String, Box<str>>, HashMap<String, i32>)> {
     // The resolved copy: the load's `ingredient` answers are in place, and
     // none of them leaves it (`forget_answers` below).
     let items = sunrise_client::items::Items::catalog_with_damage_registry(
-        resources, overlay, defaults, damage,
+        resources,
+        overlay,
+        defaults,
+        damage,
+        |items| match packed {
+            Some(packed) => packed.install_items(items, resources, overlay, defaults),
+            None => items.load_resource_registries(resources, overlay, defaults),
+        },
     )?;
     let accepted =
         sunrise_client::crafting::Recipes::from_resolved(resources, &items, overlay, sources)?;
@@ -341,14 +349,30 @@ const CONTENT_MAX: usize = 1_048_576 - 1024;
 pub struct ContentPart {
     pub recipes: Vec<(String, Value)>,
     pub last: Option<Vec<String>>,
+    /// Why a recipe of this part has no decodable serializer. Set by
+    /// `decode`, never sent: the receiver refuses the whole update when its
+    /// last part comes, not only this part.
+    #[serde(skip)]
+    pub refused: Option<String>,
 }
 impl ContentPart {
     /// Decode a content part only within the same bound used by the sender.
+    /// Each recipe's `type` is decoded here, as on disk, so that the
+    /// replacement and the book's numbering read the canonical id even from a
+    /// server that sends a bare one. A malformed envelope is an error of this
+    /// part; a malformed serializer is `refused`, which keeps `last`.
     pub fn decode(data: &[u8]) -> Result<Self, String> {
         if data.len() > CONTENT_MAX {
             return Err(format!("recipe content exceeds {CONTENT_MAX} bytes"));
         }
-        serde_json::from_slice(data).map_err(|error| error.to_string())
+        let mut part: Self = serde_json::from_slice(data).map_err(|error| error.to_string())?;
+        for (id, recipe) in &mut part.recipes {
+            if let Err(error) = sunrise_items::recipe_sources::decode_type(recipe) {
+                part.refused = Some(format!("recipe {id}: {error}"));
+                break;
+            }
+        }
+        Ok(part)
     }
 }
 
@@ -390,6 +414,7 @@ pub fn encode_content(types: &[String], sources: &[(String, Value)], reset: bool
                 serde_json::to_vec(&ContentPart {
                     recipes,
                     last: None,
+                    refused: None,
                 })
                 .unwrap_or_default(),
             );
@@ -404,6 +429,7 @@ pub fn encode_content(types: &[String], sources: &[(String, Value)], reset: bool
             serde_json::to_vec(&ContentPart {
                 recipes,
                 last: None,
+                refused: None,
             })
             .unwrap_or_default(),
         );
@@ -411,6 +437,7 @@ pub fn encode_content(types: &[String], sources: &[(String, Value)], reset: bool
     let last = ContentPart {
         recipes: part,
         last: Some(types.to_vec()),
+        refused: None,
     };
     out.push(serde_json::to_vec(&last).unwrap_or_default());
     out

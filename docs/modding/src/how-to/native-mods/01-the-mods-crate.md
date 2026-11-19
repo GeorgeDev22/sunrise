@@ -45,6 +45,17 @@ requirements allow, both mods are built on one of the two. So a mod may be built
 semver-compatible version of a dependency than the one its author locked; a requirement that must
 not move is written as an exact one (`dtoa = "=1.0.9"`).
 
+Each mod is its own library, and a library carries a copy of every registry package linked into it,
+so a mod depending on two mods that each use `serde` would reach two copies of `serde`, which Rust
+refuses to link. When two or more mods of a build link registry packages, the build links them into
+one more library instead, `sunrise_registry_shared`, which those mods depend on and which is
+installed beside them: a mod is not registered by it, and loads it like any library it depends on.
+It takes every package those mods link at run time, as Cargo resolved them for the target (proc
+macros and build-script dependencies stay out), and nothing else changes: each mod's requirements,
+features and lock still decide what Cargo resolves and the build checks. A build where one mod or
+none uses registry packages writes no such library. The package name `sunrise-registry-shared` and
+the crate name `sunrise_registry_shared` are reserved for it.
+
 `native-lock` starts from the game's `Cargo.lock`, which it downloads once from the pinned game
 commit. A package the game also locks takes the game's version where the mod's requirements allow
 it, so mods made for one game build agree on those packages; the mod's other packages take the newest

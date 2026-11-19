@@ -13,6 +13,11 @@ impl Game<'_> {
                 mod_api::HookId::BlockEntityOnLoad,
             ));
         world
+            .block_entities
+            .set_data_load_enabled(mod_api::__private::has_part_hook(
+                mod_api::HookId::BlockEntityLoadAdditional,
+            ));
+        world
     }
 
     /// A replacement can inherit a ticker slot later in the current pass.
@@ -24,7 +29,9 @@ impl Game<'_> {
         {
             return;
         }
-        if self.world.block_entities.has_pending_on_load() {
+        if self.world.block_entities.has_pending_on_load()
+            || self.world.block_entities.has_pending_data_load()
+        {
             let generation = self.world.block_entities.generation(&pos);
             self.fire_pending_block_entity_loads();
             if self.world.block_entities.generation(&pos) != generation {
@@ -36,6 +43,7 @@ impl Game<'_> {
 
     /// Drain attachment notices before either logical side runs block entity tickers.
     pub(in crate::game) fn fire_pending_block_entity_loads(&mut self) {
+        self.fire_pending_block_entity_data_loads();
         if !self.world.block_entities.has_pending_on_load() {
             return;
         }

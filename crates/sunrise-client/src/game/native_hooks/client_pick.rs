@@ -175,6 +175,7 @@ impl Game<'_> {
         let mut result = original;
         self.native_client_pick(mod_api::__private::ClientPickCall {
             partial_tick,
+            origin,
             original,
             block_candidate,
             entity_candidate,

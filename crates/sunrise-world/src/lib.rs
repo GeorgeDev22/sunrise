@@ -47,6 +47,7 @@ pub mod effect_attribute_modifiers;
 pub mod effect_notifications;
 pub mod effect_particles;
 pub mod effect_sync;
+pub mod enchantment_answers;
 pub mod entity_collision;
 pub mod entity_fluid;
 pub mod entity_fluid_tick;

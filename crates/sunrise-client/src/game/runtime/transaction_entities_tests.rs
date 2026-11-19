@@ -60,7 +60,8 @@ static KIND_OF_PENDING: Mutex<Option<Option<String>>> = Mutex::new(None);
 /// `a_level_commit_told_inside_another_levels_commit_keeps_its_own_batch`: 0 is off.
 static NEST: AtomicU8 = AtomicU8::new(0);
 
-/// Hears construction, joins and leaves; marks each entity it constructs; keeps sheep out.
+/// Hears construction, joins and leaves; marks each entity it constructs; keeps sheep and
+/// snowballs out.
 struct Observer;
 #[mod_api::__subscriptions]
 impl Hooks for Observer {
@@ -137,7 +138,7 @@ impl Hooks for Observer {
             }
             _ => {}
         }
-        if event.kind == "minecraft:sheep" {
+        if matches!(event.kind, "minecraft:sheep" | "minecraft:snowball") {
             Flow::Cancel
         } else {
             Flow::Continue
@@ -297,6 +298,42 @@ fn a_join_cancelled_at_commit_leaves_a_stale_handle() {
         let heard = heard();
         assert_eq!(heard.joined, [sheep]);
         assert!(heard.left.is_empty(), "never announced, so it never leaves");
+    });
+}
+
+/// `LevelRef::spawn_entity` of a thrown projectile: its join is told at the call outside a
+/// transaction, so a mod keeping it out refuses the call, and at the root commit inside one,
+/// with only that spawn in the transaction.
+#[test]
+#[ignore = "daily"]
+fn a_thrown_spawn_joins_at_the_call_or_the_root_commit() {
+    const NAME: &str =
+        "game::transaction_entities_tests::a_thrown_spawn_joins_at_the_call_or_the_root_commit";
+    with_observer(NAME, |game| {
+        use mod_api::{EntitySpawn, Identifier, SpawnBody};
+        let level = game.level(game.dim.id()).unwrap();
+        let thrown = |game: &mut Game<'_>, kind: &str| {
+            let key = game.item_key(&Identifier::parse(kind).unwrap()).unwrap();
+            let item = mod_api::ItemStack::new(key, 1).unwrap();
+            let spawn = EntitySpawn::new(SpawnBody::Thrown { item });
+            game.level_spawn_entity(level, kind, [1.5, 70.0, 1.5], &spawn)
+        };
+        let projectiles = game.creatures.projectiles.len();
+        let next = game.next_entity;
+        assert_eq!(thrown(game, "minecraft:snowball"), None, "kept out at once");
+        assert_eq!(heard().joined, [next + 1]);
+        assert_eq!(game.creatures.projectiles.len(), projectiles);
+        let egg = thrown(game, "minecraft:egg").unwrap();
+        assert_eq!(heard().joined, [egg.id()]);
+
+        let seal = game.transaction_open();
+        let held = thrown(game, "minecraft:egg").unwrap();
+        let kept_out = thrown(game, "minecraft:snowball").expect("the handle comes back at once");
+        assert!(heard().joined.is_empty(), "the joins wait");
+        game.transaction_close(&seal, true);
+        assert_eq!(heard().joined, [held.id(), kept_out.id()]);
+        assert!(game.entity(held.id()).is_some());
+        assert_eq!(game.entity(kept_out.id()), None);
     });
 }
 
@@ -637,7 +674,7 @@ struct Fixture {
 #[ignore = "daily"]
 fn exhausted_ids_refuse_every_mod_spawn() {
     const NAME: &str = "game::transaction_entities_tests::exhausted_ids_refuse_every_mod_spawn";
-    let rows: [(&str, Spawn); 13] = [
+    let rows: [(&str, Spawn); 14] = [
         ("summon", |game, _| {
             summon(game, "minecraft:pig", "{}").is_some()
         }),
@@ -666,6 +703,11 @@ fn exhausted_ids_refuse_every_mod_spawn() {
         ("level_spawn_mob", |game, f| {
             let reason = mod_api::SpawnReason::Command;
             (game.level_spawn_mob(f.level, "minecraft:cow", [1.5, 70.0, 1.5], reason)).is_some()
+        }),
+        ("level_spawn_entity", |game, f| {
+            let reason = mod_api::SpawnReason::Command;
+            let spawn = mod_api::EntitySpawn::new(mod_api::SpawnBody::Living { reason });
+            (game.level_spawn_entity(f.level, "minecraft:cow", [1.5, 70.0, 1.5], &spawn)).is_some()
         }),
         ("level_block_drops", |game, f| {
             game.level_block_drops(f.level, [1, 70, 1], None, None)

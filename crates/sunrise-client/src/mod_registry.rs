@@ -355,7 +355,7 @@ impl Installed {
         sunrise_mod_package::Package::read(&path)
             .ok()
             .filter(|p| p.manifest.id == id)
-            .map(|p| p.manifest.version)
+            .map(|p| p.manifest.version.to_string())
     }
 }
 

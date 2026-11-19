@@ -268,10 +268,63 @@ window, which centres the mouse again; `MenuReplace::InPlace` sends none, so the
 its screen and its mouse where they are until the new screen replaces it, as when one
 screen of a machine leads to the next.
 
+## The menu's screen
+
+A mod menu type's screen belongs to the menu type, as a screen registered with NeoForge's
+`RegisterMenuScreensEvent` does: attach a `MenuPart` to the type and answer `screen` (the
+layout) and, as needed, `screen_draw`, `screen_click` and `screen_tooltip`. The same part
+answers whatever opened the menu, a machine's use or `player.open_mod_menu` from an item,
+an entity or a command. A mod menu type with no `screen` answer has no screen, and its
+window closes again.
+
+```rust
+struct BackpackScreen;
+#[mod_api::sunrise_part]
+impl mod_api::MenuPart for BackpackScreen {
+    fn screen(&self, _: &dyn mod_api::Host, _: &mut mod_api::ScreenEvent<'_>) -> Option<mod_api::Screen> {
+        Some(mod_api::Screen {
+            width: 176.0,
+            height: 133.0,
+            // One row of nine; a slot left `None` is hidden.
+            slots: (0..9)
+                .map(|i| Some(mod_api::ScreenSlot { position: [8.0 + 18.0 * i as f32, 18.0], ..Default::default() }))
+                .collect(),
+            inventory_x: 8.0,
+            inventory_y: 51.0,
+            ..Default::default()
+        })
+    }
+}
+
+// In `register`:
+r.menu_part("mymod:backpack", BackpackScreen);
+```
+
+Each of the four events names the menu type (`event.menu`) and the mod block whose menu it
+is (`event.block`: the mod block at the menu's position whose container opens this menu type,
+`None` for a menu opened without one), so blocks that share a menu type
+can lay out or draw differently. A mod block whose container names one of vanilla's menus
+gets a mod screen the same way, from a part attached to that vanilla menu type; it is asked
+only for your own mod's blocks that open the menu, never for another mod's or vanilla's own,
+so several mods' machines can share one vanilla type. One part owns each screen and alone
+hears its four hooks: a mod menu type takes one part answering them, a vanilla type one per
+mod, and a second is refused at load. The server asks `screen` too, whatever opened the
+menu, so a slot it hides takes no shift-click there either.
+
+For a block's menu, the one `event.block` names, a button returned by `screen_click` reaches
+`menu_button`, a server-side `BlockEntityPart` method. That includes menus opened by using a
+block or by calling `player_open_mod_menu` at the block's position with the menu type its
+container opens. A registered recipe-book screen also opens for a block's menu. The mod that
+registered the layout owns its slot controls and can attach a part for drawing, clicks and
+tooltips; another mod's screen part is refused.
+
+Server buttons and registered recipe-book screens are not yet supported for blockless menus
+([sunrise-org/sunrise#2672](https://github.com/sunrise-org/sunrise/issues/2672)).
+
 ## Laying a screen's slots out again
 
 A screen whose slots move while it is open (Tinkers' tinker station, which lays its input slots out for the
-tool being built) calls `host.set_screen_slot(block, slot, Some([x, y]))` on the client, or `None` to hide a
+tool being built) calls `host.set_screen_slot(menu, slot, Some([x, y]))` on the client, or `None` to hide a
 slot ([moving or hiding a mod screen's slots](../client/screens.md#moving-or-hiding-a-mod-screens-slots)). Only
 the screen changes: the server's menu keeps every slot.
 

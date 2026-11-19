@@ -15,15 +15,19 @@
 //! `level.dat`) are migrated on open.
 use crate::mod_chunk_tickets::{ModTicket, ModTickets, TicketOwner};
 mod backpressure;
-use backpressure::compress_records;
+use compression_pool::{CompressedWrite, compress_records};
 pub mod biome_regions;
 pub mod block_entity_encode;
 mod block_entity_order;
 mod far_regions;
+mod horizon_names;
+pub(crate) use horizon_names::adopt_in_player as adopt_horizon_player;
+#[cfg(test)]
+mod horizon_names_tests;
 pub mod level_mods;
 mod respawn;
 mod writes;
-use writes::{Outstanding, Writer};
+use writes::{Outstanding, QueuedWrite, Writer};
 
 use crate::{
     Result,
@@ -687,7 +691,12 @@ pub fn block_entity_data(
     lock: Option<&Tag>,
     items: &crate::items::Items,
 ) -> Tag {
-    let mut tag = block_entity_encode::encode(p, e, block, items);
+    let tag = block_entity_encode::encode(p, e, block, items);
+    command_block_entity_data(tag, lock)
+}
+
+/// Apply the command data view to an encoded block entity.
+pub fn command_block_entity_data(mut tag: Tag, lock: Option<&Tag>) -> Tag {
     if let Tag::Compound(map) = &mut tag {
         map.remove(&"keepPacked".into());
         if let Some(lock) = lock {
@@ -718,10 +727,10 @@ pub fn decode_end_gateway(tag: &Tag) -> crate::containers::EndGateway {
     }
 }
 /// A mod's block entity: its compound without `id` and the position, and
-/// its `Items` as slots (`ContainerHelper.loadAllItems`; the game sizes them
-/// to the block's container when it uses them). `Items` that do not re-encode
-/// exactly (compared in slot order) stay the mod's own.
+/// the `Items` rows that can be represented losslessly as modeled slots.
+/// The game sizes the modeled vector to its container when it uses it.
 fn decode_mod_block_entity(id: String, tag: &Tag) -> Option<crate::containers::ModBlockEntity> {
+    use crate::block_entity_nbt::saved_item_slot;
     let Tag::Compound(map) = tag else {
         return None;
     };
@@ -733,25 +742,35 @@ fn decode_mod_block_entity(id: String, tag: &Tag) -> Option<crate::containers::M
     let shapes = nbt
         .remove(&crate::containers::SHAPES_KEY.into())
         .and_then(|tag| crate::containers::PublishedShapes::from_tag(&tag));
-    // `Slot` is a byte: 256 slots at most.
-    let mut items = decode_items(nbt.get(&"Items".into()), 256);
-    // Compared in slot order, the order `encode_items` writes: vanilla loads by `Slot`.
-    let encoded = sunrise_items::item_nbt::encode_items_using(&items, |stack| Tag::from(stack));
-    let matches = match (nbt.get(&"Items".into()), &encoded) {
-        (Some(Tag::List(saved)), Tag::List(encoded)) => {
-            let mut saved: Vec<&Tag> = saved.iter().collect();
-            saved.sort_by_key(|entry| number(entry.get("Slot")).unwrap_or(0) as u8);
-            saved.into_iter().eq(encoded.iter())
+    let mut items = Vec::new();
+    let key = "Items".into();
+    if let Some(Tag::List(entries)) = nbt.get_mut(&key) {
+        let mut occurrences = [0u8; 256];
+        for slot in entries.iter().filter_map(saved_item_slot) {
+            occurrences[slot] = occurrences[slot].saturating_add(1);
         }
-        (saved, encoded) => saved == Some(encoded),
-    };
-    if matches {
-        nbt.remove(&"Items".into());
-        while items.last().is_some_and(Option::is_none) {
-            items.pop();
+        entries.retain(|raw| {
+            let Some(slot) = saved_item_slot(raw) else {
+                return true;
+            };
+            if occurrences[slot] == 1
+                && let Some(stack) = item_from_nbt(raw)
+                && let Tag::Compound(mut canonical) = Tag::from(&stack)
+            {
+                canonical.insert("Slot".into(), Tag::Byte(slot as i8));
+                if raw == &Tag::Compound(canonical) {
+                    if items.len() <= slot {
+                        items.resize(slot + 1, None);
+                    }
+                    items[slot] = Some(stack);
+                    return false;
+                }
+            }
+            true
+        });
+        if entries.is_empty() && !items.is_empty() {
+            nbt.remove(&key);
         }
-    } else {
-        items.clear();
     }
     let mut entity = crate::containers::ModBlockEntity::new(
         id,
@@ -770,7 +789,17 @@ pub fn decode_block_entity_for_block(
     tag: &Tag,
     block: &str,
 ) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
-    let decoded = decode_block_entity(tag)?;
+    decode_block_entity_replacing(tag, block, None)
+}
+
+/// Like [`decode_block_entity_for_block`], retaining mutable set history when
+/// reading new NBT onto an existing trial spawner.
+pub fn decode_block_entity_replacing(
+    tag: &Tag,
+    block: &str,
+    previous: Option<&crate::containers::BlockEntity>,
+) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
+    let decoded = decode_block_entity_with_history(tag, previous)?;
     // Several vanilla types share a decoded representation (for example barrel
     // and chest). Membership belongs to the saved type, not that representation.
     let saved_id = text(tag.get("id"))?;
@@ -785,6 +814,13 @@ pub fn decode_block_entity_for_block(
 }
 
 pub fn decode_block_entity(tag: &Tag) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
+    decode_block_entity_with_history(tag, None)
+}
+
+fn decode_block_entity_with_history(
+    tag: &Tag,
+    previous: Option<&crate::containers::BlockEntity>,
+) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
     use crate::containers::BlockEntity;
     let int = |k: &str| tag.get(k).and_then(crate::nbt_path::int_value); // getIntOr
     let id = text(tag.get("id"))?;
@@ -1007,7 +1043,13 @@ pub fn decode_block_entity(tag: &Tag) -> Option<((i32, i32, i32), crate::contain
             };
         }
         BlockEntity::Spawner(s) => **s = crate::mobs::spawner::Spawner::load(tag),
-        BlockEntity::TrialSpawner(s) => **s = crate::mobs::trial_spawner::TrialSpawner::load(tag),
+        BlockEntity::TrialSpawner(s) => {
+            let previous = match previous {
+                Some(BlockEntity::TrialSpawner(old)) => Some(old.as_ref()),
+                _ => None,
+            };
+            **s = crate::mobs::trial_spawner::TrialSpawner::load(tag, previous);
+        }
         BlockEntity::Vault(v) => **v = crate::vault::Vault::load(tag),
         BlockEntity::Beehive(h) => **h = crate::beehive::Beehive::from_nbt(tag),
         BlockEntity::CommandBlock(c) => **c = crate::command_block::CommandBlock::load(tag),
@@ -1259,6 +1301,18 @@ pub fn encode_with(
     shape: LevelShape,
     items: &crate::items::Items,
 ) -> NamedTag {
+    encode_full(chunk, registry, biomes, tables, shape, items, true)
+}
+
+fn encode_full(
+    chunk: &Chunk,
+    registry: &BlockRegistry,
+    biomes: &Biomes,
+    tables: Option<&SaveTables>,
+    shape: LevelShape,
+    items: &crate::items::Items,
+    apply_block_entity_edits: bool,
+) -> NamedTag {
     let sky_light = shape.sky_light;
     let mut sections = Vec::new();
     let air = tables.map_or(0, |t| t.air);
@@ -1355,7 +1409,13 @@ pub fn encode_with(
         .filter(|(_, e)| !block_entity_placeholder(e))
         .map(|(p, e)| {
             let block = block_name(p);
-            let mut current = block_entity_encode::encode(*p, e, &block, items);
+            let mut current = block_entity_encode::encode_with(*p, e, &block, items, |_, _| {
+                if apply_block_entity_edits {
+                    extras?.block_entity_save_edits.as_ref()?.get(p).cloned()
+                } else {
+                    None
+                }
+            });
             if let Some((_, name)) = chunk.block_names.iter().find(|(q, _)| q == p)
                 && let Tag::Compound(map) = &mut current
             {
@@ -2048,18 +2108,19 @@ fn write_region_records(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as u32);
     let compressed = compress_records(records, timestamp);
-    let mut by_region: BTreeMap<(i32, i32), Vec<(ChunkPos, Option<ChunkRecord>)>> = BTreeMap::new();
-    for (&((x, z), _), record) in records.iter().zip(compressed) {
+    type RegionWrite<'a> = (ChunkPos, &'a Record, Option<CompressedWrite>);
+    let mut by_region: BTreeMap<(i32, i32), Vec<RegionWrite<'_>>> = BTreeMap::new();
+    for (&((x, z), source), record) in records.iter().zip(compressed) {
         let record = record?;
         by_region
             .entry((x >> 5, z >> 5))
             .or_default()
-            .push((ChunkPos::new(x, z), record));
+            .push((ChunkPos::new(x, z), source, record));
     }
     for ((rx, rz), list) in by_region {
         let path = region_path(root, folder, rx, rz);
         // Clearing chunks of a region that doesn't exist changes nothing.
-        let create = list.iter().any(|(_, r)| r.is_some());
+        let create = list.iter().any(|(_, _, r)| r.is_some());
         let Some(region) = cached_region(cache, (rx, rz), &path, create)? else {
             continue;
         };
@@ -2068,13 +2129,13 @@ fn write_region_records(
         let _writing = far_regions::writing(cache, (rx, rz));
         let mut region = region.lock().map_err(|_| "region file poisoned")?;
         let mut changed = false;
-        for (pos, record) in &list {
+        for (pos, source, record) in list {
             match record {
                 Some(record) => {
-                    region.write(*pos, record)?;
+                    write_chunk_record(&mut region, pos, source, record)?;
                     changed = true;
                 }
-                None => changed |= region.clear(*pos, timestamp)?,
+                None => changed |= region.clear(pos, timestamp)?,
             }
         }
         if changed {
@@ -2090,6 +2151,42 @@ fn write_region_records(
         }
     }
     Ok(())
+}
+
+fn write_chunk_record(
+    region: &mut RegionFile,
+    pos: ChunkPos,
+    source: &Record,
+    CompressedWrite { record, primary }: CompressedWrite,
+) -> std::io::Result<()> {
+    let error = match region.write(pos, &record) {
+        Ok(()) => {
+            if primary {
+                source.accept_block_entity_edits();
+            }
+            return Ok(());
+        }
+        Err(error) => error,
+    };
+    if !primary
+        || !error
+            .get_ref()
+            .is_some_and(|cause| cause.is::<sunrise_world::region::CompressedChunkLimit>())
+    {
+        return Err(error);
+    }
+    let (compression, timestamp) = (record.compression, record.timestamp);
+    drop(record);
+    let Some(stored) = source.without_block_entity_edits() else {
+        return Err(error);
+    };
+    log::warn!(
+        "block_entity_save_additional: discarding listener edits from chunk {},{}: {error}",
+        pos.x,
+        pos.z
+    );
+    let stored = ChunkRecord::from_nbt(&stored, compression, timestamp, Limits::saved())?;
+    region.write(pos, &stored)
 }
 
 /// `job(i)` for every `i` below `count`, in order, shared between this thread
@@ -2236,6 +2333,7 @@ fn upgrade_record<'a>(
     context: impl FnOnce() -> Option<&'a DatafixContext>,
 ) -> Result<()> {
     use sunrise_world::datafix::{self, schema::Ty};
+    horizon_names::adopt_in_record(folder, &mut record.tag);
     let default = if folder == Folder::Poi { 1945 } else { -1 };
     if number(record.tag.get("DataVersion")).unwrap_or(default) >= i64::from(DATA_VERSION) {
         return Ok(());
@@ -2261,7 +2359,7 @@ fn upgrade_record<'a>(
 /// Chunk and entity records waiting for the writer thread, by (entities?,
 /// x, z): reads see them before the region files do.
 type PendingWrites = Mutex<HashMap<(Folder, i32, i32), (u64, Record)>>;
-type WriteBatch = (Folder, Vec<((i32, i32), Record, u64)>);
+type WriteBatch = (Folder, Vec<QueuedWrite>);
 /// The region folders of a dimension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Folder {
@@ -2402,8 +2500,14 @@ impl SaveDir {
     /// a warning, and the level opens without them (as vanilla's `SavedDataStorage` starts a
     /// saved data over when its file is broken), so the next save can't overwrite it.
     pub fn load_attachments(&self) -> sunrise_mod_runtime::attachments::Attachments {
-        let path = self.attachments_path();
-        let data = match try_read_dat(&path) {
+        let mut path = self.attachments_path();
+        let mut read = try_read_dat(&path);
+        if matches!(read, Err(DatIssue::Missing)) {
+            // A dimension Horizon saved: its file, written under Sunrise's name at the next save.
+            path = horizon_names::horizon_attachments_path(&self.root);
+            read = try_read_dat(&path);
+        }
+        let data = match read {
             Err(DatIssue::Missing) => return Default::default(),
             Ok(root) => match root.get("data") {
                 Some(Tag::Compound(data)) => Ok(data.clone()),
@@ -2431,7 +2535,11 @@ impl SaveDir {
     ) -> Result<()> {
         let path = self.attachments_path();
         let data = attachments.to_nbt();
-        if data.is_empty() && !path.exists() {
+        // Emptied after a Horizon file was read: an empty file under Sunrise's name keeps it unread.
+        if data.is_empty()
+            && !path.exists()
+            && !horizon_names::horizon_attachments_path(&self.root).exists()
+        {
             return Ok(());
         }
         write_dat(
@@ -2716,7 +2824,9 @@ impl SaveDir {
     }
     /// A record as saved: the pending write first, then the region file.
     fn read_record_raw(&self, folder: &str, x: i32, z: i32) -> Option<NamedTag> {
-        self.try_read_record_raw(folder, x, z).ok().flatten()
+        self.try_read_record_raw(folder, x, z, Record::tag_for_metadata)
+            .ok()
+            .flatten()
     }
     /// `read_record_raw`, telling a record that isn't there (`Ok(None)`) from a read that failed
     /// (`Err`, already reported): the second may succeed on a later read.
@@ -2725,6 +2835,7 @@ impl SaveDir {
         folder: &str,
         x: i32,
         z: i32,
+        read_pending: fn(&Record) -> Option<Arc<NamedTag>>,
     ) -> std::result::Result<Option<NamedTag>, ()> {
         let pending = self
             .pending
@@ -2733,7 +2844,7 @@ impl SaveDir {
             .get(&(Folder::of(folder), x, z))
             .map(|(_, r)| r.clone());
         if let Some(record) = pending {
-            return Ok(record.tag().map(|t| (*t).clone()));
+            return Ok(read_pending(&record).map(|t| (*t).clone()));
         }
         let cache = match Folder::of(folder) {
             Folder::Region => &self.regions,
@@ -2759,8 +2870,9 @@ impl SaveDir {
         folder: &str,
         x: i32,
         z: i32,
+        read_pending: fn(&Record) -> Option<Arc<NamedTag>>,
     ) -> std::result::Result<Option<NamedTag>, ()> {
-        let Some(mut record) = self.try_read_record_raw(folder, x, z)? else {
+        let Some(mut record) = self.try_read_record_raw(folder, x, z, read_pending)? else {
             return Ok(None);
         };
         match self.upgrade_record(Folder::of(folder), &mut record) {
@@ -2773,7 +2885,9 @@ impl SaveDir {
     }
     /// A record brought to the current version (`upgrade_record`).
     fn read_record(&self, folder: &str, x: i32, z: i32) -> Option<NamedTag> {
-        self.try_read_record(folder, x, z).ok().flatten()
+        self.try_read_record(folder, x, z, Record::tag_for_metadata)
+            .ok()
+            .flatten()
     }
     fn upgrade_record(&self, folder: Folder, record: &mut NamedTag) -> Result<()> {
         upgrade_record(folder, record, || {
@@ -2794,7 +2908,7 @@ impl SaveDir {
         registry: &BlockRegistry,
         biomes: &Biomes,
     ) -> std::result::Result<Option<Chunk>, ()> {
-        let Some(root) = self.try_read_record("region", x, z)? else {
+        let Some(root) = self.try_read_record("region", x, z, Record::tag)? else {
             return Ok(None);
         };
         let tables = self.tables.get().map(|t| &**t);
@@ -3198,7 +3312,8 @@ pub fn world_gen_settings(world: &Path) -> Option<Tag> {
     })
 }
 include!("save/preset_saved.rs");
-pub use sunrise_client_core::uuid::{uuid_from_text, uuid_text};
+pub use sunrise_client_core::uuid::uuid_from_text;
+pub use sunrise_core::uuid::uuid_text;
 /// A random (version 4) UUID as vanilla's four-int form.
 ///
 /// Every call gets its own: the generator is seeded once from the clock and
@@ -3776,7 +3891,10 @@ impl Level {
                 .or_else(|| read_dat(&player_dir.join(format!("{name}.dat_old"))))
         });
         level.singleplayer_file = owner.is_some();
-        let player = owner.or_else(|| data.get("Player").cloned());
+        let mut player = owner.or_else(|| data.get("Player").cloned());
+        if let Some(player) = &mut player {
+            horizon_names::adopt_in_player(player);
+        }
         level.player_uuid = uuid_from_tag(player.as_ref().and_then(|p| p.get("UUID"))).or(uuid);
         let spawn = level
             .world_spawn
@@ -4182,12 +4300,19 @@ impl Level {
     }
     /// Write every file; a world without a player UUID gets a random one.
     pub fn write(&mut self, dir: &Path, items: &crate::items::Items) -> Result<()> {
-        self.write_internal(dir, Some(items), false)
+        self.write_internal(dir, Some(items), false, false)
     }
 
     /// Dedicated servers save connected players separately.
     pub fn write_without_player(&mut self, dir: &Path) -> Result<()> {
-        self.write_internal(dir, None, false)
+        self.write_internal(dir, None, false, false)
+    }
+
+    /// `level.dat` without a new player file: the single-player owner's file stays as last
+    /// saved, and a legacy `Data.Player` (before the first normal save the owner's only copy)
+    /// stays in `level.dat`.
+    pub fn write_keeping_player(&mut self, dir: &Path) -> Result<()> {
+        self.write_internal(dir, None, false, true)
     }
 
     /// The temporary world a Realms upload packs
@@ -4196,7 +4321,7 @@ impl Level {
     /// generation and game rules, and no player file or weather/clocks the server makes
     /// on its own. The caller writes the data packs and removes the folder.
     pub fn write_upload(&mut self, dir: &Path) -> Result<()> {
-        self.write_internal(dir, None, true)
+        self.write_internal(dir, None, true, false)
     }
 
     /// The player's file alone, `players/data/<singleplayer_uuid>.dat`
@@ -4216,6 +4341,7 @@ impl Level {
         dir: &Path,
         items: Option<&crate::items::Items>,
         upload: bool,
+        keep_legacy_player: bool,
     ) -> Result<()> {
         fs::create_dir_all(dir)?;
         restore_level_dat(dir);
@@ -4224,6 +4350,9 @@ impl Level {
             .get("Data")
             .is_some_and(|d| d.get("Player").is_some() || d.get("WorldGenSettings").is_some());
         let mut data = compound_or_empty(root.get("Data").cloned());
+        let kept_player = keep_legacy_player
+            .then(|| data.get("Player").cloned())
+            .flatten();
         if let Tag::Compound(map) = &mut data {
             // Pre-26.3 keys now stored elsewhere (a legacy Sunrise level.dat).
             for key in [
@@ -4265,7 +4394,9 @@ impl Level {
         }
         // An upload's level.dat names no player (`createTag(null)`); every other file
         // names this world's own.
-        let uuid = (!upload).then(|| self.ensure_player_uuid());
+        // A keep-owner write names nothing new: the on-disk `singleplayer_uuid` (or its absence)
+        // stays, so reopening loads the same owner file as before.
+        let uuid = (!upload && !keep_legacy_player).then(|| self.ensure_player_uuid());
         // A new world's first spawn point is its world spawn.
         if self.world_spawn.is_none() {
             self.world_spawn = self.spawn.map(|s| {
@@ -4471,6 +4602,9 @@ impl Level {
         }
         if let Some(items) = items {
             self.write_player(dir, items)?;
+        }
+        if let Some(player) = kept_player {
+            put(&mut data, "Player", player);
         }
         put(&mut root, "Data", data);
         write_dat(&dir.join("level.dat"), root)?;
@@ -6605,7 +6739,8 @@ mod tests {
                 .pop()
                 .expect("one record")
                 .expect("an encoded record")
-                .expect("a chunk, not a deletion");
+                .expect("a chunk, not a deletion")
+                .record;
             assert_eq!(
                 written.compression,
                 Compression::selected(),
@@ -6649,7 +6784,7 @@ mod tests {
                 })
                 .transpose()
                 .unwrap();
-            let got = got.unwrap();
+            let got = got.unwrap().map(|r| r.record);
             assert_eq!(
                 got.as_ref().map(|r| (&r.compressed, r.timestamp)),
                 want.as_ref().map(|r| (&r.compressed, r.timestamp))
@@ -7512,6 +7647,74 @@ mod tests {
     }
 
     #[test]
+    fn mod_block_entity_items_claim_only_the_slots_written() {
+        use crate::{
+            containers::{BlockEntity, ModBlockEntity},
+            items::ItemStack,
+        };
+        let parse = |s| sunrise_core::nbt::parse_snbt(s).unwrap().0;
+        let saved = parse(
+            r#"{id:"test:machine",x:0,y:64,z:0,Items:[{Slot:0b,raw:"superseded"},{Slot:1b,raw:"retained"},{raw:"no slot"}]}"#,
+        );
+        let (pos, BlockEntity::Mod(mut data)) = decode_block_entity(&saved).unwrap() else {
+            panic!("expected mod block entity")
+        };
+        let encode = |data: &ModBlockEntity| {
+            block_entity_encode::encode(
+                pos,
+                &BlockEntity::Mod(Box::new(data.clone())),
+                "test:machine",
+                &Default::default(),
+            )
+        };
+        data.items.resize(2, None);
+        *data.item_slot_mut(0).unwrap() = Some(ItemStack::new("minecraft:stone", 2));
+        let encoded = encode(&data);
+        assert_eq!(
+            encoded.get("Items"),
+            Some(&parse(
+                r#"[{Slot:0b,id:"minecraft:stone",count:2},{Slot:1b,raw:"retained"},{raw:"no slot"}]"#
+            ))
+        );
+        let (_, BlockEntity::Mod(reloaded)) = decode_block_entity(&encoded).unwrap() else {
+            panic!("expected mod block entity")
+        };
+        assert_eq!(reloaded.items[0], data.items[0]);
+        assert_eq!(encode(&reloaded), encoded);
+        *data.item_slot_mut(0).unwrap() = None;
+        // A tick reply replacing the mutable fields, including shrinking the
+        // modeled vector to zero, cannot restore the old saved row for slot 0.
+        let mut snapshot = (**data).clone();
+        snapshot.items.clear();
+        let revision = data.revision().changes() + 1;
+        data.apply_snapshot(snapshot, revision);
+        assert_eq!(
+            encode(&data).get("Items"),
+            Some(&parse(r#"[{Slot:1b,raw:"retained"},{raw:"no slot"}]"#))
+        );
+        data.items.resize(2, None);
+        *data.item_slot_mut(1).unwrap() = None;
+        assert_eq!(
+            encode(&data).get("Items"),
+            Some(&parse(r#"[{raw:"no slot"}]"#))
+        );
+        let (_, BlockEntity::Mod(mixed)) = decode_block_entity(&parse(
+            r#"{id:"test:machine",x:0,y:64,z:0,Items:[{Slot:0b,raw:"opaque"},{Slot:1b,id:"minecraft:stone",count:2}]}"#,
+        ))
+        .unwrap() else {
+            panic!("expected mod block entity")
+        };
+        assert_eq!(
+            mixed.items,
+            [None, Some(ItemStack::new("minecraft:stone", 2))]
+        );
+        data.nbt.insert("Items".into(), parse("{energy:5}"));
+        assert_eq!(encode(&data).get("Items"), Some(&parse("{energy:5}")));
+        data.nbt.remove(&"Items".into());
+        assert_eq!(encode(&data).get("Items"), None);
+    }
+
+    #[test]
     fn mod_block_entity_round_trips() {
         let saved = sunrise_core::nbt::parse_snbt(
             r#"{id:"gtmod:macerator",x:5,y:-60,z:12,energy:1200L,progress:7,Items:[{Slot:0b,id:"minecraft:iron_ore",count:3}]}"#,
@@ -7591,25 +7794,32 @@ mod tests {
             block_entity_encode::encode(pos, &back, "gtmod:macerator", &Default::default()),
             reordered
         );
-        // Unordered lists the loader cannot read exactly stay the mod's, as saved.
-        for items in [
-            r#"Items:[{Slot:1b,id:"minecraft:stone",count:1,note:"mine"},{Slot:0b,id:"minecraft:stone",count:1}]"#,
-            r#"Items:[{Slot:1b,id:"minecraft:stone",count:1},{Slot:1b,id:"minecraft:dirt",count:1}]"#,
+        // A lossless slot is modeled even beside an opaque row. Duplicate
+        // slot indices stay opaque because the engine cannot model both stacks.
+        let duplicate = r#"Items:[{Slot:1b,id:"minecraft:stone",count:1},{Slot:1b,id:"minecraft:dirt",count:1}]"#;
+        let modeled = [Some(crate::items::ItemStack::new("minecraft:stone", 1))];
+        let parse = |items| {
+            sunrise_core::nbt::parse_snbt(&format!(r#"{{id:"gtmod:cable",x:0,y:0,z:0,{items}}}"#))
+                .unwrap()
+                .0
+        };
+        for (input, output, slots) in [
+            (
+                r#"Items:[{Slot:1b,id:"minecraft:stone",count:1,note:"mine"},{Slot:0b,id:"minecraft:stone",count:1}]"#,
+                r#"Items:[{Slot:0b,id:"minecraft:stone",count:1},{Slot:1b,id:"minecraft:stone",count:1,note:"mine"}]"#,
+                modeled.as_slice(),
+            ),
+            (duplicate, duplicate, &[]),
         ] {
-            let saved = sunrise_core::nbt::parse_snbt(&format!(
-                r#"{{id:"gtmod:cable",x:0,y:0,z:0,{items}}}"#
-            ))
-            .unwrap()
-            .0;
-            let (pos, back) = decode_block_entity(&saved).expect("mod block entity");
+            let (pos, back) = decode_block_entity(&parse(input)).expect("mod block entity");
             let crate::containers::BlockEntity::Mod(m) = &back else {
                 panic!("not a mod's");
             };
-            assert!(m.items.is_empty(), "{items}");
+            assert_eq!(m.items.as_slice(), slots, "{input}");
             assert_eq!(
                 block_entity_encode::encode(pos, &back, "gtmod:cable", &Default::default()),
-                saved,
-                "{items}"
+                parse(output),
+                "{input}"
             );
         }
         // Vanilla's types are never a mod's, modelled or not.
@@ -8299,6 +8509,86 @@ mod tests {
         let reopened = Level::read(&dir).unwrap();
         assert_eq!(reopened.day_time, 12345);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A crash save that excludes the single-player owner writes `level.dat` without a new
+    /// player file and keeps a legacy `Data.Player`, the owner's only copy before a normal save.
+    #[test]
+    fn keeping_the_owner_writes_no_player_file_and_keeps_legacy_data_player() {
+        let dir = std::env::temp_dir().join(format!("sunrise-keep-owner-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut level = Level {
+            name: "Test".into(),
+            ..Level::default()
+        };
+        level.write_without_player(&dir).unwrap();
+        let legacy = Tag::compound([("Health", Tag::Float(7.0_f32.to_bits()))]);
+        let mut root = read_dat(&dir.join("level.dat")).unwrap();
+        let Tag::Compound(root_map) = &mut root else {
+            panic!("level.dat is a compound");
+        };
+        let Some(Tag::Compound(data)) = root_map.get_mut(&JavaString::from("Data")) else {
+            panic!("level.dat has Data");
+        };
+        data.insert(JavaString::from("Player"), legacy.clone());
+        write_dat(&dir.join("level.dat"), root).unwrap();
+
+        level.position = Some([1.0, 2.0, 3.0]);
+        level.day_time = 777;
+        level.write_keeping_player(&dir).unwrap();
+
+        let root = read_dat(&dir.join("level.dat")).unwrap();
+        assert_eq!(
+            root.get("Data").and_then(|d| d.get("Player")),
+            Some(&legacy)
+        );
+        assert!(!dir.join("players").join("data").exists());
+        assert_eq!(Level::read(&dir).unwrap().day_time, 777);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A keep-owner write leaves `singleplayer_uuid` as it was on disk, absent included:
+    /// naming the offline `Player` would make a reopen load another account's file.
+    #[test]
+    fn keeping_the_owner_keeps_the_on_disk_singleplayer_uuid() {
+        let dir = std::env::temp_dir().join(format!("sunrise-keep-uuid-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut level = Level {
+            name: "Test".into(),
+            ..Level::default()
+        };
+        let set_uuid = |uuid: Option<Tag>| {
+            let mut root = read_dat(&dir.join("level.dat")).unwrap();
+            let Tag::Compound(root_map) = &mut root else {
+                panic!("level.dat is a compound");
+            };
+            let Some(Tag::Compound(data)) = root_map.get_mut(&JavaString::from("Data")) else {
+                panic!("level.dat has Data");
+            };
+            match uuid {
+                Some(tag) => data.insert(JavaString::from("singleplayer_uuid"), tag),
+                None => data.remove(&JavaString::from("singleplayer_uuid")),
+            };
+            write_dat(&dir.join("level.dat"), root).unwrap();
+        };
+        let on_disk = || {
+            read_dat(&dir.join("level.dat"))
+                .unwrap()
+                .get("Data")
+                .and_then(|d| d.get("singleplayer_uuid"))
+                .cloned()
+        };
+        level.write_without_player(&dir).unwrap();
+
+        set_uuid(None);
+        level.write_keeping_player(&dir).unwrap();
+        assert_eq!(on_disk(), None, "a level.dat without a uuid keeps none");
+
+        let owner = Tag::IntArray(vec![1, 2, 3, 4]);
+        set_uuid(Some(owner.clone()));
+        level.write_keeping_player(&dir).unwrap();
+        assert_eq!(on_disk(), Some(owner), "a uuid stays the same");
         let _ = fs::remove_dir_all(&dir);
     }
 

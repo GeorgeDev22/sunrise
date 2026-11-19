@@ -207,25 +207,6 @@ pub fn blit_sprite(
         }
     }
 }
-/// `GuiGraphicsExtractor.blit(location, x, y, u, v, width, height, textureWidth,
-/// textureHeight)`: a `src` region of a sprite — in its own texture's units, as the
-/// u/v/width/height arguments are — stretched over `w` × `h`.
-pub fn blit_sprite_region(
-    batch: &mut HudBatch,
-    atlas: &HudAtlas,
-    sprite: &str,
-    src: [f32; 4],
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    color: u32,
-) {
-    if let Some(r) = atlas.sprites.get(sprite) {
-        let size = [r.w as f32, r.h as f32];
-        batch.rect_uv(x, y, w, h, sub(*r, size, src), color);
-    }
-}
 fn draw_sprite(
     batch: &mut HudBatch,
     r: Rect,
@@ -811,8 +792,8 @@ fn slider_sprites_ext(
     (track, handle)
 }
 /// Slider value for a click at `cx` (AbstractSliderButton.setValueFromMouse).
-pub fn slider_value(x: f32, w: f32, cx: f32) -> f32 {
-    ((cx - (x + 4.0)) / (w - 8.0)).clamp(0.0, 1.0)
+pub fn slider_value(x: f32, w: f32, cx: f32) -> f64 {
+    ((f64::from(cx) - (f64::from(x) + 4.0)) / (f64::from(w) - 8.0)).clamp(0.0, 1.0)
 }
 /// Screen.renderMenuBackground: in a world the translucent dark texture,
 /// otherwise the dirt-like menu texture, tiled at 32 pixels.

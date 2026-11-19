@@ -67,7 +67,8 @@ class WorldInputCaptureTests(unittest.TestCase):
         self.assertIn("self.tick_remote_player(running, hold)", level_fn)
         level = method(remote, "tick_remote_player")
         self.assertLess(level.index("self.tick_client_load()"),
-                        level.index("self.tick_local_player("))
+                        level.index("self.tick_remote_own_player()"))
+        self.assertIn("self.tick_local_player(", method(remote, "tick_remote_own_player"))
         # The extracted local-player pass owns the movement input now.
         self.assertIn("let stick = self.pad_move()", method(remote, "tick_local_player"))
 
@@ -156,10 +157,12 @@ impl Replay { fn playing(&self) -> bool { self.driver.is_some() } }
 struct Options { offscreen: bool }
 #[derive(Default)]
 struct ServerPacks { prompt: Option<()> }
+#[derive(Default)]
+struct ScreenState { answered: Cell<bool> }
 struct Game {
     focused: bool, agent_pointer: bool, window: Option<Box<Window>>, mouse: Mouse,
     captured: bool, capture_mode: Option<CursorGrabMode>, regrab_on_refocus: bool, title: Option<()>, screen: Screen,
-    remote: Option<Remote>,
+    screen_state: ScreenState, remote: Option<Remote>,
     studio: Studio, replay: Replay,
     mining: bool, lan_acting: Option<u32>, renderer: Option<Renderer>, cursor: (f32, f32),
     window_cursor: Option<window::PointerSample>,
@@ -172,7 +175,7 @@ impl Default for Game {
     fn default() -> Self {
         Self { focused: true, agent_pointer: false, window: Some(Box::default()),
             mouse: Mouse::default(), captured: false, capture_mode: None, regrab_on_refocus: false, title: None,
-            screen: Screen::Playing, remote: None, studio: Studio::default(), replay: Replay::default(),
+            screen: Screen::Playing, screen_state: ScreenState::default(), remote: None, studio: Studio::default(), replay: Replay::default(),
             mining: false, lan_acting: None,
             renderer: None, cursor: (0.0, 0.0), window_cursor: None,
             window_pointer_space: std::cell::OnceCell::new(), server_packs: ServerPacks::default(),

@@ -17,6 +17,75 @@ impl HookParts {
     ) -> &[Attached<dyn MenuPart>] {
         attached(&self.menus, id)
     }
+    /// The screen hooks' lookup: the part that owns the screen of menu type `menu` opened as
+    /// mod block `block`'s menu, alone. A mod menu type has one such part (registration refuses
+    /// a second); one of vanilla's has one per mod, and a mod's block gets its own mod's.
+    /// For a registered recipe-book screen, registration allows screen Parts only from
+    /// the declaring mod, so these same lookups cannot dispatch to a foreign part.
+    pub(crate) fn menu_screen(&self, menu: &str, block: Option<&str>) -> &[Attached<dyn MenuPart>] {
+        let parts = attached(&self.menus, || Some(menu));
+        if !vanilla_menu(menu) {
+            return parts;
+        }
+        let Some((namespace, _)) = block.and_then(|b| b.split_once(':')) else {
+            return &[];
+        };
+        match parts
+            .iter()
+            .position(|p| owns_namespace(p.mod_id, namespace))
+        {
+            Some(i) => std::slice::from_ref(&parts[i]),
+            None => &[],
+        }
+    }
+}
+
+/// The hooks a menu type's screen is made of, one part per screen answering them all.
+const SCREEN_HOOKS: [HookId; 4] = [
+    HookId::Screen,
+    HookId::ScreenDraw,
+    HookId::ScreenClick,
+    HookId::ScreenTooltip,
+];
+
+/// Whether `part` answers a screen hook: then it owns the screens it is asked for.
+pub fn lays_out_screen(part: &dyn MenuPart) -> bool {
+    let mut subscribed = part.menu_subscribed().iter().flatten();
+    subscribed.any(|&hook| {
+        SCREEN_HOOKS
+            .iter()
+            .any(|&screen| screen as usize == hook as usize)
+    })
+}
+
+/// Whether screen parts of mods `a` and `b` on menu type `menu` would own the same screens,
+/// which registration refuses: always on a mod's menu type, and on one of vanilla's only for
+/// one mod, as each mod's blocks get their own mod's part (`HookParts::menu_screen`).
+pub fn screens_shared(menu: &str, a: &str, b: &str) -> bool {
+    !vanilla_menu(menu) || a == b
+}
+
+fn vanilla_menu(menu: &str) -> bool {
+    menu.starts_with("minecraft:")
+}
+
+/// The mod that declared the recipe-book screen or owns the dynamic screen of `menu`
+/// opened as `block`'s menu. A registered book needs no screen part to have an owner.
+pub fn menu_screen_owner(menu: &str, block: Option<&str>) -> Option<&'static str> {
+    if let Some(owner) = crate::RecipeBookLayout::declaring_mod(menu) {
+        return Some(owner);
+    }
+    SCREEN_HOOKS
+        .into_iter()
+        .filter(|&hook| has_part_hook(hook))
+        .find_map(|hook| {
+            let parts = parts(hook, "screen owner");
+            parts
+                .for_hook(hook)?
+                .menu_screen(menu, block)
+                .first()
+                .map(|p| p.mod_id)
+        })
 }
 
 /// Whether the Parts attached to the menu type `menu` subscribe to `hook`; the game
@@ -31,7 +100,7 @@ pub fn menu_listens(hook: HookId, menu: &str) -> bool {
 }
 
 impl dyn Registrar + '_ {
-    /// Attach `part` to the mod menu type `menu`.
+    /// Attach `part` to the menu type `menu`: a mod's, or one of vanilla's that a mod block opens.
     pub fn menu_part<P: MenuPart>(&mut self, menu: &str, part: P) {
         self.attach_menu_part(menu, type_name::<P>(), Arc::new(part));
     }
@@ -45,6 +114,8 @@ pub trait MenusRegistrar {
     /// typed screen value, frozen here: mapped slots need finite coordinates and
     /// its book must equal `book`. This screen owns client geometry and server
     /// hidden-slot policy; these menus do not call the dynamic screen hook.
+    /// The declaring mod owns the screen's callbacks and slot controls, even
+    /// without a screen part. A foreign screen part on this menu is refused.
     /// This does not turn display candidates into ingredient predicates.
     /// Invalid ownership, unknown books, duplicate menus or malformed screen
     /// geometry refuse installation, even when the caller ignores the error.
@@ -56,6 +127,6 @@ pub trait MenusRegistrar {
         layout: crate::RecipeBookLayout,
         screen: crate::Screen,
     ) -> Result<(), String>;
-    /// Attach `part`, of kind `kind`, to the mod menu type `menu`.
+    /// Attach `part`, of kind `kind`, to the menu type `menu`.
     fn attach_menu_part(&mut self, menu: &str, kind: &'static str, part: Arc<dyn MenuPart>);
 }

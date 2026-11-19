@@ -950,10 +950,10 @@ fn shared_resources_can_cross_threads() {
 #[test]
 fn selecting_creative_tabs_does_not_drop_the_carried_stack_on_release() {
     let mut creative = Creative::from_json(&serde_json::json!({
-        "schema": 2,
+        "schema": 4, "item_features": {}, "potion_features": {},
         "tabs": [
-            {"type": "CATEGORY", "items": ["{count:1,id:\"minecraft:stone\"}"]},
-            {"type": "INVENTORY"}
+            {"id":"minecraft:building_blocks","type":"CATEGORY","build":[]},
+            {"id":"minecraft:inventory","type":"INVENTORY","build":[]}
         ]
     }))
     .unwrap();
@@ -961,7 +961,7 @@ fn selecting_creative_tabs_does_not_drop_the_carried_stack_on_release() {
         let mut clicks = Clicks::default();
         for tab in [1, 1, 0, 1] {
             select_creative_tab(&mut creative, &mut clicks, tab);
-            assert_eq!(creative.selected, tab);
+            assert_eq!(creative.selected_index(), tab);
             assert_eq!(creative.tab().inventory, tab == 1);
             assert_eq!(
                 clicks.release(
@@ -1127,6 +1127,7 @@ fn integrated_server_save_persists_owner_player_data() {
         &dir,
         execution_role::ExecutionRole::IntegratedServer,
         &Default::default(),
+        false,
     )
     .unwrap();
 
@@ -1148,6 +1149,7 @@ fn integrated_server_save_persists_owner_player_data() {
         &dir,
         execution_role::ExecutionRole::DedicatedServer,
         &Default::default(),
+        false,
     )
     .unwrap();
 

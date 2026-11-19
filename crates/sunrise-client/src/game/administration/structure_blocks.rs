@@ -7,7 +7,6 @@ use std::collections::HashSet;
 use sunrise_client::{
     containers::BlockEntity,
     gizmos::{Gizmos, InvisibleBlock},
-    save,
     structure_block::{
         self, RenderMode, SCAN_CORNER_BLOCKS_RANGE, StructureBlock, StructureMode, UpdateType,
     },
@@ -216,7 +215,7 @@ impl Game<'_> {
                     let nbt = self.world.block_entities.get(&at).map(|entity| {
                         let name = &*self.res.facts().get(state).name;
                         let mut tag =
-                            save::block_entity_encode::encode(at, entity, name, self.res.items());
+                            self.encode_live_block_entity(at, entity, name, self.res.items());
                         Self::write_pending_loot(&self.world, at, &mut tag);
                         let Tag::Compound(mut c) = tag else {
                             return Compound::new();

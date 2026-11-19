@@ -19,7 +19,10 @@ height (`Window.getGuiScaledWidth/Height`).
 
 `LevelRef::brightness(host, layer, pos)` (`getBrightness`, the stored light 0 to 15) reads on a client too: the
 light of the level the client shows, as the server sent it for a chunk the client holds. It is `None` for a
-chunk the client does not hold and before login; `can_see_sky` stays a server read.
+chunk the client does not hold and before login. `LevelRef::block_face_sturdy(host, pos, face, support)` uses
+that level's local shapes for a loaded block inside build height. `LevelRef::can_see_sky(host, pos)` reads
+its published sky light, even outside build height or in an unloaded column. See
+[Level hosts](../../concepts/hooks-and-the-host.md#level-hosts) for the boundary rules.
 
 `ClientHost::playing()` is true while the player is in the world with nothing over it: no screen, title, sign
 editor or book, so keys and zoom apply. `ClientHost::mapping(name)` reads a vanilla key mapping (`key.forward`,
@@ -199,18 +202,12 @@ These read the local player as the client sees it. They take no mod-controlled n
 - `ClientHost::hover_name(&stack)` is `ItemStack.getHoverName()` as plain text: the custom name, else
   a written book's non-blank title, else the item's name in the client's language, without rarity
   colour or italics. An invalid stack reads an empty string.
-- `ClientHost::creative_search_items()` is the creative search tab's stacks, in the order the screen
-  lists them, once per item and components. Mod additions from `build_creative_mode_tab_contents`
-  join when the tabs are built, and the operator tab's items only with the last build's permissions.
-  It is empty before resources load. It reads the same on native and wasm.
-- `ClientHost::creative_tabs()` is the creative inventory's item tabs in `CreativeModeTabs.tabs()` order
-  (not the search, saved toolbars or survival inventory tabs), each a `CreativeModeTabInfo` with its
-  registry id and `display_items` (`CreativeModeTab.getDisplayItems`, components kept), and the build's
-  `has_permissions`. Mod stacks from `build_creative_mode_tab_contents` follow a tab's own, so this is
-  the read for "which tab shows this stack": `tabs_showing(&stack)` matches by item and components. The
-  operator tab is listed only when the last build had permissions. The contents come from the game's
-  tab export, built with vanilla's default feature flags: a world's feature set does not change them,
-  so there is no feature field. Empty before resources load; the same on native and wasm.
+- `ClientHost::creative_search_items()` returns the built creative search tab's display order,
+  for ranking stacks in inventory sorters. It requests the catalog with the local player's permission
+  and Operator Items Tab option. A cache miss can fire the creative build hook, so this read needs a
+  mutable Host. It returns an empty list during setup and reload, and excludes client-only
+  presentation additions.
+  For membership reads on either side, see [creative tab contents](../content-mods.md).
 - `ClientHost::item_uses_block_light(&stack, context)` is `ItemStackRenderState.usesBlockLight` of the
   stack's model resolved for an `ItemDisplayContext` (no owner or level): true for a model lit like a
   block from the side (`gui_light: side`), false for a flat item lit from the front. It is what
@@ -225,11 +222,15 @@ These read the local player as the client sees it. They take no mod-controlled n
 `client_pick` runs at both vanilla pick call sites: every client tick at
 partial tick 1.0 after the game mode tick and before key handling, even while
 paused; and every frame at its game-time partial tick before render-state
-extraction. Both write the same stored result. NeoForge 26.3 has no counterpart. The event supplies read-only `original`, `block_candidate` and
-`entity_candidate` values and a mutable `result`, initialized to `original`.
-Choose the block candidate to target a block through an entity, choose a target
-from the typed ray APIs, or clear the result for a miss. Later listeners see the
-previous listener's result. A reentrant `crosshair_target()` read sees `original`.
+extraction. Both write the same stored result. NeoForge 26.3 has no counterpart.
+The event supplies the vanilla `original`, the independent `block_candidate` and
+`entity_candidate`, and the pick's `origin: [f64; 3]` in world-space XYZ. This is
+the camera entity's eye for that pick: current for a tick, interpolated for a frame.
+Use it with a candidate's hit point to measure the ray distance without casting
+another ray. All listeners receive the same inputs. Only `result`, initialized to
+`original`, carries edits to later listeners. Choose the block candidate to target
+through an entity, choose a target from the typed ray APIs, or clear the result for
+a miss. A reentrant `crosshair_target()` read sees `original`.
 
 The game accepts an unchanged original without revalidating its geometry. A
 replacement is validated at writeback: finite point, current level, live entity or

@@ -186,7 +186,8 @@ uses the no-pack frame. What it changes from 0.1:
   draws are decoded, so glass, water and smoke blend as light does and solid surfaces look as under `"gamma"`. A stage
   sees the same values either way. Where the device can't draw a float frame the pack draws on an 8-bit one, in
   gamma. Resource packs' `core/sky`, `core/stars` and `core/rendertype_lines` shaders write gamma, so under
-  `"linear"` Sunrise's own sky, stars and block outline draw in their place.
+  `"linear"` Sunrise's own sky, stars and block outline draw in their place. A resource pack's `core/lightmap` is
+  kept: it draws the light texture, not the frame.
 - **`[entity]`**, `fn entity(input: EntityInput) -> Surface`: the lit colour of what is no block terrain (entities,
   block entities, dropped and framed items, particles; `input.kind` says which), from its texture, tint, vanilla's
   shade and hurt flash, its light and a normal, with the material stage's shadow maps and coloured lights. It returns

@@ -259,11 +259,45 @@ fn the_text_background_opacity_sets_the_backdrop_and_the_faded_text() {
 fn glyphs_of_a_label_refused_for_capacity_still_upload() {
     with_client_game(|game| {
         face_south(game);
-        // The default font's runes are already packed bitmap glyphs, not runtime
-        // uploads. Force Unifont and an empty per-game cache so this layout must
-        // rasterize them, independently of any text drawn during game setup.
-        game.gui.atlas.font.uniform = true;
-        game.gui.atlas.font.reset_cache();
+        // The default font's runes are already packed bitmap glyphs, not runtime uploads, and
+        // the prepared resources carry no Unifont. Give the game a font whose runes are hex
+        // glyphs and an empty cache, so this layout must rasterize them.
+        let mut hex = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        hex.start_file("runes.hex", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        let rows = "3C".repeat(16);
+        let glyphs: String = ["16A0", "16A2", "16A6"]
+            .iter()
+            .map(|rune| format!("{rune}:{rows}\n"))
+            .collect();
+        std::io::Write::write_all(&mut hex, glyphs.as_bytes()).unwrap();
+        let hex = hex.finish().unwrap().into_inner();
+        let source = sunrise_assets::resource_source::ResourceSource::indexed(
+            [
+                (
+                    "assets/minecraft/font/default.json",
+                    br#"{"providers":[{"type":"unihex","hex_file":"minecraft:font/runes.zip"}]}"#
+                        .to_vec(),
+                ),
+                ("assets/minecraft/font/runes.zip", hex),
+            ]
+            .map(|(path, bytes)| {
+                (
+                    path.to_owned(),
+                    sunrise_assets::resource_source::Resource::bytes(bytes),
+                )
+            })
+            .into(),
+        );
+        let atlas = &mut game.gui.atlas;
+        atlas.font = sunrise_client::font::Font::load(
+            &source,
+            &Default::default(),
+            &[],
+            (atlas.width, atlas.height),
+            (atlas.height / 2, atlas.height / 2),
+            atlas.sprites["sunrise/white"],
+        );
         let text = Text::literal("\u{16A0}\u{16A2}\u{16A6}");
         let at = [0.5, 70.0, 0.5];
         let options = NameTagOptions::new(false, true, 0xF0);
@@ -516,7 +550,7 @@ fn wasm_mods() -> Vec<mod_api::ModEntry> {
     let manifest = Package::read(&path).unwrap().manifest;
     let info = mod_api::PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         mod_api::PackageKind::Code,
         mod_api::Side::Both,
         vec![manifest.id.clone()],

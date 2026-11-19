@@ -109,6 +109,22 @@ engine = pathlib.Path(sys.argv[1])
 binary = next(p for p in (engine / "sunrise-engine", engine / "sunrise-engine.exe") if p.is_file())
 assert b"sunrise-private-holder-v2;" in binary.read_bytes(), f"holder capability missing from {binary}"
 PYMARK
+if [[ " ${FNR_MODS:-alpha beta} " == *" shared_tip "* ]]; then
+  # The library the mods' registry crates are linked from is exported beside them, as a library
+  # they load, not a mod: no row of the libraries record names it (#1379).
+  python3 - "$scratch/engine" <<'PYSHARED'
+import json, pathlib, sys
+engine = pathlib.Path(sys.argv[1])
+names = ("libsunrise_registry_shared.so", "libsunrise_registry_shared.dylib", "sunrise_registry_shared.dll")
+found = [name for name in names if (engine / name).is_file()]
+assert len(found) == 1, f"one shared registry library in {engine}, found {found}"
+rows = json.loads((engine / "native-mods.json").read_text())["libraries"]
+assert all(row["file"] != found[0] for row in rows), f"{found[0]} is recorded as a mod library: {rows}"
+mods = {row["mod"] for row in rows if row["kind"] == "mod"}
+assert {"fnr_shared_left", "fnr_shared_right", "fnr_shared_tip"} <= mods, rows
+print(f"shared registry library {found[0]} exported, not recorded as a mod")
+PYSHARED
+fi
 if [ "$side" = server ]; then
   # The server folder's export: the launcher says where the engine is, and installs no instance build.
   grep -F "Built the server engine: $scratch/engine/sunrise-engine" "$scratch/native-build.out"
@@ -285,6 +301,10 @@ fill 0 100 0 9 100 9 minecraft:hopper[facing=east]{Items:[{Slot:0b,id:"minecraft
   if [[ " ${FNR_MODS:-alpha beta} " == *" wasmtime "* ]]; then
     # The mod's own engine ran a module in the game's one wasmtime.
     grep -F 'fnr: wasmtime add 2+3=5' "$scratch/server.log"
+  fi
+  if [[ " ${FNR_MODS:-alpha beta} " == *" shared_tip "* ]]; then
+    # A mod depending on two mods that use the same crates.io crate linked, and runs (#1379).
+    grep -F 'fnr: shared_tip left 1 right 2 own 3' "$scratch/server.log"
   fi
   if [[ " ${FNR_MODS:-alpha beta} " == *" fdshape "* ]]; then
     grep -F 'fnr: native_server_started dedicated=true' "$scratch/server.log"

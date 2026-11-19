@@ -29,7 +29,6 @@ pub mod copper_golem;
 pub mod creaking;
 pub mod creaking_heart;
 pub mod cube;
-pub mod dab;
 pub mod data;
 pub mod dolphin;
 pub mod doors;
@@ -125,6 +124,8 @@ pub mod wither;
 
 #[cfg(test)]
 mod invisible_follow_tests;
+#[cfg(test)]
+mod template_mob_tests;
 mod world;
 pub use world::{TargetInfo, single_player_pos, visual_clip};
 pub mod dragon_contacts;
@@ -233,6 +234,8 @@ pub struct MobType {
     /// The bounds `finalize`'s attribute record clamps to, from the catalog.
     pub attribute_bounds: finalize::AttrBounds,
     pub gravity: f64,
+    /// The type's `safe_fall_distance`: the base of a mob's attribute when
+    /// `attributes` has no row for it (`finalize::base_value`).
     pub safe_fall_distance: f64,
     pub fall_damage_multiplier: f64,
     pub water_efficiency: f64,
@@ -583,9 +586,14 @@ impl NamedDamage {
     pub const IS_EXPLOSION: u32 = 1 << 8;
     pub const IS_FALL: u32 = 1 << 9;
     pub const BYPASSES_ENCHANTMENTS: u32 = 1 << 10;
+    pub const BYPASSES_COOLDOWN: u32 = 1 << 11;
+    pub const DAMAGES_HELMET: u32 = 1 << 12;
+    pub const IS_FREEZING: u32 = 1 << 13;
+    pub const WITCH_RESISTANT_TO: u32 = 1 << 14;
+    pub const NO_ANGER: u32 = 1 << 15;
 
     /// Each flag with the damage tag it stands for.
-    const TAG_FLAGS: [(u32, &'static str); 11] = [
+    const TAG_FLAGS: [(u32, &'static str); 16] = [
         (Self::IS_FIRE, "minecraft:is_fire"),
         (Self::BYPASSES_ARMOR, "minecraft:bypasses_armor"),
         (Self::NO_KNOCKBACK, "minecraft:no_knockback"),
@@ -603,6 +611,11 @@ impl NamedDamage {
             Self::BYPASSES_ENCHANTMENTS,
             "minecraft:bypasses_enchantments",
         ),
+        (Self::BYPASSES_COOLDOWN, "minecraft:bypasses_cooldown"),
+        (Self::DAMAGES_HELMET, "minecraft:damages_helmet"),
+        (Self::IS_FREEZING, "minecraft:is_freezing"),
+        (Self::WITCH_RESISTANT_TO, "minecraft:witch_resistant_to"),
+        (Self::NO_ANGER, "minecraft:no_anger"),
     ];
 
     pub const fn new(name: &'static str, tags: u32) -> Self {
@@ -739,6 +752,47 @@ impl DamageKind {
             return named.has(NamedDamage::BYPASSES_ENCHANTMENTS);
         }
         matches!(self, DamageKind::SonicBoom)
+    }
+    /// DamageTypeTags.BYPASSES_COOLDOWN: empty in vanilla.
+    pub fn bypasses_cooldown(self) -> bool {
+        matches!(self, Self::Named(named) if named.has(NamedDamage::BYPASSES_COOLDOWN))
+    }
+    /// DamageTypeTags.DAMAGES_HELMET: falling anvils, blocks and stalactites.
+    pub fn damages_helmet(self) -> bool {
+        if let Self::Named(named) = self {
+            return named.has(NamedDamage::DAMAGES_HELMET);
+        }
+        matches!(
+            self,
+            DamageKind::FallingBlock | DamageKind::FallingAnvil | DamageKind::FallingStalactite
+        )
+    }
+    /// DamageTypeTags.IS_FREEZING: `freeze` alone in vanilla.
+    pub fn is_freezing(self) -> bool {
+        if let Self::Named(named) = self {
+            return named.has(NamedDamage::IS_FREEZING);
+        }
+        self == DamageKind::Freeze
+    }
+    /// DamageTypeTags.WITCH_RESISTANT_TO: magic, indirect magic, sonic boom and thorns.
+    pub fn witch_resistant_to(self) -> bool {
+        if let Self::Named(named) = self {
+            return named.has(NamedDamage::WITCH_RESISTANT_TO);
+        }
+        matches!(
+            self,
+            DamageKind::Magic
+                | DamageKind::IndirectMagic
+                | DamageKind::SonicBoom
+                | DamageKind::Thorns
+        )
+    }
+    /// DamageTypeTags.NO_ANGER: `mob_attack_no_aggro` alone in vanilla, a goat's ram.
+    pub fn no_anger(self) -> bool {
+        if let Self::Named(named) = self {
+            return named.has(NamedDamage::NO_ANGER);
+        }
+        self == DamageKind::MobAttackNoAggro
     }
 }
 /// `source.getEntity()` of a blow, as `SulfurCube.knockback` reads it: `getEyePosition()`,
@@ -1141,6 +1195,10 @@ pub struct Extra {
     pub swing_stab: bool,
     pub flag: bool,
     pub flag2: bool,
+    /// `Bat.DATA_ID_FLAGS` without bit 0 (resting, which is `flag`): bits only
+    /// a save or summon sets, which `Bat.setResting` leaves alone and the bat
+    /// saves back.
+    pub bat_flags: u8,
     /// `AbstractHorse`'s `Bred` save flag: nothing sets it at runtime (no
     /// vanilla code calls `setBred` outside `readAdditionalSaveData`), so only
     /// a save or `/summon` gives it, and `followMommy` reads it.
@@ -1492,8 +1550,6 @@ pub struct Mob {
     /// `Entity.needsSync`: knocked back, pushed or jumped since its server
     /// last sent it, so the next update goes out at once.
     pub needs_sync: bool,
-    /// The mobs it pushed this turn, kept while the collision cap is on (`push::Cap`).
-    pub pushed: Vec<u32>,
     /// `Entity.syncPosition`: it bounced this tick (`restituteMovementAfterCollisions`),
     /// so its tracker keeps this position as a step of the next move it sends.
     pub sync_position: bool,
@@ -1585,6 +1641,8 @@ pub struct Mob {
     /// checks made outside the mob world (minecarts, boats).
     pub on_climbable: bool,
     pub fire_ticks: i32,
+    /// Unsaved fire immunity granted on this logical side.
+    pub mod_fire_immune: bool,
     pub ticks_frozen: i32,
     /// `Entity.isInPowderSnow` as of the last mob tick, for the skeleton's
     /// freezing tracker read at save time.
@@ -1630,9 +1688,6 @@ pub struct Mob {
     /// `PlayerSkin.cape`: a player's cape texture, once every download of
     /// its skin is ready.
     pub cape: Option<String>,
-    /// A pose laid over this player's body after the vanilla animation (`anim::setup`), timed on
-    /// `age`, given by a hook (`sunrise_hooks::players::BodyPose`). Visual only.
-    pub emote: Option<Arc<dyn anim::BodyPose>>,
     /// A mannequin's `DATA_PROFILE` (ResolvableProfile): the profile's
     /// `textures` property resolves to `skin` like a player's.
     pub profile: Option<sunrise_protocol::entity_data::Profile>,
@@ -1702,6 +1757,11 @@ pub enum MobEvent {
     ForPlayer {
         conn: Option<u32>,
         event: Box<MobEvent>,
+    },
+    /// A finished drink whose item effects still need the world's living Host.
+    DrinkFinished {
+        mob: u32,
+        stack: crate::items::ItemStack,
     },
     /// Squid.handleEntityEvent(19), resetting the remote tentacle cycle.
     SquidCycle {
@@ -2701,12 +2761,20 @@ impl Mob {
             .sum();
         (base - 0.15 * f64::from(protection)).max(0.0)
     }
+    /// The mob type's fire immunity or a live grant. Species-specific hurt rules
+    /// (such as the Creaking's heart-bound damage gate) stay on their own paths.
+    pub fn fire_immune(&self) -> bool {
+        self.kind.flags.fire_immune || self.mod_fire_immune
+    }
     /// Entity.isOnFire: fire-immune mobs never count as burning, even on the
     /// tick a sun or fire check set their timer before `base_tick` clears it.
     pub fn is_on_fire(&self) -> bool {
-        !self.kind.flags.fire_immune && self.fire_ticks > 0
+        self.fire_ticks > 0 && !self.fire_immune()
     }
     pub fn ignite_for_ticks(&mut self, ticks: i32) {
+        if self.mod_fire_immune {
+            return;
+        }
         self.fire_ticks = self
             .fire_ticks
             .max((f64::from(ticks) * self.burning_time()).ceil() as i32);
@@ -2814,7 +2882,6 @@ impl Mob {
             is_vehicle: equine::is_vehicle(m),
             still: m.species() == Species::HappyGhast && happy_ghast::on_still_timeout(m),
             carrying: m.rider.is_some() || m.extra.rider.is_some(),
-            collisions: 0,
             knockback_resistance: m.attrs.knockback_resistance,
             effects: m
                 .extra
@@ -3393,22 +3460,6 @@ impl MobWorld<'_> {
         event
     }
 
-    /// An action directed at the player already bound at tick start, such as
-    /// retaliation against the attacker, must not follow a later target change.
-    pub fn route_initial_player_event(&self, event: MobEvent) -> MobEvent {
-        if event.targets_player()
-            && let Some(selection) = self.player_selection
-            && selection.has_switched()
-            && let Some(player) = selection.initial()
-        {
-            return MobEvent::ForPlayer {
-                conn: player.connection,
-                event: Box::new(event),
-            };
-        }
-        event
-    }
-
     /// Keep a mount's rider as the recipient even when a target-change hook
     /// redirects the mount to a different player later in the same tick.
     /// Before any switch the existing allocation-free routing is unchanged.
@@ -3581,7 +3632,6 @@ impl Mob {
         random: LegacyRandom,
     ) -> Self {
         let mut mob = Self {
-            emote: None,
             attachment_lifetime: Default::default(),
             join: Default::default(),
             id,
@@ -3601,7 +3651,6 @@ impl Mob {
             horizontal_collision: false,
             vertical_collision_below: false,
             needs_sync: false,
-            pushed: Vec::new(),
             sync_position: false,
             movement_emission: None,
             gear_knockback_resistance: None,
@@ -3642,6 +3691,7 @@ impl Mob {
             climbing: false,
             on_climbable: false,
             fire_ticks: 0,
+            mod_fire_immune: false,
             ticks_frozen: 0,
             in_powder_snow: false,
             was_in_powder_snow: false,
@@ -3992,15 +4042,11 @@ impl Mob {
         amount -= blocked;
         container.record_block(blocked);
         // #damages_helmet: falling anvils, blocks and stalactites.
-        if matches!(
-            source.kind,
-            DamageKind::FallingBlock | DamageKind::FallingAnvil | DamageKind::FallingStalactite
-        ) && self.extra.head_id().is_some()
-        {
+        if source.kind.damages_helmet() && self.extra.head_id().is_some() {
             amount *= 0.75;
         }
         // LivingEntity.hurtServer: `#freeze_hurts_extra_types` take five times.
-        if source.kind == DamageKind::Freeze
+        if source.kind.is_freezing()
             && matches!(
                 self.species(),
                 Species::Strider | Species::Blaze | Species::MagmaCube
@@ -4015,7 +4061,8 @@ impl Mob {
         // with `lastHurt` by this incoming amount, before armor and Resistance,
         // and `actuallyHurt` gets only what it adds.
         let incoming = amount;
-        let cooldown = self.invulnerable as f32 > 10.0;
+        // `#bypasses_cooldown` skips the comparison.
+        let cooldown = self.invulnerable as f32 > 10.0 && !source.kind.bypasses_cooldown();
         if cooldown {
             if incoming <= self.last_hurt {
                 return false;
@@ -4098,13 +4145,7 @@ impl Mob {
         if witch {
             if source.attacker == Some(Who::Mob(self.id)) {
                 amount = 0.0;
-            } else if matches!(
-                source.kind,
-                DamageKind::Magic
-                    | DamageKind::IndirectMagic
-                    | DamageKind::SonicBoom
-                    | DamageKind::Thorns
-            ) {
+            } else if source.kind.witch_resistant_to() {
                 amount *= 0.15;
             }
         }
@@ -4478,10 +4519,17 @@ impl Mob {
             absorption_removed |= !keep && e.id == "minecraft:absorption";
             keep
         });
+        // `removeModifier` dirties `max_absorption` only when the modifier
+        // is there, permanent or a mod's transient one with its id: a loaded
+        // Absorption, which added none, clamps nothing.
+        let (cap, absorption_id) = (finalize::Attr::MaxAbsorption, "minecraft:effect.absorption");
+        let cap_removed = absorption_removed
+            && (finalize::modifier_amount(self, cap, absorption_id).is_some()
+                || finalize::has_transient_modifier(self, cap, absorption_id));
         for effect in removed {
             self.set_effect_modifiers(effect, None);
         }
-        if absorption_removed {
+        if cap_removed {
             // LivingEntity.onAttributeUpdated clamps to the remaining maximum;
             // removing Absorption does not subtract the hearts it granted.
             self.absorption = self.absorption.min(armor::max_absorption(self));
@@ -4581,16 +4629,19 @@ impl Mob {
         if !active.visible {
             self.extra.hidden_effects.push(effect);
         }
+        // `onEffectAdded` for a new effect, `onEffectUpdated(_, true, _)` for a
+        // changed one: the modifiers follow the active amplifier.
+        if changed {
+            self.set_effect_modifiers(effect, Some(active.amplifier));
+        }
+        // Then `MobEffectInstance.onEffectStarted`, for every `addEffect`:
+        // `AbsorptionMobEffect` raises the amount within the maximum the
+        // modifier above set.
         if effect == "minecraft:absorption" {
             self.absorption = self
                 .absorption
                 .max(4.0 * (incoming.amplifier + 1) as f32)
                 .clamp(0.0, armor::max_absorption(self));
-        }
-        // `onEffectAdded` for a new effect, `onEffectUpdated(_, true, _)` for a
-        // changed one: the modifiers follow the active amplifier.
-        if changed {
-            self.set_effect_modifiers(effect, Some(active.amplifier));
         }
         self.effects_dirty |= changed;
         changed
@@ -5311,7 +5362,13 @@ pub(crate) mod sensor_scan_tests {
             armor_toughness: 0.0,
             knockback_resistance: 0.0,
             jump_strength: 0.42,
-            attributes: Arc::default(),
+            // `LivingEntity.createLivingAttributes`: every living entity has
+            // the attributes an effect's modifier changes on a mob (#1988).
+            attributes: Arc::new(HashMap::from([
+                ("minecraft:safe_fall_distance".to_owned(), 3.0),
+                ("minecraft:max_absorption".to_owned(), 0.0),
+                ("minecraft:waypoint_transmit_range".to_owned(), 0.0),
+            ])),
             item_stack_limits: Default::default(),
             attribute_bounds: Default::default(),
             gravity: 0.08,
@@ -7346,19 +7403,10 @@ mod hidden_speed_mob_tick_tests {
 
     #[test]
     fn consume_effect_removal_clamps_absorption_to_remaining_maximum() {
-        use sunrise_world::attributes::entity::Catalog;
-        let bits = |v: f64| format!("{:016x}", v.to_bits());
-        let catalog = Arc::new(
-            Catalog::from_json(&serde_json::json!({
-                "data_version": sunrise_world::DATA_VERSION,
-                "attributes": [
-                    {"id":"minecraft:max_absorption", "default":bits(0.0), "min":bits(0.0), "max":bits(2048.0), "syncable":true}
-                ],
-                "entities": {"minecraft:pig":{"minecraft:max_absorption":bits(0.0)}}
-            }))
-            .unwrap(),
-        );
-        let key = catalog.id("minecraft:max_absorption").unwrap();
+        // A mob whose `max_absorption` base is `base`.
+        let with_base = |m: &mut Mob, base: f64| {
+            finalize::set_base(m, finalize::Attr::MaxAbsorption, base);
+        };
 
         let mut kind = (*sensor_scan_tests::kind()).clone();
         kind.id = "minecraft:pig".into();
@@ -7383,11 +7431,7 @@ mod hidden_speed_mob_tick_tests {
         // Case 2: Base 20 mob with Absorption I (granting 4.0 absorption hearts, max_absorption 24.0).
         // On ClearAllEffects, max_absorption becomes 20.0; amount 4.0 is <= 20.0, so it keeps 4.0.
         let mut m20 = Mob::new(2, kind.clone(), Vec3::ZERO, 0.0);
-        let mut attrs = catalog.create("minecraft:pig").unwrap();
-        attrs.edit(key, |value, observer| {
-            value.set_base_value(20.0, observer).unwrap();
-        });
-        m20.extra.armor_attributes = Some(Box::new(attrs));
+        with_base(&mut m20, 20.0);
         m20.add_effect("absorption", 600, 0);
         assert_eq!(armor::max_absorption(&m20), 24.0);
         assert_eq!(m20.absorption, 4.0);
@@ -7404,11 +7448,7 @@ mod hidden_speed_mob_tick_tests {
         // On RemoveEffects(["minecraft:absorption"]), remaining max_absorption is 20.0,
         // so amount 24.0 is clamped to 20.0.
         let mut m20_clamp = Mob::new(3, kind.clone(), Vec3::ZERO, 0.0);
-        let mut attrs3 = catalog.create("minecraft:pig").unwrap();
-        attrs3.edit(key, |value, observer| {
-            value.set_base_value(20.0, observer).unwrap();
-        });
-        m20_clamp.extra.armor_attributes = Some(Box::new(attrs3));
+        with_base(&mut m20_clamp, 20.0);
         m20_clamp.add_effect("absorption", 600, 0);
         m20_clamp.absorption = 24.0;
         m20_clamp.apply_consume_effect(
@@ -7438,11 +7478,7 @@ mod hidden_speed_mob_tick_tests {
         // The shared command/expiry removal path must obey the same contract.
         for (base, amount, expected) in [(20.0, 8.0, 8.0), (20.0, 24.0, 20.0), (0.0, 4.0, 0.0)] {
             let mut m = Mob::new(5, kind.clone(), Vec3::ZERO, 0.0);
-            let mut attrs = catalog.create("minecraft:pig").unwrap();
-            attrs.edit(key, |value, observer| {
-                value.set_base_value(base, observer).unwrap();
-            });
-            m.extra.armor_attributes = Some(Box::new(attrs));
+            with_base(&mut m, base);
             m.add_effect("absorption", 600, 1);
             m.absorption = amount;
             m.effects_dirty = false;

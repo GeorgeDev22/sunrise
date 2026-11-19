@@ -322,6 +322,21 @@ impl Boat {
             last: (self.position, self.yaw, self.pitch),
         });
     }
+    /// The client took over a boat that was easing toward the server's position
+    /// (`target` and the rotation, `steps` to go): its LinearInterpolationHandler
+    /// goes on, now following the boat's own moves too.
+    pub(super) fn go_on_easing(&mut self, target: Vec3, rotation: (f32, f32), steps: u32) {
+        if steps == 0 || self.lerp.is_some() {
+            return;
+        }
+        self.lerp = Some(DrivenLerp {
+            target,
+            yaw: rotation.0,
+            pitch: rotation.1,
+            steps,
+            last: (self.position, self.yaw, self.pitch),
+        });
+    }
     /// `Entity.getClientPositionAndRotation`: where the boat is easing to, or
     /// where it is when it isn't.
     pub(super) fn client_position(&self) -> (Vec3, f32, f32) {
@@ -2331,6 +2346,23 @@ mod tests {
 
     fn boat() -> Boat {
         Boat::new(1, Arc::from("oak"), Vec3::ZERO, 0.0)
+    }
+
+    /// A boat the client takes over while it eases toward the server's position goes on
+    /// easing there and reports that spot (the handler is the entity's, not the driver's).
+    #[test]
+    #[ignore = "daily"]
+    fn a_boat_taken_over_mid_way_goes_on_easing() {
+        super::super::native_entity_refs::tests::with_game(|game| {
+            let mut b = Boat::new(9, "oak".into(), Vec3::new(0.5, 64.0, 2.5), 0.0);
+            b.go_on_easing(Vec3::new(0.5, 64.0, 3.5), (0.0, 0.0), 2);
+            assert_eq!(b.client_position().0, Vec3::new(0.5, 64.0, 3.5));
+            game.interpolate_driven_boat(&mut b);
+            assert!((b.position.z - 3.0).abs() < 1e-9, "{}", b.position.z);
+            game.interpolate_driven_boat(&mut b);
+            assert!((b.position.z - 3.5).abs() < 1e-9, "{}", b.position.z);
+            assert!(b.lerp.is_none());
+        });
     }
 
     /// The boat this client drives eases to a server teleport over three ticks

@@ -6,6 +6,15 @@ which the engine registers. Each mod registers its own serializer IDs and any ne
 recipe type IDs in namespaces it owns. Duplicate serializer IDs and duplicate
 recipe type IDs refuse startup, naming the ID.
 
+A `type` written without a namespace (`crafting_shaped`, or `:crafting_shaped`)
+means `minecraft`, as everywhere an identifier is read; it is never the recipe
+file's own namespace. The id is decoded once, when the file is read, so filters,
+brewing and clients all see `minecraft:crafting_shaped`. An id that is not a
+valid identifier (`Crafting_shaped`), a missing or non-string `type` and a recipe
+that is not a JSON object are each refused by name; a valid id no mod registered
+is refused separately as an unregistered serializer. Every refusal is listed in
+the one report of recipes that failed to load.
+
 Register crafting code in `Hooks::register`, which receives `RegistrationContext`:
 
 ```rust,ignore

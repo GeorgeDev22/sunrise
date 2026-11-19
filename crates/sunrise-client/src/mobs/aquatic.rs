@@ -285,9 +285,10 @@ pub(super) fn no_ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) 
         super::ai::make_age_locked_particle(m, events);
     }
 }
-/// `Tadpole.aiStep`: growing up into a frog after 24000 ticks.
+/// `Tadpole.aiStep`: growing up into a frog after 24000 ticks. A negative
+/// loaded age counts up too (`setAge(age + 1)` has no sign check).
 fn grow_up(m: &mut Mob, events: &mut Vec<MobEvent>) {
-    if m.extra.age >= 0 && !m.extra.age_locked {
+    if !m.extra.age_locked {
         m.extra.age += 1;
         if m.extra.age >= 24_000 && !m.removed {
             m.removed = true;
@@ -1235,6 +1236,23 @@ mod school_tests {
                 .iter()
                 .any(|e| matches!(e, MobEvent::ParticleAt { .. }))
         );
+    }
+    /// `Tadpole.aiStep`: `setAge(age + 1)` whatever the sign, so a tadpole
+    /// loaded with `Age:-100` reads `-99` after one tick; an age-locked one
+    /// stays put.
+    #[test]
+    fn a_tadpole_with_a_negative_age_still_ages() {
+        let mut k = kind();
+        Arc::make_mut(&mut k).species = Species::Tadpole;
+        let mut m = Mob::new(1, k, Vec3::ZERO, 0.0);
+        m.extra.age = -100;
+        let mut events = Vec::new();
+        grow_up(&mut m, &mut events);
+        assert_eq!(m.extra.age, -99);
+        m.extra.age_locked = true;
+        grow_up(&mut m, &mut events);
+        assert_eq!(m.extra.age, -99);
+        assert!(events.is_empty());
     }
     #[test]
     fn school_sizes() {

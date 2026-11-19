@@ -6,7 +6,10 @@
 use super::Game;
 use super::transactions::{After, DeferredEffect};
 use mod_api::__private::game::*;
-use mod_api::{CraftedByError, EquipmentSlot, ItemPlace, LivingRef, MenuSlotBacking, Transaction};
+use mod_api::{
+    CraftedByError, EquipmentSlot, ItemPlace, ItemPlaceEditError, LivingRef, MenuSlotBacking,
+    Transaction,
+};
 use sunrise_client::{first_person::Hand, items::ItemStack, menu::Menu};
 
 impl Game<'_> {
@@ -79,7 +82,7 @@ impl Game<'_> {
             _ => None,
         }
     }
-    /// All player place mutations use the command/host slot writer (and its journal).
+    /// Player place insert and extract use the command/host slot writer (and its journal).
     fn write_player_place(&mut self, place: &ItemPlace, stack: Option<ItemStack>) {
         use super::commands::items::Slot;
         let slot = match place {
@@ -164,6 +167,50 @@ impl Game<'_> {
         }
         self.unscoped_game_stack(place)
     }
+    /// Component-only write, without going through an equipment setter or stopping item use.
+    pub(super) fn game_edit_stack(
+        &mut self,
+        place: &ItemPlace,
+        stack: ItemStack,
+        changed: &[String],
+        tx: &Transaction,
+    ) -> Result<(), ItemPlaceEditError> {
+        if !self.places_simulated() || !self.transaction_holds(tx) {
+            return Err(ItemPlaceEditError::Unavailable);
+        }
+        if let ItemPlace::Equipment { entity, slot } = *place {
+            let mut held = self
+                .equipment_stack(entity, slot)
+                .flatten()
+                .ok_or(ItemPlaceEditError::NotHeld)?;
+            held.copy_changed_components_from(stack, changed);
+            self.journal_equipment(entity);
+            if let Some(mob) = self.mobs.iter_mut().find(|m| m.id == entity && !m.removed) {
+                mob.set_equipment_stack(slot as usize, Some(held));
+                self.after_commit(After::EquipmentSync(entity));
+            } else if let Some(stand) = self.armor_stands.iter_mut().find(|a| a.id == entity) {
+                stand.equipment.set(slot as usize, Some(held));
+            }
+        } else {
+            let player = self
+                .place_player(place)
+                .ok_or(ItemPlaceEditError::NotHeld)?;
+            let mut written = false;
+            self.native_as_player(player, |game| {
+                game.journal_player(player);
+                if let Some(held) = game.player_place(place).and_then(Option::as_mut) {
+                    held.copy_changed_components_from(stack, changed);
+                    written = true;
+                }
+            });
+            if !written {
+                return Err(ItemPlaceEditError::NotHeld);
+            }
+        }
+        self.notice_menu_place_write(place);
+        Ok(())
+    }
+
     /// Runs the vanilla `ItemStack.onCraftedBy` effects for a stack a mod-delivered menu result
     /// owns. The stack mutation is journaled through the caller's transaction and the statistic
     /// is deferred until its root commit.
@@ -388,7 +435,13 @@ impl Game<'_> {
                 .then(|| g.add_stack_to_inventory(rest))
                 .flatten()
             {
-                g.drop_after_commit(player, rest);
+                // What is left drops at the player, unless they are in another level than
+                // this one: then it stays the caller's.
+                if g.acting_in_level_in_place() {
+                    g.drop_after_commit(player, rest);
+                } else {
+                    went -= rest.count;
+                }
             }
         });
         went
@@ -508,10 +561,6 @@ impl Game<'_> {
         });
         took
     }
-    /// Writes mob `entity`'s equipment `slot` (#932): the same write
-    /// `native_living_set_equipment` makes — stack, attribute map, equip sound and game event
-    /// — with the effects waiting for the root commit of the open transaction, so an abort of
-    /// it is quiet. The equipment goes back then too (`journal_equipment`).
     /// The equipment `slot` of living entity `entity` (#932): a mob's
     /// (`equipment_stacks`, the worn stacks overlaid) or an armor stand's
     /// own, `None` where the slot is empty. None where neither kind is
@@ -563,7 +612,8 @@ pub(super) mod tests {
     use mod_api::HostTransaction;
     use mod_api::ServerHost;
     use mod_api::{
-        CraftedByError, ENTITY_AUTOMATION, ENTITY_ITEMS, ItemPlace, ItemResource, MenuRef,
+        CraftedByError, ENTITY_AUTOMATION, ENTITY_ITEMS, ItemPlace, ItemPlaceEditError,
+        ItemResource, MenuRef,
     };
     use std::sync::{Arc, atomic::AtomicI32, mpsc};
     use sunrise_client::{
@@ -655,7 +705,7 @@ pub(super) mod tests {
                         .unwrap();
                 }))
             });
-            assert_eq!(result, Ok(true));
+            assert_eq!(result, Ok(Ok(())));
             assert_eq!(game.dropped.len(), dropped_before);
             assert_eq!(
                 inventory(game),
@@ -669,7 +719,7 @@ pub(super) mod tests {
                 game.transaction(|host, tx| {
                     Ok::<_, ()>(slot.edit(host, tx, |stack| stack.set_count(15).unwrap()))
                 }),
-                Ok(false)
+                Ok(Err(ItemPlaceEditError::CountChanged))
             );
             assert_eq!(inventory(game), expected);
             let stone = ItemStack::new("minecraft:stone", 16)
@@ -679,7 +729,7 @@ pub(super) mod tests {
                 game.transaction(|host, tx| {
                     Ok::<_, ()>(slot.edit(host, tx, |stack| *stack = stone))
                 }),
-                Ok(false)
+                Ok(Err(ItemPlaceEditError::ItemChanged))
             );
             assert_eq!(inventory(game), expected);
             assert_eq!(game.inventory, host_before);
@@ -692,7 +742,7 @@ pub(super) mod tests {
                 game.transaction(|host, tx| {
                     Ok::<_, ()>(empty.edit(host, tx, |_| panic!("empty place ran editor")))
                 }),
-                Ok(false)
+                Ok(Err(ItemPlaceEditError::NotHeld))
             );
             assert_eq!(inventory(game), expected);
             assert_eq!(game.dropped.len(), dropped_before);
@@ -725,9 +775,12 @@ pub(super) mod tests {
             let original_stack = before[3].as_ref().unwrap().try_into_api().unwrap();
             assert_eq!(
                 game.transaction(|host, tx| {
-                    assert!(slot.edit(host, tx, |stack| {
-                        stack.copy_component_from(&source, "minecraft:custom_name");
-                    }));
+                    assert!(
+                        slot.edit(host, tx, |stack| {
+                            stack.copy_component_from(&source, "minecraft:custom_name");
+                        })
+                        .is_ok()
+                    );
                     assert_eq!(slot.stack(host), Some(expected_stack.clone()));
                     Err::<(), ()>(())
                 }),
@@ -739,9 +792,12 @@ pub(super) mod tests {
             assert_eq!(
                 game.transaction(|host, _| {
                     let child = host.transaction(|host, tx| {
-                        assert!(slot.edit(host, tx, |stack| {
-                            stack.copy_component_from(&source, "minecraft:custom_name");
-                        }));
+                        assert!(
+                            slot.edit(host, tx, |stack| {
+                                stack.copy_component_from(&source, "minecraft:custom_name");
+                            })
+                            .is_ok()
+                        );
                         Err::<(), ()>(())
                     });
                     assert_eq!(child, Err(()));
@@ -996,6 +1052,599 @@ pub(super) mod tests {
             0.0,
         ));
         30
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn worn_component_edit_is_quiet_and_reaches_tracking() {
+        use mod_api::EquipmentSlot;
+        use sunrise_client::lan::Out;
+        use sunrise_protocol::{buf::Reader, packets::play::Clientbound};
+
+        with_game(|game| {
+            open_to_lan(game);
+            let (tx, rx) = mpsc::channel();
+            let mut viewer = guest(1);
+            viewer.sender = PlayerSender::new(tx, Arc::default());
+            viewer.position = [0.5, 64.0, 1.5];
+            viewer.dimension = "minecraft:overworld".into();
+            viewer.loaded = true;
+            viewer.load_timeout = 0;
+            viewer.sent_chunks.insert((0, 0));
+            game.lan.as_mut().unwrap().hub.guests.push(viewer);
+
+            let id = zombie(game);
+            let living = game.living(game.entity(id).unwrap()).unwrap();
+            let slot = EquipmentSlot::Chest;
+            let armor = ItemStack::new("minecraft:diamond_chestplate", 1);
+            assert!(game.living_set_equipment(living, slot, Some(armor)));
+            game.mobs[0].first_tick = false;
+            // Track once to pair, again to cache a full idle state, then confirm it can go bare.
+            for _ in 0..3 {
+                game.level_pass.packets_drained = true;
+                game.mobs[0].needs_sync = false;
+                game.tick_lan(false);
+            }
+            let host = game.lan.as_ref().unwrap();
+            assert!(host.hub.guests[0].tracker.is_tracking(id as i32));
+            assert!(
+                host.states
+                    .as_slice()
+                    .iter()
+                    .any(|state| state.id == id as i32 && state.bare)
+            );
+            rx.try_iter().for_each(drop);
+
+            game.audio.capture = Some(Vec::new());
+            let place = ItemPlace::Equipment { entity: id, slot };
+            super::super::dispense_fixture::start_recording();
+            game.transaction(|host, tx| place.edit(host, tx, |stack| stack.set_damage(7)))
+                .unwrap();
+            assert!(game.audio.capture.as_ref().unwrap().is_empty());
+            assert!(super::super::dispense_fixture::stop_recording().is_empty());
+
+            game.level_pass.packets_drained = true;
+            game.tick_lan(false);
+            let hub = &game.lan.as_ref().unwrap().hub;
+            let received = rx
+                .try_iter()
+                .flat_map(|message| match message {
+                    Out::Packet(body) => vec![body],
+                    Out::Packets(bodies) => bodies,
+                    Out::Disconnect(reason) => panic!("tracking viewer disconnected: {reason:?}"),
+                })
+                .find_map(|body| {
+                    let mut reader = Reader::new(&body);
+                    let packet = reader.varint().ok()?;
+                    let Clientbound::SetEquipment(equipment) =
+                        Clientbound::decode(packet, reader.rest()).ok()?
+                    else {
+                        return None;
+                    };
+                    if equipment.id != id as i32 {
+                        return None;
+                    }
+                    let (_, stack) = equipment
+                        .slots
+                        .into_iter()
+                        .find(|(at, _)| *at == slot as u8)?;
+                    Some(hub.stack_from_network(&stack?))
+                })
+                .expect("the existing viewer receives the idle mob's equipment edit");
+            assert_eq!(received.item.as_ref(), "minecraft:diamond_chestplate");
+            assert_eq!(received.count, 1);
+            assert_eq!(received.damage, 7);
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn virtual_wrappers_and_cursors_refuse_a_whole_stack_edit() {
+        super::super::native_guest_turn_tests::with_guests(|game| {
+            let stick = ItemStack::new("minecraft:stick", 32);
+            let cursor_stack = ItemStack::new("minecraft:paper", 1);
+            game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                guest.game_mode = 1;
+                guest.inventory[0] = Some(stick.clone());
+                guest.carried = Some(cursor_stack.clone());
+            });
+            let player = game.player(12).unwrap();
+            let menu = game.player_container_menu(player).unwrap();
+            let hand = ItemPlace::PlayerHand {
+                player: player.uuid(),
+                hand: mod_api::Hand::Main,
+            };
+            for place in [
+                ItemPlace::Strict(Box::new(ItemPlace::InfiniteMaterials {
+                    player: player.uuid(),
+                    inner: Box::new(hand.clone()),
+                })),
+                ItemPlace::OneByOne(Box::new(hand)),
+                menu.cursor(),
+            ] {
+                assert_eq!(
+                    game.transaction(|host, tx| {
+                        place.edit(host, tx, |_| panic!("a refused place ran its editor"))
+                    }),
+                    Err(ItemPlaceEditError::UnsupportedPlace)
+                );
+            }
+            let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+            assert_eq!(guest.inventory[0].as_ref(), Some(&stick));
+            assert_eq!(guest.carried.as_ref(), Some(&cursor_stack));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn component_edit_preserves_live_nested_data_and_applies_a_removal() {
+        use mod_api::Tag;
+
+        with_game(|game| {
+            open_to_lan(game);
+            let mut player = guest(1);
+            let mut map = ItemStack::new("minecraft:filled_map", 1);
+            map.data_mut().map_id = Some(27);
+            map.data_mut().map_post_processing = Some(1);
+            let mut bundle = ItemStack::new("minecraft:bundle", 1);
+            let data = bundle.data_mut();
+            data.bundle_contents.push(map);
+            data.bundle_selected = sunrise_items::item_data::BundleSelected(0);
+            data.custom_name = Some(Tag::String("keep my contents".into()));
+            player.inventory[3] = Some(bundle);
+            let place = ItemPlace::PlayerSlot {
+                player: 123,
+                slot: 3,
+            };
+            game.lan.as_mut().unwrap().hub.guests.push(player);
+
+            game.transaction(|host, tx| {
+                place.edit(host, tx, |stack| {
+                    stack
+                        .apply_components(
+                            &[(
+                                "!minecraft:custom_name".into(),
+                                Tag::compound(Vec::<(&str, Tag)>::new()),
+                            )]
+                            .into(),
+                        )
+                        .unwrap();
+                })
+            })
+            .unwrap();
+            let bundle = game.lan.as_ref().unwrap().hub.guests[0].inventory[3]
+                .as_ref()
+                .unwrap()
+                .data()
+                .unwrap();
+            assert!(bundle.custom_name.is_none());
+            assert!(bundle.other("!minecraft:custom_name").is_some());
+            assert_eq!(bundle.bundle_selected.0, 0);
+            let map = bundle.bundle_contents[0].data().unwrap();
+            assert_eq!(map.map_id, Some(27));
+            assert_eq!(map.map_post_processing, Some(1));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn editing_a_raid_banners_name_preserves_its_other_components() {
+        use mod_api::Tag;
+        use sunrise_items::item_data::encode_extra_components;
+
+        with_game(|game| {
+            open_to_lan(game);
+            let banner = sunrise_client::mobs::raider::ominous_banner();
+            let original = encode_extra_components(&banner).unwrap();
+            let mut player = guest(1);
+            player.inventory[3] = Some(banner);
+            game.lan.as_mut().unwrap().hub.guests.push(player);
+            let place = ItemPlace::PlayerSlot {
+                player: 123,
+                slot: 3,
+            };
+            let edit = |game: &mut super::Game<'_>, id: &str, value: Tag| {
+                game.transaction(|host, tx| {
+                    place.edit(host, tx, |stack| {
+                        stack
+                            .apply_components(&[(id.into(), value)].into())
+                            .unwrap();
+                    })
+                })
+                .unwrap();
+            };
+            let banner = |game: &super::Game<'_>| {
+                game.lan.as_ref().unwrap().hub.guests[0].inventory[3]
+                    .clone()
+                    .unwrap()
+            };
+            edit(
+                game,
+                "minecraft:custom_name",
+                Tag::String("Named Raid Banner".into()),
+            );
+            let compact = banner(game);
+            assert!(compact.data().unwrap().ominous_banner);
+            let mut named = sunrise_client::mobs::raider::ominous_banner();
+            named.data_mut().set_other(
+                "minecraft:custom_name",
+                Some(Tag::String("Named Raid Banner".into())),
+            );
+            assert!(compact.same_item_same_components(&named));
+
+            let name = Tag::String("Renamed Raid Banner".into());
+            edit(game, "minecraft:item_name", name.clone());
+            let edited = encode_extra_components(&banner(game)).unwrap();
+            assert_eq!(edited.get("minecraft:item_name"), Some(&name));
+            for id in [
+                "minecraft:banner_patterns",
+                "minecraft:rarity",
+                "minecraft:tooltip_display",
+            ] {
+                assert_eq!(
+                    edited.get(id).unwrap(),
+                    original.get(id).unwrap(),
+                    "{id} was not edited"
+                );
+            }
+
+            let rare = Tag::String("rare".into());
+            edit(game, "minecraft:rarity", rare.clone());
+            edit(
+                game,
+                "minecraft:item_name",
+                original.get("minecraft:item_name").unwrap().clone(),
+            );
+            let saved = sunrise_items::item_nbt::item_to_nbt(&banner(game), game.items());
+            let loaded = sunrise_items::item_nbt::item_from_nbt(&saved).unwrap();
+            for stack in [banner(game), loaded] {
+                let components = encode_extra_components(&stack).unwrap();
+                assert_eq!(components.get("minecraft:rarity"), Some(&rare));
+                for id in [
+                    "minecraft:item_name",
+                    "minecraft:banner_patterns",
+                    "minecraft:tooltip_display",
+                ] {
+                    assert_eq!(components.get(id), original.get(id), "{id} must survive");
+                }
+            }
+            // Writing the last differing value restores the stock representation,
+            // so a resource reconstructed from the same components compares equal.
+            let fresh = sunrise_client::mobs::raider::ominous_banner();
+            let prototype = fresh.try_into_api().unwrap();
+            game.transaction(|host, tx| {
+                place.edit(host, tx, |stack| {
+                    for id in ["minecraft:rarity", "minecraft:custom_name"] {
+                        stack.copy_component_from(&prototype, id);
+                    }
+                })
+            })
+            .unwrap();
+            assert!(banner(game).same_item_same_components(&fresh));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn nested_equipment_rollback_restores_the_live_modifiers_not_the_quiet_stack() {
+        use mod_api::{EquipmentSlot, Tag};
+
+        with_game(|game| {
+            let id = zombie(game);
+            let living = game.living(game.entity(id).unwrap()).unwrap();
+            let slot = EquipmentSlot::Chest;
+            let place = ItemPlace::Equipment { entity: id, slot };
+            assert!(game.living_set_equipment(
+                living,
+                slot,
+                Some(ItemStack::new("minecraft:diamond_chestplate", 1))
+            ));
+            let armor = |host: &dyn mod_api::ServerHost| {
+                living.attribute_value(host, "minecraft:armor").unwrap()
+            };
+            let before = armor(game);
+            assert!(before >= 8.0);
+            for (commit_child, gravity) in [(false, 0.1), (true, 0.2)] {
+                let rolled_back = game.transaction(|host, tx| {
+                    place
+                        .edit(host, tx, |stack| {
+                            stack
+                                .apply_components(
+                                    &[(
+                                        "!minecraft:attribute_modifiers".into(),
+                                        Tag::compound(Vec::<(&str, Tag)>::new()),
+                                    )]
+                                    .into(),
+                                )
+                                .unwrap();
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        armor(host),
+                        before,
+                        "quiet edit must not recollect the worn stack"
+                    );
+                    let taken = place.resource(host).unwrap();
+                    let child = host.transaction(|host, tx| {
+                        assert_eq!(place.extract(host, tx, &taken, 1), 1);
+                        assert!(armor(host) < before);
+                        assert!(living.set_attribute_base(host, "minecraft:gravity", gravity));
+                        // This disjoint write invalidates the live map. Rollback must use
+                        // the updated seed and restore armor without asking the item again.
+                        assert!(living.set_attribute_base(host, "minecraft:max_health", 30.0));
+                        commit_child.then_some(()).ok_or(())
+                    });
+                    assert_eq!(child.is_ok(), commit_child);
+                    assert_eq!(
+                        living.attribute_base(host, "minecraft:gravity"),
+                        Some(gravity)
+                    );
+                    if !commit_child {
+                        assert_eq!(
+                            armor(host),
+                            before,
+                            "child abort restores the still-active modifiers"
+                        );
+                        assert_eq!(place.resource(host), Some(taken));
+                    }
+                    Err::<(), ()>(())
+                });
+                assert_eq!(rolled_back, Err(()));
+                assert_eq!(
+                    living.attribute_base(game, "minecraft:gravity"),
+                    Some(gravity)
+                );
+                assert_eq!(
+                    living.attribute_base(game, "minecraft:max_health"),
+                    Some(30.0)
+                );
+                assert_eq!(
+                    armor(game),
+                    before,
+                    "parent abort restores the original modifiers"
+                );
+                assert_eq!(
+                    game.mobs[0]
+                        .equipment_stacks()
+                        .get(slot as usize)
+                        .unwrap()
+                        .item
+                        .as_ref(),
+                    "minecraft:diamond_chestplate"
+                );
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn equipment_rollback_undoes_a_rebuild_after_a_quiet_edit() {
+        use mod_api::{EquipmentSlot, Tag};
+
+        with_game(|game| {
+            let entity = zombie(game);
+            let living = game.living(game.entity(entity).unwrap()).unwrap();
+            let slot = EquipmentSlot::Chest;
+            let place = ItemPlace::Equipment { entity, slot };
+            assert!(game.living_set_equipment(
+                living,
+                slot,
+                Some(ItemStack::new("minecraft:diamond_chestplate", 1))
+            ));
+            let before = place.resource(game).unwrap();
+            let armor =
+                |host: &dyn ServerHost| living.attribute_value(host, "minecraft:armor").unwrap();
+            let worn_armor = armor(game);
+            assert!(worn_armor >= 8.0);
+            let result = game.transaction(|host, tx| {
+                place
+                    .edit(host, tx, |stack| {
+                        stack
+                            .apply_components(
+                                &[(
+                                    "!minecraft:attribute_modifiers".into(),
+                                    Tag::Compound(Default::default()),
+                                )]
+                                .into(),
+                            )
+                            .unwrap();
+                    })
+                    .unwrap();
+                assert_eq!(
+                    armor(host),
+                    worn_armor,
+                    "the quiet edit does not refresh armor"
+                );
+                assert!(living.set_attribute_base(host, "minecraft:max_health", 32.0));
+                assert!(
+                    armor(host) < worn_armor,
+                    "the rebuild sees the tentative edit"
+                );
+                Err::<(), ()>(())
+            });
+            assert_eq!(result, Err(()));
+            assert_eq!(place.resource(game), Some(before));
+            assert_eq!(
+                armor(game),
+                worn_armor,
+                "rollback restores the pre-rebuild live modifiers"
+            );
+            assert_eq!(
+                living.attribute_base(game, "minecraft:max_health"),
+                Some(32.0)
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn equipment_rollback_keeps_a_later_permanent_modifier_with_the_same_id() {
+        use mod_api::{
+            AttributeModifier, AttributeOperation, EquipmentSlot, Identifier, ModifierLifetime, Tag,
+        };
+
+        with_game(|game| {
+            let entity = zombie(game);
+            let living = game.living(game.entity(entity).unwrap()).unwrap();
+            let slot = EquipmentSlot::Chest;
+            let place = ItemPlace::Equipment { entity, slot };
+            let attribute = "minecraft:gravity";
+            let modifier = "test:bonus";
+            let gravity = |host: &dyn ServerHost| living.attribute_value(host, attribute).unwrap();
+            assert!(living.set_attribute_base(game, attribute, 0.125));
+            let mut armor = ItemStack::new("minecraft:diamond_chestplate", 1);
+            armor.data_mut().set_other(
+                "minecraft:attribute_modifiers",
+                Some(Tag::List(vec![Tag::compound([
+                    ("type", Tag::String(attribute.into())),
+                    ("id", Tag::String(modifier.into())),
+                    ("amount", Tag::Double(0.25f64.to_bits())),
+                    ("operation", Tag::String("add_value".into())),
+                    ("slot", Tag::String("chest".into())),
+                ])])),
+            );
+            assert!(game.living_set_equipment(living, slot, Some(armor)));
+            assert_eq!(gravity(game), 0.375);
+            let resource = place.resource(game).unwrap();
+            game.transaction(|host, _| {
+                let child = host.transaction(|host, tx| {
+                    assert_eq!(place.extract(host, tx, &resource, 1), 1);
+                    assert_eq!(gravity(host), 0.125);
+                    assert!(living.add_attribute_modifier(
+                        host,
+                        attribute,
+                        AttributeModifier::new(
+                            Identifier::parse(modifier).unwrap(),
+                            0.5,
+                            AttributeOperation::AddValue
+                        ),
+                        ModifierLifetime::Permanent,
+                    ));
+                    Err::<(), ()>(())
+                });
+                assert_eq!(child, Err(()));
+                assert_eq!(place.resource(host), Some(resource));
+                assert_eq!(gravity(host), 0.625);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+            assert_eq!(gravity(game), 0.625);
+            let entry = saved_mob_attribute(game, entity, attribute);
+            assert_eq!(
+                entry.get("modifiers"),
+                Some(&Tag::List(vec![Tag::compound([
+                    ("id", Tag::String(modifier.into())),
+                    ("amount", Tag::Double(0.5f64.to_bits())),
+                    ("operation", Tag::String("add_value".into())),
+                ])]))
+            );
+        });
+    }
+
+    fn saved_mob_attribute(game: &super::Game<'_>, entity: u32, attribute: &str) -> mod_api::Tag {
+        use mod_api::Tag;
+        let mob = game.mobs.iter().find(|mob| mob.id == entity).unwrap();
+        let saved = sunrise_client::entity_nbt::mob_to_nbt(
+            mob,
+            [0, 0, 0, 1],
+            None,
+            None,
+            |_| None,
+            game.items(),
+        );
+        let Some(Tag::List(attributes)) = saved.get("attributes") else {
+            panic!("the mob must save its live attributes");
+        };
+        let id = Tag::String(attribute.into());
+        attributes
+            .iter()
+            .find(|entry| entry.get("id") == Some(&id))
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_same_id_gear_refresh_only_keeps_its_overwrite_on_commit() {
+        use mod_api::{
+            AttributeModifier, AttributeOperation, EquipmentSlot, Identifier, ModifierLifetime, Tag,
+        };
+
+        for commit in [false, true] {
+            with_game(|game| {
+                let entity = zombie(game);
+                let living = game.living(game.entity(entity).unwrap()).unwrap();
+                let slot = EquipmentSlot::Chest;
+                let place = ItemPlace::Equipment { entity, slot };
+                let attribute = "minecraft:max_health";
+                let modifier = "test:bonus";
+                assert!(living.set_attribute_base(game, attribute, 20.0));
+                assert!(game.living_set_equipment(
+                    living,
+                    slot,
+                    Some(ItemStack::new("minecraft:diamond_chestplate", 1))
+                ));
+                let before = place.resource(game).unwrap();
+                let mut after = None;
+                let result = game.transaction(|host, tx| {
+                    place
+                        .edit(host, tx, |stack| {
+                            let rows = Tag::List(vec![Tag::compound([
+                                ("type", Tag::String(attribute.into())),
+                                ("id", Tag::String(modifier.into())),
+                                ("amount", Tag::Double(3.0f64.to_bits())),
+                                ("operation", Tag::String("add_value".into())),
+                                ("slot", Tag::String("chest".into())),
+                            ])]);
+                            stack
+                                .apply_components(
+                                    &[("minecraft:attribute_modifiers".into(), rows)].into(),
+                                )
+                                .unwrap();
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        living.attribute_value(host, attribute),
+                        Some(20.0),
+                        "the edit is quiet"
+                    );
+                    after = place.resource(host);
+                    assert_ne!(after.as_ref(), Some(&before));
+                    assert!(living.add_attribute_modifier(
+                        host,
+                        attribute,
+                        AttributeModifier::new(
+                            Identifier::parse(modifier).unwrap(),
+                            5.0,
+                            AttributeOperation::AddValue
+                        ),
+                        ModifierLifetime::Permanent,
+                    ));
+                    assert_eq!(
+                        living.attribute_value(host, attribute),
+                        Some(23.0),
+                        "refresh applies the now-worn item"
+                    );
+                    commit.then_some(()).ok_or(())
+                });
+                assert_eq!(result.is_ok(), commit);
+                assert_eq!(
+                    place.resource(game),
+                    if commit { after } else { Some(before) }
+                );
+                assert_eq!(
+                    living.attribute_value(game, attribute),
+                    Some(if commit { 23.0 } else { 25.0 })
+                );
+                let entry = saved_mob_attribute(game, entity, attribute);
+                let permanent = Tag::List(vec![Tag::compound([
+                    ("id", Tag::String(modifier.into())),
+                    ("amount", Tag::Double(5.0f64.to_bits())),
+                    ("operation", Tag::String("add_value".into())),
+                ])]);
+                assert_eq!(entry.get("modifiers"), (!commit).then_some(&permanent));
+            });
+        }
     }
 
     /// A living entity's [`ENTITY_ITEMS`] is its equipment (#932): seven slots by

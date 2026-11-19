@@ -62,9 +62,100 @@ pub struct CoreProgram {
     pub other: Vec<String>,
 }
 
+impl CoreProgram {
+    /// Whether either stage reads the resource at `binding` of set 0 (a sampler's texture,
+    /// [`SAMPLERS`]), not only declares it.
+    /// The stages whose entry points read the resource at `binding` of set 0, through any
+    /// function they call: what a pipeline layout must make that binding visible to. Empty
+    /// for one a stage only declares (or the preprocessor kept but nothing reads).
+    pub fn stages_reading(&self, binding: u32) -> wgpu::ShaderStages {
+        let mut stages = wgpu::ShaderStages::NONE;
+        for (module, stage) in [
+            (&self.vertex, wgpu::ShaderStages::VERTEX),
+            (&self.fragment, wgpu::ShaderStages::FRAGMENT),
+        ] {
+            if entry_points_read(module, binding) {
+                stages |= stage;
+            }
+        }
+        stages
+    }
+
+    /// Whether every stage that reads the block at `binding` of set 0 declares it as one float
+    /// (`uniform Name { float value; };`), what an expression uniform holds. A stage that only
+    /// declares it, whatever its shape, binds nothing of it.
+    pub fn is_float_block(&self, binding: u32) -> bool {
+        [&self.vertex, &self.fragment]
+            .into_iter()
+            .filter(|module| entry_points_read(module, binding))
+            .all(|module| {
+                module
+                    .global_variables
+                    .iter()
+                    .filter(|(_, g)| {
+                        g.binding
+                            .as_ref()
+                            .is_some_and(|b| b.group == 0 && b.binding == binding)
+                    })
+                    .all(|(_, g)| match &module.types[g.ty].inner {
+                        naga::TypeInner::Struct { members, .. } => {
+                            matches!(
+                                members.as_slice(),
+                                [member] if matches!(
+                                    module.types[member.ty].inner,
+                                    naga::TypeInner::Scalar(naga::Scalar::F32)
+                                )
+                            )
+                        }
+                        _ => false,
+                    })
+            })
+    }
+
+    pub fn reads_binding(&self, binding: u32) -> bool {
+        [&self.vertex, &self.fragment].into_iter().any(|module| {
+            let bound: HashSet<naga::Handle<naga::GlobalVariable>> = module
+                .global_variables
+                .iter()
+                .filter(|(_, g)| {
+                    g.binding
+                        .as_ref()
+                        .is_some_and(|b| b.group == 0 && b.binding == binding)
+                })
+                .map(|(h, _)| h)
+                .collect();
+            let reads = |f: &naga::Function| {
+                f.expressions.iter().any(
+                    |(_, e)| matches!(e, naga::Expression::GlobalVariable(h) if bound.contains(h)),
+                )
+            };
+            module.functions.iter().any(|(_, f)| reads(f))
+                || module.entry_points.iter().any(|e| reads(&e.function))
+        })
+    }
+}
+
 /// The binding of the `index`th block or sampler of [`CoreProgram::other`].
 pub fn other_binding(index: usize) -> u32 {
     OTHER_BINDINGS + 2 * index as u32
+}
+
+/// Whether an entry point of `module` reads the resource at `binding` of set 0, through any
+/// function it calls (naga's per entry point use). A module that doesn't validate (it did when
+/// it was translated) counts as reading it.
+fn entry_points_read(module: &naga::Module, binding: u32) -> bool {
+    let Some((handle, _)) = module.global_variables.iter().find(|(_, g)| {
+        g.binding
+            .as_ref()
+            .is_some_and(|b| b.group == 0 && b.binding == binding)
+    }) else {
+        return false;
+    };
+    let Ok(info) = Validator::new(ValidationFlags::empty(), Capabilities::all()).validate(module)
+    else {
+        return true;
+    };
+    (0..module.entry_points.len()).any(|i| !info.get_entry_point(i)[handle].is_empty())
 }
 
 /// The shaders of one pipeline (`text.vsh`, `text.fsh`) with vanilla's `defines` for it.
@@ -90,9 +181,37 @@ pub fn translate_core_with(
     glue: &Glue,
     provided: &dyn Fn(&str) -> bool,
 ) -> Result<CoreProgram, String> {
-    const CORE: &str = "minecraft:shaders/core/";
-    let vertex_text = glsl_fixups::fixups(&strip_comments(&expand(vertex, CORE, include)?));
-    let fragment_text = glsl_fixups::fixups(&strip_comments(&expand(fragment, CORE, include)?));
+    let sources = Stages {
+        dir: "minecraft:shaders/core/",
+        vertex,
+        fragment,
+    };
+    translate_core_at(&sources, defines, include, glue, provided)
+}
+
+/// A pipeline's two stages and the folder they are in (`ns:shaders/core/...`), which their
+/// quoted (relative) includes start from.
+pub struct Stages<'a> {
+    pub dir: &'a str,
+    pub vertex: &'a str,
+    pub fragment: &'a str,
+}
+
+/// [`translate_core_with`] for stages that aren't in `minecraft:shaders/core/`.
+pub fn translate_core_at(
+    sources: &Stages,
+    defines: &[&str],
+    include: &dyn Fn(&str) -> Option<String>,
+    glue: &Glue,
+    provided: &dyn Fn(&str) -> bool,
+) -> Result<CoreProgram, String> {
+    let Stages {
+        dir,
+        vertex,
+        fragment,
+    } = *sources;
+    let vertex_text = glsl_fixups::fixups(&strip_comments(&expand(vertex, dir, include)?));
+    let fragment_text = glsl_fixups::fixups(&strip_comments(&expand(fragment, dir, include)?));
     let mut names = Names::default();
     let vertex_code = rewrite(&vertex_text, ShaderStage::Vertex, glue, &mut names)
         .map_err(|e| format!("vertex shader: {e}"))?;
@@ -126,7 +245,7 @@ pub fn translate_core_with(
 
 /// A bound on a pack's includes, which are pasted every time.
 const MAX_PASTES: u32 = 1024;
-const MAX_EXPANDED: usize = 1 << 20;
+pub(crate) const MAX_EXPANDED: usize = 1 << 20;
 
 /// The file with its includes inlined (`#include <ns:path>`, `#include "relative"` and the same
 /// with `#moj_import`), `#version` and `#extension` lines dropped. An `#include` is pasted every

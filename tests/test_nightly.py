@@ -212,17 +212,13 @@ class UntrustedBuildTests(unittest.TestCase):
         self.assertIn("save-if: ${{ inputs.trusted }}", self.game)
         self.assertEqual(self.game.count("Swatinem/rust-cache"), 1)
 
-    def test_an_untrusted_build_never_runs_on_the_release_runner(self):
-        runs_on = [line for line in self.game.splitlines() if "runs-on: ${{" in line and "'dyna-small'" not in line]
-        self.assertEqual(len(runs_on), 3)
-        # The nightly's own runner: never the release runner, and never behind pull requests' parity queue.
-        nightly_default = "'[\"self-hosted\", \"macOS\", \"sunrise-nightly\"]'"
-        for line, variable in zip(runs_on, ("NIGHTLY_EXPORTERS_RUNNER", "NIGHTLY_MAC_RUNNER")):
-            self.assertIn("inputs.trusted && toJSON(vars.MAC_RUNNER)", line)
-            self.assertIn(f"vars.DYNA_CI_SELF_HOSTED == 'true' && vars.{variable}", line)
-            self.assertIn(f"vars.SELF_HOSTED_CI != 'off' && {nightly_default}", line)
-        self.assertNotIn("NIGHTLY_LINUX_RUNNER", runs_on[1])
-        self.assertIn("vars.NIGHTLY_LINUX_RUNNER", runs_on[2])
+    def test_no_build_job_names_a_self_hosted_mac(self):
+        # Sunrise has no Mac runner of its own: the Macs build on Blacksmith's (or GitHub's) machines, and exporters
+        # run on Dyna's runner for an untrusted build only, never sharing a trusted build with pull requests' jobs.
+        self.assertNotIn("MAC_RUNNER", self.game)
+        self.assertNotIn('"macOS"', self.game)
+        exporters = next(line for line in self.game.splitlines() if "runs-on:" in line and "NIGHTLY_EXPORTERS_RUNNER" in line)
+        self.assertIn("!inputs.trusted && vars.DYNA_CI_SELF_HOSTED == 'true' && vars.NIGHTLY_EXPORTERS_RUNNER", exporters)
 
     def test_a_trusted_build_never_reads_the_shared_sccache(self):
         calls = self.game.count("bash tools/ci/runner-env.sh")

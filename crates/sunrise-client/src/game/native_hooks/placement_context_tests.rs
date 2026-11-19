@@ -2,7 +2,10 @@
 
 use crate::game::native_entity_refs::tests::{bind_local_player, with_game};
 use crate::game::{Game, GuestUse, Hit};
-use mod_api::{Hooks, ItemPart, LevelSide, MustSurviveEvent, PlacementContextEvent, Registrar};
+use mod_api::{
+    BlockPart, BlockState, Hooks, ItemPart, LevelSide, MustSurviveEvent, PlacementContextEvent,
+    Registrar, StateForPlacementEvent,
+};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -227,11 +230,16 @@ fn item_parts_rewrite_or_refuse_context_and_control_survival_on_both_sides() {
             assert!(!Game::can_hint_block_placement(&stack("minecraft:stone")));
             assert!(!Game::can_hint_block_placement(&stack("minecraft:poppy")));
             assert!(Game::can_hint_block_placement(&stack("minecraft:glass")));
-            let (pos, changes) = game
+            let placed = game
                 .remote_can_place(&hit, &stack("minecraft:stone"))
                 .expect("rewritten stone placement");
+            let pos = placed.pos;
             assert_eq!(pos, BlockPos::new(4, 62, 4));
-            assert!(changes.contains(&(pos, registry.default_state("minecraft:stone").unwrap())));
+            assert!(
+                placed
+                    .changes
+                    .contains(&(pos, registry.default_state("minecraft:stone").unwrap()))
+            );
             assert_eq!(game.world.block(pos.x, pos.y, pos.z), air);
             assert!(
                 game.remote_can_place(&hit, &stack("minecraft:dirt"))
@@ -242,6 +250,108 @@ fn item_parts_rewrite_or_refuse_context_and_control_survival_on_both_sides() {
                     .is_some()
             );
         })
+    });
+}
+
+struct Substitute(&'static str);
+#[mod_api::sunrise_part]
+impl BlockPart for Substitute {
+    fn state_for_placement(
+        &self,
+        level: LevelSide<'_>,
+        _: &mut StateForPlacementEvent<'_>,
+    ) -> Option<Option<BlockState>> {
+        let (LevelSide::Server(level) | LevelSide::Client(level)) = level;
+        Some(level.block_state_id(self.0))
+    }
+}
+struct PlacementSubstitution;
+#[mod_api::__subscriptions]
+impl Hooks for PlacementSubstitution {
+    fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+        let door = r.block_key("minecraft:oak_door");
+        r.block_part(door, Substitute("minecraft:stone"));
+        let furnace = r.block_key("minecraft:furnace");
+        r.block_part(furnace, Substitute("minecraft:oak_door"));
+    }
+
+    fn entity_place(
+        &self,
+        host: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::EntityPlaceEvent,
+    ) -> mod_api::Flow {
+        if event.pos.z != 9 {
+            return mod_api::Flow::Continue;
+        }
+        let mod_api::Placement::Multi(writes) = &event.placement else {
+            panic!("the held door pre-clears above the chosen stone");
+        };
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].pos, event.pos);
+        assert_eq!(
+            Some(writes[0].state),
+            host.block_state_id("minecraft:stone")
+        );
+        assert_eq!(writes[1].pos, event.pos.offset(0, 1, 0));
+        assert_eq!(Some(writes[1].state), host.block_state_id("minecraft:air"));
+        mod_api::Flow::Cancel
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn substituted_placement_uses_the_held_item_preclear_and_selected_placed_by() {
+    let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+        "placement_substitution",
+        Box::new(PlacementSubstitution),
+    )]
+    .into();
+    crate::game::api_values::install_parts(&mods).unwrap();
+    mod_platform::testing::with_mods(mods, || {
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
+            game.block_ticks
+                .add_empty_chunk(sunrise_core::position::ChunkPos::new(0, 0))
+                .unwrap();
+            game.player =
+                Some(PlayerMotion::new(game.motion, Vec3::new(12.5, 64.0, 12.5)).unwrap());
+            bind_local_player(game, 20, 123);
+            game.lan_acting_name = Some("Placer".into());
+            game.lan_acting_permission = Some(0);
+            game.set_mode_id(0);
+
+            let registry = game.pack.assets.registry;
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            let air = registry.default_state("minecraft:air").unwrap();
+            let roof = registry.default_state("minecraft:obsidian").unwrap();
+            let door = registry.default_state("minecraft:oak_door").unwrap();
+            let mut upper = registry.state(door).unwrap().clone();
+            upper.properties.insert("half".into(), "upper".into());
+            let upper = registry.id(&upper).unwrap();
+            for (item, z, remaining, primary, above) in [
+                ("minecraft:furnace", 5, 1, door, upper),
+                ("minecraft:oak_door", 7, 1, stone, air),
+                ("minecraft:oak_door", 9, 2, air, roof),
+            ] {
+                game.world.set(4, 63, z, stone).unwrap();
+                game.world.set(4, 65, z, roof).unwrap();
+                let hit = Hit {
+                    pos: [4, 63, z],
+                    face: [0, 1, 0],
+                    point: [4.5, 64.0, f64::from(z) + 0.5],
+                    inside: false,
+                };
+                *game.held_mut() = Some(ItemStack::new(item, 2));
+                game.guest_use = Some(GuestUse::OnBlock(mod_api::Hand::Main));
+                assert!(game.use_hand(Some(&hit)).unwrap());
+                assert_eq!(game.held().unwrap().count, remaining);
+                assert_eq!(game.world.block(4, 64, z), primary);
+                assert_eq!(game.world.block(4, 65, z), above);
+            }
+        });
     });
 }
 

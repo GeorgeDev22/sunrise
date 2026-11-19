@@ -15,6 +15,7 @@ pub(crate) struct Installed {
     pub(crate) game_rules: Vec<crate::GameRuleDecl>,
     pub(crate) attachment_types: HashMap<String, HashMap<String, bool>>,
     pub(crate) custom_stats: Vec<String>,
+    pub(crate) entity_tick_each: crate::parts::EntityTickEach,
     pub(crate) game_rule_slots: Vec<u32>,
     pub(crate) keys: Parts,
     pub(crate) tags: TagParts,

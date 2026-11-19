@@ -106,7 +106,7 @@ impl SaveDir {
             .get(&(Folder::Region, x, z))
             .map(|(_, record)| record.clone());
         if let Some(record) = pending {
-            return record.tag().map(|tag| (*tag).clone());
+            return record.tag_for_metadata().map(|tag| (*tag).clone());
         }
         let mut root = self.far_region_record(x, z)?;
         self.upgrade_record(Folder::Region, &mut root).ok()?;

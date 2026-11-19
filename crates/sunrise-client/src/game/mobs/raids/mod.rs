@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use sunrise_client::mobs::villager as mobs_villager;
 use sunrise_client::{
     effects::{EffectInstance, OmenTick},
+    lan::playerdata::ints_uuid,
     mobs::{
         Mob, Species, raider,
         spawn_rules::{self, SpawnLevel},
@@ -729,17 +730,46 @@ impl Game<'_> {
                     raider::state_mut(m).ticks_outside_raid = ticks;
                 }
             }
-            // Raid.tick on a victory: each hero who is still alive.
-            Action::Victory { heroes, amplifier } => self.for_each_player(|g| {
-                if heroes.contains(&g.acting_uuid()) && !g.spectator() {
-                    let mut effect =
-                        EffectInstance::new("hero_of_the_village", raid::HERO_DURATION, amplifier);
-                    effect.visible = false;
-                    g.potions.effects.add(effect);
-                    g.award_custom_stat("raid_win", 1);
-                    g.trigger_player("minecraft:hero_of_the_village");
-                }
+            Action::Victory { heroes, amplifier } => self.for_each_raid_hero(&heroes, |g| {
+                let mut effect =
+                    EffectInstance::new("hero_of_the_village", raid::HERO_DURATION, amplifier);
+                effect.visible = false;
+                g.potions.effects.add(effect);
+                g.award_custom_stat("raid_win", 1);
+                g.trigger_player("minecraft:hero_of_the_village");
             }),
+        }
+    }
+
+    /// Raid.tick resolves and rewards each living hero in the set's traversal
+    /// order, not in the level's player order.
+    fn for_each_raid_hero(&mut self, heroes: &[[i32; 4]], mut reward: impl FnMut(&mut Self)) {
+        for &hero in heroes {
+            let uuid = ints_uuid(hero);
+            let acting_uuid = self
+                .lan_acting_uuid
+                .or_else(|| self.level.player_uuid.map(ints_uuid));
+            if let Some(p) = self.player.as_ref()
+                && acting_uuid == Some(uuid)
+            {
+                if !self.lan_acting_fake && !self.spectator() && !p.health.dead_or_dying() {
+                    reward(self);
+                }
+                continue;
+            }
+            if let Some((i, conn)) = self.lan.as_ref().and_then(|host| {
+                host.hub.guests.iter().enumerate().find_map(|(i, g)| {
+                    (g.uuid == uuid
+                        && host.hub.here(g)
+                        && g.loaded
+                        && !g.dead
+                        && g.health > 0.0
+                        && !g.spectator())
+                    .then_some((i, g.conn))
+                })
+            }) {
+                let _ = self.as_guest_at(i, conn, &mut reward);
+            }
         }
     }
     /// `Raid.playSound`: the horn, 13 blocks from each player toward the wave,
@@ -1549,35 +1579,20 @@ impl Game<'_> {
     /// A raider's ominous banner (drop chance 2.0: always dropped) and a
     /// patrol captain's ominous bottle (`entities/pillager`).
     /// `OminousBottleAmplifier.onConsume`: Bad Omen for 100 minutes at the
-    /// bottle's amplifier, then the dispose sound; the bottle is used up.
-    pub(super) fn drink_ominous_bottle(
-        &mut self,
-        slot: usize,
-        stack: &sunrise_client::items::ItemStack,
-    ) {
+    /// bottle's amplifier. The consumable list owns the dispose sound.
+    pub(super) fn drink_ominous_bottle(&mut self, stack: &sunrise_client::items::ItemStack) {
         let amplifier = stack.data().and_then(|d| d.ominous_amplifier).unwrap_or(0);
         let mut effect =
             sunrise_client::effects::EffectInstance::new("bad_omen", 120_000, i32::from(amplifier));
         effect.visible = false;
         let new = self.potions.effects.get("bad_omen").is_none();
         self.potions.effects.add(effect);
-        let eye = self.eye_position().unwrap_or_default();
         // MobEffect.onEffectAdded: Bad Omen's sound when it is new, at the
         // player's feet.
         if new && let Some(p) = self.player.as_ref() {
             let at = [p.position.x, p.position.y, p.position.z];
             self.audio
                 .play("minecraft:event.mob_effect.bad_omen", Some(at), 1.0, 1.0);
-        }
-        self.audio
-            .play("minecraft:item.ominous_bottle.dispose", Some(eye), 1.0, 1.0);
-        if !self.creative
-            && let Some(s) = self.stack_in_mut(slot).as_mut()
-        {
-            s.count -= 1;
-            if s.count == 0 {
-                *self.stack_in_mut(slot) = None;
-            }
         }
     }
 }
@@ -1699,13 +1714,13 @@ impl Game<'_> {
         let pos: [i32; 3] =
             std::array::from_fn(|i| op["poi"][i].as_i64().unwrap_or(i64::MIN) as i32);
         let loaded = self.world.loaded(pos[0], pos[2]);
-        let live_poi = loaded.then(|| {
+        let live_poi = if loaded {
             let w = self.mob_world_base(&[]);
-            format!(
-                "{:?}",
-                sunrise_client::mobs::villager_brain::poi_at(&w, pos[0], pos[1], pos[2])
-            )
-        });
+            sunrise_client::mobs::villager_brain::poi_at(&w, pos[0], pos[1], pos[2])
+                .and_then(|poi| w.professions.pois.name(poi))
+        } else {
+            None
+        };
         eprintln!(
             "raid input raw: {}",
             json!({"label":op["label"],"id":id,"loaded":loaded,
@@ -1724,6 +1739,10 @@ mod bed_loss_tests;
 #[cfg(test)]
 #[path = "tests/bar_players.rs"]
 mod bar_players_tests;
+
+#[cfg(test)]
+#[path = "tests/victory.rs"]
+mod victory_tests;
 
 #[cfg(test)]
 mod entity_ticking_tests {

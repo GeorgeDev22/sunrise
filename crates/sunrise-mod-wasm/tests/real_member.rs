@@ -108,7 +108,7 @@ fn real_member() {
         let manifest = Package::read(path).unwrap().manifest;
         let info = mod_api::PackageInfo::new(
             manifest.id.clone(),
-            manifest.version.clone(),
+            manifest.version.to_string(),
             mod_api::PackageKind::Code,
             mod_api::Side::Both,
             vec![manifest.id.clone()],
@@ -199,25 +199,35 @@ fn real_member() {
             }
             lending::check(&mut Quiet);
             // Exercise the same three subscriptions as the native residency regression.
-            // The guest only observes; terminal falling-block retirement belongs to
-            // the engine and does not depend on the listener's target.
+            // The guest observes, and its Pre cancels by kind across the boundary;
+            // terminal falling-block retirement belongs to the engine and does not
+            // depend on the listener's target.
+            let each =
+                mod_api::__private::entity_tick_each().expect("the guest's parts are installed");
+            assert!(
+                each.names("minecraft:tnt") && !each.names("minecraft:item"),
+                "the guest's entity_tick_each crosses at registration"
+            );
             let mut listened = false;
-            mod_api::dispatch_entity_tick_listened(&mut Quiet, &mut listened);
+            mod_api::dispatch_entity_tick_listened(
+                mod_api::HostSide::Server(&mut Quiet),
+                &mut listened,
+            );
             assert!(listened);
-            let mut canceled = false;
+            let mut canceled = Vec::new();
             mod_api::dispatch_entity_tick_pre(
-                &mut Quiet,
+                mod_api::HostSide::Server(&mut Quiet),
                 "minecraft:overworld",
-                71,
-                "minecraft:item",
+                &[71, 72, 73],
+                &["minecraft:item", "minecraft:tnt", "minecraft:item"],
                 &mut canceled,
             );
-            assert!(!canceled);
+            assert_eq!(canceled, [72], "the guest cancels the one entity it names");
             mod_api::dispatch_entity_tick_post(
-                &mut Quiet,
+                mod_api::HostSide::Server(&mut Quiet),
                 "minecraft:overworld",
-                71,
-                "minecraft:item",
+                &[71, 73],
+                &["minecraft:item", "minecraft:item"],
             );
             let mut entity =
                 mod_api::ModBlockEntity::new("wasm_fixture:counter".into(), Default::default());

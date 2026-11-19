@@ -985,8 +985,7 @@ impl Mob {
     fn landing_dust(&self, w: &MobWorld, events: &mut Vec<MobEvent>) {
         let pos = self.block_on_legacy(w);
         let state = w.world.block(pos[0], pos[1], pos[2]);
-        let Some(count) = landing_dust_count(self.fall_distance, self.kind.safe_fall_distance)
-        else {
+        let Some(count) = landing_dust_count(self.fall_distance, self.safe_fall_distance()) else {
             return;
         };
         if w.facts.is_air(state) {
@@ -1344,6 +1343,12 @@ impl Mob {
             super::DamageKind::Fall,
         );
     }
+    /// `getAttributeValue(SAFE_FALL_DISTANCE)`, which `calculateFallPower`
+    /// takes off a fall: Jump Boost's stored modifier among the attribute's
+    /// ([`Mob::set_effect_modifiers`]).
+    fn safe_fall_distance(&self) -> f64 {
+        super::finalize::value(self, super::finalize::Attr::SafeFallDistance)
+    }
     /// True when the fall hurt (`causeFallDamage`'s result).
     pub(super) fn cause_fall_damage_at(
         &mut self,
@@ -1407,7 +1412,7 @@ impl Mob {
             return false;
         }
         let (distance, modifier) = self.mod_block_fall(level, contact, distance, modifier);
-        let power = distance + 1.0e-6 - self.kind.safe_fall_distance;
+        let power = distance + 1.0e-6 - self.safe_fall_distance();
         let mut damage = (power * f64::from(modifier) * self.kind.fall_damage_multiplier).floor();
         // Frog.calculateFallDamage: five points less than the base damage;
         // Goat.calculateFallDamage: ten, so a long jump down a ledge is safe.
@@ -3296,6 +3301,49 @@ mod tests {
         // A mob that takes no fall damage still has a safe distance of its own.
         assert_eq!(landing_dust_count(7.0, 10.0), None);
     }
+    /// #1988: both of `checkFallDamage`'s reads of the fall power take the
+    /// safe fall distance attribute, a given Jump Boost's stored modifier
+    /// included. A zombie landing on stone after 4.5 blocks takes 1 damage
+    /// and throws up `150 * (0.2F + 1 / 15)` = 40 grains; with Jump Boost II
+    /// (3 + 2 = 5) it takes none and throws up nothing.
+    #[test]
+    #[ignore = "daily"]
+    fn a_jump_boosted_zombies_landing_reads_its_safe_fall_distance() {
+        let build = |world: &mut crate::world::World,
+                     registry: &sunrise_world::registry::BlockRegistry| {
+            world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(crate::chunk::Chunk::empty(0, 0)),
+            );
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            world.set(4, 63, 4, stone).unwrap();
+        };
+        let ran = crate::mobs::world::with_built_test_world(&[], build, |w, types| {
+            let kind = std::sync::Arc::new(types.types["minecraft:zombie"].clone());
+            let land = |boosted: bool| {
+                let mut m = Mob::new(1, kind.clone(), Vec3::new(4.5, 64.0, 4.5), 0.0);
+                if boosted {
+                    m.add_effect("minecraft:jump_boost", -1, 1);
+                }
+                m.on_ground = true;
+                m.fall_distance = 4.5;
+                let mut test_level = crate::health::TestLevel::new(0);
+                let mut events = Vec::new();
+                m.check_fall_damage(w, &mut test_level.level(), Vec3::ZERO, &mut events);
+                let dust: Vec<i32> = events
+                    .iter()
+                    .filter_map(|e| match e {
+                        MobEvent::LandingDust { count, .. } => Some(*count),
+                        _ => None,
+                    })
+                    .collect();
+                (m.health, dust)
+            };
+            assert_eq!(land(false), (19.0, vec![40]));
+            assert_eq!(land(true), (20.0, vec![]));
+        });
+        assert!(ran, "the vanilla test resources must be available");
+    }
     /// Over the block it lands on the dust starts at the mob; straddling
     /// into another column it is pulled to that block's near edge.
     #[test]
@@ -3858,7 +3906,6 @@ mod tests {
 
 #[path = "living/fluid_heights.rs"]
 mod fluid_heights;
-#[allow(dead_code)]
 pub mod section_writes;
 #[cfg(test)]
 #[path = "living/size_answer_tests.rs"]

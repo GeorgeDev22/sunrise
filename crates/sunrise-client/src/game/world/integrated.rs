@@ -22,7 +22,7 @@ use std::{
     net::TcpListener,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering},
         mpsc::{Receiver, RecvTimeoutError, Sender, channel, sync_channel},
     },
     thread::JoinHandle,
@@ -51,11 +51,12 @@ pub(super) const NO_ANSWER: &str =
     "the integrated server stopped or did not answer within 10 s (the game log says which)";
 
 /// The server thread holds its `Game` by value and runs every tick on it.
-/// It reserves the same guest limit and host headroom as the main thread.
-const SERVER_THREAD_STACK: usize =
-    sunrise_guest_stack::GUEST_STACK_BYTES + sunrise_guest_stack::HOST_HEADROOM;
+/// It reserves what every guest-capable thread does under the engine's stack policy.
+fn server_thread_stack_floor() -> usize {
+    sunrise_guest_stack::engine().reservation()
+}
 
-/// The server thread's stack size: [`SERVER_THREAD_STACK`], or what `RUST_MIN_STACK` asks for
+/// The server thread's stack size: [`server_thread_stack_floor`], or what `RUST_MIN_STACK` asks for
 /// when that is larger. std reads the variable only for a thread spawned without a size, and
 /// harnesses raise it for this thread (`tools/test_wind_burst_hook.py`, the parity tools).
 fn server_thread_stack() -> usize {
@@ -63,12 +64,14 @@ fn server_thread_stack() -> usize {
     *SIZE.get_or_init(|| stack_for(std::env::var("RUST_MIN_STACK").ok().as_deref()))
 }
 
-/// [`SERVER_THREAD_STACK`], or `min_stack` (a byte count, as std parses `RUST_MIN_STACK`) when
+/// [`server_thread_stack_floor`], or `min_stack` (a byte count, as std parses `RUST_MIN_STACK`) when
 /// that is larger.
 fn stack_for(min_stack: Option<&str>) -> usize {
     min_stack
         .and_then(|bytes| bytes.parse::<usize>().ok())
-        .map_or(SERVER_THREAD_STACK, |bytes| bytes.max(SERVER_THREAD_STACK))
+        .map_or(server_thread_stack_floor(), |bytes| {
+            bytes.max(server_thread_stack_floor())
+        })
 }
 
 /// `LevelLoadProgressTracker.EXPECTED_PLAYER_CHUNKS`: the 7x7 chunks around the spawn.
@@ -92,9 +95,9 @@ struct Flags {
     /// server follows while it runs (IntegratedServer.tickServer).
     render_distance: AtomicI32,
     simulation_distance: AtomicI32,
-    /// `options.entityDistanceScaling` (an `f32`'s bits), which
+    /// `options.entityDistanceScaling` (an `f64`'s bits), which
     /// `IntegratedServer.getScaledTrackingDistance` reads on every call.
-    entity_distance: AtomicU32,
+    entity_distance: AtomicU64,
     /// `MinecraftServer.isCurrentlySaving`: the server is autosaving.
     saving: AtomicBool,
     /// The generators of the levels the server has run, by dimension: what
@@ -203,7 +206,7 @@ impl Integrated {
     }
     /// The window's render and simulation distances and its Entity Distance
     /// option, for the server to follow.
-    pub fn set_distances(&self, render: i32, simulation: i32, entity: f32) {
+    pub fn set_distances(&self, render: i32, simulation: i32, entity: f64) {
         self.flags.render_distance.store(render, Ordering::Relaxed);
         self.flags
             .simulation_distance
@@ -1201,7 +1204,7 @@ impl Game<'_> {
     fn follow_distances(&mut self, flags: &Flags) {
         // IntegratedServer.getScaledTrackingDistance reads the option each time.
         self.settings.entity_distance =
-            f32::from_bits(flags.entity_distance.load(Ordering::Relaxed));
+            f64::from_bits(flags.entity_distance.load(Ordering::Relaxed));
         let Some(host) = self.lan.as_mut() else {
             return;
         };
@@ -1613,6 +1616,70 @@ pub(super) mod tests {
 
     #[test]
     #[ignore = "daily"]
+    fn block_state_weathering_reverts_after_integrated_session_stops() {
+        use mod_api::HostBlockStates;
+        use sunrise_world::level::BlockMaps;
+
+        super::super::native_entity_refs::tests::with_client_game(|window| {
+            window.join_world_rest().unwrap();
+            let state = |name| BlockStatesHost::block_state_id(window, name).unwrap();
+            let copper = state("minecraft:copper_block");
+            let exposed = state("minecraft:exposed_copper");
+            let oxidized = state("minecraft:oxidized_copper");
+            let next = || window.block_states().next_weathering_stage(copper);
+            assert_eq!(next(), Some(exposed));
+
+            for failed_open in [false, true] {
+                let mut options = window.options.clone();
+                options.dedicated = Some(Vec::new());
+                options.execution_role = ExecutionRole::IntegratedServer;
+                let mut server = server_game(
+                    &window.res,
+                    window.pack.clone(),
+                    options,
+                    window.settings.clone(),
+                )
+                .unwrap();
+                server.save = window.save.clone();
+                let result = server.run_server_lifecycle(false, |server, began| {
+                    *began = true;
+                    // Model publication at open_world_tables, before later steps can fail.
+                    let maps = BlockMaps::from_values(
+                        [],
+                        [(
+                            "minecraft:copper_block",
+                            &serde_json::json!({
+                                "next_oxidation_stage": "minecraft:oxidized_copper"
+                            }),
+                        )],
+                        [],
+                        |_| 0,
+                    );
+                    server.res.behaviours().set_block_maps(Some(Arc::new(maps)));
+                    assert_eq!(next(), Some(oxidized));
+                    if failed_open {
+                        Err("open failed after map publication".into())
+                    } else {
+                        server.world_adopted = true;
+                        Ok(())
+                    }
+                });
+                if failed_open {
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "open failed after map publication"
+                    );
+                } else {
+                    result.unwrap();
+                }
+                // The window and its resource tables outlive both kinds of session.
+                assert_eq!(next(), Some(exposed), "failed_open = {failed_open}");
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn client_session_identifies_only_its_own_integrated_server() {
         super::super::native_entity_refs::tests::with_client_game(|game| {
             let _pipe = super::super::native_client_session::tests::logged_client(game);
@@ -1680,6 +1747,24 @@ pub(super) mod tests {
                 )
                 .unwrap(),
             );
+            // The owner's file as last saved, with an experience total the panicking tick's
+            // state (37) differs from.
+            game.level.xp_total = 11;
+            game.level.write_player(&root, game.res.items()).unwrap();
+            let owner_file = std::fs::read_dir(root.join("players").join("data"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let owner_xp = || {
+                let player = sunrise_client::save::read_dat(&owner_file)?;
+                match player.get("XpTotal") {
+                    Some(sunrise_core::nbt::Tag::Int(xp)) => Some(*xp),
+                    _ => None,
+                }
+            };
+            assert_eq!(owner_xp(), Some(11));
             let flags = Arc::new(Flags::default());
             flags.fail_tick.store(true, Ordering::Relaxed);
             flags.published.store(1234, Ordering::Relaxed);
@@ -1698,7 +1783,8 @@ pub(super) mod tests {
             );
             let saved = sunrise_client::save::Level::read(&root).unwrap();
             assert_eq!(saved.name, "saved after integrated tick panic");
-            assert_eq!(saved.xp_total, 37);
+            // No hub: players are not saved, so the owner's file keeps what it had.
+            assert_eq!(owner_xp(), Some(11));
             assert_eq!(flags.published.load(Ordering::Relaxed), 0);
             assert!(game.session_lock.is_none());
             std::fs::remove_dir_all(&root).ok();

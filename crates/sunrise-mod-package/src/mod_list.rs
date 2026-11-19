@@ -61,7 +61,7 @@ impl ModInfo {
     pub fn of(manifest: &crate::Manifest, icon: Option<&crate::icon::Icon>) -> Self {
         Self {
             name: manifest.name.clone(),
-            version: manifest.version.clone(),
+            version: manifest.version.to_string(),
             authors: manifest.authors.clone(),
             credits: manifest.credits.clone(),
             license: manifest.license.clone(),

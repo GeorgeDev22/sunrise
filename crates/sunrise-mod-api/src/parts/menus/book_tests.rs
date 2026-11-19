@@ -73,6 +73,45 @@ fn registration_refuses_unknown_books_duplicate_menus_and_overlapping_roles() {
         screen(&book)
     );
 }
+struct Overlay;
+#[mod_api::sunrise_part]
+impl MenuPart for Overlay {
+    fn screen_draw(&self, _: &dyn ClientHost, _: &mut ScreenDrawEvent<'_>) {}
+}
+
+#[test]
+fn a_foreign_screen_part_conflicts_with_a_registered_book_in_either_order() {
+    let menu = "demo:pot";
+    for book_first in [true, false] {
+        let mut registrar = PartRegistrar::new("demo");
+        let book = registrar.recipe_book_type("demo:book").unwrap();
+        let attach = |registrar: &mut PartRegistrar| {
+            registrar.mod_id = "rival";
+            (registrar as &mut dyn Registrar).menu_part(menu, Overlay);
+            registrar.mod_id = "demo";
+        };
+        if !book_first {
+            attach(&mut registrar);
+        }
+        let registered =
+            registrar.menu_recipe_book(menu, &book, "demo:cooking", roles(), screen(&book));
+        if book_first {
+            assert!(registered.is_ok());
+            attach(&mut registrar);
+            assert!(!registrar.parts.menus.contains_key(menu));
+        } else {
+            assert!(registered.is_err());
+            assert!(!registrar.menu_recipe_books.contains_key(menu));
+        }
+        let [refusal] = registrar.refused.as_slice() else {
+            panic!("expected one conflict, got {:?}", registrar.refused);
+        };
+        for name in [menu, "mod demo", "mod rival"] {
+            assert!(refusal.contains(name), "{refusal} does not name {name}");
+        }
+    }
+}
+
 #[test]
 fn missing_nonfinite_and_wrong_book_geometry_refuse_registration() {
     let mut registrar = PartRegistrar::new("demo");

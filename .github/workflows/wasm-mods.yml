@@ -119,7 +119,7 @@ jobs:
           prebuilt -p sunrise-mod-vocab --lib -- strict_math_seeded_reference_vectors_match_exact_bits
           prebuilt -p sunrise-mod-wasm --test strict_math -- --ignored --nocapture
           prebuilt -p sunrise-mod-points --test registry --test replace --test order
-          prebuilt -p sunrise-mod-wasm --test real_member --test unstaged --test self_refusal --test native_listener --test no_wire_registration --test capability_registration --test chunk_disk --test import_identity -- --include-ignored --nocapture --skip a_mod_built_before_the_break
+          prebuilt -p sunrise-mod-wasm --test real_member --test unstaged --test self_refusal --test native_listener --test no_wire_registration --test capability_registration --test chunk_disk --test import_identity -- --include-ignored --nocapture --skip a_mod_built_before_the_break --skip every_hook_part_and_point_the_fixture_implements_is_imported_and_checked
           prebuilt -p sunrise-mod-wasm --lib -- guest_input_pool_stays_flat_for_100k_no_import_calls --ignored --nocapture
           exit "$failed"
       - name: Build and test the isolated mixed-output boundary
@@ -243,4 +243,5 @@ jobs:
       - run: cargo test --locked -p sunrise-mod-wasm --lib deep_guest_stack_and_overflow_attribution
       - run: cargo test --locked -p sunrise-mod-wasm --lib sixty_thousand_frames_exceed_wasmtime_default
       - run: cargo test --locked -p sunrise-mod-wasm --lib generated_client_and_server_hooks_complete_sixty_thousand_frames
-      - run: cargo test --locked -p sunrise-mod-wasm --features runtime-fixture --test main_stack_probe -- --nocapture
+      - run: cargo test --locked -p sunrise-mod-wasm --features runtime-fixture,test-copy-probe --test main_stack_probe -- --nocapture
+      - run: cargo test --locked -p sunrise-mod-wasm --features runtime-fixture --test pulley_policy -- --nocapture

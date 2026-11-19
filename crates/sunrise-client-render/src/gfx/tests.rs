@@ -1068,6 +1068,28 @@ fn chunk_fade_is_vanillas_get_visibility() {
     assert_eq!(chunk_visibility(0, 0), 1.0, "Off: whole at once");
     assert_eq!(chunk_visibility(u64::MAX, 750), 1.0);
 }
+#[test]
+fn the_players_section_shows_once_compiled_and_three_tenths_faded_in() {
+    // LevelRenderer.isSectionCompiledAndVisible: getVisibility(now, 750) >= 0.3.
+    use super::compiled_and_visible;
+    use std::time::{Duration, Instant};
+    let now = Instant::now() + Duration::from_secs(10);
+    let ago = |ms| now - Duration::from_millis(ms);
+    assert!(!compiled_and_visible(true, Some(&ago(224)), 750, now));
+    assert!(compiled_and_visible(true, Some(&ago(225)), 750, now));
+    assert!(
+        !compiled_and_visible(false, Some(&ago(5_000)), 750, now),
+        "a mesh still waiting to upload"
+    );
+    assert!(
+        compiled_and_visible(true, Some(&ago(5_000)), 750, now),
+        "faded in long ago: no fresh timer"
+    );
+    assert!(
+        compiled_and_visible(true, Some(&ago(0)), 0, now),
+        "fade off"
+    );
+}
 /// Iris 1.11.7's terrain `gl_Vertex`, read back by a probe pack of ours, is each block's
 /// position minus the camera with its fraction rounded to 1/65536 block: these are the
 /// fractions (in 65536ths) it implied, for eyes at y 69.62 and 82.92, at x 100.3 and

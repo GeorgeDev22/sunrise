@@ -46,7 +46,7 @@ pub(super) fn slider_caption(page: usize, r: usize) -> &'static str {
 /// A registered page's slider: its position.
 pub(super) fn slider_kind(page: usize, r: usize) -> Kind {
     match row(page, r) {
-        Some(added::Row::Slider { value, .. }) => Kind::Slider(value.clamp(0.0, 1.0)),
+        Some(added::Row::Slider { value, .. }) => Kind::Slider(f64::from(value.clamp(0.0, 1.0))),
         _ => Kind::Cycle,
     }
 }

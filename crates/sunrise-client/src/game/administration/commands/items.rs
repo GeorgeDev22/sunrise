@@ -554,7 +554,7 @@ impl Game<'_> {
                 if m.items.len() < size {
                     m.items.resize(size, None);
                 }
-                m.items[i] = stack;
+                *m.item_slot_mut(i).unwrap() = stack;
             }
             Some(entity) => entity.slots_mut()[i] = stack,
             None => return false,
@@ -1133,18 +1133,20 @@ impl Game<'_> {
                                     Some(rest) => (true, rest),
                                     None => (false, k.as_str()),
                                 };
-                                let key = if key.contains(':') {
-                                    key.to_owned()
-                                } else {
-                                    format!("minecraft:{key}")
+                                let Ok(id) = sunrise_core::identifier::Identifier::parse(key)
+                                else {
+                                    continue;
                                 };
+                                let key =
+                                    sunrise_core::nbt::JavaString::from(id.to_string().as_str());
+                                let marker =
+                                    sunrise_core::nbt::JavaString::from(format!("!{id}").as_str());
+                                c.remove(&key);
+                                c.remove(&marker);
                                 if remove {
-                                    c.remove(&key.as_str().into());
+                                    c.insert(marker, Tag::Compound(Default::default()));
                                 } else {
-                                    c.insert(
-                                        key.as_str().into(),
-                                        sunrise_client::scoreboard::json_to_tag(v),
-                                    );
+                                    c.insert(key, sunrise_client::scoreboard::json_to_tag(v));
                                 }
                             }
                         });
@@ -2737,6 +2739,41 @@ mod builtin_component_delivery_tests {
             assert!(
                 failures.is_empty(),
                 "actual command -> network_stack -> full protocol packet missing builtin components: {failures:?}"
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod component_modifier_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "daily"]
+    fn item_modify_removal_hides_the_prototype_and_a_set_clears_the_marker() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let stack = ItemStack::new("minecraft:bread", 1);
+            assert_eq!(stack.villager_food(game.items().get(&stack.item)), Some(4));
+            let mut random = sunrise_core::random::LegacyRandom::new(1);
+            let remove = serde_json::json!({"type":"minecraft:set_components", "components":{"!villager_food":{}}});
+            let removed = game
+                .apply_item_modifier(&remove, Some(stack), &mut random, None, [0.0; 3], 0)
+                .unwrap();
+            assert_eq!(removed.villager_food(game.items().get(&removed.item)), None);
+            let set = serde_json::json!({"type":"minecraft:set_components", "components":{"minecraft:villager_food":{"nutrition":7}}});
+            let result = game
+                .apply_item_modifier(&set, Some(removed), &mut random, None, [0.0; 3], 0)
+                .unwrap();
+            assert_eq!(
+                result.villager_food(game.items().get(&result.item)),
+                Some(7)
+            );
+            assert!(
+                result
+                    .data()
+                    .unwrap()
+                    .other("!minecraft:villager_food")
+                    .is_none()
             );
         });
     }

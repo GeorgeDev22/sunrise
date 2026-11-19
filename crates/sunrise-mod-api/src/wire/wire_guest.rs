@@ -13,7 +13,7 @@ mod prepared;
 pub use prepared::PreparedSlots;
 
 mod generated {
-    #![allow(clippy::all, unused, dead_code, non_snake_case)]
+    #![allow(clippy::all, unused, non_snake_case)]
     use crate::__private::game::{BackendMutRefOf, BackendRefOf, ClientBackendMutRefOf};
     use crate::*;
     include!(concat!(env!("OUT_DIR"), "/wire_guest_generated.rs"));
@@ -452,21 +452,28 @@ impl Drop for Reply {
 }
 
 /// Marks one export as used: a call, on wasm, of a no-op import named `$name`. The module's
-/// import section then lists the hook, Part method or handler method; the link keeps the
+/// import section then lists the export it names; the link keeps the
 /// import exactly while the code that calls this is linked.
+///
+/// `$id` names the function that holds the import. The generator gives every mark its own, because
+/// rustc names an extern item by its Rust path, not by its `link_name`: two marks declared
+/// as `mark` in the same function would be one import, the first one's.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __sunrise_import {
-    ($name:literal) => {{
+    ($id:ident, $name:literal) => {{
         #[cfg(target_arch = "wasm32")]
         {
-            #[link(wasm_import_module = "sunrise")]
-            unsafe extern "C" {
-                #[link_name = $name]
-                fn mark();
+            fn $id() {
+                #[link(wasm_import_module = "sunrise")]
+                unsafe extern "C" {
+                    #[link_name = $name]
+                    fn mark();
+                }
+                // SAFETY: a no-op import of the game's table, which takes and returns nothing.
+                unsafe { mark() }
             }
-            // SAFETY: a no-op import of the game's table, which takes and returns nothing.
-            unsafe { mark() }
+            $id();
         }
     }};
 }

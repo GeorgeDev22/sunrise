@@ -4,9 +4,7 @@ The complete reference for the mod API is the rustdoc of the `sunrise-mod-api` c
 every hook of `Hooks`, every event, Part trait, handle and `Host` method, with its side, its NeoForge 26.3
 counterpart where it has one, and whether a mod may cancel it.
 
-**[Open the API reference](https://sunrise-org.github.io/sunrise/api/mod_api/)**
-
-To build it locally, from a Sunrise checkout:
+Build it from a Sunrise checkout:
 
 ```sh
 cargo doc -p sunrise-mod-api --no-deps --open

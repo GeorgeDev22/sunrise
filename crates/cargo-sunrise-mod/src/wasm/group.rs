@@ -179,8 +179,9 @@ pub(super) fn build(
     api: Option<&mod_surface::Surface>,
 ) -> Result<(), String> {
     let root = dunce::canonicalize(root).map_err(|e| e.to_string())?;
+    let package_output = crate::PackageOutput::in_project(&root)?;
+    let target = package_output.0.as_path();
     let toolchain = toolchain()?;
-    let target = root.join("target/sunrise-mod");
     let stage = target.join("group");
     let mut metadatas = Vec::new();
     for directory in std::iter::once(root.as_path()).chain(additional.iter().map(PathBuf::as_path))
@@ -485,7 +486,7 @@ pub(super) fn build(
     );
     workspace["workspace"]["resolver"] = toml_edit::value("3");
     std::fs::write(stage.join("Cargo.toml"), workspace.to_string()).map_err(|e| e.to_string())?;
-    let mut command = cargo_command("build", "member", &stage, &target, &toolchain)?;
+    let mut command = cargo_command("build", "member", &stage, target, &toolchain)?;
     command.env(
         "SUNRISE_POINT_NAMES",
         serde_json::to_string(&point_names).map_err(|e| e.to_string())?,
@@ -538,7 +539,8 @@ pub(super) fn build(
                 .to_owned(),
             sha512_of(&module),
         );
-        std::fs::write(member.root.join(WASM), module).map_err(|e| e.to_string())?;
+        // Replaced, never written through: a link at `mod.wasm` is not followed.
+        crate::internals::atomic_write(&member.root.join(WASM), module)?;
     }
     for member in &mut members {
         let id = member.manifest["id"]
@@ -568,7 +570,15 @@ pub(super) fn build(
     }
     for member in &members {
         // A group member packs no uses table yet, so it counts as made for its build only.
-        crate::pack_into(&member.root, &target, None, api)?;
+        let package = sunrise_mod_package::Package::read(&member.root)?;
+        crate::pack_into(
+            &member.root,
+            &package_output,
+            &package.manifest,
+            None,
+            api,
+            None,
+        )?;
     }
     Ok(())
 }

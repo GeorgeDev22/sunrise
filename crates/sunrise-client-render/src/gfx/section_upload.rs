@@ -577,6 +577,26 @@ impl Renderer {
         );
         self.shadow_visible.iter().any(|v| v.key == key)
     }
+    /// `LevelRenderer.isSectionCompiledAndVisible` for the section holding block `pos`: it
+    /// has had a mesh since its column came (an empty one too), and it is 30% through its
+    /// fade-in of `fade_ms` since its first upload. A mesh still waiting to upload is not
+    /// compiled yet.
+    pub fn section_compiled_and_visible(&self, pos: [i32; 3], fade_ms: u64) -> bool {
+        let Some(sy) = self.layout.section_index(pos[1]) else {
+            return false;
+        };
+        let key = (pos[0] >> 4, sy as i32, pos[2] >> 4);
+        let compiled = self
+            .detail_columns
+            .get(&(key.0, key.2))
+            .is_some_and(|mask| mask.contains(sy));
+        compiled_and_visible(
+            compiled,
+            self.section_uploaded.get(&key),
+            fade_ms,
+            std::time::Instant::now(),
+        )
+    }
     /// Milliseconds since `key` was uploaded; a section not in `section_uploaded` is old.
     fn section_elapsed_ms(&self, key: SectionKey, now: std::time::Instant) -> u64 {
         self.section_uploaded.get(&key).map_or(u64::MAX, |t| {

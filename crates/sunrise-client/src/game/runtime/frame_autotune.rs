@@ -5,7 +5,6 @@ use sunrise_client::autotune::GpuCullingAuto;
 use sunrise_client::dynamic_resolution::{DynamicResolution, Pace};
 use sunrise_client::gfx::Renderer;
 use sunrise_client::graphics::{GpuCullingMode, Graphics};
-use sunrise_client::perf_overlay::FrameGraph;
 
 /// One rendered frame of `r`, its CPU and whole time in milliseconds. `settled`: the player is
 /// in a world that has loaded, the only frames either mode counts (a chunk load's slow frames
@@ -14,14 +13,9 @@ pub(super) fn observe(
     g: &Graphics,
     settled: bool,
     (culling, dynamic): (&mut GpuCullingAuto, &mut DynamicResolution),
-    graph: &mut FrameGraph,
     r: &mut Renderer,
     (cpu_ms, frame_ms): (f32, f32),
 ) {
-    // The performance overlay names the scale while it moves on its own.
-    graph.dynamic_scale = g
-        .dynamic_resolution
-        .then(|| dynamic.scale(g.resolution_scale));
     if !settled {
         return;
     }

@@ -1,4 +1,5 @@
 //! Tool-written native inject declarations, pinned to the game's metadata.
+use crate::{internals::CatalogDiscovery, native_build};
 use std::{fs, path::Path};
 use sunrise_mod_package::{
     Manifest,
@@ -66,30 +67,26 @@ pub(crate) mod update;
 
 pub fn run(args: &[String]) -> Result<(), String> {
     if args.first().is_some_and(|command| command == "update") {
-        return update::run(Path::new("."), &args[1..]);
+        return update::run(Path::new("."), &args[1..], native_build::project_catalog);
     }
     if args.first().is_some_and(|command| command == "sync") {
         return crate::inject_sync::run(&args[1..]);
     }
-    add(Path::new("."), args)
+    add(Path::new("."), args, native_build::project_catalog)
 }
 
-fn add(dir: &Path, args: &[String]) -> Result<(), String> {
+pub(super) fn add(dir: &Path, args: &[String], discover: CatalogDiscovery) -> Result<(), String> {
     let request = request(args)?;
     let path = dir.join(MANIFEST);
     let original = crate::bounded::read(&path, crate::bounded::MAX_MANIFEST)?;
     // Manifest::parse owns mod id, native pin and existing declaration validation.
     let manifest = Manifest::parse(&original)?;
-    let directory = crate::internals::catalog_directory(dir, &manifest)?;
     let native = manifest
         .native
         .as_ref()
         .ok_or("inject add needs a [native] mod")?;
-    let internals = if native.module.is_empty() {
-        crate::internals::load(dir, &native.sunrise)?
-    } else {
-        sunrise_mod_package::internals::read(&directory.join("internals.json"))?
-    };
+    let directory = crate::internals::catalog_directory(dir, native, discover)?;
+    let internals = crate::internals::read_catalog(&directory)?;
     let points = directory.join("points.json");
     let (_, catalog): (_, Catalog) = sunrise_mod_package::build_data::read(
         sunrise_mod_package::build_data::POINTS,

@@ -179,7 +179,7 @@ item's signature and the shapes of the types it carries, so adding a method refu
 them all. A hook hands a mod `&mut dyn ServerHost`, whose vtable keeps every host method, so a built mod
 imports every host call whether it calls it or not: changing or removing any host call refuses every
 built wasm mod (a new method refuses none), while a changed hook, Part method or point refuses only
-the mods that implement it (a point's hash covers its own signature, not every type reachable from it). One exception: the shared resource codec keeps one Part marker (`part:BlockCapabilityProvider<dyn ItemStorage>::provide`), so a mod that implements no Part still imports it, and a game build that changes that one method refuses it (#2517). Rebuilding against this SDK moves a mod's numbered imports to these names with no source edit: a mod that uses the derive needs only a rebuild, while one that decodes an `EntityWrite` or `InsideEffects` by hand needs a source change to match the derive's bytes. Known gap: a behaviour change under an unchanged signature is not caught; the hook's
+the mods that implement it (a point's hash covers its own signature, not every type reachable from it). A Part or hook method is marked by the `#[sunrise_part]` or `#[sunrise_mod]` impl that writes it; a plain implementation of any other handler trait (`EnergyHandler`, `ItemStorage`, `BlockCapabilityProvider` and the like) carries no marks of its own, so a changed method of such a trait is not caught at load. Rebuilding against this SDK moves a mod's numbered imports to these names with no source edit: a mod that uses the derive needs only a rebuild, while one that decodes an `EntityWrite` or `InsideEffects` by hand needs a source change to match the derive's bytes. Known gap: a behaviour change under an unchanged signature is not caught; the hook's
 `hook_version` is how the game says one happened.
 
 Each guest exports:
@@ -241,7 +241,7 @@ Wasm threads and shared memory are off for wasm mods. A module that declares or 
 
 ## Compiled module cache
 
-The game caches compiled wasm modules in `<game_dir>/.sunrise-cache/wasm/`, keyed by the
+The game caches compiled wasm modules in `<game_dir>/.sunrise-cache/wasm/`, or in `<home>/.sunrise-cache/wasm/` when `--home` or `SUNRISE_HOME` names a home (even the platform default one), keyed by the
 wasm bytes, Wasmtime compatibility and engine settings. Hits map the compiled file into memory;
 files shipped beside a mod are never loaded as compiled code.
 
