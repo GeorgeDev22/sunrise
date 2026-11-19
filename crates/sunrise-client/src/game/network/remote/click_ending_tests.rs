@@ -177,3 +177,106 @@ fn an_end_crystal_click_on_a_block_ends_there() {
         assert!(!game.remote_use_block(Hand::Main));
     });
 }
+
+/// EnderEyeItem.useOn is SUCCESS into a frame without an eye: the arm swings and the click ends
+/// with one use_item_on. On a frame with an eye it passes, so Item.use follows (use_item).
+/// MinecartItem.useOn ends the click either way: SUCCESS (swing) on a rail, FAIL (no swing) on
+/// any other block. CompassItem.useOn on a lodestone is SUCCESS. After those, neither the main
+/// hand's air use nor the off hand's torch is tried.
+#[test]
+#[ignore = "daily"]
+fn an_ender_eye_and_a_minecart_end_the_click_where_vanilla_does() {
+    crate::game::native_entity_refs::tests::with_game(|game| {
+        use crate::game::Hit;
+        use std::sync::Arc;
+        use sunrise_client::{chunk::Chunk, motion::PlayerMotion};
+        use sunrise_core::geometry::Vec3;
+        use sunrise_protocol::packets::play;
+        let (mut peer, _writer) = connect_menu_test(game);
+        peer.set_read_timeout(Some(std::time::Duration::from_millis(50)))
+            .unwrap();
+        game.set_mode_id(0);
+        game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+        game.world
+            .chunks
+            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        let registry = game.pack.assets.registry;
+        let frame = |eye: &str| {
+            registry
+                .resolve(&sunrise_world::chunk::BlockState {
+                    name: "minecraft:end_portal_frame".into(),
+                    properties: [("eye", eye), ("facing", "north")]
+                        .into_iter()
+                        .map(|(key, value)| (key.into(), value.into()))
+                        .collect(),
+                })
+                .unwrap()
+        };
+        game.world.set(0, 63, 2, frame("false")).unwrap();
+        game.world.set(0, 63, 4, frame("true")).unwrap();
+        game.world
+            .set(0, 64, 6, registry.default_state("minecraft:rail").unwrap())
+            .unwrap();
+        game.world
+            .set(0, 63, 8, registry.default_state("minecraft:stone").unwrap())
+            .unwrap();
+        game.world
+            .set(
+                0,
+                63,
+                10,
+                registry.default_state("minecraft:lodestone").unwrap(),
+            )
+            .unwrap();
+        game.offhand = Some(ItemStack::new("minecraft:torch", 8));
+        game.selected = 0;
+        while peer.recv().is_ok() {}
+        let mut click = |game: &mut crate::game::Game<'_>, item: &str, pos: [i32; 3]| {
+            game.inventory[0] = Some(ItemStack::new(item, 4));
+            game.forced_hit = Some(Hit {
+                pos,
+                face: [0, 1, 0],
+                point: [0.5, f64::from(pos[1]) + 1.0, f64::from(pos[2]) + 0.5],
+                inside: false,
+            });
+            let swings = game.swings_started;
+            game.remote_use(mod_api::InteractionAttempt::Press);
+            let mut sent = Vec::new();
+            while let Ok((id, bytes)) = peer.recv() {
+                match play::Serverbound::decode(id, &bytes) {
+                    Ok(play::Serverbound::UseItemOn(p)) => sent.push(if p.hand == 0 {
+                        "use_item_on"
+                    } else {
+                        "off_hand_use_item_on"
+                    }),
+                    Ok(play::Serverbound::UseItem(_)) => sent.push("use_item"),
+                    _ => {}
+                }
+            }
+            (game.swings_started != swings, sent)
+        };
+        assert_eq!(
+            click(game, "minecraft:ender_eye", [0, 63, 2]),
+            (true, vec!["use_item_on"])
+        );
+        // EnderEyeItem.use PASSes too while the player looks at a frame, so the off hand's
+        // torch gets its turn.
+        assert_eq!(
+            click(game, "minecraft:ender_eye", [0, 63, 4]).1,
+            ["use_item_on", "use_item", "off_hand_use_item_on"]
+        );
+        assert_eq!(
+            click(game, "minecraft:minecart", [0, 64, 6]),
+            (true, vec!["use_item_on"])
+        );
+        assert_eq!(
+            click(game, "minecraft:minecart", [0, 63, 8]),
+            (false, vec!["use_item_on"])
+        );
+        // CompassItem.useOn on a lodestone: SUCCESS, the click ends there.
+        assert_eq!(
+            click(game, "minecraft:compass", [0, 63, 10]),
+            (true, vec!["use_item_on"])
+        );
+    });
+}

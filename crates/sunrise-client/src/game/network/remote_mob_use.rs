@@ -77,7 +77,7 @@ impl Game<'_> {
             return true;
         }
         let sneaking = self.keys.held(Action::Sneak);
-        match m.species() {
+        let species_answer = match m.species() {
             // Villager.mobInteract: trading, or a baby's head shake. A sleeping
             // villager falls back to super.mobInteract, which passes.
             Species::Villager => item != "minecraft:villager_spawn_egg" && !villager::sleeping(m),
@@ -101,7 +101,9 @@ impl Game<'_> {
             // HappyGhast.mobInteract: a harnessed adult is ridden.
             Species::HappyGhast => !baby && m.extra.body_id().is_some(),
             // TamableAnimal (wolf, cat, parrot) on a client: CONSUME once tame.
-            Species::Wolf | Species::Cat | Species::Parrot => m.extra.tame,
+            Species::Wolf | Species::Cat => m.extra.tame,
+            // Parrot.mobInteract: its poisonous food (a cookie) is SUCCESS, tame or not.
+            Species::Parrot => m.extra.tame || self.parrot_poisonous(item),
             // Allay.mobInteract: gives an item or takes it back.
             Species::Allay if !act => self.allay_would_take(i, hand, stack.cloned()),
             Species::Allay => self.predict_allay_interaction(i, hand, stack.cloned()),
@@ -188,7 +190,46 @@ impl Game<'_> {
                         || !m.extra.off_hand_id().is_some_and(|o| self.piglin_loved(o)))
             }
             _ => false,
-        }
+        };
+        // Player.interactOn: when the mob passes, ItemStack.interactLivingEntity puts an
+        // equip_on_interact item (a saddle, horse or wolf armour, a harness) on it.
+        species_answer || self.equips_on_interact(i, hand)
+    }
+    /// `Equippable.equipOnTarget` on a client: SUCCESS when the mob can wear the item in its
+    /// slot (`isEquippableInSlot`: the slot usable, the type allowed) and the slot is empty.
+    fn equips_on_interact(&self, i: usize, hand: Hand) -> bool {
+        use super::dispenser::{Slot, mob_can_use_slot, mob_slot_item};
+        let Some(m) = self.mobs.get(i) else {
+            return false;
+        };
+        let stack = match hand {
+            Hand::Main => self.stack_in(self.selected),
+            Hand::Off => self.offhand.as_ref(),
+        };
+        let Some(info) = stack
+            .and_then(|s| self.res.items().get(&s.item))
+            .filter(|info| info.equip_on_interact)
+        else {
+            return false;
+        };
+        let Some(slot) = info.equip_slot.as_deref().and_then(Slot::from_name) else {
+            return false;
+        };
+        m.alive()
+            && mob_can_use_slot(m, slot)
+            && info
+                .equip_allowed
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(m.kind.id.as_str()))
+            && mob_slot_item(m, slot).is_none()
+    }
+    /// `#minecraft:parrot_poisonous_food`.
+    fn parrot_poisonous(&self, item: &str) -> bool {
+        self.res
+            .items()
+            .item_tags
+            .get("minecraft:parrot_poisonous_food")
+            .is_some_and(|tag| tag.contains(item))
     }
     /// Whether that answer is `InteractionResult.SUCCESS`, the only result that
     /// swings the hand: `CONSUME` ends the click without one. An adult animal's
@@ -209,6 +250,12 @@ impl Game<'_> {
         // an unnamed one passes on to the trader's trading (SUCCESS_SERVER).
         if m.species() == Species::WanderingTrader && item == "minecraft:name_tag" {
             return stack.is_some_and(|s| s.custom_name().is_some());
+        }
+        // Parrot.mobInteract's poisonous food and Equippable.equipOnTarget answer SUCCESS.
+        if m.species() == Species::Parrot && self.parrot_poisonous(item)
+            || self.equips_on_interact(i, hand)
+        {
+            return true;
         }
         mob_swings(m, item)
     }
@@ -349,6 +396,56 @@ fn mob_swings(m: &Mob, item: &str) -> bool {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// Equippable.equipOnTarget through ItemStack.interactLivingEntity: a saddle goes on an adult
+    /// pig with none (SUCCESS, a swing), not on a baby (Pig.canUseSlot) or on one already
+    /// saddled for the saddle's own sake. Parrot.mobInteract: a cookie is SUCCESS on an untamed
+    /// parrot too, a stick passes.
+    #[test]
+    #[ignore = "daily"]
+    fn a_saddle_on_a_pig_and_a_cookie_on_a_parrot_answer_on_the_client() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let root =
+                std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
+            let types = sunrise_client::mobs::MobTypes::load(&root).unwrap();
+            let spawn = |kind: &str, id: u32| {
+                Mob::new(
+                    id,
+                    Arc::new(types.types[kind].clone()),
+                    sunrise_core::geometry::Vec3::new(0.5, 64.0, 2.5),
+                    0.0,
+                )
+            };
+            let mut baby = spawn("minecraft:pig", 2);
+            baby.extra.age = -24000;
+            game.mobs.clear();
+            game.mobs.push(spawn("minecraft:pig", 1));
+            game.mobs.push(baby);
+            game.mobs.push(spawn("minecraft:parrot", 3));
+            let hold = |game: &mut Game<'_>, item: &str| {
+                game.inventory[game.selected] =
+                    Some(sunrise_client::items::ItemStack::new(item, 1));
+            };
+            hold(game, "minecraft:saddle");
+            assert!(
+                game.remote_mob_would_take(0, Hand::Main),
+                "an adult pig takes the saddle"
+            );
+            assert!(game.remote_mob_swings(0, Hand::Main));
+            assert!(
+                !game.remote_mob_would_take(1, Hand::Main),
+                "a baby pig can't wear it"
+            );
+            hold(game, "minecraft:cookie");
+            assert!(
+                game.remote_mob_would_take(2, Hand::Main),
+                "a cookie poisons any parrot"
+            );
+            assert!(game.remote_mob_swings(2, Hand::Main));
+            hold(game, "minecraft:stick");
+            assert!(!game.remote_mob_would_take(2, Hand::Main));
+        });
+    }
 
     fn mob(kind: &str) -> Option<Mob> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
