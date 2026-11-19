@@ -1008,9 +1008,9 @@ impl Game<'_> {
         self.native_players_leaving();
         // IntegratedServer.stopServer: teardownPublishedState.
         self.stop_serving();
-        // PlayerList.removeAll: the owner and every guest leave the game, after
-        // a crash too (MinecraftServer.stopServer); a player the panic
-        // interrupted keeps the last saved files (`crash_save`).
+        // PlayerList.removeAll: the owner and every guest leave the game. A
+        // crash saves the players it did not interrupt as a stop does; an
+        // interrupted player keeps their last saved files (`crash_save`).
         self.award_leave_game_to_all();
         self.save_leaving_guests();
         if let Some(host) = self.lan.as_mut() {

@@ -13,9 +13,10 @@ checks, from the files the server leaves:
   byte what the previous clean stop wrote, and a block placed before the panic is still there on the next start.
 - `hub`: the panic comes while a console line has the hub out of the game, with a player in
   (the fixture takes it out first, as a panic in the network tick leaves it). Same checks.
-- Bystander: a second player, given diamonds, is in when the panic interrupts the first one's turn.
-  `MinecraftServer.stopServer` saves the players after a crash too: the bystander's file holds the
-  diamonds, while the interrupted player's files are what the previous clean stop wrote.
+- Bystander: a second player, given diamonds and riding a boat, is in when the panic interrupts the
+  first one's turn. A crash saves the players it did not interrupt as a stop does, each leaving with
+  the vehicle they alone ride: the bystander's file holds the diamonds and the boat. The interrupted
+  player keeps the files the previous clean stop wrote, and a lost hub saves only the world.
 """
 import hashlib
 import os
@@ -240,6 +241,8 @@ def crash_saves_bystander(build):
         other.raw('wait-for', 'loaded', '--timeout', 300)
         server.wait_for(rf'{bystander} joined the game')
         server.console(f'give {bystander} minecraft:diamond 4')
+        server.console(f'execute at {bystander} run summon minecraft:oak_boat ~ ~ ~ {{Tags:["bystander_boat"]}}')
+        server.console(f'ride {bystander} mount @e[tag=bystander_boat,limit=1]')
         server.console('say GIVEN-TO-BYSTANDER')
         server.wait_for(r'\[Server\] GIVEN-TO-BYSTANDER')
         assert not file.exists(), 'the bystander was saved before the crash'
@@ -260,6 +263,10 @@ def crash_saves_bystander(build):
     player = anvil_dump.plain(anvil_dump.read_dat(file), full=True)
     diamonds = sum(i['count'] for i in player['Inventory'] if i['id'] == 'minecraft:diamond')
     assert diamonds == 4, f'the bystander was saved with {diamonds} diamonds, not 4'
+    # Only the shutdown's leave save (PlayerList.remove) puts the boat they alone ride in their file:
+    # the world save keeps a ridden vehicle in its chunk.
+    vehicle = player.get('RootVehicle', {}).get('Entity', {}).get('id')
+    assert vehicle == 'minecraft:oak_boat', f'the bystander left without their boat in the file ({vehicle!r})'
     print('crash saves the bystander, keeps the interrupted player: ok', flush=True)
 
 def main():

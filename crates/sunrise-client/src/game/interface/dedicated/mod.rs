@@ -2338,9 +2338,9 @@ impl Game<'_> {
         self.native_players_leaving();
         log("INFO", "Saving players");
         // PlayerList.removeAll: each player's file, with the vehicle it
-        // alone rides, then its records. MinecraftServer.stopServer saves them
-        // after a crash as after a stop; a player the panic interrupted keeps
-        // the last saved file (`crash_save`), and a lost hub has none to save.
+        // alone rides, then its records. A crash saves the players it did not
+        // interrupt as a stop does; an interrupted player keeps their last
+        // saved files (`crash_save`), and a lost hub saves only the world.
         self.save_leaving_guests();
         if let Some(h) = self.lan.as_mut() {
             let conns: Vec<u32> = h.hub.guests.iter().map(|g| g.conn).collect();
