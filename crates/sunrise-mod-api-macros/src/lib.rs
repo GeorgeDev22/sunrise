@@ -188,11 +188,24 @@ fn expand(mut implementation: ItemImpl, export: bool) -> TokenStream {
     // marked by a no-op import named for it, kept exactly while this impl is linked. A method
     // the API keeps off wasm has no marker.
     let owner = proc_macro2::Literal::string(&name.to_string());
+    // A block part's plain `explosion_resistance_is_pure` is asked, across the boundary, of every
+    // part subscribed to `explosion_resistance` (its default included), so that listener marks it.
+    let purity = (name == "BlockPart")
+        .then(|| {
+            methods
+                .iter()
+                .zip(&cfgs)
+                .find(|(method, _)| *method == "explosion_resistance")
+                .map(|(_, cfgs)| {
+                    quote! { #(#cfgs)* mod_api::__sunrise_mark!(#owner explosion_resistance_is_pure); }
+                })
+        })
+        .flatten();
     let marks = {
         let marked = methods.iter().zip(&cfgs).map(|(method, cfgs)| {
             quote! { #(#cfgs)* mod_api::__sunrise_mark!(#owner #method); }
         });
-        quote! { #(#marked)* mod_api::__sunrise_mark!(#owner #subscribed_name); }
+        quote! { #(#marked)* #purity mod_api::__sunrise_mark!(#owner #subscribed_name); }
     };
     // Entity parts (#1077) carry plain methods beside their scoped hooks
     // (#792): the goal, behavior and spawn-size registrars are not hooks, so
@@ -348,7 +361,9 @@ pub fn host_area(_attribute: TokenStream, input: TokenStream) -> TokenStream {
             Err(error) => return error.to_compile_error().into(),
         };
         method.attrs.retain(|attr| {
-            !attr.path().is_ident("static_call") && !attr.path().is_ident("service")
+            !attr.path().is_ident("static_call")
+                && !attr.path().is_ident("service")
+                && !attr.path().is_ident("read_stack")
         });
         let operation = method.sig.ident.to_string();
         let label = format!("{union}::{operation}");

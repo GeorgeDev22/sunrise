@@ -6,19 +6,15 @@ use super::{Renderer, ScreenshotRequest, copy_frame, submit};
 impl Renderer {
     /// The frame's readbacks to start right after its submission (on the submit thread when
     /// the frame goes there): occlusion culling's results (`cull`) and GPU culling's
-    /// statistics. GPU frames leave occlusion culling off, so a frame has one at most.
+    /// statistics, then a pack-drawn light texture's copy while F3 charts it. GPU frames leave
+    /// occlusion culling off, so a frame has one of the first two at most.
     pub(super) fn after_submit(&mut self) -> Option<submit::AfterSubmit> {
         let cull = self.cull.as_mut().and_then(|c| c.submitted());
         let gpu = self.gpu_culling.as_mut().and_then(|g| g.submitted());
-        match (cull, gpu) {
-            (Some(c), Some(g)) => Some(Box::new(move || {
-                c();
-                g();
-            })),
-            (Some(c), None) => Some(Box::new(c)),
-            (None, Some(g)) => Some(Box::new(g)),
-            (None, None) => None,
-        }
+        let lightmap = self.core_lightmap.as_mut().and_then(|l| l.submitted());
+        let cull = cull.map(|c| Box::new(c) as submit::AfterSubmit);
+        let gpu = gpu.map(|g| Box::new(g) as submit::AfterSubmit);
+        chain(chain(cull, gpu), lightmap)
     }
     /// Frame `frame`'s statistics shown, unless a newer frame's are: a CPU frame's as it is
     /// drawn, a GPU frame's when its counts come back (`GpuCulling::collect`).
@@ -116,5 +112,41 @@ impl Renderer {
             self.screenshot_result = Some(Err(error));
             None
         }
+    }
+}
+
+/// `first`, then `then`, as one readback: a new box only when both are there.
+fn chain(
+    first: Option<submit::AfterSubmit>,
+    then: Option<submit::AfterSubmit>,
+) -> Option<submit::AfterSubmit> {
+    match (first, then) {
+        (Some(a), Some(b)) => Some(Box::new(move || {
+            a();
+            b();
+        })),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::{chain, submit};
+    use std::sync::{Arc, Mutex};
+
+    /// Two readbacks chained both run, the first first; one alone is itself; none is none.
+    #[test]
+    fn chained_readbacks_run_in_order_and_none_is_none() {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let read = |n: u8| -> Option<submit::AfterSubmit> {
+            let ran = ran.clone();
+            Some(Box::new(move || ran.lock().unwrap().push(n)))
+        };
+        chain(read(1), read(2)).expect("both")();
+        chain(read(3), None).expect("the first")();
+        chain(None, read(4)).expect("the second")();
+        assert!(chain(None, None).is_none());
+        assert_eq!(*ran.lock().unwrap(), [1, 2, 3, 4]);
     }
 }

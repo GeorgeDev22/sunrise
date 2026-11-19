@@ -3,9 +3,10 @@
 //! capability handlers), through one shared-memory boundary and the glue on both sides of it.
 mod append;
 mod borrowed;
-mod calls;
+pub(crate) mod calls;
 mod descriptors;
 mod host;
+pub(crate) use host::refusal_value;
 mod prepared;
 #[cfg(test)]
 mod prepared_tests;
@@ -497,7 +498,7 @@ pub(super) struct Names {
     /// The calls a mod makes on a game object of an exported trait it holds (`held-` imports).
     held: std::collections::HashMap<(String, String), mod_call::Name>,
     /// The three named entries of each prepared hook, by (hook, entry).
-    prepared: std::collections::HashMap<(String, String), mod_call::Name>,
+    pub(super) prepared: std::collections::HashMap<(String, String), mod_call::Name>,
 }
 
 impl Names {
@@ -624,12 +625,25 @@ pub(super) fn call_names(
         } else {
             Kind::Part
         };
+        // A subscription crosses as the names of its hooks (and their priorities), never as
+        // `HookId`: the catalog's whole hook enum must not move the name or the id.
+        let answer: Option<syn::Type> = calls::is_subscription(m).then(|| {
+            if m.owner == "Hooks" {
+                syn::parse_quote!(Vec<(String, i32, bool)>)
+            } else {
+                syn::parse_quote!(Vec<String>)
+            }
+        });
+        let answer_ty = match &answer {
+            Some(ty) => Some(surface.types.ty(syntax.module, ty, &[])?),
+            None => None,
+        };
         let private = {
             let tys: Vec<&Ty> = m
                 .params
                 .iter()
                 .map(|(_, ty)| ty)
-                .chain(std::iter::once(&m.ret))
+                .chain(std::iter::once(answer_ty.as_ref().unwrap_or(&m.ret)))
                 .collect();
             mod_call::digest(&descriptors::text(&surface.types, &tys))
         };
@@ -642,7 +656,10 @@ pub(super) fn call_names(
                     receiver: m.receiver,
                     module: syntax.module,
                     params: syntax.params.iter().map(parse).collect::<Result<_, _>>()?,
-                    ret: syntax.ret.as_ref().map(parse).transpose()?,
+                    ret: match &answer {
+                        Some(ty) => Some(ty.clone()),
+                        None => syntax.ret.as_ref().map(parse).transpose()?,
+                    },
                     trait_params: syntax.trait_params.clone(),
                     owner_args: syntax
                         .owner_args
@@ -893,7 +910,11 @@ pub(crate) fn owned_types(
     let providers = crate::capability_providers::generate(root, included)?.0;
     let mut with_providers = included.to_vec();
     with_providers.push(("capability_providers_generated.rs", providers.as_str()));
-    let mut surface = surface(root, &with_providers)?;
+    point_types(&mut surface(root, &with_providers)?)
+}
+
+/// Owned point values from an already resolved Wire surface.
+pub(super) fn point_types(surface: &mut Surface<'_>) -> Result<crate::points::WireTypes, String> {
     // Every owned signature def appears in the generated wire code with a Wire bound.
     // That compile-time guarantee covers macro-generated slot keys/handle codecs too;
     // no owned field traversal or second Wire-implementation discovery is needed.
@@ -1111,6 +1132,53 @@ mod tests {
                         key.1
                     );
                 }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A subscription crosses as hook names, so a hook the mod does not listen to, added to
+    /// the catalog, moves neither the subscription's import name nor its dispatch id.
+    #[test]
+    #[ignore = "daily"]
+    fn an_unrelated_hook_added_to_the_catalog_moves_no_subscription_name_or_id() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+                let generated = crate::sources(&root, crate::FillMode::Require).unwrap();
+                let hooks = crate::Catalog::load(&root).unwrap().hooks;
+                let subscriptions = |hooks_source: &str| {
+                    let included = [
+                        ("mod_api_generated.rs", hooks_source),
+                        ("mod_api_generated_host.rs", generated.host.as_str()),
+                        ("mod_api_host_areas.rs", generated.areas.as_str()),
+                    ];
+                    let providers = crate::capability_providers::generate(&root, &included)
+                        .unwrap()
+                        .0;
+                    let mut with_providers = included.to_vec();
+                    with_providers.push(("capability_providers_generated.rs", providers.as_str()));
+                    let mut surface = super::surface(&root, &with_providers).unwrap();
+                    let names = super::call_names(&mut surface, &hooks, &[]).unwrap();
+                    super::SUBSCRIBED
+                        .iter()
+                        .map(|(owner, method)| {
+                            let name = &names.by_method[&(owner.to_string(), method.to_string())];
+                            (name.text(), name.export_id())
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let before = subscriptions(&generated.hooks);
+                assert_eq!(before.len(), super::SUBSCRIBED.len());
+                let grown = generated.hooks.replacen(
+                    "pub enum HookId { ",
+                    "pub enum HookId { UnrelatedNewHook, ",
+                    1,
+                );
+                assert_ne!(grown, generated.hooks);
+                assert_eq!(subscriptions(&grown), before);
             })
             .unwrap()
             .join()

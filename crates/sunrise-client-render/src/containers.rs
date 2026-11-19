@@ -813,6 +813,25 @@ impl BlockEntity {
             | Self::Campfire(_) => &[],
         }
     }
+    /// An individual slot write claims just that slot from a mod's saved payload.
+    pub fn slot_mut(&mut self, slot: usize) -> Option<&mut Option<ItemStack>> {
+        match self {
+            Self::Mod(m) => m.item_slot_mut(slot),
+            other => other.slots_mut().get_mut(slot),
+        }
+    }
+    /// Write back an inventory projection, claiming a mod's opaque rows only at changed slots.
+    pub fn replace_slots(&mut self, slots: &[Option<ItemStack>]) {
+        if let Self::Mod(m) = self {
+            for (slot, stack) in slots.iter().enumerate() {
+                if m.items[slot] != *stack {
+                    *m.item_slot_mut(slot).unwrap() = stack.clone();
+                }
+            }
+        } else {
+            self.slots_mut().clone_from_slice(slots);
+        }
+    }
     pub fn slots_mut(&mut self) -> &mut [Option<ItemStack>] {
         match self {
             Self::Chest(items) => items,

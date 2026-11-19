@@ -36,7 +36,7 @@ impl Game<'_> {
                         attack.attacker
                     )
                 ),
-                &self.motion.health,
+                &self.health_resources,
                 rules,
                 source,
                 amount,
@@ -67,7 +67,7 @@ impl Game<'_> {
                         attack.attacker
                     )
                 ),
-                &self.motion.health,
+                &self.health_resources,
                 rules,
                 &mut hit,
             )?;
@@ -89,7 +89,7 @@ impl Game<'_> {
                         attack.attacker
                     )
                 ),
-                &self.motion.health,
+                &self.health_resources,
                 rules,
                 hit,
             )

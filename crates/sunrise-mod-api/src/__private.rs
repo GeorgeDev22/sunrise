@@ -35,7 +35,9 @@ pub fn install(mods: crate::Mods) {
 pub use crate::load_state::{install_packages, install_registration_data};
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
-pub use crate::load_state::{with_test_packages, with_test_registration_data};
+pub use crate::load_state::{
+    with_test_package_inventory, with_test_packages, with_test_registration_data,
+};
 
 pub use crate::equip_reads::{
     EquipReadGuard, EquipReadSet, cached_equip_alive, cached_equip_equipment,

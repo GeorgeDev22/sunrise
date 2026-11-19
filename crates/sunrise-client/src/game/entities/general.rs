@@ -37,6 +37,9 @@ pub struct GeneralEntityRecord {
     pub rotation: [f32; 2],
     /// The entity's UUID, the identity a reload continues.
     pub uuid: [i32; 4],
+    /// The UUID of the entity that fired it (`Owner`, as `TraceableEntity`s and
+    /// projectiles save it), when a spawn named one.
+    pub owner: Option<[i32; 4]>,
     /// The type envelope: which registered type owns the payload, at which
     /// schema version, with which bounded payload bytes.
     pub envelope: GeneralTypeEnvelope,
@@ -211,6 +214,8 @@ mod format {
     pub const ROTATION: &str = "Rotation";
     /// `UUID`: four ints.
     pub const UUID: &str = "UUID";
+    /// `Owner`: the firing entity's UUID, four ints (`Projectile.addAdditionalSaveData`'s key).
+    pub const OWNER: &str = "Owner";
     /// The payload's schema version, a short.
     pub const PAYLOAD_VERSION: &str = "PayloadVersion";
     /// The payload bytes, a byte array.
@@ -264,6 +269,9 @@ impl GeneralEntityRecord {
             ),
         );
         map.insert(format::UUID.into(), Tag::IntArray(self.uuid.to_vec()));
+        if let Some(owner) = self.owner {
+            map.insert(format::OWNER.into(), Tag::IntArray(owner.to_vec()));
+        }
         map.insert(
             format::PAYLOAD_VERSION.into(),
             Tag::Short(i16::from_ne_bytes(
@@ -388,6 +396,19 @@ fn record_from_compound(tag: &Tag) -> Result<GeneralEntityRecord, GeneralRecordE
             });
         }
     };
+    let owner = match tag.get(format::OWNER) {
+        None => None,
+        Some(Tag::IntArray(ints)) if ints.len() == 4 => {
+            let mut out = [0i32; 4];
+            out.copy_from_slice(ints);
+            Some(out)
+        }
+        Some(_) => {
+            return Err(GeneralRecordError::InvalidEnvelope {
+                field: format::OWNER,
+            });
+        }
+    };
     let payload_version = match tag.get(format::PAYLOAD_VERSION) {
         None => 0,
         Some(Tag::Short(version)) => u16::from_ne_bytes(version.to_ne_bytes()),
@@ -425,6 +446,7 @@ fn record_from_compound(tag: &Tag) -> Result<GeneralEntityRecord, GeneralRecordE
         velocity,
         rotation,
         uuid,
+        owner,
         envelope: GeneralTypeEnvelope {
             type_key: type_key.to_string_lossy(),
             payload_version,
@@ -493,6 +515,11 @@ impl GeneralTypeCatalog {
         (entry.width, entry.height)
     }
 
+    /// The type's declared payload schema version, the one a fresh row starts at.
+    pub fn payload_version(&self, slot: usize) -> u16 {
+        self.entries[slot].payload_version
+    }
+
     /// The type's declared save policy, the writer of a record consults: a
     /// `noSave` type's rows produce zero persisted records.
     pub fn save_policy(&self, slot: usize) -> mod_api::GeneralSavePolicy {
@@ -556,6 +583,9 @@ pub struct GeneralRow {
     pub velocity: Vec3,
     /// The yaw and pitch in degrees.
     pub rotation: [f32; 2],
+    /// The UUID of the entity that fired it, kept and saved as `Owner`
+    /// (`TraceableEntity.getOwner`); a spawn sets it.
+    pub owner: Option<[i32; 4]>,
     /// How far the row has fallen; stage 3's load and stage 4's tick own it.
     pub fall_distance: f64,
     /// The payload's schema version, as the record carried it and the writer
@@ -681,6 +711,7 @@ impl Game<'_> {
             velocity: [row.velocity.x, row.velocity.y, row.velocity.z],
             rotation: row.rotation,
             uuid: row.uuid,
+            owner: row.owner,
             envelope: GeneralTypeEnvelope {
                 type_key: general_type_catalog().key(row.type_slot).to_owned(),
                 payload_version: row.payload_version,
@@ -904,16 +935,33 @@ impl Game<'_> {
                 return Ok(());
             }
         };
+        match self.admit_general_record(record, &tag, transferred) {
+            Err(()) => Err(tag),
+            Ok(_) => Ok(()),
+        }
+    }
+
+    /// Admit one general record tree: every check, then its rows inserted
+    /// unjoined, the join left to the caller's flush. The root row's runtime
+    /// id; `Ok(None)` for a tree refused with a warning (a structural fault,
+    /// a UUID a live level entity already owns), `Err` for a sound tree of
+    /// types the frozen registry doesn't hold.
+    pub(in crate::game) fn admit_general_record(
+        &mut self,
+        record: GeneralEntityRecord,
+        tag: &Tag,
+        transferred: Option<TransferredEntityState>,
+    ) -> Result<Option<u32>, ()> {
         let catalog = general_type_catalog();
         match check_general_record(&record, |key| catalog.slot(key).is_some()) {
             Ok(GeneralRecordCheck::Ready) => {}
-            Ok(GeneralRecordCheck::UnknownType) => return Err(tag),
+            Ok(GeneralRecordCheck::UnknownType) => return Err(()),
             Err(error) => {
                 log::warn!(
                     "Sunrise: refusing general entity record: {}",
                     error.message()
                 );
-                return Ok(());
+                return Ok(None);
             }
         }
         // A UUID a live entity of the level already owns refuses the whole
@@ -924,10 +972,14 @@ impl Game<'_> {
                 "Sunrise: refusing general entity record: a live entity owns its uuid {:?}",
                 record.uuid
             );
-            return Ok(());
+            return Ok(None);
         }
-        self.insert_general_record(record, &tag, None, transferred);
-        Ok(())
+        Ok(Some(self.insert_general_record(
+            record,
+            tag,
+            None,
+            transferred,
+        )))
     }
 
     /// Insert one record as a row (and, recursively, its riders as rows of
@@ -940,7 +992,7 @@ impl Game<'_> {
         tag: &Tag,
         mount: Option<u32>,
         transferred: Option<TransferredEntityState>,
-    ) {
+    ) -> u32 {
         let slot = general_type_catalog()
             .slot(&record.envelope.type_key)
             .expect("check_general_record resolved every type of the tree");
@@ -962,6 +1014,7 @@ impl Game<'_> {
             position,
             velocity: Vec3::new(record.velocity[0], record.velocity[1], record.velocity[2]),
             rotation: record.rotation,
+            owner: record.owner,
             fall_distance: 0.0,
             payload_version: record.envelope.payload_version,
             payload_bytes: record.envelope.payload_bytes,
@@ -980,6 +1033,7 @@ impl Game<'_> {
         for (rider, rider_tag) in riders {
             self.insert_general_record(rider.clone(), rider_tag, Some(id), None);
         }
+        id
     }
 }
 
@@ -1127,6 +1181,7 @@ mod tests {
             position: [0.0, 64.0, 0.0],
             velocity: [0.0, 0.0, 0.0],
             rotation: [0.0, 0.0],
+            owner: None,
             uuid,
             envelope: GeneralTypeEnvelope {
                 type_key: type_key.to_owned(),
@@ -1389,6 +1444,7 @@ mod tests {
             previous: Vec3::new(0.5, 64.0, 0.5),
             velocity: Vec3::ZERO,
             rotation: [0.0, 0.0],
+            owner: None,
             fall_distance: 0.0,
             payload_version: 1,
             payload_bytes: Vec::new(),

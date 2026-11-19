@@ -103,7 +103,7 @@ fn add_sections(groups: &mut Vec<Group<ExtraRow>>) {
                     Row::new(id, lang::get(label), Value::Choice(label_text(value)))
                 }
                 added::Row::Slider { label, value, text } => {
-                    let position = value.clamp(0.0, 1.0);
+                    let position = f64::from(value.clamp(0.0, 1.0));
                     let text = label_text(text);
                     let value = Value::Slider {
                         position,
@@ -255,9 +255,9 @@ impl Screen for ExtrasScreen {
             }
         }
     }
-    fn slide(&mut self, _s: &mut Settings, row: ExtraRow, position: f32) {
+    fn slide(&mut self, _s: &mut Settings, row: ExtraRow, position: f64) {
         if let ExtraRow::Added(page, r) = row {
-            act(page, r, Act::Slide(position));
+            act(page, r, Act::Slide(position as f32));
         }
     }
     /// With the wheel extra on, the wheel over an item changes it, without a click; the mod's rows

@@ -3,7 +3,6 @@ pregen:true
 fullbright:true
 dynamicLights:false
 lodZoomDetail:false
-autoReconnect:false
 uiSoundReserve:false
 ownNameTag:true
 skipModdedSplashesIfVanillaModified:true

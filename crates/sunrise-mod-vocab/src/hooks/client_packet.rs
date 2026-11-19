@@ -5,10 +5,11 @@ pub trait Hooks {
     /// just before the game handles it (`Connection.genericsFtw` handing it
     /// to `ClientPacketListener`): every packet of the play phase, custom
     /// payloads included, in the order the server sent them. Packets the
-    /// network thread handles itself are not heard: keep-alives, bundle
-    /// delimiters, resource pack pushes and pops, cookies, server links,
-    /// transfers, disconnects, the configuration switch, `minecraft:brand`
-    /// and far terrain tiles; neither is the configuration phase.
+    /// network thread handles itself are not heard: keep-alives, chunk batch
+    /// starts and finishes, bundle delimiters, resource pack pushes and pops,
+    /// cookies, server links, transfers, disconnects, the configuration switch,
+    /// `minecraft:brand` and far terrain tiles; neither is the configuration
+    /// phase.
     /// Read-only: the game handles the packet as it would without the mod.
     /// Client-side, on any server, single player's own included.
     /// Every packet exposes its protocol type id. Custom payloads also expose
@@ -26,7 +27,8 @@ for native and wasm mods, with a generated codec.
 
 The hook cannot cancel or replace a packet. It also observes chunk packets
 handled by the batching path, once each. Configuration packets and the network
-thread's own handling (including keep-alives and resource pack messages) do not fire it.
+thread's own handling (including keep-alives, chunk batch starts and finishes, and resource pack
+messages) do not fire it. The chunks between a batch's start and finish still fire it.
 
 `ClientHost::hold_packets` retains uncancelled play packets, unmodified and in order, up to 256
 packets or 1,048,576 encoded bytes. Release sends oldest first; drop discards them. Overflow ends
@@ -34,20 +36,21 @@ and flushes the hold; its next release/drop returns `HoldError::Limit` with thos
 A failed release reports `HoldError::Send { sent, error }` and discards the unsent tail.
 Starting another hold while one is active returns `HoldError::Limit` with the configured bounds.
 Disconnect, protocol incarnation changes
-and aborted travel invalidate holds. Network-thread keep-alives, configuration, cookies and pack
-answers bypass the queue. Held packets expose no additional inspection or editing API.
+and aborted travel invalidate holds. Network-thread keep-alives, chunk batch acknowledgements,
+configuration, cookies and pack answers bypass the queue. Held packets expose no additional inspection or editing API.
 
 `Hooks::client_packet_send` is the other direction: a `ClientPacketSendEvent` with the same
 `ClientPacket` view for each play packet the window's game is about to send (`Connection.send`),
 in order, including the selected slot sent before an attack or a use. Returning `Flow::Cancel` drops
 the packet, and the game goes on as if it had been sent. Play-phase pongs pass through this hook.
-Packets the network thread sends itself (keep-alives, configuration pongs, cookies, configuration), the phase-dependent answers (resource pack status,
+Packets the network thread sends itself (keep-alives, chunk batch acknowledgements, configuration pongs, cookies, configuration), the phase-dependent answers (resource pack status,
 a dialog's custom click action) and far terrain requests do not fire it. With no listener the
 send path checks one flag and builds nothing."#]
     #[hook(
         side = "client",
         contract = "listen",
         cancellable = false,
+        version = 2,
         neoforge = "none (NeoForge has no raw play-packet receive event)"
     )]
     fn client_packet();

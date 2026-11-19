@@ -673,7 +673,7 @@ impl Game<'_> {
         self.set_biome_at(pos, biome)
     }
     /// One residency boundary for state-bearing block writes; position refusal is vanilla.
-    fn native_level_write_position(
+    pub(super) fn native_level_write_position(
         &self,
         level: LevelRef,
         pos: [i32; 3],
@@ -725,9 +725,9 @@ impl Game<'_> {
         Some(self.state_shape_boxes(world, anims, state, pos, kind))
     }
 
-    /// Gameplay's face support in the current or a parked server level, including
-    /// live block entities for dynamic shapes. None for stale or closed levels,
-    /// unloaded blocks, unsupported states or a shape query error.
+    /// The local face support in an open server level or the current client level,
+    /// including shapes published by local block entities. None for unavailable
+    /// levels, unloaded or out-of-height blocks, or a shape query error.
     pub(super) fn level_block_face_sturdy(
         &self,
         level: LevelRef,
@@ -736,7 +736,7 @@ impl Game<'_> {
         support: mod_api::SupportType,
     ) -> Option<bool> {
         super::native_world_read::block_face_sturdy(
-            self.native_level_world(level)?,
+            self.native_level_read_world(level)?,
             self.res.behaviours(),
             self.res.collision(),
             pos,
@@ -848,9 +848,38 @@ impl Game<'_> {
         match self.native_entity_read_target(entity) {
             Some(target) => self.native_entity_kind_key(target),
             None => {
+                if self.native_lifecycle.epoch() == Some(entity.epoch())
+                    && let Some((_, mob)) = self.mob_in_other_level(entity.id())
+                {
+                    return mod_api::__private::resolved_entity_type_key(&mob.kind.id);
+                }
                 mod_api::__private::resolved_entity_type_key(self.native_client_tracked(entity)?.0)
             }
         }
+    }
+    /// A mob of this game that is resident in a loaded level other than the
+    /// one in place, as a kill credit can name one (`getEntityInAnyDimension`):
+    /// its identity reads (`entity_kind`, `entity_uuid`, `entity_level`)
+    /// answer from there. None on a client or for anything else.
+    pub(super) fn mob_in_other_level(&self, id: u32) -> Option<(super::Dim, &super::Mob)> {
+        use sunrise_client::join_seq::residency::table::EntityLookup;
+        if !self.is_logical_server() {
+            return None;
+        }
+        let EntityLookup::Found {
+            location,
+            value: Target::Mob(_),
+        } = self.server_resident_entity(id)
+        else {
+            return None;
+        };
+        let (dim, parked) = self
+            .levels
+            .parked
+            .iter()
+            .find(|(dim, _)| dim.key() == location.owner.dimension)?;
+        let mob = parked.mobs.get(parked.mobs.locate(location.join)?)?;
+        Some((*dim, mob))
     }
     /// The entity's UUID (`Entity.getUUID`), the one it is saved with; an
     /// entity that has none yet gets it now, as a new vanilla entity does.
@@ -879,6 +908,16 @@ impl Game<'_> {
                 .copied()
                 .map(uuid_from_words);
         }
+        if self.native_lifecycle.epoch() == Some(entity.epoch())
+            && self.mob_in_other_level(entity.id()).is_some()
+        {
+            return self
+                .resident_entities
+                .table
+                .borrow_mut()
+                .resident_uuid(entity.id())
+                .map(uuid_from_words);
+        }
         let words = match self.native_entity_target(entity)? {
             Target::Player => {
                 let dimension = self.current_player_resident_location()?.owner.dimension;
@@ -897,9 +936,15 @@ impl Game<'_> {
         let key = match self.native_entity_read_target(entity) {
             Some(t) if self.is_logical_server() => self.target_level(t).key(),
             Some(_) => self.native_level_key(),
-            None => self
-                .native_client_tracked(entity)
-                .map(|_| self.native_level_key())?,
+            None if self.native_lifecycle.epoch() == Some(entity.epoch()) => {
+                match self.mob_in_other_level(entity.id()) {
+                    Some((dim, _)) => dim.key(),
+                    None => self
+                        .native_client_tracked(entity)
+                        .map(|_| self.native_level_key())?,
+                }
+            }
+            None => return None,
         };
         Some(self.level_ref(entity.epoch(), key))
     }

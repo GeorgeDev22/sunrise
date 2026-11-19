@@ -8,7 +8,6 @@ in client setup. Native and wasm mods use the same methods.
 | --- | --- |
 | `text_width(&Text)` | `Result<i32, TextFormError>`: styled width in GUI pixels. |
 | `text_split(&Text, i32)` | `Result<Vec<Text>, TextFormError>`: wrapped, styled lines. |
-| `text_string(&Text)` | `Result<String, TextFormError>`: resolved plain characters. |
 | `text_visual_order(&Text)` | `Result<Vec<VisualTextCharacter>, TextFormError>`: styled characters in display order. |
 
 Inside a drawing hook, `DrawContext::text_lines(&Text, max_width, TextAlign, scale)` wraps and
@@ -38,14 +37,37 @@ and do not expose a full rendering context.
 ## Resolved strings
 
 For vanilla `Component.getString()` behavior, use
-`ClientHost::text_string(&Text) -> Result<String, TextFormError>`. This client
-setup read also works outside drawing on native and wasm. It uses the same
-component conversion as measurement: translation arguments, key names and nested
-siblings resolve against the current language on every call. The result contains
-plain characters, not serialized JSON or translation keys. Styles do not add
-characters; literal legacy `§` formatting codes remain in the string, unlike the
-font's formatted rendering. Invalid components return the same boundary errors
-as the other text reads. Do not cache resolved strings across language changes.
+`host.text_string(&Text) -> Result<String, TextFormError>` on either side,
+including setup, on native and wasm. It uses the same component conversion as
+measurement: translation arguments, keybinds and siblings resolve on each call.
+Styles do not add characters; literal legacy `§` formatting codes remain in the
+string. Invalid components return the same boundary errors as the other text reads.
+
+- **Client and integrated server:** both use the local player's selected language,
+  active resource packs (including client mod translations) and key bindings.
+  An integrated server does not resolve against a LAN guest's language.
+- **Dedicated server:** starts with built-in vanilla and Sunrise English; world
+  and data-load listeners still see those built-ins. Once the world has loaded,
+  just before `server_starting`, it loads `assets/<namespace>/lang/en_us.json` from
+  enabled mods and the data packs selected for this world. Sunrise visits
+  namespaces in lexical order and, within each namespace, reads the original
+  files in pack priority order (mods first). Later values win. An invalid
+  entry leaves the earlier values intact and stops the remaining files in
+  that namespace. Vanilla's deprecated keys are applied at the end. Neither
+  client resource packs nor later data-pack reloads affect the snapshot.
+  Keybind components give their literal IDs.
+
+The pack-discovery host has no game text backend. `text_string` there returns
+`TextFormError::Unavailable`.
+
+A missing key uses its component fallback, or the key itself without a
+fallback. On a dedicated server, a pack language file may also supply an
+object or array representing a component: it replaces the whole translation,
+including its arguments and fallback. A recursive reference to the same
+language entry resolves to no text.
+
+Send an unresolved component to a player when the result should use that player's
+language. Do not cache resolved strings across language changes.
 
 ## Visual order
 

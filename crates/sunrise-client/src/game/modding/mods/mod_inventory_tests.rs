@@ -220,7 +220,7 @@ fn code_only_reload_publishes_one_new_inventory_after_prepare_and_preserves_old_
                     ),
                     (
                         "instrument",
-                        serde_json::json!({"sound_event":"minecraft:item.goat_horn.sound.0","use_duration":7,"range":256}),
+                        serde_json::json!({"sound_event":"minecraft:item.goat_horn.sound.0","use_duration":7,"range":256,"description":"condition test"}),
                     ),
                     (
                         "enchantment",

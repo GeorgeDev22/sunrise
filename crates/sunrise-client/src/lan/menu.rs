@@ -466,8 +466,11 @@ impl Slots {
         for k in self.halves() {
             let n = shown(world, k).map_or(0, <[_]>::len);
             if let Some(e) = world.block_entities.get_mut(&k) {
-                for slot in e.slots_mut().iter_mut().take(n) {
-                    *slot = rest.next().flatten();
+                for i in 0..n {
+                    let stack = rest.next().flatten();
+                    if e.slots()[i] != stack {
+                        *e.slot_mut(i).unwrap() = stack;
+                    }
                 }
             }
         }
@@ -528,12 +531,12 @@ pub fn write_links(
             continue;
         };
         let mut moved = false;
-        for slot in e.slots_mut().iter_mut().take(n) {
+        for i in 0..n {
             let Some(stack) = rest.next() else {
                 break;
             };
-            if *slot != stack {
-                *slot = stack;
+            if e.slots()[i] != stack {
+                *e.slot_mut(i).unwrap() = stack;
                 moved = true;
             }
         }

@@ -364,14 +364,27 @@ LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+## zlib
+
+`crates/sunrise-deflate` is a Rust port of parts of [zlib](https://zlib.net/) 1.3.2 (`deflate.c` and
+`trees.c`, from the official `zlib-1.3.2.tar.gz`, SHA-256
+`bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16`), altered to cover only level 6 with
+the default strategy, so that saves carry the bytes the JDK's bundled zlib writes. It is under the zlib
+license; its notice and what was altered are in `crates/sunrise-deflate/LICENSE` and the header of each
+ported file:
+
+```
+(C) 1995-2026 Jean-loup Gailly and Mark Adler
+```
+
 ## fdlibm
 
-`crates/sunrise-core/src/jmath/fdlibm.rs` and the `fdlibm_asin`, `fdlibm_atan` and
-`fdlibm_atan2` functions in `crates/sunrise-core/src/geometry/trig.rs` are Rust ports of
+`crates/sunrise-core/src/jmath/fdlibm.rs` and the `fdlibm_atan` and `fdlibm_atan2`
+functions in `crates/sunrise-core/src/geometry/trig.rs` are Rust ports of
 [fdlibm](https://www.netlib.org/fdlibm/) 5.3, Sun's freely distributable math library, whose
 results the Java SE API specifies for `StrictMath`. `fdlibm.rs` ports `e_log.c`, `e_log10.c`,
 `s_cbrt.c` and `e_hypot.c`, and, with fused multiply-adds, `s_sin.c`, `s_cos.c`, `k_sin.c`,
-`k_cos.c` and `e_rem_pio2.c`; `trig.rs` ports `e_asin.c`, `s_atan.c` and `e_atan2.c`.
+`k_cos.c` and `e_rem_pio2.c`; `trig.rs` ports `s_atan.c` and `e_atan2.c`.
 
 The strict additions in `crates/sunrise-core/src/jmath/fdlibm/strict_exp_pow.rs`
 adapt netlib's original `e_exp.c` 1.6 (2004-04-22), `e_pow.c` 1.5
@@ -396,6 +409,45 @@ Developed at SunSoft, a Sun Microsystems, Inc. business.
 Permission to use, copy, modify, and distribute this
 software is freely granted, provided that this notice
 is preserved.
+```
+
+## Intel's libm
+
+`crates/sunrise-core/src/jmath/intel_trig.rs` is a Rust translation of Intel's libm: `s_sin.S`, `s_cos.S` and
+`s_tan.S` from [bionic's `libm/x86_64`](https://android.googlesource.com/platform/bionic/+/refs/tags/android-9.0.0_r1/libm/x86_64/)
+(tag android-9.0.0_r1), the algorithms HotSpot runs for `Math.sin`, `Math.cos` and `Math.tan` on x86-64. Changes:
+translated from x86-64 assembly to Rust, with the same floating-point operations in the same order (the packed SSE2
+ones through the `safe_arch` crate) and the tables as typed Rust arrays. The copyright line and license notice also
+head the file.
+
+```
+Copyright (c) 2014, Intel Corporation
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright notice,
+    * this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above copyright notice,
+    * this list of conditions and the following disclaimer in the documentation
+    * and/or other materials provided with the distribution.
+
+    * Neither the name of Intel Corporation nor the names of its contributors
+    * may be used to endorse or promote products derived from this software
+    * without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ## PCG3D hash

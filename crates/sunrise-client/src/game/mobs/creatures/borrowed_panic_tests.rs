@@ -172,17 +172,19 @@ impl mod_api::Hooks for Hooks {
     }
     fn entity_tick_listened(
         &self,
-        _: &mut dyn mod_api::ServerHost,
+        _: mod_api::HostSide<'_>,
         event: &mut mod_api::EntityTickListenedEvent,
     ) {
         event.listened = true;
     }
     fn entity_tick_post(
         &self,
-        _: &mut dyn mod_api::ServerHost,
-        _: &mut mod_api::EntityTickPostEvent<'_>,
+        _: mod_api::HostSide<'_>,
+        event: &mut mod_api::EntityTickPostEvent<'_>,
     ) {
-        self.0.posts.fetch_add(1, Ordering::SeqCst);
+        self.0
+            .posts
+            .fetch_add(event.entities.len(), Ordering::SeqCst);
     }
     fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
         r.register_attachment_type("borrowed-panic:retained", false)

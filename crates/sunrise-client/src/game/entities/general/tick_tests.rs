@@ -8,7 +8,7 @@ use crate::game::native_entity_refs::tests::with_game;
 use mod_api::{
     AttachmentCodec, AttachmentError, AttachmentType, EntityPart, EntityTickListenedEvent,
     EntityTickPreEvent, Flow, GeneralEntityCategory, GeneralEntityTickEvent, GeneralSavePolicy,
-    Holder, Hooks, Registrar, ServerHost,
+    Holder, Hooks, HostSide, Registrar, ServerHost,
 };
 use std::sync::{Arc, Mutex};
 use sunrise_core::nbt::{Compound, Tag};
@@ -154,35 +154,58 @@ impl Hooks for Declare {
             },
         );
     }
-    fn entity_tick_listened(&self, _: &mut dyn ServerHost, event: &mut EntityTickListenedEvent) {
+    fn entity_tick_listened(&self, _: HostSide<'_>, event: &mut EntityTickListenedEvent) {
         event.listened = true;
     }
-    fn entity_tick_pre(
+    fn entity_tick_pre(&self, host: HostSide<'_>, event: &mut EntityTickPreEvent<'_>) {
+        let HostSide::Server(host) = host else {
+            panic!("server fixture");
+        };
+        for &entity in event.entities {
+            self.events.lock().unwrap().push((entity, "pre"));
+            if self.pre_on.load(std::sync::atomic::Ordering::Relaxed) == entity {
+                let victim = self.pre_victim.load(std::sync::atomic::Ordering::Relaxed);
+                let victim = host
+                    .entity(victim)
+                    .expect("the victim is a live row at the remover's Pre");
+                assert!(victim.discard(host));
+            }
+            if self.cancel_on.load(std::sync::atomic::Ordering::Relaxed) == entity {
+                event.canceled.push(entity);
+            }
+        }
+    }
+    fn entity_tick_post(&self, _: HostSide<'_>, event: &mut mod_api::EntityTickPostEvent<'_>) {
+        let mut events = self.events.lock().unwrap();
+        events.extend(event.entities.iter().map(|&entity| (entity, "post")));
+    }
+    fn entity_join_level(
         &self,
         host: &mut dyn ServerHost,
-        event: &mut EntityTickPreEvent<'_>,
+        event: &mut mod_api::EntityJoinLevelEvent<'_>,
     ) -> Flow {
-        self.events.lock().unwrap().push((event.entity, "pre"));
-        if self.pre_on.load(std::sync::atomic::Ordering::Relaxed) == event.entity {
-            let victim = self.pre_victim.load(std::sync::atomic::Ordering::Relaxed);
-            let victim = host
-                .entity(victim)
-                .expect("the victim is a live row at the remover's Pre");
-            assert!(victim.discard(host));
-        }
-        if self.cancel_on.load(std::sync::atomic::Ordering::Relaxed) == event.entity {
-            return Flow::Cancel;
+        SPAWN_HEARD.lock().unwrap().push((event.entity, "join"));
+        let answer = SPAWN_ON_JOIN.swap(false, std::sync::atomic::Ordering::SeqCst);
+        if answer && event.kind == "mymod:robot" {
+            let level = host.level("minecraft:overworld").unwrap();
+            let general = mod_api::EntitySpawn::new(mod_api::SpawnBody::General);
+            let other = level.spawn_entity(host, "mymod:robot", [6.5, 65.5, 2.5], &general);
+            SPAWN_HEARD
+                .lock()
+                .unwrap()
+                .extend(other.map(|entity| (entity.id(), "summoned")));
         }
         Flow::Continue
     }
-    fn entity_tick_post(
-        &self,
-        _: &mut dyn ServerHost,
-        event: &mut mod_api::EntityTickPostEvent<'_>,
-    ) {
-        self.events.lock().unwrap().push((event.entity, "post"));
+    fn entities_load(&self, _: &mut dyn ServerHost, _: &mut mod_api::EntitiesLoadEvent<'_>) {
+        SPAWN_HEARD.lock().unwrap().push((0, "load"));
     }
 }
+
+/// The joins and chunk loads the fixture mod heard, and what it summoned from a join.
+static SPAWN_HEARD: Mutex<Vec<(u32, &'static str)>> = Mutex::new(Vec::new());
+/// Armed: the next robot's join summons another robot.
+static SPAWN_ON_JOIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A counter fixture game. The registration phase is scoped around the whole
 /// fixture: the harness re-runs the mods' `register` while the game builds,
@@ -247,6 +270,7 @@ fn record_at(type_key: &str, uuid: [i32; 4], at: [f64; 3], riders: Vec<Tag>) -> 
         position: at,
         velocity: [0.0; 3],
         rotation: [0.0, 90.0],
+        owner: None,
         uuid,
         envelope: GeneralTypeEnvelope {
             type_key: type_key.to_owned(),
@@ -931,6 +955,135 @@ fn summon_answers_a_target_with_a_network_id() {
             game.target_position(crate::game::commands::Target::General(id)),
             Some([0.5, 64.0, 0.5])
         );
+    });
+}
+
+/// A general row spawned by `LevelRef::spawn_entity` is admitted as one
+/// record and joins as a fresh spawn: no `entities_load` (no save was read),
+/// its join told at the call, and the handle names its own row even when a
+/// join listener spawns another row of the type before the call returns.
+#[test]
+#[ignore = "daily"]
+fn spawn_entity_returns_its_own_row_when_a_join_spawns_another() {
+    use mod_api::{EntitySpawn, SpawnBody};
+    with_counter(|game, _| {
+        game.world.chunks.insert(
+            (0, 0),
+            std::sync::Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)),
+        );
+        let level = game.level(game.dim.id()).unwrap();
+        SPAWN_HEARD.lock().unwrap().clear();
+        SPAWN_ON_JOIN.store(true, std::sync::atomic::Ordering::SeqCst);
+        let missile = game
+            .level_spawn_entity(
+                level,
+                "mymod:robot",
+                [2.5, 65.5, 2.5],
+                &EntitySpawn::new(SpawnBody::General),
+            )
+            .unwrap();
+        let heard = std::mem::take(&mut *SPAWN_HEARD.lock().unwrap());
+        let other = heard
+            .iter()
+            .find_map(|&(id, what)| (what == "summoned").then_some(id))
+            .unwrap_or_else(|| panic!("the listener summoned no second robot: {heard:?}"));
+        assert_ne!(other, missile.id());
+        assert!(heard.contains(&(missile.id(), "join")));
+        assert!(!heard.iter().any(|&(_, what)| what == "load"), "{heard:?}");
+        let row = |id: u32| {
+            game.resident_entities
+                .general
+                .rows
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.position)
+        };
+        assert_eq!(row(missile.id()), Some(Vec3::new(2.5, 65.5, 2.5)));
+        assert_eq!(row(other), Some(Vec3::new(6.5, 65.5, 2.5)));
+    });
+}
+
+/// `LevelRef::spawn_entity` of a general type: one row, through the insertion
+/// `/summon` reaches, with a fresh UUID, the spawn's velocity and rotation, the
+/// type's declared payload version and its owner, which reads back and saves as
+/// `Owner`. No projectile is made. A body of another family, and a general
+/// body for a type that isn't general, refuse with nothing spawned.
+#[test]
+#[ignore = "daily"]
+fn spawn_entity_inserts_a_general_row_with_its_owner() {
+    use mod_api::{EntitySpawn, SpawnBody};
+    with_counter(|game, _| {
+        game.world.chunks.insert(
+            (0, 0),
+            std::sync::Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)),
+        );
+        let level = game.level(game.dim.id()).unwrap();
+        let reason = mod_api::SpawnReason::Command;
+        let living = EntitySpawn::new(SpawnBody::Living { reason });
+        let turret = game
+            .level_spawn_entity(level, "minecraft:cow", [2.5, 64.0, 2.5], &living)
+            .unwrap();
+        let mut spawn = EntitySpawn::new(SpawnBody::General);
+        spawn.velocity = [0.5, 0.125, -0.25];
+        spawn.rotation = Some([90.0, -15.0]);
+        spawn.owner = Some(turret);
+        let projectiles = game.creatures.projectiles.len();
+        let missile = game
+            .level_spawn_entity(level, "mymod:robot", [2.5, 65.5, 2.5], &spawn)
+            .unwrap();
+        assert_eq!(game.creatures.projectiles.len(), projectiles);
+        let owner_uuid =
+            sunrise_client::lan::playerdata::uuid_ints(game.entity_uuid(turret).unwrap());
+        let rows = &game.resident_entities.general.rows;
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.id, missile.id());
+        assert_eq!(row.position, Vec3::new(2.5, 65.5, 2.5));
+        assert_eq!(row.velocity, Vec3::new(0.5, 0.125, -0.25));
+        assert_eq!(row.rotation, [90.0, -15.0]);
+        assert_eq!(row.payload_version, 1);
+        assert!(row.payload_bytes.is_empty());
+        assert_eq!(row.owner, Some(owner_uuid));
+        assert_eq!(game.entity_owner(missile), Some(turret));
+        // The save keeps the owner, and a load reads it back.
+        let record = game
+            .general_row_record(missile.id(), &mut std::collections::HashSet::new())
+            .unwrap();
+        let tag = record.to_tag();
+        assert_eq!(tag.get("Owner"), Some(&Tag::IntArray(owner_uuid.to_vec())));
+        assert_eq!(record_from_compound(&tag).unwrap().owner, Some(owner_uuid));
+        // A row with no owner answers none, and saves no `Owner`.
+        let alone = game
+            .level_spawn_entity(
+                level,
+                "mymod:robot",
+                [3.5, 65.5, 2.5],
+                &EntitySpawn::new(SpawnBody::General),
+            )
+            .unwrap();
+        assert_eq!(game.entity_owner(alone), None);
+        let record = game
+            .general_row_record(alone.id(), &mut std::collections::HashSet::new())
+            .unwrap();
+        assert_eq!(record.to_tag().get("Owner"), None);
+        // Bodies of another family, and a general body for a mob, refuse.
+        let rows = game.resident_entities.general.rows.len();
+        let mobs = game.mobs.len();
+        let general = EntitySpawn::new(SpawnBody::General);
+        assert_eq!(
+            game.level_spawn_entity(level, "minecraft:cow", [4.5, 64.0, 2.5], &general),
+            None
+        );
+        assert_eq!(
+            game.level_spawn_entity(level, "mymod:robot", [4.5, 64.0, 2.5], &living),
+            None
+        );
+        assert_eq!(
+            game.level_spawn_entity(level, "mymod:missing", [4.5, 64.0, 2.5], &general),
+            None
+        );
+        assert_eq!(game.resident_entities.general.rows.len(), rows);
+        assert_eq!(game.mobs.len(), mobs);
     });
 }
 

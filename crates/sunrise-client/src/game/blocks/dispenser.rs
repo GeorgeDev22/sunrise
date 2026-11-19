@@ -481,7 +481,6 @@ impl Game<'_> {
     /// return this remainder in its answer with `CLICK`; the caller plays the
     /// answer's event and smoke once. A client, another dimension or an unloaded
     /// chunk keeps the input stack unchanged.
-    #[allow(dead_code)]
     pub(super) fn dispense_default(
         &mut self,
         dimension: &str,
@@ -552,7 +551,15 @@ impl Game<'_> {
                 .get(&rest.item)
                 .map_or(64, |i| i.max_stack)
                 .max(1);
-            for cell in entity.slots_mut() {
+            for slot in 0..entity.slots().len() {
+                let existing = &entity.slots()[slot];
+                if existing
+                    .as_ref()
+                    .is_some_and(|item| !item.same_item_same_components(&rest))
+                {
+                    continue;
+                }
+                let cell = entity.slot_mut(slot).unwrap();
                 match cell {
                     None => {
                         let n = rest.count.min(max);
@@ -562,12 +569,11 @@ impl Game<'_> {
                         });
                         rest.count -= n;
                     }
-                    Some(e) if e.same_item_same_components(&rest) => {
+                    Some(e) => {
                         let n = rest.count.min(max.saturating_sub(e.count));
                         e.count += n;
                         rest.count -= n;
                     }
-                    Some(_) => {}
                 }
                 if rest.count == 0 {
                     break;
@@ -1768,6 +1774,7 @@ impl Game<'_> {
         self.find_wither_pattern(
             sunrise_client::block_pattern::WITHER_BASE,
             [head.0, head.1, head.2],
+            self.world.block(head.0, head.1, head.2),
         )
         .is_some()
     }
@@ -1832,22 +1839,10 @@ impl Game<'_> {
         if !self.with_level(|b, level, ticks| b.directional_can_place(level, ticks, &ctx)) {
             return Ok((Some(stack), FAIL));
         }
-        let Some((resolved, state)) = self.place_item_block(&ctx, false) else {
+        if self.place_item_block(&ctx, false, &stack)?.is_none() {
             self.process_level_events()?;
             return Ok((Some(stack), FAIL));
-        };
-        let placed = resolved.pos;
-        let target = (placed.x, placed.y, placed.z);
-        let state = self.apply_item_block_state([target.0, target.1, target.2], state, &stack)?;
-        if !self.world.block_entities.stateful_entity(state.0)
-            && let Some(entity) = self.new_block_entity_for_state(state)
-        {
-            self.world.block_entities.insert(target, entity);
         }
-        if self.world.block_entities.get(&target).is_some() {
-            self.apply_placed_item([target.0, target.1, target.2], &stack, false);
-        }
-        self.block_item_placed(&stack, None, &resolved);
         self.process_level_events()?;
         Ok((shrink(stack), CLICK))
     }
@@ -2095,7 +2090,12 @@ impl Game<'_> {
                 LevelSound::new(name, [at.x, at.y, at.z], 1.0, 1.0).in_source(SoundSource::Blocks)
             };
             match m.species() {
-                _ if let Some((part, _)) = part => self.part_shear(i, part, None, &shears),
+                // A refused part shears nothing: no shear event, and the dispenser does not succeed.
+                _ if let Some((part, _)) = part => {
+                    if self.part_shear(i, part, None, &shears).is_err() {
+                        continue;
+                    }
+                }
                 Species::SulfurCube if sulfur_cube::has_body(m) => {
                     // SulfurCube.shear: the swallowed block comes out at the
                     // passenger attachment, and nothing is swallowed for 5 s.

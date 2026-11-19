@@ -84,7 +84,7 @@ pub fn stage(
     };
     internals
         .entries
-        .extend(crate::crossing::foreign_internals());
+        .extend(crate::crossing::foreign_internals(root)?);
     #[derive(serde::Serialize)]
     struct Internals<'a> {
         internals: &'a [internals::Internal],
@@ -202,6 +202,7 @@ mod tests {
             let lists = root.join("crates/sunrise-mod-api-gen");
             std::fs::create_dir_all(&lists).unwrap();
             std::fs::write(lists.join("internals.txt"), "").unwrap();
+            std::fs::write(root.join(crate::crossing::CROSSING_FOREIGN_FILE), "[]").unwrap();
             let package = root.join("crates/sunrise-engine-slots");
             std::fs::create_dir_all(&package).unwrap();
             std::fs::write(

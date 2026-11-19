@@ -31,9 +31,6 @@ use sunrise_core::{
 
 pub use crate::biome::{SpawnCost, parse_costs, parse_entries};
 
-mod parallel;
-pub use parallel::{Lane, Member, Pack, commit};
-
 thread_local! {
     static ATTEMPT_COUNTS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
 }
@@ -46,21 +43,6 @@ pub fn attempt_counters(publish: bool) {
     if publish {
         sunrise_perf_format::counter("natural_spawning.attempts", &[]).add(counts[0]);
         sunrise_perf_format::counter("natural_spawning.spawns", &[]).add(counts[1]);
-    }
-}
-/// Takes the attempts this thread counted (a lane's, to hand to the pass's thread) and drops
-/// its spawns: the pass counts those when it commits them.
-pub fn take_attempts() -> u64 {
-    ATTEMPT_COUNTS.with(|c| c.replace([0; 2]))[0]
-}
-/// Adds the attempts a lane counted to this thread's.
-pub fn add_attempts(n: u64) {
-    if crate::spans::enabled() {
-        ATTEMPT_COUNTS.with(|c| {
-            let mut counts = c.get();
-            counts[0] += n;
-            c.set(counts);
-        });
     }
 }
 fn attempt_count(index: usize) {

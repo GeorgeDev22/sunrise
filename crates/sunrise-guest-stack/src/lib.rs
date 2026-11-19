@@ -4,9 +4,73 @@
 mod constants;
 pub use constants::{GUEST_STACK_BYTES, HOST_HEADROOM};
 
+/// How the guest's code runs, which decides what a thread that may enter it must reserve.
+/// The runtime reads it from the engine it configures; this crate only follows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuestEngine {
+    /// Native code: guest frames use the calling thread's own stack.
+    Native,
+    /// An interpreter (Pulley): the guest's stack is a heap allocation the engine bounds, so
+    /// the calling thread needs no more than an ordinary stack.
+    Interpreter,
+}
+
+/// A guest-capable thread's stack under [`GuestEngine::Interpreter`]: std's own default.
+const ORDINARY_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+impl GuestEngine {
+    /// What a guest-capable thread reserves for its stack.
+    pub const fn reservation(self) -> usize {
+        match self {
+            Self::Native => GUEST_STACK_BYTES + HOST_HEADROOM,
+            Self::Interpreter => ORDINARY_STACK_BYTES,
+        }
+    }
+
+    /// The bound the runtime puts on the guest's own stack: the thread's reservation less
+    /// headroom for native code, the interpreter's heap stack otherwise, smaller where the
+    /// address space is 32 bits wide.
+    pub const fn wasm_stack(self) -> usize {
+        match self {
+            Self::Native => GUEST_STACK_BYTES,
+            Self::Interpreter => interpreter_stack(usize::BITS),
+        }
+    }
+}
+
+/// The interpreter's heap stack on a host whose address space is `pointer_bits` wide. Each
+/// store allocates it in full, and a 32-bit process cannot spare [`GUEST_STACK_BYTES`] for
+/// every group, so it gets 8 MiB (about 4,000 of the 1.8 KB frames [`GUEST_STACK_BYTES`] was
+/// sized from, a clean stack-overflow trap beyond them).
+const fn interpreter_stack(pointer_bits: u32) -> usize {
+    if pointer_bits <= 32 {
+        8 * 1024 * 1024
+    } else {
+        GUEST_STACK_BYTES
+    }
+}
+
+static ENGINE: std::sync::OnceLock<GuestEngine> = std::sync::OnceLock::new();
+
+/// Decides the policy for the whole process, before any guest-capable thread is started. Native
+/// code is the policy of a process that never decides. It refuses a second, different answer: a
+/// thread already started under the first would have the wrong reservation.
+pub fn set_engine(engine: GuestEngine) -> Result<(), &'static str> {
+    if *ENGINE.get_or_init(|| engine) == engine {
+        Ok(())
+    } else {
+        Err("GuestStackUnavailable: the guest engine was decided differently earlier")
+    }
+}
+
+/// The process's policy; reading it before [`set_engine`] settles it as native code.
+pub fn engine() -> GuestEngine {
+    *ENGINE.get_or_init(|| GuestEngine::Native)
+}
+
 /// Spawn guarantees the reservation even on platforms without a stack-size query.
 pub fn builder() -> std::thread::Builder {
-    std::thread::Builder::new().stack_size(GUEST_STACK_BYTES + HOST_HEADROOM)
+    std::thread::Builder::new().stack_size(engine().reservation())
 }
 
 /// Starts a thread that may enter a guest: guest-sized and named `name`, and in debug builds it
@@ -59,6 +123,9 @@ fn prepare() -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 fn prepare() -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
+    if engine() == GuestEngine::Interpreter {
+        return Ok(());
+    }
     let required = (GUEST_STACK_BYTES + HOST_HEADROOM) as libc::rlim_t;
     let mut limit = libc::rlimit {
         rlim_cur: 0,
@@ -161,32 +228,54 @@ impl std::fmt::Display for StackError {
 }
 
 fn inspect_current() -> Result<(), StackError> {
+    // An interpreter's guest stack is on the heap: any thread's own stack will do.
+    if engine() == GuestEngine::Interpreter {
+        return Ok(());
+    }
     let size = current_stack_size()?;
-    if size < GUEST_STACK_BYTES + HOST_HEADROOM {
+    if !fits(size, THREAD_STRUCTURE_ALLOWANCE) {
         return Err(StackError::Small(size));
     }
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+/// Bionic's `pthread_getattr_np` reports a thread's stack without the thread's own structure,
+/// which sits at its top: a few KiB short of what the thread was asked for, so 16 KiB is
+/// accepted there. Every other platform reports the full size.
+const THREAD_STRUCTURE_ALLOWANCE: usize = if cfg!(target_os = "android") {
+    16 * 1024
+} else {
+    0
+};
+
+/// Whether a stack of `size` bytes holds the guest's reservation, short by at most `allowance`.
+const fn fits(size: usize, allowance: usize) -> bool {
+    size.saturating_add(allowance) >= GUEST_STACK_BYTES + HOST_HEADROOM
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn current_stack_size() -> Result<usize, StackError> {
-    // SAFETY: getpid and gettid take no arguments and always succeed.
-    let main = unsafe { libc::getpid() as libc::c_long == libc::syscall(libc::SYS_gettid) };
-    if main {
-        // The main thread's stack grows on demand up to RLIMIT_STACK (`prepare` raises it and
-        // re-execs so the range stays clear). glibc's pthread_getattr_np reports that limit, but
-        // musl's reports only the pages mapped so far, so read the limit itself.
-        let mut limit = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: limit is writable and getrlimit initializes it on success.
-        if unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut limit) } != 0 {
-            return Err(StackError::Uninspectable(
-                "GuestStackUnavailable: cannot read the main thread's stack limit",
-            ));
+    #[cfg(target_os = "linux")]
+    {
+        // Linux only: Android's main thread goes through pthread_getattr_np like any other.
+        // SAFETY: getpid and gettid take no arguments and always succeed.
+        let main = unsafe { libc::getpid() as libc::c_long == libc::syscall(libc::SYS_gettid) };
+        if main {
+            // The main thread's stack grows on demand up to RLIMIT_STACK (`prepare` raises it and
+            // re-execs so the range stays clear). glibc's pthread_getattr_np reports that limit, but
+            // musl's reports only the pages mapped so far, so read the limit itself.
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: limit is writable and getrlimit initializes it on success.
+            if unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut limit) } != 0 {
+                return Err(StackError::Uninspectable(
+                    "GuestStackUnavailable: cannot read the main thread's stack limit",
+                ));
+            }
+            return Ok(usize::try_from(limit.rlim_cur).unwrap_or(usize::MAX));
         }
-        return Ok(usize::try_from(limit.rlim_cur).unwrap_or(usize::MAX));
     }
     let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
     // SAFETY: pthread_self is live and attr is writable. Destroy only on success.
@@ -224,7 +313,12 @@ fn current_stack_size() -> Result<usize, StackError> {
     Ok(high - low)
 }
 
-#[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+)))]
 fn current_stack_size() -> Result<usize, StackError> {
     Err(StackError::Uninspectable(
         "GuestStackUnavailable: stack inspection is unsupported on this platform",
@@ -288,6 +382,52 @@ fn audited_guest_workers_use_the_stack_policy() {
 
 #[cfg(test)]
 mod tests {
+    use super::{GUEST_STACK_BYTES, GuestEngine, HOST_HEADROOM, fits, interpreter_stack};
+
+    #[test]
+    fn native_keeps_the_136_mib_reservation() {
+        assert_eq!(GuestEngine::Native.reservation(), 136 * 1024 * 1024);
+        assert_eq!(GuestEngine::Native.wasm_stack(), 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn interpreter_workers_keep_ordinary_stacks_and_a_smaller_heap_stack_on_32_bits() {
+        assert_eq!(GuestEngine::Interpreter.reservation(), 2 * 1024 * 1024);
+        assert_eq!(interpreter_stack(32), 8 * 1024 * 1024);
+        assert_eq!(interpreter_stack(64), 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_second_different_decision_is_refused() {
+        // Nothing in this test binary decides before this, and readers settle on native code.
+        assert_eq!(super::engine(), GuestEngine::Native);
+        assert!(super::set_engine(GuestEngine::Native).is_ok());
+        assert!(super::set_engine(GuestEngine::Interpreter).is_err());
+    }
+
+    #[test]
+    fn the_thread_structure_allowance_covers_a_few_kib_and_no_more() {
+        let required = 136 * 1024 * 1024;
+        assert!(fits(required, 0));
+        assert!(!fits(required - 4096, 0));
+        assert!(fits(required - 4096, 16 * 1024));
+        assert!(!fits(required - 1024 * 1024, 16 * 1024));
+    }
+
+    #[test]
+    fn the_largest_stack_fits_with_an_allowance() {
+        assert!(fits(usize::MAX, 16 * 1024));
+        assert!(fits(usize::MAX, 0));
+    }
+
+    #[test]
+    fn the_allowance_boundary_is_exact() {
+        let required = GUEST_STACK_BYTES + HOST_HEADROOM;
+        assert!(fits(required - 16 * 1024, 16 * 1024));
+        assert!(!fits(required - 16 * 1024 - 1, 16 * 1024));
+        assert!(!fits(0, 16 * 1024));
+    }
+
     #[test]
     fn small_worker_refuses_guest_entry() {
         std::thread::Builder::new()

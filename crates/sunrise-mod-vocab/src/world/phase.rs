@@ -249,23 +249,40 @@ pub(crate) fn unprovided(method: &'static str, operation: &'static str, access: 
     unimplemented!("{}", method)
 }
 
-/// One cell read at the generated API boundary, not a tick scan or registry lookup.
-/// Native callers currently panic on refusal. The wasm host dispatcher checks
+/// One cell read at the generated API boundary, not a tick scan or registry lookup; in
+/// `World` nothing more.
+///
+/// A refused call records a [`PhaseRefusal`](super::phase_refusal::PhaseRefusal) in the
+/// thread's containment scope and unwinds with it (`resume_unwind`, so no panic hook and no
+/// crash report). The dispatcher that called the mod catches it with `contain_refusal`, drops
+/// that listener's answer and goes on. The scope latches: while it holds a refusal every later
+/// gated call in it refuses too, whatever its access class, and the refusal is reported even
+/// if the mod caught the unwind and returned normally. The wasm host dispatcher checks
 /// `access_allowed` before entering these methods and returns a named phase refusal
 /// instead; the guest must never consult its own independent phase state.
+///
+/// Two cases are not contained. When the thread is already unwinding (a mod `Drop` running
+/// during a panic, say) the gate logs the named line and panics, and a panic during an unwind
+/// aborts the process. With no containment scope on the thread it panics with the named
+/// message; no production path reaches that.
 #[inline]
-pub fn check_access(operation: &str, access: LoadAccess) {
-    assert!(
-        access_allowed(operation, access),
-        "mod API {operation} is unavailable during {:?}",
-        current_phase()
-    );
+pub fn check_access(operation: &'static str, access: LoadAccess) {
+    let phase = current_phase();
+    if phase != ModPhase::World
+        && (!phase_allows(phase, operation, access) || super::phase_refusal::latched())
+    {
+        super::phase_refusal::refuse(operation, phase);
+    }
 }
 
 /// Whether an operation is available in this thread's current load phase.
 #[inline]
 pub fn access_allowed(operation: &str, access: LoadAccess) -> bool {
-    let phase = current_phase();
+    phase_allows(current_phase(), operation, access)
+}
+
+#[inline]
+fn phase_allows(phase: ModPhase, operation: &str, access: LoadAccess) -> bool {
     if phase == ModPhase::World {
         return true;
     }
@@ -419,6 +436,8 @@ pub struct RegistrationData {
     /// The same load-owned behavior owners that supply the game's default providers.
     capability_coverage: Option<fn(crate::ProvidedBy, &str, &str) -> bool>,
     block_entity_coverage: Option<fn(&str, &str) -> bool>,
+    /// Each package's checked runtime files, by mod ID.
+    runtime_files: Arc<std::collections::BTreeMap<String, Arc<dyn crate::RuntimeFileSource>>>,
 }
 
 impl RegistrationData {
@@ -435,6 +454,7 @@ impl RegistrationData {
             runtime,
             capability_coverage: None,
             block_entity_coverage: None,
+            runtime_files: Default::default(),
             registries: registries
                 .into_iter()
                 .map(|(name, ids)| (name, ids.into()))
@@ -450,6 +470,18 @@ impl RegistrationData {
     /// Without a registration publication, the load owns a fresh capture.
     pub fn initial_settings_snapshot() -> Option<Arc<[(String, Arc<[(String, String)]>)]>> {
         registration_data().map(|data| data.settings)
+    }
+    /// Bind each package's checked runtime files, by mod ID: what
+    /// [`RegistrationContext::runtime_files`] serves the mod being dispatched.
+    pub fn with_runtime_files(
+        mut self,
+        files: std::collections::BTreeMap<String, Arc<dyn crate::RuntimeFileSource>>,
+    ) -> Self {
+        self.runtime_files = Arc::new(files);
+        self
+    }
+    pub(crate) fn runtime_source(&self, mod_id: &str) -> Option<Arc<dyn crate::RuntimeFileSource>> {
+        self.runtime_files.get(mod_id).cloned()
     }
     /// Bind the game's pure type-coverage projection. It reads no world or runtime position.
     pub fn with_capability_coverage(
@@ -604,6 +636,9 @@ pub struct RegistrationContext {
     /// [`message`](Self::message); none without a game.
     pub(crate) startup: Option<Arc<dyn crate::StartupScreen>>,
     pub(crate) runtime: Option<crate::RuntimeEnvironment>,
+    /// The runtime files of the wasm mod this context was handed to (it crosses as a resource); a
+    /// native mod's come from `data`, by the mod being dispatched.
+    pub(crate) runtime_files: Option<Arc<dyn crate::RuntimeFileSource>>,
 }
 
 impl RegistrationContext {
@@ -619,6 +654,7 @@ impl RegistrationContext {
             warnings: Default::default(),
             instance_dir,
             startup: crate::world::startup_progress::installed(),
+            runtime_files: None,
             runtime,
         }
     }

@@ -44,16 +44,21 @@ folders are unsupported.
 
 ## `sunrise-mod.toml`
 
-The shared [manifest fields](../how-to/content-mods.md#the-manifest) include `id`, `name`, `version`, `api = "0.2"`
-and `capabilities = ["registries"]`. The content API is checked for exact equality. Unknown fields
-refuse the manifest. Native mods may declare top-level `internals`, an array of tables with
+The shared [manifest fields](../how-to/content-mods.md#the-manifest) include `id`, `name`, and `version`.
+`version` is semver (`MAJOR.MINOR.PATCH`, with an optional pre-release and build metadata such as
+`3.6.30+refabricated`); an omitted minor or patch is padded (`1` is `1.0.0`, `1.2` is `1.2.0`).
+A non-semver version is refused when the manifest is read, naming the value.
+
+`cargo sunrise-mod build` puts `api = "0.2"` and `capabilities = ["registries"]` into the package. A manifest
+that writes either field must give that value; any other value is refused, naming both. Unknown fields refuse the
+manifest, naming the nearest valid key when one is close. Native mods may declare top-level `internals`, an array of tables with
 `path`, optional `hash`, and `kind` when a path names several member kinds. Without `hash`, the build uses the fingerprint from the pinned game’s catalog. An explicitly empty `hash` is refused. Native code adds `[native]`:
 
 | Field | Type | Rule |
 | --- | --- | --- |
 | `game` | string | not empty, the Minecraft version (`"26.3"`) |
 | `sunrise` | string | the exact Sunrise commit, 40 lowercase hex characters |
-| `mixins` | string | the exact horizon-mixins commit, 40 lowercase hex characters |
+| `mixins` | string, optional | a horizon-mixins commit, 40 lowercase hex characters; when mixins are used it must match the pinned SDK. If omitted, `build` writes the SDK's revision into the package. See [The pin](sdk/03-in-a-project.md#the-pin). |
 | `module` | array of tables | optional support modules, written as `[[native.module]]` |
 
 API points use top-level declarations.
@@ -223,16 +228,16 @@ earlier recipe at the same id. A jar may use any namespace. Only its passive
 `assets/` and `data/` participate: Java classes and the jar's own pack metadata are
 not loaded.
 
-Original jars stay in `<game home>/jars/<sha512>.jar`; no bytes are copied into a
-mod. The launcher checks and supplies exact files, and the existing ZIP readers
-write only the decoded resource cache. The complete ordered reference list,
+The game reads exact originals from `<game home>/jars/<sha512>.jar`; no bytes are copied into a mod.
+For development, [`cargo sunrise-mod run`](../how-to/content-mods.md#java-jars-as-external-assets) checks and
+stages these files in its own game home. The ZIP readers write only the decoded resource cache.
+The complete ordered reference list,
 including version, contributes to the composed root's stamp, so changing it
 rebuilds on the next resource load. Server `/reload` uses the accepted inputs of
 that composed root, not another package scan.
 
-**Unavailable originals.** Launcher preparation refuses before a native build or
-game launch and names all requiring mods, the original jar and its expected
-cache path. Direct game resource or world loading with a missing native
+**Unavailable originals.** `cargo sunrise-mod run` refuses before starting the game and names the mod,
+the original jar and its expected cache path. Direct game resource or world loading with a missing native
 requirement fails as a whole; it never publishes code without the matching data.
 A missing input during `/reload` reports the typed failure to the command source
 and keeps the previous data and composed root. Content-only mods have no code to
@@ -263,7 +268,7 @@ the mod list. The scaffold does not create a default icon.
 | What | Limit |
 | --- | --- |
 | A registry file, as downloaded | 64 MiB |
-| Selected native source files, excluding the manifest, icon and resources | 511 files, 64 MiB unpacked in total |
+| Selected native source files, excluding the manifest, icon and resources | 65,536 files, 64 MiB unpacked in total |
 | Content files | 65,536 files, 16 MiB each, 512 MiB in total |
 | `sunrise-mod.toml` | 32 MiB |
 | `icon.png` | 256 KiB encoded, 512 × 512 pixels |

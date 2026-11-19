@@ -42,14 +42,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read  # the run's creation time (tools/ci/dyna_ci_route.sh)
+      actions: read  # the attempt's creation or start time (tools/ci/dyna_ci_route.sh)
     outputs:
       self_hosted: ${{ steps.runner.outputs.self_hosted }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # The pool's switch and lease (tools/ci/dyna_ci_route.sh): a snapshot is judged at the run's creation, so a
+      # The pool's switch and lease (tools/ci/dyna_ci_route.sh): a snapshot is judged at the attempt's creation (a re-run's start), so a
       # run that waited in a concurrency group or GitHub's queue is not sent off the pool by a lease that lapsed
       # meanwhile.
       - id: runner
@@ -227,6 +227,12 @@ jobs:
             | tee "$FNR_SCRATCH/fnr-check.log"
           grep -E 'Function replacement:|: [0-9]+ ms$|^Mods compiled against the prebuilt game in |^Runner load:' \
             "$FNR_SCRATCH/fnr-check.log" >> "$GITHUB_STEP_SUMMARY"
+      # Each mod is a dylib: the tip, depending on two mods that use the same crates.io crate, links
+      # only with the library the build links their registry crates from (#1379).
+      - name: Mods sharing a crates.io crate (build and link)
+        run: |
+          FNR_KEEP=1 FNR_MODS="shared_left shared_right shared_tip" tools/ci/fn_replace_check.sh \
+            "$LAUNCHER" "$FNR_SCRATCH/sdk-base" "$FNR_SCRATCH/check"
       - name: An API-only set takes the API route (build and link)
         run: |
           FNR_KEEP=1 FNR_ROUTE=prebuilt-api FNR_MODS="api_only" tools/ci/fn_replace_check.sh \

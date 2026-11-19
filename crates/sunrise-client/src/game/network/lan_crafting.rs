@@ -1358,12 +1358,13 @@ impl Game<'_> {
         for gi in 0..count {
             let host = self.lan.as_ref().unwrap();
             let g = &host.hub.guests[gi];
-            let Some((t, pos)) =
-                g.menu.as_ref().filter(|_| host.hub.here(g)).and_then(|m| {
-                    match (m.mod_type, m.slots) {
-                        (Some(t), Slots::Block(pos)) if t.links.is_some() => Some((t, pos)),
-                        _ => None,
-                    }
+            let Some((t, pos)) = g
+                .menu
+                .as_ref()
+                .filter(|_| host.hub.here(g) && !self.player_tick_canceled(g.conn))
+                .and_then(|m| match (m.mod_type, m.slots) {
+                    (Some(t), Slots::Block(pos)) if t.links.is_some() => Some((t, pos)),
+                    _ => None,
                 })
             else {
                 continue;
@@ -1444,12 +1445,13 @@ impl Game<'_> {
                 return;
             };
             let g = &host.hub.guests[gi];
-            let Some((t, pos)) =
-                g.menu.as_ref().filter(|_| host.hub.here(g)).and_then(|m| {
-                    match (m.mod_type, m.slots) {
-                        (Some(t), Slots::Block(pos)) if t.crafting.is_some() => Some((t, pos)),
-                        _ => None,
-                    }
+            let Some((t, pos)) = g
+                .menu
+                .as_ref()
+                .filter(|_| host.hub.here(g) && !self.player_tick_canceled(g.conn))
+                .and_then(|m| match (m.mod_type, m.slots) {
+                    (Some(t), Slots::Block(pos)) if t.crafting.is_some() => Some((t, pos)),
+                    _ => None,
                 })
             else {
                 continue;
@@ -1485,7 +1487,11 @@ impl Game<'_> {
                     .guests
                     .iter()
                     .find(|g| g.conn == c)
-                    .is_some_and(|g| host.hub.here(g) && !self.lan_table_valid(g, pos))
+                    .is_some_and(|g| {
+                        host.hub.here(g)
+                            && !self.player_tick_canceled(c)
+                            && !self.lan_table_valid(g, pos)
+                    })
             })
             .map(|(c, window, _)| (c, window))
             .collect();
@@ -2343,7 +2349,7 @@ mod empty_ingredient_placement_tests {
                     game.world_tables = game
                         .stage_world_tables(&stack, false, &resources)
                         .unwrap()
-                        .0;
+                        .tables;
                     game.build_registries();
                     {
                         // The generated Host entrypoint serves native and wasm callers;

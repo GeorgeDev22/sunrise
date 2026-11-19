@@ -942,10 +942,14 @@ impl Game<'_> {
             false
         };
         if after == before && !rolled && !lock_changed && !name_changed && !cooldown_changed {
+            // BlockInput.place calls loadWithComponents even when its before/after
+            // saves are equal. DataCommands instead rejects a no-op before setData.
+            self.notify_block_entity_load_additional(key);
             return false;
         }
         self.world.block_entities.insert(key, new);
         self.world.set_block_lock(key, &tag);
+        self.notify_block_entity_load_additional(key);
         self.update_spawner_display(key);
         self.command_block_loaded(key, was_auto);
         self.world.modified.insert((pos[0] >> 4, pos[2] >> 4));
@@ -1199,35 +1203,10 @@ impl Game<'_> {
                 }
                 Ok(tag)
             }
-            DataRef::Block(p) => {
-                if let Some(tag) = self.comparator_data(*p).or_else(|| self.pot_data(*p)) {
-                    return Ok(tag);
-                }
-                let key = (p[0], p[1], p[2]);
-                let name = self.data_block_name(*p);
-                let e = self
-                    .world
-                    .block_entities
-                    .get(&key)
-                    .ok_or_else(|| err("commands.data.block.invalid", &[]))?;
-                // BlockEntity.saveWithFullMetadata: no chunk-only keepPacked,
-                // and the lock and custom name the model does not hold.
-                let mut tag = save::block_entity_data(
-                    key,
-                    e,
-                    &name,
-                    self.world.block_lock(key),
-                    self.items(),
-                );
-                if let (Some(custom), Tag::Compound(map)) =
-                    (self.world.block_names.get(&key), &mut tag)
-                {
-                    map.entry("CustomName".into())
-                        .or_insert_with(|| custom.clone());
-                }
-                Self::write_pending_loot(&self.world, key, &mut tag);
-                Ok(tag)
-            }
+            // BlockDataAccessor.getData: BlockEntity.saveWithFullMetadata.
+            DataRef::Block(p) => self
+                .full_block_entity_data(*p)
+                .ok_or_else(|| err("commands.data.block.invalid", &[])),
             DataRef::Storage(id) => Ok(self.score.storage.get(id)),
         }
     }
@@ -1239,14 +1218,25 @@ impl Game<'_> {
         if let Some(tag) = self.moving_piston_data(p) {
             return Some(tag);
         }
+        self.full_block_entity_data(p)
+    }
+    /// `BlockEntity.saveWithFullMetadata` of the stored block entity at `p`,
+    /// for `/data` (`BlockDataAccessor.getData`) and [`Self::block_entity_nbt`].
+    /// Comparators and decorated pots come from their own views; any other
+    /// entry gets what the model keeps outside it: the hopper's
+    /// `TransferCooldown` (`HopperBlockEntity.saveAdditional`), the custom
+    /// name and the pending loot table.
+    fn full_block_entity_data(&self, p: [i32; 3]) -> Option<Tag> {
         if let Some(tag) = self.comparator_data(p).or_else(|| self.pot_data(p)) {
             return Some(tag);
         }
         let key = (p[0], p[1], p[2]);
         let name = self.data_block_name(p);
         let e = self.world.block_entities.get(&key)?;
-        let mut tag =
-            save::block_entity_data(key, e, &name, self.world.block_lock(key), self.items());
+        let mut tag = save::command_block_entity_data(
+            self.encode_live_block_entity(key, e, &name, self.items()),
+            self.world.block_lock(key),
+        );
         if name == "minecraft:hopper" {
             set_key(
                 &mut tag,
@@ -1300,6 +1290,7 @@ impl Game<'_> {
                         self.world.block_entities.insert(key, new);
                     }
                     self.world.set_block_lock(key, &tag);
+                    self.notify_block_entity_load_additional(key);
                     self.update_spawner_display(key);
                     self.command_block_loaded(key, was_auto);
                     // BlockDataAccessor.setData: setChanged and sendBlockUpdated(3),
@@ -1326,7 +1317,8 @@ impl Game<'_> {
     ) -> bool {
         let state = self.world.block(key.0, key.1, key.2);
         let name = &self.res.facts().get(state).name;
-        let Some((_, mut new)) = save::decode_block_entity_for_block(tag, name) else {
+        let previous = self.world.block_entities.get(&key);
+        let Some((_, mut new)) = save::decode_block_entity_replacing(tag, name, previous) else {
             return false;
         };
         self.take_loot_table(key, tag, &mut new);
@@ -2451,6 +2443,9 @@ mod mod_block_entity_tests;
 
 #[cfg(test)]
 mod residency_tests;
+
+#[cfg(test)]
+mod hopper_cooldown_tests;
 
 #[cfg(test)]
 mod arrow_owner_tests {

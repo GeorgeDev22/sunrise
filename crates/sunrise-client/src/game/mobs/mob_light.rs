@@ -14,7 +14,7 @@ impl Game<'_> {
         // EntityRenderer.getBlockLightLevel: a burning mob has 15 block
         // light, and so do the Allay, Blaze, Magma Cube, Vex and Wither
         // renderers' overrides; the sky light stays the level's.
-        if mob.fire_ticks > 0
+        if mob.fire_ticks > 0 && !mob.mod_fire_immune
             || matches!(
                 mob.species(),
                 Species::Allay

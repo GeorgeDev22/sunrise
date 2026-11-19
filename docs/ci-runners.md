@@ -142,6 +142,10 @@ only the workflow token (`actions: read`, `issues: write`). What the Team and th
 GitHub reruns a failed job only after its whole run has ended: while another job of the run (often `lint`) is still
 going, "Re-run failed jobs" is refused ("already running"). Wait for the run to finish, then rerun the failed job.
 
+For daily parity, rerun the entire workflow ("Re-run all jobs"), or dispatch a fresh daily for the same commit.
+The merged verdict reads only the plan and share artifacts from the current attempt; an earlier attempt's
+artifacts cannot fill a gap.
+
 ## Rust version
 
 CI, the launcher's native-mod toolchain and the wasm mods' toolchain use one Rust release, written once in
@@ -164,7 +168,8 @@ counts as passed for a required check. Everything runs on main's pushes, on disp
 this repository's own branches (rollups, syncs, fast-path fixes, our sessions' work), which carry contributors'
 changes into one heavy run. The rule is `tools/ci/pr_gate.py`; `tests/test_pr_gate.py` keeps the workflows to it.
 
-A reviewer runs the heavy gate on one contributor's pull request with `gh workflow run dyna-ci.yml -f pr=<number>`.
+A reviewer runs the heavy gate on one contributor's pull request with `gh workflow run dyna-ci.yml -f pr=<number>`. A rollup or
+sync pull request of this repository is refused: each push to it already runs the heavy gate.
 Main's workflow checks out that pull request's head commit on GitHub's runners (never ours) with a read-only token,
 and the `pr-status` job, which runs none of its code and alone may write commit statuses, posts `dispatched/lint`,
 `dispatched/verify` and `dispatched/verify-static` on that commit.

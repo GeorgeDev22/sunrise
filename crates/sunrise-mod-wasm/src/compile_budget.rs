@@ -92,13 +92,15 @@ impl CompileBudget {
         };
         if dedicated {
             let properties =
-                sunrise_java_properties::Properties::load(&contents.chars().collect::<Vec<_>>())
-                    .map_err(|error| SettingError::File {
+                sunrise_java_properties::Properties::load_str(&contents).map_err(|error| {
+                    SettingError::File {
                         path,
                         why: error.to_string(),
-                    })?;
+                    }
+                })?;
             return properties
                 .get(SETTING)
+                .as_deref()
                 .map(Self::parse)
                 .transpose()
                 .map(|budget| budget.unwrap_or_default());

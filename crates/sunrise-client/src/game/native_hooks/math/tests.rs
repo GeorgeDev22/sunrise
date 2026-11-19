@@ -4,9 +4,14 @@ fn assert_platform_profile(actual: MathProfile) {
     // Independent literal expectations, including Windows ARM's precedence.
     #[cfg(target_arch = "aarch64")]
     assert_eq!(actual, MathProfile::Aarch64Fma);
-    #[cfg(all(windows, not(target_arch = "aarch64")))]
+    #[cfg(target_arch = "x86_64")]
+    assert_eq!(actual, MathProfile::HotSpotX86_64);
+    #[cfg(all(windows, not(any(target_arch = "aarch64", target_arch = "x86_64"))))]
     assert_eq!(actual, MathProfile::CorrectlyRounded);
-    #[cfg(all(not(windows), not(target_arch = "aarch64")))]
+    #[cfg(all(
+        not(windows),
+        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+    ))]
     assert_eq!(actual, MathProfile::LibmRounding);
 }
 
@@ -46,7 +51,7 @@ fn compiled_wasm_loopback() {
     let manifest = Package::read(path).unwrap().manifest;
     let info = mod_api::PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         mod_api::PackageKind::Code,
         mod_api::Side::Both,
         vec![manifest.id.clone()],
@@ -71,6 +76,7 @@ fn compiled_wasm_loopback() {
                 MathProfile::CorrectlyRounded => 2.0,
                 MathProfile::Aarch64Fma => 3.0,
                 MathProfile::StrictMath => 4.0,
+                MathProfile::HotSpotX86_64 => 5.0,
                 _ => panic!("test needs updating for the new math profile"),
             };
             let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);

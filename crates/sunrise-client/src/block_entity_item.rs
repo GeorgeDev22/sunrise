@@ -400,12 +400,22 @@ pub fn pick(saved: &Tag) -> Compound {
 /// item's data of the same type, op-only types only when `game_master`, the
 /// player can use game master blocks), then `applyComponentsFromItemStack`.
 pub fn place(saved: &Tag, components: &Compound, game_master: bool) -> Tag {
+    place_with_load_result(saved, components, game_master).0
+}
+
+/// Returns the placed tag and whether `TypedEntityData.loadInto` applied custom data.
+pub fn place_with_load_result(
+    saved: &Tag,
+    components: &Compound,
+    game_master: bool,
+) -> (Tag, bool) {
     let Some(id) = block_entity_nbt::id(saved) else {
-        return saved.clone();
+        return (saved.clone(), false);
     };
     let Tag::Compound(mut tag) = saved.clone() else {
-        return saved.clone();
+        return (saved.clone(), false);
     };
+    let mut custom_data_loaded = false;
     // TypedEntityData.loadInto: saveCustomOnly, merge, loadCustomOnly when changed.
     if let Some(Tag::Compound(data)) = components.get(&JavaString::from(BLOCK_ENTITY_DATA))
         && data
@@ -432,6 +442,7 @@ pub fn place(saved: &Tag, components: &Compound, game_master: bool) -> Tag {
                 canonical(&merged).or_else(|| (!id.starts_with("minecraft:")).then_some(merged));
             if let Some(Tag::Compound(loaded)) = loaded {
                 tag = loaded;
+                custom_data_loaded = true;
             }
         }
     }
@@ -505,7 +516,7 @@ pub fn place(saved: &Tag, components: &Compound, game_master: bool) -> Tag {
         .collect();
     tag.insert("components".into(), Tag::Compound(own));
     let tag = Tag::Compound(tag);
-    canonical(&tag).unwrap_or(tag)
+    (canonical(&tag).unwrap_or(tag), custom_data_loaded)
 }
 
 /// The slots of a `minecraft:container` component.

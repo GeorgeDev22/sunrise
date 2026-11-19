@@ -1,7 +1,6 @@
 //! A remote player: connection, position, chunk and entity views, and the
 //! player state (inventory, health, game mode) that the host's gameplay code
 //! operates on when it acts for them.
-use super::prediction::record::{Change, Record};
 use super::{Joined, PlayerSender, entity::Tracker};
 use crate::{
     items::ItemStack,
@@ -262,8 +261,6 @@ pub struct Guest {
     /// Pending ClientboundPlayerPositionPacket id; movement is ignored until
     /// the client accepts it (ServerGamePacketListenerImpl.awaitingPositionFromClient).
     pub awaiting_teleport: Option<(i32, [f64; 3])>,
-    /// The teleport awaited keeps the player's motion (`Hub::teleport_keeping_motion`).
-    pub awaiting_keeps_motion: bool,
     /// Through a portal, until `LanHub::land` gives the client its position:
     /// the moves it sent from the old level are ignored, as they would be
     /// while it had a teleport to accept.
@@ -303,21 +300,6 @@ pub struct Guest {
     /// A position move arrived since the client's last ClientTickEnd
     /// (receivedPositionThisTick): a second one is a protocol error.
     pub position_this_tick: bool,
-    /// Violation levels and the checks' state (the anticheat, when on).
-    pub anticheat: sunrise_anticheat::Player,
-    /// The client ticks the movement prediction plays again (only while it records).
-    pub record: Option<Box<Record>>,
-    /// Sprinting as the client's own commands left it (ServerboundPlayerCommandPacket's
-    /// START_SPRINTING and STOP_SPRINTING: LocalPlayer.wasSprinting), which the record's ticks take.
-    /// Not the server's player: a hit with extra knockback stops its sprint
-    /// (Player.causeExtraKnockback), the client's own `Player.attack` doesn't (a mob's `hurtClient`
-    /// is false), and once the server's flag reaches it LocalPlayer.aiStep starts the sprint again
-    /// while the sprint key is held, with nothing to say: wasSprinting never changed.
-    pub client_sprinting: bool,
-    /// The movement prediction's replay of the client's own moves (only while it runs).
-    pub replay: Option<Box<super::prediction::Replay>>,
-    /// What the server sent this tick that changes how the client moves (only while it records).
-    pub changes: std::sync::Mutex<Vec<Change>>,
     /// It accepted a move since the last entity range checks
     /// (ServerChunkCache.move), which then check all of its pairs again.
     pub moved: bool,
@@ -466,7 +448,6 @@ pub struct Guest {
     pub last_death: Option<(String, [i32; 3])>,
     /// The last action sequence to acknowledge at the next tick (-1: none).
     pub ack_up_to: std::cell::Cell<i32>,
-    pub sent_selected: usize,
     /// Packets waiting for the player's next turn, and their bytes on the wire.
     pub inbox: VecDeque<InboxItem>,
     pub joined_tick: u64,
@@ -563,6 +544,8 @@ pub struct Guest {
     pub advancements_changed: std::collections::BTreeSet<usize>,
     /// The server's scoreboard as this player's client has it (lan/scoreboard.rs).
     pub scoreboard: super::scoreboard::View,
+    /// Whether the joining sync (`PlayerList.updateEntireScoreboard`) went out.
+    pub scoreboard_synced: bool,
     /// Recipes unlocked since the client was last told
     /// (`ServerRecipeBook.addRecipes` sends them).
     pub recipes_unlocked: Vec<String>,
@@ -756,7 +739,6 @@ impl Guest {
             spawn: None,
             respawn_elsewhere: None,
             awaiting_teleport: None,
-            awaiting_keeps_motion: false,
             landing: false,
             tp_held: false,
             teleport_counter: 0,
@@ -774,11 +756,6 @@ impl Guest {
             rests_on_ground: false,
             support_blocks_sent: 0,
             position_this_tick: false,
-            anticheat: Default::default(),
-            record: None,
-            client_sprinting: false,
-            replay: None,
-            changes: Default::default(),
             moved: false,
             tab_hidden: Default::default(),
             loaded: false,
@@ -844,7 +821,6 @@ impl Guest {
             sent_stuck: (0, 0),
             last_death: None,
             ack_up_to: std::cell::Cell::new(-1),
-            sent_selected: 0,
             inbox: VecDeque::new(),
             joined_tick: 0,
             ticks: 0,
@@ -885,6 +861,7 @@ impl Guest {
             advancements_visible: Vec::new(),
             advancements_changed: Default::default(),
             scoreboard: Default::default(),
+            scoreboard_synced: false,
             recipes_unlocked: Vec::new(),
         }
     }
@@ -896,9 +873,6 @@ impl Guest {
         if !self.participates_online() {
             return;
         }
-        if self.record.is_some() {
-            self.note_change(packet);
-        }
         match packet.try_encode() {
             Ok(body) => self.sender.send(body),
             Err(error) => eprintln!("[lan] send refused: {error}"),
@@ -909,6 +883,14 @@ impl Guest {
         crate::raw_payloads::negotiated(
             self.sender.payload_transport(),
             sunrise_protocol::collider_sync::CHANNEL,
+        )
+    }
+    /// Whether this connection reads general entity spawns (`sunrise:general_entity`): only
+    /// such a guest is paired with a mod's general row.
+    pub fn negotiated_general_entity(&self) -> bool {
+        crate::raw_payloads::negotiated(
+            self.sender.payload_transport(),
+            sunrise_protocol::general_entity::CHANNEL,
         )
     }
     /// Whether the guest's play epoch has attachment sync negotiated (a vanilla client never
@@ -932,58 +914,12 @@ impl Guest {
         }
     }
     /// [`Self::send`] of a `ChunksBiomes` whose body is `packet.encode()`, the same
-    /// bytes for each guest with those columns. `note_change` ignores that packet.
+    /// bytes for each guest with those columns.
     pub fn send_chunks_biomes_body(&self, body: Vec<u8>) {
         if !self.participates_online() {
             return;
         }
         self.sender.send(body);
-    }
-    /// What `packet` changes about how the client moves, for the prediction's replay: kept until
-    /// the tick's ping places it (`Hub::anticheat_ping`).
-    fn note_change(&self, packet: &play::Clientbound) {
-        use play::Clientbound as C;
-        let own = |id: i32| id == self.entity_id;
-        let change = match packet {
-            C::SetEntityMotion(p) if own(p.id) => {
-                Change::Velocity(sunrise_protocol::buf::LpVec3::quantize(p.velocity))
-            }
-            C::Explode(p) => match p.knockback {
-                Some(k) => Change::Knockback(k),
-                None => return,
-            },
-            C::UpdateAttributes(p) if own(p.id) => {
-                let speed = self.motion.as_ref().and_then(|m| {
-                    m.attributes
-                        .key("minecraft:movement_speed")
-                        .map(|k| k.attribute().registry_id())
-                });
-                let sprint = p
-                    .values
-                    .iter()
-                    .find(|a| Some(a.attribute) == speed)
-                    .map(|a| a.modifiers.iter().any(|m| m.id == "minecraft:sprinting"));
-                Change::Attributes { sprint }
-            }
-            // Entity.DATA_SHARED_FLAGS_ID: its sprinting bit (0x08).
-            C::SetEntityData(p) if own(p.id) => match p.values.iter().find(|v| v.0 == 0) {
-                Some(&(_, _, sunrise_protocol::entity_data::Value::Byte(flags))) => {
-                    Change::Sprinting(flags & 0x08 != 0)
-                }
-                _ => return,
-            },
-            C::UpdateMobEffect(p) if own(p.id) => Change::Effects,
-            C::RemoveMobEffect(p) if own(p.id) => Change::Effects,
-            C::PlayerAbilities(_) => Change::Abilities,
-            // The chest slot (InventoryMenu's slot 6): a glider.
-            C::ContainerSetSlot(p) if p.container == 0 && p.slot == 6 => Change::Abilities,
-            C::ContainerSetContent(p) if p.container == 0 => Change::Abilities,
-            _ => return,
-        };
-        self.changes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(change);
     }
     /// `Entity.stopRiding`: out of the vehicle it rode.
     pub fn stop_riding(&mut self) {
@@ -1822,21 +1758,12 @@ pub(super) fn network_stack(
                 .added
                 .push((sunrise_protocol::item::component::TRIM, component));
         }
-        // BannerPatternLayers: each pattern a reference into the synced registry;
-        // a layer that has none leaves the stack without the component. An
-        // ominous banner made by the raid keeps only its flag, so its layers
-        // are the ones the NBT encoder synthesises from it.
-        let patterns: Vec<(&str, &str)> = if d.ominous_banner && d.banner_patterns.is_empty() {
-            crate::item_data::OMINOUS_LAYERS.to_vec()
-        } else {
-            d.banner_patterns
-                .iter()
-                .map(|layer| (&*layer.pattern, &*layer.color))
-                .collect()
-        };
-        let layers: Option<Vec<(i32, i32)>> = patterns
+        // A pattern without a synced registry id leaves out the component.
+        let layers: Option<Vec<(i32, i32)>> = d
+            .banner_layers()
             .iter()
-            .map(|(pattern, color)| {
+            .map(|layer| {
+                let (pattern, color) = (&*layer.pattern, &*layer.color);
                 let name = if pattern.contains(':') {
                     pattern.to_string()
                 } else {
@@ -1854,26 +1781,30 @@ pub(super) fn network_stack(
                 sunrise_protocol::item::Component::BannerPatterns(layers),
             ));
         }
-        // The raid captain's banner: `Raid.getBannerComponentPatch` gives it
-        // the ominous name, rarity and hidden layers, which `StackData` keeps
-        // as `ominous_banner` rather than in `other` (#12530).
-        if d.ominous_banner {
-            stack.added.push((
-                sunrise_protocol::item::component::ITEM_NAME,
-                sunrise_protocol::item::Component::Text(sunrise_core::nbt::Tag::compound([(
-                    "translate",
-                    sunrise_core::nbt::Tag::String("block.minecraft.ominous_banner".into()),
-                )])),
-            ));
-            stack.added.push((
-                sunrise_protocol::item::component::RARITY,
-                sunrise_protocol::item::Component::Int(1),
-            ));
+        if let Some(display @ sunrise_core::nbt::Tag::Compound(_)) =
+            d.saved_other("minecraft:tooltip_display")
+        {
+            let mut seen = std::collections::HashSet::new();
+            let hidden = match display.get("hidden_components") {
+                Some(sunrise_core::nbt::Tag::List(entries)) => entries
+                    .iter()
+                    .filter_map(|tag| {
+                        let name = crate::save::text(Some(tag))?;
+                        let name = sunrise_core::identifier::Identifier::parse(&name).ok()?;
+                        synced_id("minecraft:data_component_type", &name.to_string())
+                    })
+                    .filter(|id| seen.insert(*id))
+                    .collect(),
+                _ => Vec::new(),
+            };
             stack.added.push((
                 sunrise_protocol::item::component::TOOLTIP_DISPLAY,
                 sunrise_protocol::item::Component::TooltipDisplay {
-                    hide: false,
-                    hidden: vec![sunrise_protocol::item::component::BANNER_PATTERNS],
+                    hide: display
+                        .get("hide_tooltip")
+                        .and_then(crate::item_data::component_bool)
+                        .unwrap_or(false),
+                    hidden,
                 },
             ));
         }
@@ -2119,7 +2050,7 @@ pub(super) fn network_stack(
         stack.removed.push(sunrise_protocol::item::component::LORE);
     }
     // The stack's custom rarity ("common", "uncommon", "rare", "epic" or 0..=3).
-    if let Some(r) = s.data().and_then(|d| d.other("minecraft:rarity")) {
+    if let Some(r) = s.data().and_then(|d| d.saved_other("minecraft:rarity")) {
         let index = match r {
             sunrise_core::nbt::Tag::String(s) => match &*s.to_string_lossy() {
                 "common" => Some(0),
@@ -2165,7 +2096,7 @@ pub(super) fn network_stack(
         ));
     }
     // The component as loaded, so a translatable name stays one.
-    if let Some(name) = s.data().and_then(|d| d.other("minecraft:item_name")) {
+    if let Some(name) = s.data().and_then(|d| d.saved_other("minecraft:item_name")) {
         stack.added.push((
             sunrise_protocol::item::component::ITEM_NAME,
             sunrise_protocol::item::Component::Text(name.clone()),

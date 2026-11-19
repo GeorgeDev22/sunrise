@@ -1,4 +1,4 @@
-//! `surface.json`: the stable surface of one game build, what an API-only mod can name.
+//! `surface.json`: the stable mod API of one game build, with optional engine records for CI and audits.
 //!
 //! The generator (`sunrise-stage surface`) writes it from the declarations the build parses;
 //! nothing in it is kept by hand. This crate holds its record types, their contract hashes, the
@@ -30,6 +30,9 @@
 //! | Part kind | `part:<kind>` |
 //! | capability | `capability:<key>` (`registries`, `sunrise:fluids`) |
 //! | behaviour | `behaviour:<name>` (`add_to_merging`) |
+//! | injection point | `point:<target>` |
+//! | published loop | `loop:<name>` |
+//! | listed internal | `internal:<kind>:<path>` (with ` [<cfg>]` for a guarded row) |
 //!
 //! # Hashes
 //!
@@ -122,6 +125,10 @@ pub struct Surface {
     /// Older readers ignore this additive collection without a schema change.
     #[serde(default)]
     pub extension_tags: Vec<ExtensionTag>,
+    /// Injection points, native loops and listed internals for CI and local audits. Omitted
+    /// from SDK exports and not inferred by the API source-use scanner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_items: Vec<EngineItem>,
 }
 
 /// Why a document was refused.
@@ -471,6 +478,7 @@ impl Surface {
             capabilities,
             behaviours: Vec::new(),
             extension_tags: Vec::new(),
+            engine_items: Vec::new(),
         };
         surface.hash = surface.document_hash();
         surface
@@ -492,8 +500,16 @@ impl Surface {
         self
     }
 
+    /// Add the ordered engine catalog records and update the document hash.
+    pub fn with_engine_items(mut self, mut items: Vec<EngineItem>) -> Self {
+        items.sort_by(|a, b| a.id.cmp(&b.id));
+        self.engine_items = items;
+        self.hash = self.document_hash();
+        self
+    }
+
     /// Every named API record and member record as (id, hash), in no promised order.
-    /// Extension tags have registry-scoped IDs and are hashed separately by `document_hash`.
+    /// Engine items and extension tags are not API source uses.
     pub fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
         let hooks = self.hooks.iter().flat_map(|r| {
             std::iter::once((r.id.as_str(), r.hash.as_str()))
@@ -538,6 +554,14 @@ impl Surface {
             .chain(behaviours)
     }
 
+    fn entries_with_engine(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries().chain(
+            self.engine_items
+                .iter()
+                .map(|r| (r.id.as_str(), r.hash.as_str())),
+        )
+    }
+
     /// The SHA-256 (first 128 bits, hex) of `<id> <hash>\n` for every entry, in byte order of id.
     pub fn document_hash(&self) -> String {
         let tags: Vec<_> = self
@@ -551,7 +575,7 @@ impl Surface {
             })
             .collect();
         let mut entries: Vec<(&str, &str)> = self
-            .entries()
+            .entries_with_engine()
             .chain(tags.iter().map(|(id, hash)| (id.as_str(), hash.as_str())))
             .collect();
         entries.sort_unstable();
@@ -693,7 +717,7 @@ impl Surface {
         let surface: Self =
             serde_json::from_slice(bytes).map_err(|e| ReadError::Json(e.to_string()))?;
         let mut seen = BTreeSet::new();
-        for (id, _) in surface.entries() {
+        for (id, _) in surface.entries_with_engine() {
             if !seen.insert(id) {
                 return Err(ReadError::DuplicateId(id.to_owned()));
             }

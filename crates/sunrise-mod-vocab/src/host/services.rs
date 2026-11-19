@@ -190,17 +190,6 @@ pub trait Levels {
 /// The messages service, reached through its host.
 pub trait Messages {
     /// Side: server.
-    /// Whether the server's chat filter (`server.toml` `[chat_filter]`)
-    /// lets `text` through: true without a filter, None inside a player's
-    /// hook (where the server is out of reach).
-    fn text_allowed(&self, text: &str) -> Option<bool> {
-        crate::world::phase::unprovided(
-            "Messages::text_allowed",
-            "text_allowed",
-            crate::world::phase::LoadAccess::WorldOnly,
-        )
-    }
-    /// Side: server.
     /// A system line in every player's chat and the server's log.
     /// Refuses text deeper than 512 component nodes before applying any changes.
     fn broadcast(&self, line: Text) -> Result<(), TextFormError> {

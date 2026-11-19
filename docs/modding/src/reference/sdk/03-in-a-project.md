@@ -8,12 +8,12 @@ sunrise-mod-api = { path = ".sunrise/sdk/api/crates/sunrise-mod-api" }
 ```
 
 `sunrise-mod-points`, `sunrise-internals` and `sunrise-wasmtime` (native mods only; [the game's wasmtime](../../concepts/native-route/8-wasmtime.md)) are named the same way, by `.sunrise/sdk/api/crates/<package>`. The
-SDK carries no `sunrise-internals` crate yet: a mod that names game internals builds through the launcher, which
-puts the mod's own generated facade in its place, and not with a plain `cargo check`. Features
+SDK does not carry a `sunrise-internals` crate: `cargo sunrise-mod build` and `internals sync` generate the
+mod's own facade in its place. A plain `cargo check` cannot resolve it. Features
 (`features = ["testing"]` on a dev-dependency) are kept.
 
-`cargo sunrise-mod new` writes that path, and it is the only form the launcher takes: when it builds a mod, it
-refuses every other form under `E_SDK_SOURCE`, with the line to write instead:
+`cargo sunrise-mod new` writes that path. A native build refuses every other form under `E_SDK_SOURCE`,
+with the line to write instead:
 
 | Written | Why it is refused |
 |---|---|
@@ -29,8 +29,20 @@ The build a mod is made for is its pin, always a full commit sha in the file:
 - a native mod: `[native] sunrise` in `sunrise-mod.toml`;
 - a wasm mod: `sdk` under `[package.metadata.sunrise]` in `Cargo.toml`.
 
-`cargo sunrise-mod new` writes the current Nightly's build, or `--sunrise`'s. `cargo sunrise-mod update` moves
-either pin, changing only its value. Wherever a build is given, these forms are accepted:
+`cargo sunrise-mod new` writes the current Nightly's build, or the one selected with `--sunrise`.
+A native project normally leaves `[native] mixins` out. When a mod uses mixins, builds and discovery use the
+horizon-mixins revision and patch recorded in the pinned SDK's signed `sdk.json`. The mod tool must support that
+exact pair, and any explicit `[native] mixins` revision must match it. If the tool and SDK disagree, install the
+tool from that SDK or run `cargo sunrise-mod update` to move to an SDK that matches your tool. If the explicit
+revision disagrees, remove it to use the SDK's revision.
+
+A native build writes the revision into the package, not the project. For a mod that doesn't use mixins, the
+package keeps an explicit revision or records the SDK's revision if none was written, without requiring a match.
+A project in a game checkout uses the checkout's API surface instead of fetching one into the project, but its
+native compile and package revision still come from the pinned SDK. `cargo sunrise-mod update` moves the Sunrise
+build pin after checking the destination SDK; it leaves any explicit mixins revision alone.
+
+Wherever a build is given, these forms are accepted:
 
 | Written | Means |
 |---|---|
@@ -69,7 +81,8 @@ launcher or sent to a registry.
 Every SDK base is checked the same way, against Sunrise's signature. The launcher's own copies are described in
 [Cache and disk](../../how-to/native-mods/10-cache-and-disk.md).
 
-The internals commands (`internals add`, `inject add`, `inject update`, and `update` on a mod with an `internals`
-list or `[[inject]]` rows) read `internals.json` and `points.json` from the pinned build's signed SDK, through the
-same fetch and `SUNRISE_SDK_BASE`: its `build-data.tar.xz` is unpacked once into
-`.sunrise/cache/<build id>/build-data/`. A build with no SDK release is refused by name.
+`internals add`, `inject add`, `inject update`, and pin changes that need catalogs read `internals.json` and
+`points.json` from the pinned build's signed SDK. The tool unpacks `build-data.tar.xz` into
+`.sunrise/cache/<build id>/build-data/`. `internals sync` checks pinned game source instead, as do the add and
+inject update commands when the mod adds `[[native.module]]` rows. Source discovery uses the Rust named by the
+signed SDK, but does not need its compiled game slices. See [Native dependency tools](../registry-index.md#native-dependency-tools).

@@ -3327,6 +3327,10 @@ mod crack_feedback_tests;
 mod menu_still_valid_tests;
 
 #[cfg(test)]
+#[path = "tests/player_entity_tick_tests.rs"]
+mod player_entity_tick_tests;
+
+#[cfg(test)]
 #[path = "tests/projectile_lifecycle_tests.rs"]
 mod projectile_lifecycle_tests;
 

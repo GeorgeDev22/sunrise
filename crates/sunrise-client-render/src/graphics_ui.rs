@@ -8,7 +8,7 @@ use crate::{
     gfx::EffectiveOutput,
     graphics::{
         EntityCullingMode, FarDetail, FrameGeneration, GpuCullingMode, GraphicsApi, HdrMode,
-        HdrSetup as Setup, LeafCullingMode, Overlay, Pacing, ParallelTickMode, ParticleCullingMode,
+        HdrSetup as Setup, LeafCullingMode, Pacing, ParallelTickMode, ParticleCullingMode,
         PresentMode, Preset, Upscaling,
     },
     graphics_style::Cost,
@@ -60,7 +60,7 @@ impl Page {
             Page::Quality => "The sky and weather, lighting, textures and the image.",
             Page::Performance => "Chunk loading, culling and power use.",
             Page::Shaders => "Shader packs, Sunrise's and shaders/ folder ones, and their options.",
-            Page::Advanced => "How frames reach the screen, and the performance overlay.",
+            Page::Advanced => "How frames reach the screen.",
             Page::Hdr => "Brighter-than-white output on an HDR display.",
         }
     }
@@ -99,7 +99,6 @@ pub enum H {
     Pacing,
     Workers,
     ParallelTick,
-    Overlay,
     ResolutionScale,
     DynamicResolution,
     TargetFps,
@@ -551,41 +550,31 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
         ),
         (
             Page::Advanced,
-            vec![
-                (
-                    "Frames",
-                    vec![
-                        h(
-                            H::PresentMode,
-                            None,
-                            "How frames reach the screen while VSync is off.",
-                        ),
-                        h(
-                            H::Pacing,
-                            None,
-                            "Efficient sleeps until the next frame; Precise spins, like vanilla.",
-                        ),
-                        h(
-                            H::GraphicsApi,
-                            None,
-                            "Vulkan, then DirectX 12 (Windows) or OpenGL (Linux) where it fails. Next start.",
-                        ),
-                        h(
-                            H::TranslucentBatching,
-                            Saves,
-                            "Water and glass in one buffer: fewer draw calls, a bit more VRAM. Next start.",
-                        ),
-                    ],
-                ),
-                (
-                    "Overlay",
-                    vec![h(
-                        H::Overlay,
+            vec![(
+                "Frames",
+                vec![
+                    h(
+                        H::PresentMode,
                         None,
-                        "Frame rate and frame times over the game, with a graph.",
-                    )],
-                ),
-            ],
+                        "How frames reach the screen while VSync is off.",
+                    ),
+                    h(
+                        H::Pacing,
+                        None,
+                        "Efficient sleeps until the next frame; Precise spins, like vanilla.",
+                    ),
+                    h(
+                        H::GraphicsApi,
+                        None,
+                        "Vulkan, then DirectX 12 (Windows) or OpenGL (Linux) where it fails. Next start.",
+                    ),
+                    h(
+                        H::TranslucentBatching,
+                        Saves,
+                        "Water and glass in one buffer: fewer draw calls, a bit more VRAM. Next start.",
+                    ),
+                ],
+            )],
         ),
         (
             Page::Hdr,
@@ -986,14 +975,6 @@ impl H {
                 "Smooth Gradients",
                 on_off(g.hdr_smooth_gradients && out.wide_frame_supported),
             ),
-            H::Overlay => labelled(
-                "Performance Overlay",
-                match g.overlay {
-                    Overlay::Off => "Off",
-                    Overlay::Fps => "FPS",
-                    Overlay::Graph => "FPS and Graph",
-                },
-            ),
         }
     }
     fn set_slider(self, s: &mut Settings, v: f32) {
@@ -1122,13 +1103,6 @@ impl H {
                     Pacing::Precise => Pacing::Efficient,
                 }
             }
-            H::Overlay => {
-                g.overlay = step(
-                    &[Overlay::Off, Overlay::Fps, Overlay::Graph],
-                    g.overlay,
-                    back,
-                )
-            }
             _ => {}
         }
     }
@@ -1248,10 +1222,10 @@ impl Item {
             _ => return None,
         })
     }
-    pub fn slider(self, s: &Settings) -> Option<f32> {
+    pub fn slider(self, s: &Settings) -> Option<f64> {
         match self {
             Item::Vanilla(o) => o.slider_position(s),
-            Item::Sunrise(h) => h.slider(s),
+            Item::Sunrise(h) => h.slider(s).map(f64::from),
             Item::Extra(_) => None,
         }
     }
@@ -1272,14 +1246,14 @@ impl Item {
             ),
         }
     }
-    pub fn set_slider(self, s: &mut Settings, v: f32, out: &EffectiveOutput) {
+    pub fn set_slider(self, s: &mut Settings, v: f64, out: &EffectiveOutput) {
         if !self.available() || self.blocked(s, out).is_some() {
             return;
         }
         match self {
             // Options.applyGraphicsPreset, as Video Settings' slider does it.
             Item::Vanilla(o) => crate::options_ui::set_slider(o, s, v),
-            Item::Sunrise(h) => h.set_slider(s, v),
+            Item::Sunrise(h) => h.set_slider(s, v as f32),
             Item::Extra(_) => {}
         }
         self.touched(s);
@@ -1304,7 +1278,6 @@ impl Item {
                     H::Preset
                         | H::BlueMapAutoDetect
                         | H::BlueMapRadius
-                        | H::Overlay
                         | H::ScreenshotQuality
                         | H::Pacing
                         | H::PresentMode
@@ -1521,7 +1494,7 @@ impl Screen for GraphicsScreen {
             }
         }
     }
-    fn slide(&mut self, s: &mut Settings, item: Item, position: f32) {
+    fn slide(&mut self, s: &mut Settings, item: Item, position: f64) {
         item.set_slider(s, position, &self.output);
     }
     /// With the "Scroll wheel changes settings" extra, the wheel steps a value between `<` `>`
@@ -2159,9 +2132,9 @@ mod tests {
         // Every stop is reachable and reads back as the same position.
         for (i, &distance) in LOD_STEPS.iter().enumerate() {
             let at = i as f32 / (LOD_STEPS.len() - 1) as f32;
-            item.set_slider(&mut s, at, &NONE);
+            item.set_slider(&mut s, f64::from(at), &NONE);
             assert_eq!(s.sunrise.lod_distance, distance);
-            assert_eq!(item.slider(&s), Some(at));
+            assert_eq!(item.slider(&s), Some(f64::from(at)));
             assert_eq!(s.render_distance, near);
         }
         // The ends are off and the whole world, which the far terrain plans.
@@ -2185,9 +2158,9 @@ mod tests {
         assert_eq!(s.sunrise.lod_distance, 24);
         // A distance between stops (from the file) sits on the next one.
         s.sunrise.lod_distance = 3000;
-        assert_eq!(item.slider(&s), Some(13.0 / 23.0));
+        assert_eq!(item.slider(&s), Some(f64::from(13.0_f32 / 23.0)));
         s.sunrise.lod_distance = 12;
-        assert_eq!(item.slider(&s), Some(1.0 / 23.0));
+        assert_eq!(item.slider(&s), Some(f64::from(1.0_f32 / 23.0)));
     }
 
     /// With far terrain on, Render Distance reads "Full Detail Distance" but keeps vanilla's

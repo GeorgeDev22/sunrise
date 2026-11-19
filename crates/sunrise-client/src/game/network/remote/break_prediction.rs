@@ -68,7 +68,11 @@ impl Game<'_> {
     }
 
     /// The blocks a use changed, kept under its sequence until acknowledgement.
-    pub(in crate::game) fn predict_blocks(&mut self, changes: &DryChanges, seq: i32) {
+    pub(in crate::game) fn predict_blocks(
+        &mut self,
+        changes: &[(BlockPos, BlockStateId)],
+        seq: i32,
+    ) {
         for &(p, state) in changes {
             let pos = [p.x, p.y, p.z];
             let previous = self.predict_block(pos, state, seq);
@@ -222,25 +226,6 @@ impl Game<'_> {
     ) {
         if let Some(previous) = previous {
             self.client_block_written(pos, previous, state, predicted);
-        }
-        // A block we just placed: play its place sound (the server skips the placer).
-        if let Some((target, _)) = self.remote.as_ref().and_then(|r| r.placing)
-            && target == pos
-            && !self.res.facts().is_air(state)
-        {
-            let s = self.own_sound_type(pos, state, mod_api::BlockSoundCause::Place);
-            let at = [
-                f64::from(pos[0]) + 0.5,
-                f64::from(pos[1]) + 0.5,
-                f64::from(pos[2]) + 0.5,
-            ];
-            self.play_client_local_sound(
-                LevelSound::new(&s.place, at, (s.volume + 1.0) / 2.0, s.pitch * 0.8)
-                    .in_source(mod_api::SoundSource::Blocks),
-            );
-            if let Some(r) = self.remote.as_mut() {
-                r.placing = None;
-            }
         }
     }
 }

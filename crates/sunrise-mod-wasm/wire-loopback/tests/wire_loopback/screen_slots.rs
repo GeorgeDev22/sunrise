@@ -1,12 +1,12 @@
 //! `ScreensClientHost::screen_slot` and `set_screen_slot` from a wasm mod reach the client
-//! with the block, the slot and the position intact, and each named refusal comes back as the
+//! with the menu type, the slot and the position intact, and each named refusal comes back as the
 //! native call returns it.
 use super::*;
 use mod_api::ScreenSlotRefusal;
 use mod_api::prelude::*;
 use std::cell::RefCell;
 
-/// What reached the client: the block, the slot and the position asked for.
+/// What reached the client: the menu type, the slot and the position asked for.
 type Call = (String, usize, Option<[f32; 2]>);
 
 /// A client with one open screen of `machines:station` and three slots, the third hidden at
@@ -20,17 +20,17 @@ mod_api::impl_host_areas!(Client);
 impl mod_api::ClientHost for Client {}
 mod_api::impl_client_host_areas!(Client, except(screens));
 impl ScreensClientHost for Client {
-    fn screen_slot(&self, block: &str, slot: usize) -> Option<[f32; 2]> {
-        (block == "machines:station" && slot < 2).then_some([slot as f32 * 18.0, 17.0])
+    fn screen_slot(&self, menu: &str, slot: usize) -> Option<[f32; 2]> {
+        (menu == "machines:station" && slot < 2).then_some([slot as f32 * 18.0, 17.0])
     }
     fn set_screen_slot(
         &self,
-        block: &str,
+        menu: &str,
         slot: usize,
         pos: Option<[f32; 2]>,
     ) -> Result<(), ScreenSlotRefusal> {
-        self.calls.borrow_mut().push((block.to_owned(), slot, pos));
-        match (block, slot, pos) {
+        self.calls.borrow_mut().push((menu.to_owned(), slot, pos));
+        match (menu, slot, pos) {
             (b, ..) if b != "machines:station" => Err(ScreenSlotRefusal::NoScreen),
             (_, 3.., _) => Err(ScreenSlotRefusal::NoSuchSlot),
             (_, 2, Some(_)) => Err(ScreenSlotRefusal::HiddenAtOpen),
@@ -77,10 +77,10 @@ fn a_wasm_mods_slot_moves_reach_the_client_and_get_each_refusal_by_name() {
             Some([f32::INFINITY, 0.0]),
             Err(ScreenSlotRefusal::BadPosition),
         ),
-        ("other:block", 0, None, Err(ScreenSlotRefusal::NoScreen)),
+        ("other:menu", 0, None, Err(ScreenSlotRefusal::NoScreen)),
     ];
-    for (block, slot, pos, answer) in asks {
-        assert_eq!(guest::Guest.set_screen_slot(block, slot, pos), answer);
+    for (menu, slot, pos, answer) in asks {
+        assert_eq!(guest::Guest.set_screen_slot(menu, slot, pos), answer);
     }
     assert_eq!(
         guest::Guest.screen_slot("machines:station", 1),

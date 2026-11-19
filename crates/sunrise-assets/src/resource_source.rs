@@ -133,6 +133,7 @@ struct Root {
     source: ResourceSource,
     data: ResourceSource,
     data_changes: ResourceSource,
+    mod_layers: Arc<[ResourceSource]>,
     runtime_block_sprites: Vec<String>,
 }
 impl ResourceRoot {
@@ -147,19 +148,24 @@ impl ResourceRoot {
             source,
             data,
             data_changes: ResourceSource::default(),
+            mod_layers: Arc::from([]),
             runtime_block_sprites: Vec::new(),
         }))
     }
     /// Passive server data is independent of the client's selected asset packs.
-    pub fn with_data(self, data: ResourceSource, data_changes: ResourceSource) -> Self {
-        Self(Arc::new(Root {
-            prepared: self.0.prepared.clone(),
-            cache: self.0.cache.clone(),
-            source: self.0.source.clone(),
-            data,
-            data_changes,
-            runtime_block_sprites: self.0.runtime_block_sprites.clone(),
-        }))
+    pub fn with_data(mut self, data: ResourceSource, data_changes: ResourceSource) -> Self {
+        let root = Arc::make_mut(&mut self.0);
+        root.data = data;
+        root.data_changes = data_changes;
+        self
+    }
+    /// Original mod packs in priority order, before flattening their assets or data.
+    pub fn with_mod_layers(mut self, layers: Arc<[ResourceSource]>) -> Self {
+        Arc::make_mut(&mut self.0).mod_layers = layers;
+        self
+    }
+    pub fn mod_layers(&self) -> &Arc<[ResourceSource]> {
+        &self.0.mod_layers
     }
     /// Add generated client textures as the highest asset layer, keeping the
     /// prepared tables and passive server data on their original sources.

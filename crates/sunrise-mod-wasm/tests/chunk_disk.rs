@@ -46,7 +46,7 @@ fn wasm() -> Mods {
     let manifest = Package::read(path).unwrap().manifest;
     let info = PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         PackageKind::Code,
         Side::Both,
         vec![manifest.id.clone()],

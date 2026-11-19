@@ -1,21 +1,10 @@
-//! Client text resolution and styled measurements, outside drawing.
+//! Client visual-order text and styled measurements, outside drawing.
 #![allow(unused_variables)]
 use crate::*;
 
 /// Read-only component resolution and access to the client tooltip font.
 #[sunrise_mod_api_macros::host_area]
 pub trait ClientTextClientHost {
-    /// Side: client.
-    /// `Component.getString()`: resolve a component to its plain characters,
-    /// including current-language translations, arguments, key names and siblings.
-    /// Styles do not contribute characters; literal legacy formatting codes remain
-    /// in the string, as in vanilla. Available outside drawing, including client
-    /// setup, on native and wasm. Invalid components return their boundary error.
-    /// Action keybind IDs such as `key.jump` resolve through the client's current
-    /// key binding to their assigned physical key, matching vanilla KeybindContents.
-    #[access(ClientSetup)]
-    fn text_string(&self, text: &Text) -> Result<String, TextFormError>;
-
     /// Side: client.
     /// `Component.getVisualOrderText()`: current-language, styled characters in
     /// visual order, including bidi shaping and mirroring. Available outside

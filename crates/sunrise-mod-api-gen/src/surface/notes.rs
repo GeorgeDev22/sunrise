@@ -125,7 +125,8 @@ pub fn parse(file: &str, text: &str) -> Result<NoteFile, NoteError> {
     })
 }
 
-/// The `*.toml` files of `dir` by name, with their bytes; none when the folder is absent.
+/// The top-level `*.toml` files of `dir` by name, with their bytes; none when the folder is
+/// absent. Historical notes in `changes/history/` are not part of a pull request's diff.
 fn files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, NoteError> {
     let error = |file: &Path, e: std::io::Error| NoteError::Read {
         file: file.display().to_string(),
@@ -272,6 +273,12 @@ mod tests {
         std::fs::write(head.join("renamed.toml"), note("e", "moved")).unwrap();
         std::fs::write(base.join("before-rename.toml"), note("e", "moved")).unwrap();
         std::fs::write(head.join("README.md"), "not a note").unwrap();
+        std::fs::create_dir(head.join("history")).unwrap();
+        std::fs::write(
+            head.join("history/earlier-change.toml"),
+            note("point:game::old", "backfilled"),
+        )
+        .unwrap();
         let names = |found: Vec<NoteFile>| -> Vec<String> {
             found.into_iter().map(|n| n.note.file).collect()
         };

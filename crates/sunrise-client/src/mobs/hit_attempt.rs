@@ -36,9 +36,7 @@ impl Mob {
             || if self.species() == Species::Ghast && (flagged || reflected) {
                 self.removed || flagged
             } else {
-                self.removed
-                    || flagged
-                    || (source.is_fire() && self.kind.flags.fire_immune && !reflected)
+                self.removed || flagged || (source.is_fire() && self.fire_immune() && !reflected)
             };
         level.invulnerability_check(crate::health::Hurting::Mob(self, source), vanilla)
     }

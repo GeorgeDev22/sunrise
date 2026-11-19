@@ -633,7 +633,8 @@ impl Game<'_> {
                             .hub
                             .guests
                             .iter()
-                            .find(|g| g.conn == *conn && host.hub.here(g))?;
+                            .find(|g| g.conn == *conn && host.hub.here(g))
+                            .filter(|_| !self.player_tick_canceled(*conn))?;
                         (!self.lan_merchant_valid(g, id)).then_some((*conn, gm.window))
                     })
                     .collect()

@@ -109,7 +109,7 @@ class NightlyBuildSnapshotTests(unittest.TestCase):
                         optional.add(row["name"])
                 macs = {"macos", "macos-x64"} if repo == "sunrise-org/sunrise" else ({"macos-x64"} if kind == "snapshot" else set())
                 self.assertEqual(optional, {"windows-arm64", "linux-musl"} | macs)
-        self.assertEqual(game["jobs"]["linux-smoke"]["needs"], ["runner-configuration", "legs"])
+        self.assertEqual(game["jobs"]["linux-smoke"]["needs"], "legs")
         # A reusable workflow that ends failed or cancelled (an optional leg) passes back no outputs: signing and
         # publishing follow the legs job's build-complete marker, read by an ordinary job.
         self.assertNotIn("outputs", game["on"]["workflow_call"])

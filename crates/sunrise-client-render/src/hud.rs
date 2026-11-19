@@ -111,9 +111,19 @@ pub struct HudAtlas {
     /// A resource pack's own `core/rendertype_lines` shader for the block outline, translated;
     /// none draws the outline natively.
     pub lines_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    /// Its Polytone expression uniforms (`shader_modifiers`), resolved when it loaded.
+    pub lines_expressions: Vec<crate::polytone_post::ExpressionUniform>,
     /// The packs' `core/sky` and `core/stars`, when a pack replaces them.
     pub sky_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
     pub stars_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    /// Their Polytone expression uniforms, resolved when they loaded.
+    pub sky_expressions: Vec<crate::polytone_post::ExpressionUniform>,
+    pub stars_expressions: Vec<crate::polytone_post::ExpressionUniform>,
+    /// The packs' `core/lightmap` (with `core/screenquad`), when a pack replaces either stage.
+    pub lightmap_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    /// Its Polytone expression uniforms (`shader_modifiers`), resolved when it loaded: the
+    /// blocks its stages read, with their programs.
+    pub lightmap_expressions: Vec<crate::polytone_post::ExpressionUniform>,
     /// The packs' Polytone screen sprite modifiers.
     pub sprite_modifiers: std::sync::Arc<sprite_modifiers::SpriteModifiers>,
     /// The packs' OptiFine random entity textures, whose variants this atlas packs.
@@ -357,7 +367,7 @@ fn walk(source: &ResourceSource, directory: &str, out: &mut Vec<String>) {
             .filter(|name| name.ends_with(".png")),
     );
 }
-fn decode_resource(source: &ResourceSource, name: &str) -> Result<(u32, u32, Vec<u8>)> {
+pub(crate) fn decode_resource(source: &ResourceSource, name: &str) -> Result<(u32, u32, Vec<u8>)> {
     decode_bytes(&source.read(name)?)
 }
 /// A packed atlas image: sprite name, size and RGBA pixels.
@@ -378,7 +388,7 @@ fn strip_frame(pixels: &[u8], stride: u32, x: u32, y: u32, w: u32, h: u32) -> Ve
     out
 }
 /// The `animation` section of a texture's `.mcmeta`.
-fn animation_of(mcmeta: Option<&str>) -> Option<AnimationMetadata> {
+pub(crate) fn animation_of(mcmeta: Option<&str>) -> Option<AnimationMetadata> {
     let meta: serde_json::Value = crate::packs::first_json(mcmeta?.as_bytes()).ok()?;
     AnimationMetadata::from_json(&meta.get("animation")?.to_string()).ok()
 }
@@ -594,40 +604,131 @@ fn walked_minecraft_texture(name: &str) -> bool {
         .any(|folder| name.starts_with(folder) && name.as_bytes().get(folder.len()) == Some(&b'/'))
 }
 
-/// Sprites the atlas definitions (`atlases/*.json`) add beyond the texture
-/// files already packed: generated ones (`paletted_permutations` such as the
-/// armour trim sprites, `unstitch` regions) and files listed under another id,
-/// such as other namespaces' item textures; and the animated ones' names.
-fn atlas_sprites(root: &ResourceSource, packed: &[PackedImage]) -> (Vec<PackedImage>, Vec<String>) {
-    use crate::atlas_sources::{self, SpriteOrigin, unasked};
-    let have: std::collections::HashSet<&str> = packed.iter().map(|i| i.0.as_str()).collect();
-    let textures = atlas_sources::list_textures(root);
-    // Each new name with its origins in the atlases' order: the first that
-    // loads is the sprite. They load at once (a content pack's atlases list
-    // tens of thousands of files), and come out in the order a load of one
-    // after another would give.
-    let mut names: Vec<(String, Vec<(usize, SpriteOrigin)>)> = Vec::new();
-    let mut slots = std::collections::HashMap::new();
-    let mut order = 0;
-    for (atlas, sources) in atlas_sources::atlases(root) {
-        // The other atlases' renamed files (GUI sprites, particles...) are
-        // looked up by their texture paths here.
-        let item_models = atlas == "minecraft:blocks" || atlas == "minecraft:items";
-        for (id, origin) in atlas_sources::list(&sources, &textures, &mut unasked) {
-            if !item_models && matches!(origin, SpriteOrigin::File(_)) {
-                continue;
+/// Whether the file a walk packed under its own name tiles into its animation's frames.
+fn walked_frames_fit(root: &ResourceSource, texture: &str) -> bool {
+    let file = crate::atlas_sources::texture_resource(texture, "textures");
+    let mcmeta = root.read_to_string(&format!("{file}.mcmeta")).ok();
+    png_size(root, &file).is_some_and(|size| {
+        crate::atlas_sources::frames_fit(size, animation_of(mcmeta.as_deref()).as_ref())
+    })
+}
+/// What the atlas definitions (`atlases/*.json`) change in the texture files already packed:
+/// the sprites to add (generated ones such as the armour trim palettes and `unstitch` regions,
+/// and files listed under another id), the animated ones' names, and the packed names to drop.
+///
+/// A model's material is one finished sprite, the one the item masks resolve: the items atlas's
+/// first, then the blocks atlas's. The walked file of its name stands only when that is the
+/// winning origin; a rename, a cut or a palette replaces it, and a walked block or item texture
+/// no atlas keeps is dropped, as the model baker would find it missing.
+fn atlas_sprites(
+    root: &ResourceSource,
+    packed: &[PackedImage],
+) -> (
+    Vec<PackedImage>,
+    Vec<String>,
+    HashSet<String>,
+    HashMap<String, TextureFlags>,
+) {
+    use crate::atlas_sources::{self, Materials, SpriteOrigin};
+    let have: HashSet<&str> = packed.iter().map(|i| i.0.as_str()).collect();
+    let mut listed = atlas_sources::listed(root);
+    let materials = Materials::take(root, &mut listed);
+    let ids: Vec<&str> = materials.ids().into_iter().collect();
+    // Each id's winner, all at once: `None` where no origin finishes, `Some(None)` where the
+    // file already walked stands.
+    let winners: HashMap<&str, Option<Option<atlas_sources::Material>>> = ids
+        .iter()
+        .copied()
+        .zip(crate::par::par_map(&ids, |id| {
+            let name = id.strip_prefix("minecraft:").unwrap_or(id);
+            materials.resolve(id, |origin| match origin {
+                // The walked file stands if its frames tile it, as a finished sprite's do.
+                SpriteOrigin::File(texture)
+                    if texture == id && have.contains(name) && walked_frames_fit(root, texture) =>
+                {
+                    Some(None)
+                }
+                // A file under a walked folder is packed under its own name or was too large
+                // for the atlas: either way it is not added again.
+                SpriteOrigin::File(texture)
+                    if texture.strip_prefix("minecraft:") == Some(name)
+                        && walked_minecraft_texture(name) =>
+                {
+                    None
+                }
+                origin => atlas_sources::finish_origin(root, origin).map(Some),
+            })
+        }))
+        .collect();
+    let model_names: HashSet<&str> = winners
+        .keys()
+        .map(|id| id.strip_prefix("minecraft:").unwrap_or(id))
+        .collect();
+    let mut dropped = HashSet::new();
+    let mut out = Vec::new();
+    let mut animated = Vec::new();
+    let mut flags = HashMap::new();
+    if !materials.is_bare() {
+        for (name, ..) in packed {
+            let path = name.split_once(':').map_or(name.as_str(), |(_, p)| p);
+            let winner = winners
+                .get(atlas_sources::qualified(name).as_str())
+                .and_then(|w| w.as_ref());
+            let stands = matches!(winner, Some(None));
+            let replaced = matches!(winner, Some(Some(_)));
+            if replaced || (!stands && (path.starts_with("block/") || path.starts_with("item/"))) {
+                dropped.insert(name.clone());
             }
+        }
+        for (id, winner) in winners {
+            let Some(Some(material)) = winner else {
+                continue;
+            };
+            let name = id.strip_prefix("minecraft:").unwrap_or(id).to_owned();
+            let path = id.split_once(':').map_or(id, |(_, p)| p);
+            let image = match &material.resource {
+                Some(file) => {
+                    // Animated strips keep their first frame and animate, like the packed
+                    // files, under any folder: vanilla animates every sprite of these atlases
+                    // (a server pack's `wynn/...` as well as `item/...`).
+                    let mcmeta = root.read_to_string(&format!("{file}.mcmeta")).ok();
+                    let animation = material.animation.as_ref();
+                    if animation.is_some() {
+                        animated.push(name.clone());
+                    }
+                    // The winner's own render flags (blur, clamp), as the walk reads them.
+                    if let Some(texture_flags) =
+                        mcmeta.as_deref().and_then(TextureFlags::from_mcmeta)
+                    {
+                        flags.insert(name.clone(), texture_flags);
+                    }
+                    if animation.is_some()
+                        || path.starts_with("block/")
+                        || path.starts_with("item/")
+                    {
+                        first_frame(material.image, animation)
+                    } else {
+                        material.image
+                    }
+                }
+                None => material.image,
+            };
+            out.push((name, image.0, image.1, image.2));
+        }
+        out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    }
+    // The other atlases' generated sprites (GUI sprites, particles...), by the first origin
+    // that loads, in the atlases' order; they load at once (a content pack's atlases list
+    // tens of thousands of files).
+    let mut names: Vec<(String, Vec<SpriteOrigin>)> = Vec::new();
+    let mut slots = HashMap::new();
+    for (_, listing) in listed {
+        for (id, origin) in listing {
             let name = id.strip_prefix("minecraft:").unwrap_or(&id).to_owned();
-            if have.contains(name.as_str()) {
-                continue;
-            }
-            // A file under a walked folder is packed under its own name already:
-            // only a renamed one is new. Other namespaces' files (content mods)
-            // are never in those folders, nor are extra directories a pack adds
-            // to the blocks atlas (`custom/...`).
-            if let SpriteOrigin::File(texture) = &origin
-                && texture.strip_prefix("minecraft:") == Some(name.as_str())
-                && walked_minecraft_texture(name.as_str())
+            // A model's sprite is the model atlases' winner above, not another atlas's output.
+            if matches!(origin, SpriteOrigin::File(_))
+                || have.contains(name.as_str())
+                || model_names.contains(name.as_str())
             {
                 continue;
             }
@@ -635,55 +736,23 @@ fn atlas_sprites(root: &ResourceSource, packed: &[PackedImage]) -> (Vec<PackedIm
                 names.push((name, Vec::new()));
                 names.len() - 1
             });
-            names[slot].1.push((order, origin));
-            order += 1;
+            names[slot].1.push(origin);
         }
     }
-    let load = |texture: &str, directory: &str| {
-        decode_resource(root, &atlas_sources::texture_resource(texture, directory)).ok()
+    let load = |texture: &str| {
+        decode_resource(root, &atlas_sources::texture_resource(texture, "textures")).ok()
     };
-    let first = |(name, origins): &(String, Vec<(usize, SpriteOrigin)>)| {
-        origins.iter().find_map(|(order, origin)| {
-            let mut animated = false;
-            let image = match origin {
-                SpriteOrigin::File(texture) => {
-                    // Its path under `textures/` in any namespace (a server
-                    // pack's `lobby:item/...` as well as vanilla's).
-                    let path = texture.split_once(':').map_or(texture.as_str(), |(_, p)| p);
-                    let file = atlas_sources::texture_resource(texture, "textures");
-                    decode_resource(root, &file).ok().map(|image| {
-                        // Animated strips keep their first frame and animate, like the
-                        // packed files, under any folder: vanilla animates every sprite of
-                        // these atlases (a server pack's `wynn/...` as well as `item/...`).
-                        let mcmeta = root.read_to_string(&format!("{file}.mcmeta")).ok();
-                        let animation = animation_of(mcmeta.as_deref());
-                        animated = animation.is_some();
-                        if animated || path.starts_with("block/") || path.starts_with("item/") {
-                            first_frame(image, animation.as_ref())
-                        } else {
-                            image
-                        }
-                    })
-                }
-                generated => atlas_sources::generate(generated, &load),
-            };
-            image.map(|(w, h, pixels)| (*order, (name.clone(), w, h, pixels), animated))
+    out.extend(
+        crate::par::par_map(&names, |(name, origins)| {
+            origins
+                .iter()
+                .find_map(|origin| atlas_sources::generate(origin, &load))
+                .map(|(w, h, pixels)| (name.clone(), w, h, pixels))
         })
-    };
-    let mut out: Vec<_> = crate::par::par_map(&names, first)
         .into_iter()
-        .flatten()
-        .collect();
-    out.sort_unstable_by_key(|(order, ..)| *order);
-    let animated = out
-        .iter()
-        .filter(|(.., animated)| *animated)
-        .map(|(_, image, _)| image.0.clone())
-        .collect();
-    (
-        out.into_iter().map(|(_, image, _)| image).collect(),
-        animated,
-    )
+        .flatten(),
+    );
+    (out, animated, dropped, flags)
 }
 /// `MissingTextureAtlasSprite`: what a sprite the atlas lacks draws as.
 pub const MISSING_SPRITE: &str = "sunrise/missing";
@@ -867,21 +936,24 @@ impl HudAtlas {
     /// The atlas of a resource root that layers packs over `defaults` (the
     /// game's own resources), whose textures give the sprites' GUI sizes.
     pub fn build_over(root: &ResourceSource, defaults: &ResourceSource) -> Result<Self> {
-        Self::build_over_with_dynamic_textures(root, defaults, false)
+        Self::build_over_with_dynamic_textures(root, defaults, defaults, false)
     }
     /// The atlas above, with the pool of slots for client mods' dynamic textures
     /// (`dynamic_textures::DYNAMIC_TEXTURE_SLOTS` of each class, 10.5 MiB of texels) only when
     /// `pool` says a client mod is loaded, native or wasm: a game without mods packs no slot
-    /// and its atlas does not grow.
+    /// and its atlas does not grow. `game` is the game's own resources, without the packs: a
+    /// pack's core shader (text, block outline, sky, stars, lightmap) is one that differs from
+    /// the game's, so a `root` given as its own `game` loads none.
     pub fn build_over_with_dynamic_textures(
         root: &ResourceSource,
         defaults: &ResourceSource,
+        game: &ResourceSource,
         pool: bool,
     ) -> Result<Self> {
         let mut atlas = Self::pack(root, defaults, WALKED_TEXTURE_FOLDERS, true, pool)?;
         atlas.dynamic_texture_pool =
             dynamic_textures::Pool::take(&mut atlas.sprites, atlas.width, atlas.height);
-        pack_text::load_shaders(&mut atlas, root, defaults);
+        pack_text::load_shaders(&mut atlas, root, game);
         atlas.sprite_modifiers = std::sync::Arc::new(sprite_modifiers::SpriteModifiers::read(
             root,
             atlas.sprites.keys(),
@@ -961,8 +1033,13 @@ impl HudAtlas {
             glint_armor: (Vec::new(), 1, 1),
             text_shaders: Default::default(),
             lines_shader: None,
+            lines_expressions: Vec::new(),
             sky_shader: None,
             stars_shader: None,
+            sky_expressions: Vec::new(),
+            stars_expressions: Vec::new(),
+            lightmap_shader: None,
+            lightmap_expressions: Vec::new(),
             sprite_modifiers: Default::default(),
             random_textures: Default::default(),
             emissive: Arc::default(),
@@ -1031,8 +1108,13 @@ impl HudAtlas {
             white,
             text_shaders: Default::default(),
             lines_shader: None,
+            lines_expressions: Vec::new(),
             sky_shader: None,
             stars_shader: None,
+            sky_expressions: Vec::new(),
+            stars_expressions: Vec::new(),
+            lightmap_shader: None,
+            lightmap_expressions: Vec::new(),
             sprite_modifiers: Default::default(),
             random_textures: Default::default(),
             emissive: Default::default(),
@@ -1331,9 +1413,15 @@ impl HudAtlas {
         }
         let mut cit_names = HashSet::new();
         if full {
-            let (more, more_animated) = atlas_sprites(root, &images);
+            let (more, more_animated, dropped, more_flags) = atlas_sprites(root, &images);
+            images.retain(|image| !dropped.contains(&image.0));
+            flags.retain(|name, _| !dropped.contains(name));
+            gui_sizes.retain(|name, _| !dropped.contains(name));
+            maps.retain(|name, _| !dropped.contains(name));
+            animated.retain(|name| !dropped.contains(name));
             images.extend(more);
             animated.extend(more_animated);
+            flags.extend(more_flags);
             for (image, image_flags, is_animated) in cit_sprites(root, &images) {
                 cit_names.insert(image.0.clone());
                 if let Some(f) = image_flags {
@@ -1459,7 +1547,10 @@ impl HudAtlas {
             } else {
                 format!("minecraft:{name}")
             };
-            let Ok(layer) = loaded.insert(&id) else {
+            // A block or item sprite as its atlas finishes it; the other atlases' are files.
+            let Ok(layer) = loaded.try_insert(&id).or_else(|_| {
+                loaded.insert_file(&crate::atlas_sources::texture_resource(&id, "textures"))
+            }) else {
                 continue;
             };
             let Some(animation) = loaded.animations.iter().find(|a| a.layer == layer).cloned()
@@ -1531,8 +1622,13 @@ impl HudAtlas {
             glint_armor,
             text_shaders: Default::default(),
             lines_shader: None,
+            lines_expressions: Vec::new(),
             sky_shader: None,
             stars_shader: None,
+            sky_expressions: Vec::new(),
+            stars_expressions: Vec::new(),
+            lightmap_shader: None,
+            lightmap_expressions: Vec::new(),
             sprite_modifiers: Default::default(),
             random_textures,
             emissive,
@@ -3072,6 +3168,141 @@ mod coverage_tests;
 
 #[cfg(test)]
 mod tests {
+    /// A scratch tree with a 2 x 1 sheet (an opaque red texel, then a transparent green one) and
+    /// the two atlas definitions.
+    fn model_atlas_root(tag: &str, items: &str, blocks: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("sunrise-hud-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let textures = root.join("assets/demo/textures/item");
+        let atlases = root.join("assets/minecraft/atlases");
+        std::fs::create_dir_all(&textures).unwrap();
+        std::fs::create_dir_all(&atlases).unwrap();
+        let mut encoder = png::Encoder::new(
+            std::fs::File::create(textures.join("sheet.png")).unwrap(),
+            2,
+            1,
+        );
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[255, 0, 0, 255, 0, 255, 0, 0])
+            .unwrap();
+        std::fs::write(atlases.join("items.json"), items).unwrap();
+        std::fs::write(atlases.join("blocks.json"), blocks).unwrap();
+        root
+    }
+    fn cut(sprite: &str, x: u8) -> String {
+        format!(
+            r#"{{"sources":[{{"type":"minecraft:unstitch","resource":"demo:item/sheet","divisor_x":2,
+            "regions":[{{"sprite":"{sprite}","x":{x},"y":0,"width":1,"height":1}}]}}]}}"#
+        )
+    }
+    /// A model's material is the items atlas's cut when it has one: it replaces both the blocks
+    /// atlas's cut and the walked file of that name, which is dropped from the pack.
+    #[test]
+    fn the_items_atlas_cut_replaces_a_packed_file_and_the_blocks_cut() {
+        let root = model_atlas_root(
+            "cut-wins",
+            &cut("demo:item/cut", 1),
+            &cut("demo:item/cut", 0),
+        );
+        let packed = vec![("demo:item/cut".to_owned(), 1, 1, vec![9, 9, 9, 9])];
+        let (images, _, dropped, _) =
+            atlas_sprites(&ResourceSource::directory(root.clone()), &packed);
+        assert_eq!(
+            images,
+            [("demo:item/cut".to_owned(), 1, 1, vec![0, 255, 0, 0])]
+        );
+        assert_eq!(dropped, HashSet::from(["demo:item/cut".to_owned()]));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    /// A walked file whose animation frames can't tile it does not stand: as the item mask does,
+    /// the pack takes the blocks atlas's sprite of the id instead.
+    #[test]
+    fn a_walked_file_with_unfitting_frames_gives_way_to_the_blocks_cut() {
+        let items =
+            r#"{"sources":[{"type":"minecraft:single","resource":"minecraft:item/target"}]}"#;
+        let root = model_atlas_root("unfitting", items, &cut("minecraft:item/target", 1));
+        let textures = root.join("assets/minecraft/textures/item");
+        std::fs::create_dir_all(&textures).unwrap();
+        // A file the HUD walk really packs: 1 x 1, declaring frames 2 wide.
+        write_strip(
+            &textures.join("target.png"),
+            1,
+            1,
+            &[[9, 9, 9, 9]],
+            Some(r#"{"animation":{"width":2}}"#),
+        );
+        let atlas = HudAtlas::build(&ResourceSource::directory(root.clone())).unwrap();
+        let rect = atlas.sprites["item/target"];
+        assert_eq!(rect.texels((atlas.width, atlas.height)), (1, 1));
+        assert_eq!(texel_at(&atlas, rect, 0, 0), [0, 255, 0, 0]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    /// The winning renamed file's own render flags come with its pixels, and another atlas's
+    /// output of a model id does not replace the model atlases' winner.
+    #[test]
+    fn a_winner_carries_its_flags_and_no_other_atlas_replaces_it() {
+        let items = r#"{"sources":[
+            {"type":"minecraft:single","resource":"demo:item/sheet","sprite":"demo:item/blurred"}]}"#;
+        let root = model_atlas_root("flags", items, &cut("demo:item/cut", 0));
+        std::fs::write(
+            root.join("assets/demo/textures/item/sheet.png.mcmeta"),
+            r#"{"texture":{"blur":true,"clamp":true},"animation":{"width":1,"height":1}}
+// High Contrast pack signature"#,
+        )
+        .unwrap();
+        // The GUI atlas cuts the other quadrant under the id the blocks atlas cuts.
+        std::fs::write(
+            root.join("assets/minecraft/atlases/gui.json"),
+            cut("demo:item/cut", 1),
+        )
+        .unwrap();
+        let atlas = HudAtlas::build(&ResourceSource::directory(root.clone())).unwrap();
+        assert_eq!(
+            texel_at(&atlas, atlas.sprites["demo:item/cut"], 0, 0),
+            [255, 0, 0, 255],
+            "the blocks atlas's quadrant, not the GUI atlas's"
+        );
+        let rect = atlas.sprites["demo:item/blurred"];
+        assert_eq!(rect.texels((atlas.width, atlas.height)), (1, 1));
+        assert_eq!(texel_at(&atlas, rect, 0, 0), [255, 0, 0, 255]);
+        assert_eq!(
+            atlas.flags["demo:item/blurred"],
+            TextureFlags {
+                blur: true,
+                clamp: true,
+            }
+        );
+        let (_, animation) = atlas
+            .sprite_animations
+            .iter()
+            .find(|(r, _)| r.u0 == rect.u0 && r.v0 == rect.v0)
+            .expect("the renamed sprite animates");
+        assert_eq!(animation.frame_count(), 2);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    /// The items atlas keeps the walked file of its name; the blocks atlas's lower cut of that
+    /// name adds nothing and drops nothing. A walked item texture neither atlas lists is dropped.
+    #[test]
+    fn a_walked_file_the_items_atlas_keeps_stands_and_an_unlisted_one_goes() {
+        let items = r#"{"sources":[{"type":"minecraft:single","resource":"demo:item/kept"}]}"#;
+        let root = model_atlas_root("walked", items, &cut("demo:item/kept", 0));
+        let textures = root.join("assets/demo/textures/item");
+        std::fs::copy(textures.join("sheet.png"), textures.join("kept.png")).unwrap();
+        let packed = vec![
+            ("demo:item/kept".to_owned(), 1, 1, vec![9, 9, 9, 9]),
+            ("item/unlisted".to_owned(), 1, 1, vec![8, 8, 8, 8]),
+            ("gui/not_a_model".to_owned(), 1, 1, vec![7, 7, 7, 7]),
+        ];
+        let (images, _, dropped, _) =
+            atlas_sprites(&ResourceSource::directory(root.clone()), &packed);
+        assert_eq!(images, []);
+        assert_eq!(dropped, HashSet::from(["item/unlisted".to_owned()]));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
     use super::*;
 
     #[test]
@@ -3124,10 +3355,11 @@ mod tests {
             Path::new("/nonexistent/sunrise-test-assets").to_path_buf(),
         );
         let plain = HudAtlas::build(&root).unwrap();
-        let without = HudAtlas::build_over_with_dynamic_textures(&root, &root, false).unwrap();
+        let without =
+            HudAtlas::build_over_with_dynamic_textures(&root, &root, &root, false).unwrap();
         assert!(plain.dynamic_texture_pool.is_none() && without.dynamic_texture_pool.is_none());
         assert_eq!((without.width, without.height), (plain.width, plain.height));
-        let with = HudAtlas::build_over_with_dynamic_textures(&root, &root, true).unwrap();
+        let with = HudAtlas::build_over_with_dynamic_textures(&root, &root, &root, true).unwrap();
         let pool = with.dynamic_texture_pool.as_ref().expect("the pool");
         assert_eq!(pool.slots(), dynamic_textures::DYNAMIC_TEXTURE_SLOTS);
         assert!(

@@ -95,7 +95,7 @@ inventory is `{"mods":[]}`. The supervisor's `GET /api/v1/mods` uses this query,
 
 ```toml
 [transfer]
-enabled = false              # true: take a proxy's player-* requests; needs Velocity forwarding (forwarding.secret)
+enabled = false              # true: take a proxy's player-* requests; refused at start since Velocity forwarding was removed
 expect_seconds = 10          # how long a player the proxy announced is waited for, when it names no time
 max_expect_seconds = 60      # the longest the proxy may ask for
 max_expected = 64            # players waited for at once
@@ -110,10 +110,9 @@ with vanilla's `accepts-transfers`, which is about the transfer packet a server 
 every `player-*` request and `transfer-status` are answered `{"error": "transfers are off on this server"}`, the
 engine keeps no table and does nothing for transfers on a tick.
 
-With it on, the engine refuses to start unless Velocity forwarding is on (`forwarding.secret`,
-[velocity-forwarding.md](velocity-forwarding.md)). The proxy must be the only way in: a player who joined a
-source server directly would find there the older copy of itself that a hand-over left behind, and items would
-double.
+With it on, the engine refuses to start. The proxy must be the only way in: a player who joined a source server
+directly would find there the older copy of itself that a hand-over left behind, and items would double. Velocity
+forwarding made sure of that, and Sunrise no longer has it.
 
 **Who can ask.** The requests do not widen who can reach the engine: they use the control endpoint, a Unix socket
 or TCP on 127.0.0.1 only (sunrise-server starts it on TCP with a token). A proxy on another machine needs
@@ -358,7 +357,7 @@ byte of the hand-over, calls `player-drop` and the target is as it was. A proxy 
 player that is dropped by itself after `max_hold_seconds`, with a warning in the log.
 
 **A hand-over, in order.** A proxy moving a player from server A to server B, without a loading screen. Both run
-with `[transfer]` on and behind the proxy's Velocity forwarding:
+with `[transfer]` on:
 
 1. `player-expect <uuid>` on B: B holds the player's next login.
 2. `player-export <uuid> freeze` on A: the record and its `handover` id, and A stops acting on the player's inputs.
@@ -576,39 +575,18 @@ restart_on_crash = true
 
 [backups]
 every = "6h"                 # automatic backups while the server runs: 30m, 6h, 1d...; "0" turns them off
-keep = 12                    # automatic backups kept (backups made by hand are never deleted)
+keep = 12                    # 1–1000 automatic backups kept (backups made by hand are never deleted)
+                             # Fix an invalid value directly here: config set must load this file first.
 
 [updates]
 keep = 1                     # other releases kept by updates, besides the one in use and the one rollback goes to
 ```
 
 This is the file `init` writes today, and it also writes `[panel]` (`bind = "127.0.0.1:8130"` and
-`allow_public = false`, section 6), `[api]`, `[transfer]` (off; a proxy's hand-overs, section 2) and `[discord]`. `[entities]` (mob AI far from players, off) is written only when set ([hosting](hosting.md)). The defaults are vanilla 26.3's (a test checks
+`allow_public = false`, section 6), `[api]`, `[transfer]` (off; a proxy's hand-overs, section 2) and `[discord]`. The defaults are vanilla 26.3's (a test checks
 each one). Unknown keys are errors, as are a typed key set again under `[properties]` and values vanilla would
 refuse. There is no `backups.before_update` setting: an update always backs up the world first (section 7).
 
-- **`[entities]`: villagers that cannot move.** Not vanilla, so off. `villager_lobotomize = true` makes the
-  engine skip the brain of a villager that is *stuck*, and `villager_lobotomize_check_interval = 100` (ticks)
-  is how often each villager is rechecked (staggered by id). The game reads the section itself, and
-  `init` leaves it out until it is set. A villager is stuck when it rides something, or when the cells it can walk to
-  (a free block at its height, down a fall of up to 3, or one block up with room above; beds and slabs count as
-  cells it can step onto) number at most 6 and no door villagers open leads out. So a 1×1 cell, a 1×2 cell with a bed, or a
-  pocket with a workstation are stuck whatever covers the head; a room of 3×3, open ground, or a cell with a door
-  are not; a sleeping villager never is. A stuck villager skips its brain (sensors,
-  behaviours, schedule, gossip spreading, sleep, farming, breeding, panic, point-of-interest searches) and
-  keeps gravity, damage, despawning, trading with its XP and level-ups, and its trades. Its job site
-  stays: while it would work (ticks 2000 to 9000 of the day) it restocks as `WorkAtPoi` does, every 300 ticks with a
-  workstation still there, at most twice a day. When the cell opens, the next recheck gives it its brain
-  back. A villager that was never free does not claim a job site or a bed.
-- **Entity collision cap (`[entities] max_collisions`).** Off (0) is vanilla. In a crowded pen every mob pushes
-  every mob it overlaps each tick, so the work grows with the square of the crowd (about 8 ms a tick on a
-  79-player server with crowded chicken farms). `max_collisions = N` (not in the file until you add it) makes a
-  mob push at most N other mobs per tick. The pushes a mob receives count as well: a mob that has had N this
-  tick is skipped by the others, and the counts start again every tick. The mobs pushed are the first N in
-  vanilla's order, so the result is the same from run to run. `max_entity_cramming` still counts every entity
-  in the box before the cap applies, so cramming damage is vanilla's. It covers mobs pushing mobs: players,
-  boats and minecarts push as in vanilla. It reaches the game as `SUNRISE_MAX_ENTITY_COLLISIONS`, at the next
-  start; with the setting at 0 a variable already in the server's environment still applies.
 - **Import.** `sunrise-server init` in a folder with a `server.properties`, or `sunrise-server import
   server.properties`, reads it with vanilla's own parser (`ServerProperties`). Keys with typed fields go into
   their sections; any other key that differs from vanilla's default goes into `[properties]`. Keys left at

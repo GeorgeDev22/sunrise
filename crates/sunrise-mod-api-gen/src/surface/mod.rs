@@ -1,9 +1,11 @@
 //! The surface export: `surface.json` ([`mod_surface::Surface`]) from what the build parses. Hooks
 //! come from the catalog, with their arguments from the generated event types; trait roles,
 //! sides and "Not on wasm" from the wire index; everything else from a walk of the public items
-//! of `sunrise-mod-api` and the vocabulary it re-exports.
+//! of `sunrise-mod-api` and the vocabulary it re-exports. The optional engine audit uses the
+//! same point, loop and internal collectors as SDK source staging.
 pub mod behaviours;
 pub(crate) mod calls;
+mod engine;
 mod expand;
 pub mod extension_tags;
 pub mod notes;
@@ -213,31 +215,36 @@ impl Export {
     }
 }
 
-/// Exports the surface of the source tree at `root`, with each record's `call` name.
+/// Optional work for the source-tree export.
+#[derive(Default)]
+pub struct ExportOptions {
+    /// Omit `call` names on the old side of a comparison, which may predate their declarations.
+    pub without_calls: bool,
+    /// Collect injection points and published loops in addition to the stable API.
+    pub with_points_and_loops: bool,
+    /// Audit the full engine catalogs, including listed internals.
+    pub with_internals: bool,
+}
+
+/// Exports the stable mod API of the source tree at `root`, as shipped by the SDK.
 pub fn export(root: &Path) -> Result<Export, String> {
-    export_with(root, true)
+    export_with(root, ExportOptions::default())
 }
 
-/// Exports the surface of a tree that predates the call names, so records carry none: the old
-/// side of a comparison across the change that introduced them. A tree this reads that does
-/// declare how every type crosses is exported by [`export`].
-pub fn export_without_calls(root: &Path) -> Result<Export, String> {
-    export_with(root, false)
-}
-
-fn export_with(root: &Path, calls: bool) -> Result<Export, String> {
+/// Exports the source tree at `root` with the requested options.
+pub fn export_with(root: &Path, options: ExportOptions) -> Result<Export, String> {
     // The wire index's resolver recurses through the API's types: give it a deep stack.
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(64 << 20)
-            .spawn_scoped(scope, || export_here(root, calls))
+            .spawn_scoped(scope, || export_here(root, options))
             .map_err(|e| e.to_string())?
             .join()
             .map_err(|_| "the surface export panicked".to_string())?
     })
 }
 
-fn export_here(root: &Path, named: bool) -> Result<Export, String> {
+fn export_here(root: &Path, options: ExportOptions) -> Result<Export, String> {
     let catalog = Catalog::load(root).map_err(|e| e.to_string())?;
     let generated = crate::sources(root, crate::FillMode::Require)?;
     let included = [
@@ -251,13 +258,25 @@ fn export_here(root: &Path, named: bool) -> Result<Export, String> {
     // A listed boundary trait an older tree lacks is noted by `Roles::resolve`, not refused.
     let mut wire = crate::wire::surface_reading(root, &with_providers, Some(&mut Vec::new()))?;
     let boundary = Boundary::from_wire(&wire);
-    let calls = if named {
-        Some(crate::wire::exported_calls(&mut wire, &catalog.hooks)?)
+    let engine = if options.with_points_and_loops || options.with_internals {
+        // Resolve the point types before the call export changes the index, as staging does.
+        let point_types = crate::wire::point_types(&mut wire)?;
+        Some(crate::source::with_walk_cache(|| {
+            engine::collect(root, &point_types, options.with_internals)
+        })?)
     } else {
         None
     };
+    let calls = if options.without_calls {
+        None
+    } else {
+        Some(crate::wire::exported_calls(&mut wire, &catalog.hooks)?)
+    };
     let mut index = wire.types.index;
     let mut export = build(root, &mut index, &catalog.hooks, &boundary)?;
+    if let Some(engine) = engine {
+        export.surface = export.surface.with_engine_items(engine);
+    }
     if let Some(calls) = &calls {
         name_calls(&mut export.surface, calls);
     }

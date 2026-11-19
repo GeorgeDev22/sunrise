@@ -158,6 +158,41 @@ fn registration_refuses_vanilla_and_duplicate_effect_parts() {
     assert!(errors.iter().any(|error| error.contains("owner:comfort")));
 }
 
+#[test]
+fn registration_refuses_malformed_effect_key_distinctly_from_duplicate() {
+    struct Registration;
+    #[mod_api::__subscriptions]
+    impl Hooks for Registration {
+        fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+            let part = Cadence::<2> {
+                package: "owner",
+                trace: Arc::new(Mutex::new(Vec::new())),
+            };
+            let invalid = r.effect_key("Bad Id");
+            assert_eq!(
+                r.mob_effect_part(&invalid, part),
+                Err(MobEffectPartError::InvalidKey { effect: invalid })
+            );
+        }
+    }
+    let errors = install_parts(
+        &[ModEntry::new("owner", Box::new(Registration))],
+        &crate::parts::tests::rule_schema(),
+        |_| false,
+    )
+    .unwrap_err();
+    assert_eq!(
+        errors,
+        [
+            "mod owner: invalid registry key \"minecraft:Bad Id\"",
+            &format!(
+                "mod owner attached {} to an invalid effect key",
+                std::any::type_name::<Cadence<2>>()
+            ),
+        ]
+    );
+}
+
 struct World;
 impl Host for World {}
 crate::impl_host_areas!(World);

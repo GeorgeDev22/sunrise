@@ -101,7 +101,7 @@ impl Game<'_> {
         }
     }
 
-    fn registry_sync(&self) -> Option<Arc<SyncData>> {
+    pub(super) fn registry_sync(&self) -> Option<Arc<SyncData>> {
         self.native_lifecycle.epoch()?;
         if !self.is_logical_server() {
             return None;

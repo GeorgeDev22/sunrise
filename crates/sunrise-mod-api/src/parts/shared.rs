@@ -53,6 +53,8 @@ pub struct PartRegistrar {
     pub(crate) attachment_uses: Vec<(String, String, String)>,
     pub(crate) attachment_types: HashMap<String, HashMap<String, bool>>,
     pub(crate) custom_stats: Vec<String>,
+    /// The entity types each named to `entity_tick_each`, in order: `None` for every type.
+    pub(crate) entity_tick_each: Vec<Option<String>>,
     pub(crate) mod_id: &'static str,
     pub(crate) mod_index: usize,
     /// Whether the registering mod was loaded as a wasm module.
@@ -113,6 +115,7 @@ impl PartRegistrar {
             attachment_uses: Vec::new(),
             attachment_types: HashMap::new(),
             custom_stats: Vec::new(),
+            entity_tick_each: Vec::new(),
             mod_id,
             mod_index: 0,
             mod_wasm: false,
@@ -317,6 +320,7 @@ pub(crate) fn install_registrar(
         game_rule_categories: registrar.game_rule_categories,
         attachment_types: registrar.attachment_types,
         custom_stats: registrar.custom_stats,
+        entity_tick_each: mod_vocab::__private::EntityTickEach::of(&registrar.entity_tick_each),
         keys: registrar.parts,
         tags: registrar.tags,
         block_entity_types: registrar.block_entity_types,

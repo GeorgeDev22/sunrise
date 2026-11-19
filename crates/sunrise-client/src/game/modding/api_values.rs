@@ -480,7 +480,7 @@ pub(crate) trait TryIntoEngine<Context: ?Sized = Items> {
     fn try_into_engine(&self, context: &Context) -> Result<Self::Engine, Self::Error>;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StackReadError {
     UnknownItem,
     Empty,
@@ -878,7 +878,7 @@ fn encode_stack(
         damage: value.damage(),
         extra,
     };
-    content_declarations::validate_decoded_effects(patch.as_ref(), &stack)?;
+    content_declarations::validate_decoded_components(patch.as_ref(), &stack)?;
     Ok(stack)
 }
 

@@ -369,22 +369,23 @@ impl Game<'_> {
             }
         }
         let index = slot as usize;
-        if block_entity.items.get(index).and_then(Option::as_ref) == stack.as_ref() {
+        if block_entity.items.get(index).and_then(Option::as_ref) == stack.as_ref()
+            && !block_entity.has_opaque_item_slot(index)
+        {
             return Ok(false);
         }
         // A slot of a list already its full length: the journal keeps that slot, not the
         // entity's whole saved data. A list still to grow is kept whole, length and all.
         if index < block_entity.items.len() {
             self.journal_block_entity_slot(key, index);
-            self.edit_mod_block_entity(key, |block_entity| block_entity.items[index] = stack);
+            self.edit_mod_block_entity(key, |block_entity| {
+                *block_entity.item_slot_mut(index).unwrap() = stack;
+            });
             return Ok(true);
         }
         self.write_mod_block_entity(key, |block_entity| {
-            let items = &mut block_entity.items;
-            if items.len() < slots {
-                items.resize(slots, None);
-            }
-            items[index] = stack;
+            block_entity.items.resize(slots, None);
+            *block_entity.item_slot_mut(index).unwrap() = stack;
         });
         Ok(true)
     }
@@ -691,7 +692,7 @@ fn loaded_payload(old: &Tag, payload: &Tag, replace: bool) -> Tag {
 
 /// A mod's data payload as the block entity takes it: without the fields the engine owns, which
 /// are its identity and position, and its published shapes (`set_shapes` alone writes those).
-fn mod_payload(mut data: Compound) -> Compound {
+pub(in crate::game) fn mod_payload(mut data: Compound) -> Compound {
     for field in ["id", "x", "y", "z", sunrise_client::containers::SHAPES_KEY] {
         data.remove(&field.into());
     }
@@ -877,7 +878,7 @@ mod tests {
     use mod_api::HostTransaction;
     use mod_api::ServerHost;
     use std::sync::Arc;
-    use sunrise_client::{chunk::Chunk, lan::menu::Slots};
+    use sunrise_client::{chunk::Chunk, containers::ModBlockEntityFields, lan::menu::Slots};
     use sunrise_world::registry::BlockStateId;
 
     #[test]
@@ -983,7 +984,14 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn retained_handles_reject_replacements_and_rollback_restores_identity() {
-        use super::super::native_entity_refs::tests::with_game;
+        use super::super::native_entity_refs::tests::{run_fresh_cases, with_game};
+        if run_fresh_cases(
+            "game::native_block_entity_refs::tests::retained_handles_reject_replacements_and_rollback_restores_identity",
+            "SUNRISE_RETAINED_HANDLES_CHILD",
+            &["holder"],
+        ) {
+            return;
+        }
         with_game(|game| {
             game.options.dedicated = Some(Vec::new());
             game.world
@@ -994,12 +1002,14 @@ mod tests {
             let holder = || {
                 BlockEntity::Mod(Box::new(ModBlockEntity::new(
                     "test:holder".into(),
-                    Default::default(),
+                    ModBlockEntityFields {
+                        nbt: compound("{count:3}"),
+                        ..Default::default()
+                    },
                 )))
             };
             game.world.block_entities.insert(pos, holder());
             let original = game.block_entity(level, [1, 64, 1]).unwrap();
-            assert_eq!(original.merge_data(game, compound("{count:3}")), Ok(true));
             game.with_level(|_, host, ticks| {
                 let wrapped = super::super::mod_api_host::LevelTicks::new(&*host, ticks);
                 assert_eq!(

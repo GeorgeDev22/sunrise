@@ -358,6 +358,15 @@ fn sent_actions(
     game: &Game<'_>,
     server: &mut sunrise_protocol::connection::Connection,
 ) -> Vec<(&'static str, i32)> {
+    let mut actions = sent_packets(game, server);
+    actions.retain(|(kind, _)| *kind != "swing");
+    actions
+}
+
+fn sent_packets(
+    game: &Game<'_>,
+    server: &mut sunrise_protocol::connection::Connection,
+) -> Vec<(&'static str, i32)> {
     use sunrise_protocol::packets::{configuration::Ping, play::Serverbound as S};
     // An attack can already have queued Punch. Fence with a distinct packet so
     // that attack's swing cannot terminate observation before the following use.
@@ -367,9 +376,11 @@ fn sent_actions(
         let (id, payload) = server.recv().unwrap();
         match S::decode(id, &payload).unwrap() {
             S::Attack(hit) => actions.push(("attack", hit.id)),
-            S::Interact(hit) => actions.push(("interact", hit.id)),
+            S::Interact(hit) if hit.hand == 0 => actions.push(("interact", hit.id)),
+            S::Interact(hit) => actions.push(("interact_off", hit.id)),
             S::UseItem(_) => actions.push(("item", 0)),
             S::UseItemOn(hit) => actions.push(("block", hit.pos[0])),
+            S::Punch(_) => actions.push(("swing", 0)),
             S::Pong(ping) if ping.id == i32::MIN => return actions,
             _ => {}
         }
@@ -542,6 +553,114 @@ fn attack_range_pick_outside_interact_range_falls_through_to_item_use() {
     }
 }
 
+/// A cushion the stored pick selected, spawned where `with_pick_game` puts an
+/// entity and raised to the player's eye so the look ray crosses it.
+fn with_picked_cushion(
+    run: impl FnOnce(&mut Game<'_>, &mut sunrise_protocol::connection::Connection, CrosshairTarget),
+) {
+    let selected = Arc::new(Mutex::new(None));
+    let mods = vec![mod_api::ModEntry::new(
+        "pick",
+        Box::new(SelectedPick(selected.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_pick_game("minecraft:cushion", 2.5, |game, server| {
+            game.cushions.update(0, |c| c.position.y = 2.5);
+            game.inventory[0] = Some(sunrise_client::items::ItemStack::new("minecraft:stick", 1));
+            let stone = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:stone")
+                .unwrap();
+            game.world.set(3, 2, 0, stone).unwrap();
+            let target = CrosshairTarget::Entity {
+                entity: game.entity(31).unwrap(),
+                point: [2.5, 2.6, 0.5],
+            };
+            *selected.lock().unwrap() = Some(target);
+            run(game, server, target)
+        })
+    });
+}
+
+/// The cushion's position comes off the wire as raw doubles. A NaN there
+/// leaves it no box: the click is refused, never a panic in the reach check.
+#[test]
+#[ignore = "daily"]
+fn a_click_on_a_cushion_at_a_non_finite_position_is_refused() {
+    with_picked_cushion(|game, server, target| {
+        game.cushions.update(0, |c| c.position.x = f64::NAN);
+        game.refresh_client_pick(1.0);
+        assert_eq!(game.crosshair_target(), Some(target));
+        game.remote_use(mod_api::InteractionAttempt::Press);
+        assert!(
+            !sent_actions(game, server)
+                .iter()
+                .any(|(kind, _)| *kind == "interact"),
+            "a cushion without a box is not interacted with"
+        );
+    });
+}
+
+/// `Minecraft.startUseItem` on a free cushion in the crosshair: the click is
+/// the cushion's (`Cushion.interact` answers CONSUME on a client), so exactly
+/// one main-hand Interact goes out and nothing reaches the block behind it, the
+/// held item or the arm.
+#[test]
+#[ignore = "daily"]
+fn a_free_cushion_takes_the_click_and_sends_one_interact() {
+    with_picked_cushion(|game, server, target| {
+        game.refresh_client_pick(1.0);
+        assert_eq!(game.crosshair_target(), Some(target));
+        game.remote_use(mod_api::InteractionAttempt::Press);
+        assert_eq!(sent_packets(game, server), [("interact", 31)]);
+    });
+}
+
+/// `Cushion.interact` passes when anything already sits on it, whatever kind
+/// of entity the server lists as its passenger: the click goes on to the item.
+#[test]
+#[ignore = "daily"]
+fn a_click_on_a_cushion_with_a_synced_passenger_passes_to_the_item() {
+    use sunrise_protocol::packets::play::{self, Clientbound as C};
+    with_picked_cushion(|game, server, target| {
+        game.refresh_client_pick(1.0);
+        assert_eq!(game.crosshair_target(), Some(target));
+        game.handle_packet(C::SetPassengers(play::SetPassengers {
+            vehicle: 31,
+            passengers: vec![77],
+        }))
+        .unwrap();
+        game.remote_use(mod_api::InteractionAttempt::Press);
+        let actions = sent_actions(game, server);
+        assert!(
+            actions.contains(&("item", 0)),
+            "an occupied cushion does not consume the click: {actions:?}"
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_click_on_a_free_cushion_while_sneaking_passes_to_the_item() {
+    with_picked_cushion(|game, server, target| {
+        game.set_sent_sneak_for_test();
+        game.refresh_client_pick(1.0);
+        assert_eq!(game.crosshair_target(), Some(target));
+        game.remote_use(mod_api::InteractionAttempt::Press);
+        let packets = sent_packets(game, server);
+        assert!(packets.contains(&("item", 0)), "{packets:?}");
+        assert!(
+            !packets
+                .iter()
+                .any(|(kind, _)| matches!(*kind, "block" | "swing")),
+            "{packets:?}"
+        );
+    });
+}
+
 struct CountPicks(Arc<Mutex<Vec<f32>>>);
 #[mod_api::__subscriptions]
 impl Hooks for CountPicks {
@@ -636,6 +755,59 @@ fn paused_ticks_pick_and_the_frame_can_overwrite_the_tick_target() {
             );
             assert_eq!(*calls.lock().unwrap(), [1.0, 1.0, 0.0]);
         })
+    });
+}
+
+struct OverwriteOrigin;
+#[mod_api::__subscriptions]
+impl Hooks for OverwriteOrigin {
+    fn client_pick(&self, _: &mut dyn ClientHost, event: &mut ClientPickEvent<'_>) {
+        event.origin = [0.0; 3];
+    }
+}
+
+struct RecordOrigins(Arc<Mutex<Vec<[f64; 3]>>>);
+#[mod_api::__subscriptions]
+impl Hooks for RecordOrigins {
+    fn client_pick(&self, _: &mut dyn ClientHost, event: &mut ClientPickEvent<'_>) {
+        self.0.lock().unwrap().push(event.origin);
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn pick_origin_is_the_eye_used_for_each_pick_and_isolated_per_listener() {
+    use sunrise_core::geometry::Vec3;
+    let origins = Arc::new(Mutex::new(Vec::new()));
+    let mods = vec![
+        mod_api::ModEntry::new("a_overwrite", Box::new(OverwriteOrigin)),
+        mod_api::ModEntry::new("b_record", Box::new(RecordOrigins(origins.clone()))),
+    ]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_pick_game("minecraft:pig", 10.0, |game, _| {
+            let player_eye = f64::from(game.player.as_ref().unwrap().dimensions.eye_height);
+            game.previous_position = Vec3::new(4.5, 5.0, 8.5);
+            game.refresh_client_pick(1.0);
+            game.refresh_client_pick(0.25);
+
+            let mob = game.mobs.iter_mut().find(|mob| mob.id == 31).unwrap();
+            mob.previous = Vec3::new(6.0, 4.0, -1.5);
+            let mob_eye = f64::from(mob.eye_height() as f32);
+            game.remote_set_camera(31);
+            assert_eq!(game.remote_camera_id(), Some(31));
+            game.refresh_client_pick(0.25);
+
+            assert_eq!(
+                *origins.lock().unwrap(),
+                [
+                    [0.5, 1.0 + player_eye, 0.5],
+                    [3.5, 4.0 + player_eye, 6.5],
+                    [7.0, 3.5 + mob_eye, -1.0],
+                ],
+                "a listener receives the sampled camera eye, not a prior listener's edit"
+            );
+        });
     });
 }
 

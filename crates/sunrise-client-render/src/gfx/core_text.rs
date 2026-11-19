@@ -56,19 +56,24 @@ impl super::Renderer {
         );
     }
 
+    /// The vanilla `Globals` block a pack's core shaders read this frame.
+    pub(super) fn pack_globals(&self, frame: &super::Frame) -> [u8; 48] {
+        let globals = crate::post_chain::Globals {
+            glint_alpha: frame.glint_alpha,
+            ..frame.post_effects.globals
+        };
+        let size = [self.config.width, self.config.height];
+        globals.bytes(size, frame.post_effects.menu_blur_radius as i32)
+    }
+
     pub(super) fn pack_blocks(
         &self,
         frame: &super::Frame,
         fog: [f32; 4],
         ends: [f32; 4],
     ) -> PackBlocks {
-        let globals = crate::post_chain::Globals {
-            glint_alpha: frame.glint_alpha,
-            ..frame.post_effects.globals
-        };
-        let size = [self.config.width, self.config.height];
         PackBlocks {
-            globals: globals.bytes(size, frame.post_effects.menu_blur_radius as i32),
+            globals: self.pack_globals(frame),
             fog: [fog[0], fog[1], fog[2], fog[3], ends[0], ends[1]],
         }
     }

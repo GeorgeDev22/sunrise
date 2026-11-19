@@ -16,12 +16,11 @@ run-name: ${{ inputs.kind == 'snapshot' && format('snapshot build {0}', inputs.b
 #   pushes the merge as nightly/build-<date>-<n> and saves the set on the nightly-state branch.
 # - This file, game-build.yml and every script below run from main's copy: every dispatch names --ref main, and
 #   `uses: ./…` takes the caller's commit. A picked pull request's own .github/ is never read.
-# - `build` (game-build.yml, `trusted: false`) never reaches a release's tools: its macOS jobs run on the runner
-#   that also runs by-hand game tools, never the release runner; its Rust cache has its own key and is
-#   never saved; and releases don't read the machine's shared sccache.
+# - `build` (game-build.yml, `trusted: false`) never reaches a release's tools: its legs build on fresh Blacksmith
+#   (or GitHub) machines; its Rust cache has its own key and is never saved; and releases don't read the machine's
+#   shared sccache.
 # - `build` (game-build.yml) checks out and compiles the merge with no secrets: its token reads contents only and
-#   isn't kept in the checkout; the macOS programs are signed ad hoc (Developer ID needs the runner's keychain,
-#   which stays locked for nightlies).
+#   isn't kept in the checkout; the macOS programs are signed ad hoc (`developer_id: false`: no Developer ID).
 # - `sign` is the only job with RELEASE_SIGNING_KEY. It checks out nothing but main's tools/ci/sign_release.sh, which
 #   runs the runner's sha256sum and OpenSSL over the archives: it hashes them, never runs them. The signed message
 #   names the channel ("horizon release nightly"), so a nightly's signature can't pass for a release's.
@@ -221,7 +220,7 @@ jobs:
       nightly: ${{ needs.pick.outputs.nightly }}
       kind: ${{ inputs.kind }}
       developer_id: false
-      trusted: false  # it can hold unreviewed pull requests: their own cache key, never saved, not the release runner
+      trusted: false  # it can hold unreviewed pull requests: their own cache key, never saved
 
   # Whether every required leg built, from the `build-complete` marker game-build.yml's legs job uploads. build's
   # result is `failure` or `cancelled` whenever an optional leg failed, timed out or got no runner, and a reusable

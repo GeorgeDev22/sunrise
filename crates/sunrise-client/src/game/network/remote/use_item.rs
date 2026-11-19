@@ -58,22 +58,7 @@ impl Game<'_> {
             }
             // `BucketItem.emptyContents` / evaporate: `playSound(player, …)` on
             // this client; the server leaves the actor out (#4684).
-            for (pos, sound, volume, pitch) in sounds {
-                let at = [
-                    f64::from(pos.x) + 0.5,
-                    f64::from(pos.y) + 0.5,
-                    f64::from(pos.z) + 0.5,
-                ];
-                let name = if sound.contains(':') {
-                    sound.to_string()
-                } else {
-                    format!("minecraft:{sound}")
-                };
-                self.play_client_local_sound(
-                    LevelSound::new(&name, at, volume, pitch)
-                        .in_source(mod_api::SoundSource::Blocks),
-                );
-            }
+            self.play_predicted_sounds(&sounds);
             // BucketItem.use's SUCCESS (SwingSource.CLIENT) on this client.
             if succeeded {
                 self.with_hand(hand, Game::swing_arm);

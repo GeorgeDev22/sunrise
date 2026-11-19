@@ -4,7 +4,9 @@ Exports the surface of the merge base and of the checked-out tree with the head'
 writes the classified report to the job summary. The base comes from the event: on `pull_request` the checkout is
 GitHub's merge commit, whose first parent is the base; on a dispatch with `pr`, GitHub's compare API gives the merge
 base of that pull request's head and its base branch. Only that one commit is fetched (`--depth 1`), and only its
-`crates/` and `tools/layering` are unpacked.
+`Cargo.toml`, `crates/` and `tools/layering` are unpacked. The engine catalogs are read from source; the workspace
+manifest resolves inherited dependencies for crates with injection points. CI compares points and loops, not
+listed internals. To audit internals too, use --with-internals; --trees BASE HEAD accepts local source trees.
 
 It passes when the base cannot be found or fetched, or when the head's tool cannot read
 the base tree (a change to the declaration format), saying so in one line. It fails for a new change note that names
@@ -12,6 +14,8 @@ an id that did not change or cannot be read, and, with `gate = true` in tools/ci
 change no new note names.
 """
 
+from argparse import ArgumentParser
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import subprocess
@@ -71,7 +75,8 @@ def git(*args: str) -> str:
 
 def unpack(sha: str, into: Path) -> None:
     git("fetch", "-q", "--no-tags", "--depth", "1", "origin", sha)
-    archive = subprocess.Popen(["git", "archive", sha, "crates", "tools/layering"], cwd=ROOT, stdout=subprocess.PIPE)
+    archive = subprocess.Popen(["git", "archive", sha, "Cargo.toml", "crates", "tools/layering"],
+                               cwd=ROOT, stdout=subprocess.PIPE)
     subprocess.run(["tar", "-x", "-C", str(into)], stdin=archive.stdout, check=True)
     if archive.wait() != 0:
         raise subprocess.CalledProcessError(archive.returncode, "git archive")
@@ -82,20 +87,31 @@ def last_line(text: str) -> str:
     return lines[-1] if lines else "no message"
 
 
-def report(tool: str, base: Path, head: Path, work: Path, gate_on: bool) -> tuple[int, str]:
+def report(tool: str, base: Path, head: Path, work: Path, gate_on: bool, *,
+           with_internals: bool = False) -> tuple[int, str]:
     """Exports both trees at once, diffs them; (exit code, report text)."""
     # The base's records may predate the call names: its export names none (`--without-calls`),
     # which no comparison reads.
-    exports = {name: subprocess.Popen([tool, "surface", str(tree), str(work / f"{name}.json"), *flags],
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-               for name, tree, flags in (("base", base, ["--without-calls"]), ("head", head, []))}
-    results = {name: process.communicate() for name, process in exports.items()}
+    catalogs = "--with-internals" if with_internals else "--with-points-and-loops"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        # Drain both subprocesses' diagnostics while they run so a full pipe cannot stall an export.
+        exports = {name: pool.submit(subprocess.run,
+                                    [tool, "surface", str(tree), str(work / f"{name}.json"), *flags, catalogs],
+                                    capture_output=True, text=True)
+                   for name, tree, flags in (("base", base, ["--without-calls"]), ("head", head, []))}
     # This tree failing is a broken generator, which no other step would catch; the base failing
     # is an older tree this tool cannot read, which is no fault of the pull request.
-    if exports["head"].returncode != 0:
-        return 1, f"The surface export of this tree failed: {last_line(results['head'][1])}.\n"
-    if exports["base"].returncode != 0:
-        return 0, f"No surface report: the head's sunrise-stage cannot read the base tree ({last_line(results['base'][1])}).\n"
+    head_export, base_export = exports["head"].result(), exports["base"].result()
+    if head_export.returncode != 0:
+        return 1, f"The surface export of this tree failed: {last_line(head_export.stderr)}.\n"
+    if base_export.returncode != 0:
+        return 0, f"No surface report: the head's sunrise-stage cannot read the base tree ({last_line(base_export.stderr)}).\n"
+    return compare(tool, base, head, work, gate_on, with_internals=with_internals)
+
+
+def compare(tool: str, base: Path, head: Path, work: Path, gate_on: bool, *,
+            with_internals: bool) -> tuple[int, str]:
+    """Run the gate on the exported documents and the trees' change notes."""
     command = [tool, "surface-diff", str(work / "base.json"), str(work / "head.json"),
                "--notes", str(head / NOTES), "--base-notes", str(base / NOTES), "--json", str(work / "diff.json")]
     if gate_on:
@@ -105,8 +121,9 @@ def report(tool: str, base: Path, head: Path, work: Path, gate_on: bool) -> tupl
     base_schema = f"{work / 'base.json'}: surface schema "
     if diff.returncode == 2 and base_schema in diff.stderr:
         return 0, f"No surface report: the head's sunrise-stage cannot read the base surface ({last_line(diff.stderr)}).\n"
-    text = diff.stdout + diff.stderr
-    return (0 if diff.returncode == 0 else 1), text
+    scope = "" if with_internals else (
+        "CI does not compare listed internals; use surface_report.py --with-internals for a local audit.\n")
+    return (0 if diff.returncode == 0 else 1), scope + diff.stdout + diff.stderr
 
 
 def summary(text: str) -> str:
@@ -127,25 +144,35 @@ def summary(text: str) -> str:
     return head + text + foot
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    parser = ArgumentParser(description="Compare mod API surfaces and published engine catalogs.")
+    parser.add_argument("--with-internals", action="store_true", help="include advisory listed-internal changes")
+    parser.add_argument("--trees", nargs=2, metavar=("BASE", "HEAD"), type=Path,
+                        help="compare two local source trees instead of fetching the CI base")
+    args = parser.parse_args(argv)
     started = time.monotonic()
     tool = os.environ["SUNRISE_STAGE_TOOL"]
     gate_on = gate(ROOT / "tools/ci/surface.toml")
     with tempfile.TemporaryDirectory(dir=os.environ.get("RUNNER_TEMP")) as directory:
         work = Path(directory)
-        try:
-            sha, why = base_commit(os.environ.get("EVENT", ""), os.environ.get("PR", ""), git, github_api)
-            if sha:
-                (work / "base").mkdir()
-                unpack(sha, work / "base")
-        except (OSError, subprocess.CalledProcessError, KeyError, ValueError) as error:
-            sha, why = None, f"the base could not be fetched: {error}"
-        if sha:
-            fetched = time.monotonic() - started
-            code, text = report(tool, work / "base", ROOT, work, gate_on)
-            text += f"Base {sha}; fetch {fetched:.1f}s, total {time.monotonic() - started:.1f}s\n"
+        if args.trees:
+            base, head = args.trees
+            code, text = report(tool, base, head, work, gate_on, with_internals=args.with_internals)
         else:
-            code, text = 0, f"No surface report: {why}.\n"
+            base = work / "base"
+            try:
+                sha, why = base_commit(os.environ.get("EVENT", ""), os.environ.get("PR", ""), git, github_api)
+                if sha:
+                    base.mkdir()
+                    unpack(sha, base)
+            except (OSError, subprocess.CalledProcessError, KeyError, ValueError) as error:
+                sha, why = None, f"the base could not be fetched: {error}"
+            if sha:
+                fetched = time.monotonic() - started
+                code, text = report(tool, base, ROOT, work, gate_on, with_internals=args.with_internals)
+                text += f"Base {sha}; fetch {fetched:.1f}s, total {time.monotonic() - started:.1f}s\n"
+            else:
+                code, text = 0, f"No surface report: {why}.\n"
     print(text, end="")
     if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary_path, "a") as out:

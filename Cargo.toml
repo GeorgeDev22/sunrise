@@ -37,8 +37,7 @@ members = [
     "crates/sunrise-items",
     "crates/sunrise-server-files",
     "crates/sunrise-java-properties",
-    "crates/sunrise-anticheat",
-    "crates/sunrise-chat-filter",
+    "crates/sunrise-deflate",
     # The Model Context Protocol, shared by sunrise-ctl, sunrise-server and the launcher.
     "crates/sunrise-mcp",
     "crates/sunrise-server",
@@ -53,6 +52,7 @@ members = [
     "crates/sunrise-perf-format",
     "crates/sunrise-perf",
     "crates/sunrise-perf-share",
+    "crates/sunrise-perf-overlay",
     "crates/sunrise-friends",
     "crates/sunrise-relay",
     "crates/sunrise-mod-package",

@@ -185,9 +185,13 @@ pub(in crate::game) fn dynamic_texture_pool() -> bool {
 }
 
 impl UiResources {
-    /// The resolved resource generation, including the base layer and pack filters.
+    /// The resolved resource generation, including the base layer and pack filters, over the
+    /// game's own resources at `vanilla` (which tell the packs' core shaders from the game's).
     /// Its splash pool is empty until `with_splashes`.
-    pub fn load(root: &sunrise_assets::resource_source::ResourceSource) -> Result<Self> {
+    pub fn load(
+        root: &sunrise_assets::resource_source::ResourceSource,
+        vanilla: &Path,
+    ) -> Result<Self> {
         // The title screen waits for both: the panorama's six faces decode
         // beside the atlas.
         std::thread::scope(|scope| {
@@ -197,8 +201,9 @@ impl UiResources {
                 })
             });
             let pool = dynamic_texture_pool();
+            let game = sunrise_assets::resource_source::ResourceSource::directory(vanilla.into());
             let atlas = startup::time("ui.atlas", || {
-                HudAtlas::build_over_with_dynamic_textures(root, root, pool)
+                HudAtlas::build_over_with_dynamic_textures(root, root, &game, pool)
             });
             let panorama = panorama
                 .join()
@@ -356,6 +361,7 @@ impl PackResources {
             data_source: root.data().clone(),
             data_changes: root.data_changes().clone(),
             additional_data: Arc::from([]),
+            mod_layers: root.mod_layers().clone(),
             names: Arc::new(names),
             clouds: Arc::new(clouds),
             forcefield: Arc::new(forcefield),

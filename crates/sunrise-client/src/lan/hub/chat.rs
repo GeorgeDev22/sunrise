@@ -231,15 +231,6 @@ impl Hub {
                 message.content
             )));
         }
-        // The chat filter (docs/chat-filter.md): after the chain took the message, before anyone sees it.
-        if !self.chat_allowed(
-            i,
-            &[&message.content],
-            super::chat_filter::Place::Chat,
-            events,
-        ) {
-            return;
-        }
         let bound = play::ChatTypeBound {
             chat_type: self.chat_type,
             name: self.player_display_name(uuid, &name),
@@ -433,31 +424,6 @@ impl Hub {
                 overlay: false,
             }),
         );
-    }
-
-    /// A chat line as a player who is on, disguised: no signature, named as the player is shown,
-    /// to the players who show chat (a mod's character or a bot's line). `message` is the
-    /// component. False when the player isn't on.
-    pub fn chat_as(&self, uuid: u128, message: Tag) -> bool {
-        let Some(name) = self
-            .guests
-            .iter()
-            .find(|g| g.placed && g.uuid == uuid)
-            .map(|g| g.name.clone())
-        else {
-            return false;
-        };
-        let bound = play::ChatTypeBound {
-            chat_type: self.chat_type,
-            name: self.player_display_name(uuid, &name),
-            target: None,
-        };
-        for k in 0..self.guests.len() {
-            if self.guests[k].placed {
-                self.send_disguised(k, message.clone(), bound.clone());
-            }
-        }
-        true
     }
 
     /// collectSignedArguments, or collectUnsignedArguments when the client

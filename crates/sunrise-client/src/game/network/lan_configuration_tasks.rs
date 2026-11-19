@@ -55,8 +55,16 @@ impl Game<'_> {
                 });
                 request.session.register(tasks);
             }
-            let sessions = self.lan.as_mut()?.hub.lan.configuration_tasks.running();
-            for (connection, session) in sessions {
+            let mut after = None;
+            while let Some((connection, session)) = self
+                .lan
+                .as_mut()?
+                .hub
+                .lan
+                .configuration_tasks
+                .next_running(after)
+            {
+                after = Some(connection);
                 while let Some(turn) = session.turn() {
                     self.configuration_callback(&session, |game| {
                         if turn.start {
@@ -68,7 +76,8 @@ impl Game<'_> {
                                 &turn.task_type,
                                 &mut finished,
                             );
-                            if finished {
+                            // A listener may also have called `finish` itself: one completion.
+                            if finished && !session.finished() {
                                 let _ = session.finish(&turn.task_type);
                             }
                         }

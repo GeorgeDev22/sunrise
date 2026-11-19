@@ -33,27 +33,30 @@ fn a_client_reads_the_light_of_its_level() {
             game.level_brightness(level, LightLayer::Sky, [16, -60, 0]),
             None
         );
-        assert_eq!(
-            game.level_can_see_sky(level, lit),
-            None,
-            "that read stays on the server"
-        );
+        assert_eq!(level.can_see_sky(game, lit), Some(false));
         game.remote.as_mut().unwrap().logged_in = false;
         assert_eq!(game.level_brightness(level, LightLayer::Block, lit), None);
     });
 }
 
-/// The restricted level shares the handle's support/sky reads without loading chunks.
+/// A client's restricted level and handle read its local support and light without loading chunks.
 #[test]
 #[ignore = "daily"]
 fn restricted_level_support_and_sky_reads() {
+    use super::native_entity_refs::tests::with_client_game;
     use mod_api::{BlockFace, LevelHost, SupportType};
     use std::sync::Arc;
     use sunrise_client::chunk::{Chunk, Light};
+    use sunrise_protocol::connection::Pipe;
     mod_platform::testing::with_mods(Default::default(), || {
-        with_game(|game| {
-            game.options.dedicated = Some(Vec::new());
+        with_client_game(|game| {
+            let (client, _server) = Pipe::pair();
+            game.connect_local(client, "SupportReadTest").unwrap();
+            game.remote.as_mut().unwrap().logged_in = true;
             let pos = [3, -60, 5];
+            let unloaded = [32, -60, 5];
+            // Beyond the top light padding of the Overworld, not a block position.
+            let above = [3, game.world.shape.max_y() + 16, 5];
             let mut chunk = Chunk::empty(0, 0);
             Arc::make_mut(&mut chunk.sections[0]).light = Light::Uniform(0xF0);
             game.world.chunks.insert((0, 0), Arc::new(chunk));
@@ -64,6 +67,14 @@ fn restricted_level_support_and_sky_reads() {
                 .default_state("minecraft:stone")
                 .unwrap();
             game.world.set(pos[0], pos[1], pos[2], stone).unwrap();
+            let level = game.native_client_level().unwrap();
+            assert_eq!(
+                level.block_face_sturdy(game, pos, BlockFace::Up, SupportType::Full),
+                Some(true)
+            );
+            assert_eq!(level.can_see_sky(game, pos), Some(true));
+            assert_eq!(level.can_see_sky(game, above), Some(true));
+            assert_eq!(level.can_see_sky(game, unloaded), Some(true));
             game.with_level(|_, level, _| {
                 for support in [SupportType::Full, SupportType::Center, SupportType::Rigid] {
                     assert_eq!(
@@ -75,18 +86,30 @@ fn restricted_level_support_and_sky_reads() {
                         Some(false)
                     );
                     assert_eq!(
-                        level.block_face_sturdy([32, -60, 5], BlockFace::Up, support),
+                        level.block_face_sturdy(unloaded, BlockFace::Up, support),
                         None
                     );
                 }
+                assert_eq!(
+                    level.block_face_sturdy(above, BlockFace::Up, SupportType::Full),
+                    None
+                );
                 assert_eq!(level.can_see_sky(pos), Some(true));
-                assert_eq!(level.can_see_sky([32, -60, 5]), None);
-                assert_eq!(level.can_see_sky([3, -1000, 5]), None);
+                assert_eq!(level.can_see_sky(unloaded), Some(true));
+                assert_eq!(level.can_see_sky(above), Some(true));
             });
-            assert!(!game.world.loaded(32, 5));
-            // The read-only level host refuses support and sky queries on clients.
-            game.options.dedicated = None;
-            game.options.execution_role = ExecutionRole::Client;
+            // A dimension type with the same range but no sky layer cannot see the sky.
+            game.world.shape.sky_light = false;
+            assert_eq!(level.can_see_sky(game, above), Some(false));
+            game.with_level(|_, level, _| assert_eq!(level.can_see_sky(above), Some(false)));
+            assert!(!game.world.loaded(unloaded[0], unloaded[2]));
+            // A view without a live client level still refuses, even with a column in memory.
+            game.remote.as_mut().unwrap().logged_in = false;
+            assert_eq!(level.can_see_sky(game, pos), None);
+            assert_eq!(
+                level.block_face_sturdy(game, pos, BlockFace::Up, SupportType::Rigid),
+                None
+            );
             game.with_level(|_, level, _| {
                 assert_eq!(
                     level.block_face_sturdy(pos, BlockFace::Up, SupportType::Rigid),

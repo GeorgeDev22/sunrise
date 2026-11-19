@@ -67,6 +67,7 @@ pub type Mods = Arc<[ModEntry]>;
 
 pub(crate) struct Installed {
     pub(crate) mods: Mods,
+    by_id: std::collections::HashMap<&'static str, usize>,
     pub(crate) subscribers: sunrise_mod_runtime::subscribers::Subscribers,
     pub(crate) disabled: Box<[std::sync::atomic::AtomicBool]>,
     mod_id_owners: std::collections::HashMap<&'static str, usize>,
@@ -116,6 +117,11 @@ impl Installed {
             .map(|(index, entry)| (entry.id, index))
             .collect();
         Self {
+            by_id: mods
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| (entry.id, i))
+                .collect(),
             mods,
             subscribers,
             disabled,
@@ -376,6 +382,31 @@ pub(crate) fn entered_subscribers(
     })
 }
 
+/// Whether this thread is outside `World`, where a Host call can be refused: the generated
+/// dispatch reads it once and runs its listeners through [`refusable`] only then.
+#[inline]
+pub(crate) fn outside_world() -> bool {
+    crate::world::phase::current_phase() != crate::world::phase::ModPhase::World
+}
+
+/// Runs a listener's call. With `contained` (outside `World`) a Host call the phase gate refuses
+/// comes back as `Err`, and the caller answers as a refused wasm call does; otherwise it is the
+/// plain call.
+#[inline]
+pub(crate) fn refusable<T>(
+    contained: bool,
+    call: impl FnOnce() -> T,
+) -> Result<T, crate::world::phase_refusal::PhaseRefusal> {
+    if contained {
+        crate::world::phase_refusal::contain_refusal(
+            crate::content::crash::current_native_mod().unwrap_or("unknown"),
+            call,
+        )
+    } else {
+        Ok(call())
+    }
+}
+
 pub(crate) fn mark_mod(id: &'static str, hook: &'static str) -> crate::content::crash::ModGuard {
     crate::content::crash::enter_native_mod(crate::content::crash::ModCall {
         id,
@@ -506,6 +537,20 @@ pub(crate) fn listening(
                 )
             })
     })
+}
+
+/// Look up the enabled subscriber owning a namespaced kind without walking the hook's listeners.
+pub(crate) fn listening_kind_owner(hook: HookId, kind: &str) -> Option<&'static ModEntry> {
+    let (namespace, _) = kind.split_once(':')?;
+    let installed = installed()?;
+    let &index = installed.by_id.get(namespace)?;
+    if !installed.subscribers.contains(hook as usize, index)
+        || installed.disabled[index].load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return None;
+    }
+    bump_listener_serial();
+    Some(&installed.mods[index])
 }
 
 /// Marks the thread as inside `entry`'s `hook` until the guard drops, and hands back its hooks.

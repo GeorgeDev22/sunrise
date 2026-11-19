@@ -33,9 +33,26 @@ pub const WASM: &str = "mod.wasm";
 pub const MAX_USES: u64 = mod_surface::uses::MAX_USES_BYTES as u64;
 /// The content manifest API this build loads.
 pub const API: &str = "0.2";
+
+fn api() -> String {
+    API.to_owned()
+}
 /// Namespaces no mod may claim: vanilla's, the convention tags' (mods add
 /// to those, docs/modding/src/how-to/content-mods.md) and the game's own.
 const RESERVED_NAMESPACES: [&str; 3] = ["minecraft", "c", "sunrise"];
+/// Ids no mod or pack may take: the mod site's own pages under `/mods/` (a project's page is
+/// `/mods/<id>`), and the names of the pages below an id. The site's routes are checked against
+/// this list on its side.
+pub const RESERVED_IDS: [&str; 7] = [
+    "account",
+    "edit",
+    "index",
+    "mine",
+    "policy",
+    "registry-page",
+    "submit",
+];
+
 /// A mod's saved settings, shared by native mods and modpack overrides.
 pub const STORAGE_DIR: &str = ".sunrise-mod-data";
 /// wasm32's whole address space in MiB (4 GiB): the most a mod may declare in `wasm_memory_mib`,
@@ -46,13 +63,61 @@ pub const MAX_WASM_MEMORY_MIB: u32 = 4096;
 /// Maximum manifest bytes accepted by package readers and developer tools.
 pub const MAX_MANIFEST: u64 = 32 << 20;
 
+/// The most source files (`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/**`, the root notices) a
+/// package selects: as many as its content files, so a port laid out one file per class fits.
+pub const MAX_SOURCE_FILES: usize = crate::content::MAX_FILES;
+/// The most bytes those source files take, unpacked.
+pub const MAX_SOURCE_BYTES: u64 = 64 << 20;
+
+/// A mod's version as semver, padding an omitted minor and patch (`1` is `1.0.0`, `1.2` is
+/// `1.2.0`). Pre-release and build metadata are allowed.
+pub fn parse_version(version: &str) -> Result<semver::Version, String> {
+    // Only the `major.minor.patch` core is padded: the dots of a pre-release (`1-rc.1`) or build part
+    // after a `-` or `+` belong to it.
+    let (core, suffix) = version.split_at(version.find(['-', '+']).unwrap_or(version.len()));
+    let padded = match core.matches('.').count() {
+        0 => format!("{core}.0.0{suffix}"),
+        1 => format!("{core}.0{suffix}"),
+        _ => version.to_owned(),
+    };
+    semver::Version::parse(&padded).map_err(|_| {
+        format!(
+            "version {version:?} is not a semver version (MAJOR.MINOR.PATCH, e.g. 3.6.30+refabricated)"
+        )
+    })
+}
+
+/// The first build-metadata identifier of the placeholder a port gives a jar version it could not
+/// read as semver (`0.0.0+unresolved.<the jar's text>`).
+pub const UNRESOLVED_BUILD: &str = "unresolved";
+
+/// Whether `version` is such a placeholder. Dependency resolution never lets one satisfy a
+/// requirement, since semver matching ignores build metadata and `*` or `=0.0.0` would accept it;
+/// it stays refused until someone sets the real version by hand. Any other `0.0.0` is a real version.
+pub fn is_unresolved(version: &semver::Version) -> bool {
+    version.major == 0
+        && version.minor == 0
+        && version.patch == 0
+        && version.pre.is_empty()
+        && version.build.split('.').next() == Some(UNRESOLVED_BUILD)
+}
+
+fn version_from_str<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<semver::Version, D::Error> {
+    let version = String::deserialize(deserializer)?;
+    parse_version(&version).map_err(serde::de::Error::custom)
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// `[a-z0-9_]`, 1 to 64 characters: the mod's folder, log and settings key.
     pub id: String,
     pub name: String,
-    pub version: String,
+    /// Semver, read once here: omitted minor and patch are padded ([`parse_version`]).
+    #[serde(deserialize_with = "version_from_str")]
+    pub version: semver::Version,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -72,10 +137,14 @@ pub struct Manifest {
     /// Where to report problems, the Mods screen's Issues button.
     #[serde(default)]
     pub issues: Option<String>,
-    /// The content API line: `0.2`.
+    /// The content API line; the tool writes it into the packed package. Absent, it is [`API`].
+    #[serde(default = "api")]
     pub api: String,
     #[serde(default)]
     pub side: Side,
+    /// What the mod adds, as the Mods screen and the registry list it; the tool writes it into the
+    /// packed package. Absent, it is [`Capability::derived`].
+    #[serde(default = "Capability::derived")]
     pub capabilities: Vec<Capability>,
     /// Namespaces besides `id` that the mod's `assets/` and `data/` use, for
     /// a content mod whose files sit under other names than its id (Towns
@@ -237,7 +306,10 @@ impl Rule {
 pub struct Native {
     pub game: String,
     pub sunrise: String,
-    pub mixins: String,
+    /// The horizon-mixins revision, when the mod pins one itself: absent, it is the one the pinned
+    /// SDK names (see [`Native::mixins_or`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mixins: Option<String>,
     /// Source-level edits of game functions, native only: the one form that compiles game code.
     #[serde(default)]
     pub mixin: Vec<mixin::Mixin>,
@@ -252,6 +324,14 @@ pub struct Native {
     /// Slots of published game loops, native only (`mod_api::loops`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub r#loop: Vec<loops::Loop>,
+}
+
+impl Native {
+    /// The horizon-mixins revision this mod builds with: its own `mixins` pin, else `sdk`, the
+    /// revision the pinned SDK names (`sdk.json`'s `mixins`).
+    pub fn mixins_or<'a>(&'a self, sdk: &'a str) -> &'a str {
+        self.mixins.as_deref().unwrap_or(sdk)
+    }
 }
 
 /// One declared game internal, as listed in the pinned game's `internals.json`.
@@ -295,6 +375,12 @@ pub enum Capability {
     Registries,
 }
 impl Capability {
+    /// What a package's capabilities are when its manifest does not say: the one label every
+    /// package has carried (the Mods screen and the registry list read it), so every reader sees
+    /// the same value as before.
+    pub fn derived() -> Vec<Capability> {
+        vec![Capability::Registries]
+    }
     /// What the player reads before turning the mod on: "May <this>".
     pub fn describe(self) -> &'static str {
         match self {
@@ -359,6 +445,62 @@ impl Internal {
     }
 }
 
+/// A manifest's TOML error in the tool's words: no caret box, the missing field with a line to add,
+/// an unknown field with the nearest valid key when one is a few edits away.
+fn toml_error(text: &str, e: &toml::de::Error) -> String {
+    let message = e.message();
+    let line = e
+        .span()
+        .map(|span| text[..span.start.min(text.len())].matches('\n').count() + 1);
+    let at = line.map_or(String::new(), |line| format!(" (line {line})"));
+    let quoted = |after: &str| -> Option<String> {
+        let rest = message.strip_prefix(after)?;
+        Some(rest.split('`').next()?.to_owned())
+    };
+    if let Some(field) = quoted("missing field `") {
+        let example = match field.as_str() {
+            "id" => "id = \"my_mod\"".to_owned(),
+            "name" => "name = \"My Mod\"".to_owned(),
+            "version" => "version = \"0.1.0\"".to_owned(),
+            "game" => "game = \"26.3\"".to_owned(),
+            "sunrise" => "sunrise = \"<the 40-character game build commit>\"".to_owned(),
+            other => format!("{other} = …"),
+        };
+        return format!("{MANIFEST}: the field {field} is missing; add {example}");
+    }
+    if let Some(field) = quoted("unknown field `") {
+        let nearest = message
+            .split("expected ")
+            .nth(1)
+            .into_iter()
+            .flat_map(|list| list.split('`').skip(1).step_by(2))
+            .map(|key| (edit_distance(&field, key), key))
+            .min()
+            .filter(|(distance, key)| *distance <= (key.len() / 3).clamp(1, 2));
+        let hint = nearest.map_or(String::new(), |(_, key)| format!("; did you mean `{key}`?"));
+        return format!("{MANIFEST}: {message}{at}{hint}");
+    }
+    format!("{MANIFEST}: {message}{at}")
+}
+
+/// The number of single-character edits between two keys.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, x) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, y) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(x != *y))
+                .min(above + 1)
+                .min(row[j] + 1);
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
 impl Manifest {
     pub fn parse(text: &str) -> Result<Self, String> {
         let both = || {
@@ -415,7 +557,7 @@ impl Manifest {
             if native_alone {
                 wasm_loop().unwrap_or_else(both)
             } else {
-                format!("{MANIFEST}: {e}")
+                toml_error(text, &e)
             }
         })?;
         inject::Inject::check_all(&m.inject, &m.id, m.native.is_some() || m.wasm.is_some())
@@ -446,6 +588,12 @@ impl Manifest {
         if m.runtime.is_some() && m.native.is_none() && m.wasm.is_none() {
             return Err(format!(
                 "{MANIFEST}: a content mod has no code, so no [runtime]"
+            ));
+        }
+        if RESERVED_IDS.contains(&m.id.as_str()) {
+            return Err(format!(
+                "{MANIFEST}: id {:?} is a page of the mod site, so no mod can be published under it: pick another id",
+                m.id
             ));
         }
         if reserved_mod_id(&m.id) {
@@ -601,10 +749,9 @@ impl Manifest {
                     ));
                 }
             }
-            if m.version.is_empty()
-                || native.game.is_empty()
+            if native.game.is_empty()
                 || !revision(&native.sunrise)
-                || !revision(&native.mixins)
+                || native.mixins.as_deref().is_some_and(|m| !revision(m))
             {
                 return Err(format!(
                     "{MANIFEST}: native requires game and exact revisions"
@@ -613,7 +760,7 @@ impl Manifest {
         }
         if m.api != API {
             return Err(format!(
-                "unsupported content API {}; this Sunrise reads {API}",
+                "unsupported content API {}; this Sunrise reads {API}: delete the api line, the tool writes it",
                 m.api
             ));
         }
@@ -637,8 +784,19 @@ impl Manifest {
             ));
         }
         if m.capabilities != [Capability::Registries] {
+            let names = |list: &[Capability]| {
+                format!(
+                    "[{}]",
+                    list.iter()
+                        .map(|c| format!("\"{c}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
             return Err(format!(
-                "{MANIFEST}: a content mod has capabilities = [\"registries\"]"
+                "{MANIFEST}: capabilities = {} but the tool writes {}; delete the capabilities line",
+                names(&m.capabilities),
+                names(&Capability::derived())
             ));
         }
         for (field, url) in [
@@ -1032,7 +1190,7 @@ impl Package {
                     }
                 }
             }
-            if source_count > 511 || source_bytes > 64 << 20 {
+            if source_count > MAX_SOURCE_FILES || source_bytes > MAX_SOURCE_BYTES {
                 return Err("native package exceeds its entry or size limit".into());
             }
             if resource_count > crate::content::MAX_FILES
@@ -1123,21 +1281,6 @@ impl Package {
         }
         Ok(package)
     }
-    /// Whether the mod at `path` (a `.smod` or a folder) has a [`MANIFEST`].
-    pub fn has_manifest(path: &Path) -> bool {
-        if path.is_dir() {
-            return path.join(MANIFEST).is_file();
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            std::fs::File::open(path)
-                .ok()
-                .and_then(|f| zip::ZipArchive::new(f).ok())
-                .is_some_and(|mut zip| zip.by_name(MANIFEST).is_ok())
-        }
-        #[cfg(target_arch = "wasm32")]
-        false
-    }
     /// Select and validate a flat project's source and resource files deterministically.
     pub fn directory_files(
         &self,
@@ -1207,7 +1350,7 @@ impl Package {
                             .checked_add(size)
                             .ok_or("native package too large")?;
                         *source_count += 1;
-                        if *source_bytes > 64 << 20 || *source_count > 511 {
+                        if *source_bytes > MAX_SOURCE_BYTES || *source_count > MAX_SOURCE_FILES {
                             return Err("native package exceeds its entry or size limit".into());
                         }
                         files.insert(name, std::fs::read(path).map_err(|e| e.to_string())?);
@@ -1231,7 +1374,7 @@ impl Package {
     /// Pack a flat project, selecting its source and resource files deterministically.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn pack_directory(root: &Path) -> Result<Vec<u8>, String> {
-        Self::pack_directory_with(root, None)
+        Self::pack_directory_with(root, None, None)
     }
 
     /// The bytes of entry `name` in the `.smod` at `path`, refused past `most` bytes; `None` when
@@ -1258,7 +1401,11 @@ impl Package {
 
     /// [`Package::pack_directory`], carrying `uses` as the package's [`USES_FILE`] table when given.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn pack_directory_with(root: &Path, uses: Option<&[u8]>) -> Result<Vec<u8>, String> {
+    pub fn pack_directory_with(
+        root: &Path,
+        uses: Option<&[u8]>,
+        manifest: Option<String>,
+    ) -> Result<Vec<u8>, String> {
         let package = Self::read(root)?;
         let mut files = package.directory_files(root)?;
         // A source folder with the old file is valid to read and to build from; a package is
@@ -1274,8 +1421,11 @@ impl Package {
         if let Some(uses) = uses {
             files.insert(USES_FILE.to_owned(), uses.to_vec());
         }
-        let text = String::from_utf8(files.remove(MANIFEST).expect("selected manifest"))
-            .map_err(|e| e.to_string())?;
+        let selected = files.remove(MANIFEST).expect("selected manifest");
+        let text = match manifest {
+            Some(text) => text,
+            None => String::from_utf8(selected).map_err(|e| e.to_string())?,
+        };
         let files: Vec<_> = files
             .iter()
             .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
@@ -1466,6 +1616,30 @@ mod runtime_files_tests;
 
 #[cfg(test)]
 mod tests {
+    /// A short version with a pre-release or build part is padded before it, not after it.
+    #[test]
+    fn a_short_version_with_a_pre_release_is_padded_in_its_core() {
+        for (short, full) in [
+            ("1", "1.0.0"),
+            ("1.2", "1.2.0"),
+            ("1.2.3", "1.2.3"),
+            ("1.2-beta", "1.2.0-beta"),
+            ("1-rc.1", "1.0.0-rc.1"),
+            ("1.2-rc.1", "1.2.0-rc.1"),
+            ("1.2.3-rc.1", "1.2.3-rc.1"),
+            ("1.2+build.5", "1.2.0+build.5"),
+            ("1.0-SNAPSHOT", "1.0.0-SNAPSHOT"),
+        ] {
+            assert_eq!(
+                parse_version(short).unwrap(),
+                semver::Version::parse(full).unwrap(),
+                "{short}"
+            );
+        }
+        assert!(parse_version("").is_err());
+        assert!(parse_version("one.two").is_err());
+    }
+
     use super::*;
 
     #[test]
@@ -1478,6 +1652,34 @@ mod tests {
             error.contains("chemlib::transfer") && error.contains("own hooks and functions"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_version_that_is_not_semver_refuses_the_manifest_when_read() {
+        let with = |v: &str| {
+            Manifest::parse(&EXAMPLE.replace("version = \"0.1.0\"", &format!("version = '{v}'")))
+        };
+        let error = with("v1 beta!").unwrap_err();
+        assert!(
+            error.contains(
+                "version \"v1 beta!\" is not a semver version (MAJOR.MINOR.PATCH, e.g. 3.6.30+refabricated)"
+            ),
+            "{error}"
+        );
+        assert!(with("").is_err());
+    }
+
+    #[test]
+    fn an_omitted_minor_and_patch_are_padded() {
+        let with = |v: &str| {
+            Manifest::parse(&EXAMPLE.replace("version = \"0.1.0\"", &format!("version = '{v}'")))
+                .unwrap()
+                .version
+                .to_string()
+        };
+        assert_eq!(with("1"), "1.0.0");
+        assert_eq!(with("1.2"), "1.2.0");
+        assert_eq!(with("3.6.30+refabricated"), "3.6.30+refabricated");
     }
 
     #[test]
@@ -1526,6 +1728,41 @@ version = "0.1.0"
 api = "0.2"
 capabilities = ["registries"]
 "#;
+
+    #[test]
+    fn api_capabilities_and_mixins_are_optional_and_an_explicit_other_value_is_refused() {
+        let bare = "id = \"ruby\"\nname = \"Ruby\"\nversion = \"0.1.0\"\n";
+        let manifest = Manifest::parse(bare).unwrap();
+        assert_eq!(manifest.api, API);
+        assert_eq!(manifest.capabilities, [Capability::Registries]);
+        let error = Manifest::parse(&format!("{bare}capabilities = []\n")).unwrap_err();
+        assert!(
+            error.contains("[]") && error.contains("[\"registries\"]"),
+            "{error}"
+        );
+        let native = format!(
+            "{bare}[native]\ngame = \"26.3\"\nsunrise = \"{}\"\n",
+            "a".repeat(40)
+        );
+        let native = Manifest::parse(&native).unwrap().native.unwrap();
+        assert_eq!(native.mixins_or("sdk"), "sdk");
+        let pinned = Native {
+            mixins: Some("b".repeat(40)),
+            ..native
+        };
+        assert_eq!(pinned.mixins_or("sdk"), "b".repeat(40));
+    }
+
+    #[test]
+    fn a_missing_or_misspelled_field_is_named_with_the_line_to_write() {
+        let missing = Manifest::parse(&EXAMPLE.replace("version = \"0.1.0\"\n", "")).unwrap_err();
+        assert!(missing.contains("version = \"0.1.0\""), "{missing}");
+        let typo = Manifest::parse(&EXAMPLE.replace("version =", "vrsion =")).unwrap_err();
+        assert!(typo.contains("unknown field `vrsion`"), "{typo}");
+        assert!(typo.contains("did you mean `version`?"), "{typo}");
+        let far = Manifest::parse(&format!("{EXAMPLE}zzzzzzzz = 1\n")).unwrap_err();
+        assert!(!far.contains("did you mean"), "{far}");
+    }
 
     #[test]
     fn refuses_bad_ids_and_retired_manifests() {
@@ -1841,7 +2078,7 @@ capabilities = ["registries"]
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let package = Package::read_zip(&mut zip).unwrap();
         assert_eq!(package.manifest.id, "ruby");
-        assert_eq!(package.manifest.version, "0.1.0");
+        assert_eq!(package.manifest.version.to_string(), "0.1.0");
         assert_eq!(package.manifest.native.unwrap().game, "26.3");
         assert!(
             Package::write_files(&manifest, &[("Cargo.toml", b""), ("src/../bad.rs", b"")])
@@ -1919,6 +2156,31 @@ capabilities = ["registries"]
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A port written one file per class keeps more than 511 source files, far under the byte cap.
+    #[test]
+    fn a_native_project_of_many_source_files_packs_and_reads() {
+        let root =
+            std::env::temp_dir().join(format!("sunrise-many-sources-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/classes")).unwrap();
+        let manifest = format!(
+            "{EXAMPLE}[native]\ngame = '26.3'\nsunrise = '{}'\nmixins = '{}'\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        std::fs::write(root.join(MANIFEST), manifest).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = 'ruby'\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "mod classes;\n").unwrap();
+        for i in 0..700 {
+            std::fs::write(root.join(format!("src/classes/c{i}.rs")), "pub struct C;\n").unwrap();
+        }
+        let bytes = Package::pack_directory(&root).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(Package::read_zip(&mut zip).unwrap().manifest.id, "ruby");
+        assert!(zip.by_name("src/classes/c699.rs").is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn package_kind_requires_matching_source_and_native_declaration() {
         let root =
@@ -1970,6 +2232,18 @@ capabilities = ["registries"]
                 error.contains(MANIFEST)
                     && error.contains(id)
                     && error.contains("reserved namespace"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_of_the_mod_site_cannot_be_the_mod_id() {
+        for id in ["mine", "account", "policy", "submit", "index", "edit"] {
+            let manifest = EXAMPLE.replace("id = \"ruby\"", &format!("id = {id:?}"));
+            let error = Manifest::parse(&manifest).unwrap_err();
+            assert!(
+                error.contains(MANIFEST) && error.contains(id) && error.contains("mod site"),
                 "{error}"
             );
         }
@@ -2295,7 +2569,7 @@ issues = \"http://example.org/issues\"
         // The folder reads and its files select; only writing the archive refuses.
         let package = Package::read(&root).unwrap();
         assert!(package.directory_files(&root).is_ok());
-        let error = Package::pack_directory_with(&root, None).unwrap_err();
+        let error = Package::pack_directory_with(&root, None, None).unwrap_err();
         assert!(error.contains("old format"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }

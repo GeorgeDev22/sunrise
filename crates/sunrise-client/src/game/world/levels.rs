@@ -451,9 +451,24 @@ pub(super) struct Levels {
     requested_saves: Vec<Dim>,
     /// The levels mods opened while the server runs, and the requests waiting to be applied.
     pub(super) runtime: super::runtime_levels::RuntimeTable,
+    /// The entities that travelled to another level lately: the id each had, to the id it
+    /// arrived with and when. A kill credit recorded under the old id follows it there.
+    travels: HashMap<u32, (u32, i64)>,
 }
 
 impl Levels {
+    /// Note that the entity `from` arrived in another level as `to` at `now`. A kill credit
+    /// lasts a hundred ticks, so a travel older than that names nothing still credited.
+    pub(in crate::game) fn note_travel(&mut self, from: u32, to: u32, now: i64) {
+        self.travels.retain(|_, &mut (_, at)| now - at <= 100);
+        self.travels.insert(from, (to, now));
+    }
+
+    /// The id the entity `from` arrived with in another level, if it travelled lately.
+    pub(in crate::game) fn travelled(&self, from: u32) -> Option<u32> {
+        self.travels.get(&from).map(|&(to, _)| to)
+    }
+
     /// Queue `dim` to be saved at the start of the next server tick; a level already queued is
     /// not queued twice.
     pub(in crate::game) fn request_save(&mut self, dim: Dim) {
@@ -975,7 +990,7 @@ impl Game<'_> {
             p.world.watched = std::mem::take(&mut self.world.watched);
             self.swap_level(&mut p);
             // The tracked entities go with their level: a level's moves, read before its tick
-            // describes its entities again, would otherwise meet the last level's (the anticheat
+            // describes its entities again, would otherwise meet the last level's (a move
             // missed the boat under a player while anyone was in another dimension).
             let states = self.lan.as_mut().map(|h| &mut h.states);
             if let Some(states) = states {
@@ -1174,6 +1189,8 @@ impl Game<'_> {
     }
 
     fn tick_server_body(&mut self, paused: bool) -> Result<()> {
+        // A panic something caught left a game that carried on: its record ends with the tick.
+        self.interrupted_turns.clear();
         // `tickRateManager.tick()` once per server tick, before any level
         // (each `ServerLevel.tick` only reads `runsNormally`), and the native
         // `ServerTickStart` before that level work (NeoForge's

@@ -117,6 +117,8 @@ impl Game<'_> {
             sunrise_client::spans::time("tick_general", || self.tick_general())?;
             // Orbs, primed TNT and falling blocks still to tick, in join order.
             self.run_ordered_ticks(sunrise_client::join_seq::JoinSeq::MAX, false)?;
+            // Unsimulated entities no mod named are told once for the family.
+            self.native_others_tick_family(self.ordered.told, self.ordered.born);
             sunrise_client::spans::time("tick_experience", || self.tick_experience());
             // Merged, despawned or picked up.
             span("mods_leaves_flush", || self.native_leaves_flush());

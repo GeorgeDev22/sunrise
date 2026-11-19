@@ -94,6 +94,11 @@ pub enum MappingError {
         /// The name asked for.
         key: String,
     },
+    /// The mapping accepts a click but has no held state (`key.pickItem`).
+    ClickOnly {
+        /// The name asked for.
+        key: String,
+    },
 }
 
 /// The metadata of a server play packet observed by `Hooks::client_packet`.
@@ -316,6 +321,7 @@ pub struct HumanoidRenderState<'a> {
 /// Translation is in blocks and rotation is in degrees (pitch, yaw, roll).
 /// The renderer applies the transform before the ordinary hand and item poses.
 // exhaustive: the game builds it with a literal; mods only read it
+#[derive(Clone)]
 pub struct HandRender<'a> {
     /// The UUID of the player whose hand is drawn.
     pub player: u128,
@@ -709,10 +715,54 @@ pub enum ScreenOpening {
     /// `Opening.setCanceled(true)`: the current screen stays open.
     Cancel,
     /// `Opening.setNewScreen(..)`: the answering mod's own screen
-    /// (`Host::mod_screen_open`) opens instead, if it can open there (not over
-    /// the title screen, a book, a prompt or while a world loads; the
-    /// screen that was about to open does then).
+    /// (`Host::mod_screen_open`) opens instead, if it can open there (over the
+    /// world or the title's screens, not over a book, a prompt or while a
+    /// world loads; the screen that was about to open does then). Over the
+    /// title, closing it returns to the title screen.
     ModScreen,
+    /// `Opening.setNewScreen(..)` with a vanilla screen: `target` opens
+    /// instead, as it opens on its own. A target that can't open here (a
+    /// title screen in a world, a world's screen on the title or while the
+    /// world loads) keeps the screen that was about to open, and the game
+    /// logs it.
+    Vanilla(ScreenTarget),
+}
+
+/// A vanilla screen a mod's `screen_opening` answer opens in place of the one
+/// asked for (`ScreenOpening::Vanilla`): the screens that open with no
+/// arguments, named after the `ScreenView.id` they open with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum ScreenTarget {
+    /// In a world: the pause menu (`PauseScreen`), `paused`.
+    Pause,
+    /// In a world: the options (`OptionsScreen`), `options`.
+    Options,
+    /// In a world: the player's inventory (`InventoryScreen`; the creative
+    /// inventory in creative mode), `inventory` or `creative`.
+    Inventory,
+    /// In a world: the advancements (`AdvancementsScreen`), `advancements`.
+    Advancements,
+    /// In a world: the statistics (`StatsScreen`), `stats`.
+    Stats,
+    /// In a world: an empty chat box (`ChatScreen`), `chat`.
+    Chat,
+    /// On the title: the title screen itself (`TitleScreen`), `title`.
+    Title,
+    /// On the title: the world list (`SelectWorldScreen`; Create New World
+    /// when there is no world), `world_select`.
+    WorldSelect,
+    /// On the title: Create New World (`CreateWorldScreen`), `world_create`.
+    WorldCreate,
+    /// On the title: the server list (`JoinMultiplayerScreen`), `multiplayer`.
+    Multiplayer,
+    /// On the title: Add Server (`EditServerScreen` for a new server),
+    /// `add_server`; it returns to the server list.
+    AddServer,
+    /// On the title: Direct Connection (`DirectJoinServerScreen`),
+    /// `direct_connect`; it returns to the server list.
+    DirectConnect,
 }
 
 /// Where a mod menu's recipe-book toggle sits: `x` GUI pixels right of the menu's left edge and
@@ -840,10 +890,10 @@ impl ColoredLight {
     }
 }
 
-/// A mod block's screen over its menu (`screen`): its size, where
+/// A menu type's screen, a mod's (`screen`): its size, where
 /// each of the container's slots is (`Slot.x`, `Slot.y`; none hides the
-/// slot, and so do slots past the list; the server's menu does not have a
-/// hidden slot either, so clicks and shift-clicks skip it), and the player inventory's first
+/// slot, and so do slots past the list; for a block's menu the server's menu
+/// does not have a hidden slot either, so clicks and shift-clicks skip it), and the player inventory's first
 /// row (vanilla's is 84; the hotbar is 58 below it) and left column, from
 /// its top left.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -957,7 +1007,9 @@ pub enum PanelEvent {
         /// Whether it was a right click.
         right: bool,
     },
-    /// The search box's text, each time the player changes it.
+    /// The search box's text, each time it changes: the player's edit, or
+    /// the owner's own `panel_search` once its box draws. The same event for
+    /// both, so the filter changes in one place.
     Search(String),
     /// A physical key (`key.keyboard.r`) went down
     /// while the pointer was on an item: a slot of the screen's, or the

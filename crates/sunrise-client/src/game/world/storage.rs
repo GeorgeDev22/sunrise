@@ -447,7 +447,7 @@ impl Game<'_> {
             self.world
                 .block_entities
                 .get_mut(&pos)
-                .and_then(|e| e.slots_mut().get_mut(i))
+                .and_then(|e| e.slot_mut(i))
         }) {
             Some(slot) => slot,
             None => &mut self.scratch_slot,
