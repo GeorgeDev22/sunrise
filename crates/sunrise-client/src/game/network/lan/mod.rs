@@ -5155,7 +5155,7 @@ pub(crate) mod world_spawn_sync_tests {
 
     #[test]
     #[ignore = "daily"]
-    fn setworldspawn_reaches_guests_in_other_dimensions_and_keeps_compass_overrides() {
+    fn setworldspawn_reaches_guests_with_the_dimension_it_ran_in() {
         crate::game::native_entity_refs::tests::with_game(|game| {
             game.build_registries();
             game.level.world_spawn = None;
@@ -5192,6 +5192,19 @@ pub(crate) mod world_spawn_sync_tests {
             assert!(
                 spawns(&rx).is_empty(),
                 "unchanged respawn data is not broadcast again"
+            );
+            // SetWorldSpawnCommand keeps the level it runs in (RespawnData.of(level.dimension(), ..)):
+            // a world spawn in another dimension reaches the guests with that dimension.
+            game.as_console(|game| {
+                assert!(game.run_command("execute in minecraft:the_end run setworldspawn 9 70 -4"))
+            });
+            let sent = spawns(&rx);
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].pos.dimension, "minecraft:the_end");
+            assert_eq!(sent[0].pos.pos, [9, 70, -4]);
+            println!(
+                "world-spawn\tother_dimension\t{}\t{}\t{}\t{}",
+                sent[0].pos.dimension, sent[0].pos.pos[0], sent[0].pos.pos[1], sent[0].pos.pos[2]
             );
             game.as_console(|game| assert!(game.run_command("setworldspawn -7 90 12")));
             let sent = spawns(&rx);
