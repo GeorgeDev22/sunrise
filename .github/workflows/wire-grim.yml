@@ -130,9 +130,11 @@ jobs:
           fi
           set +e
           python3 tools/ci/with_xvfb.py python3 tools/test_wire_stream_parity.py --bin bin --out out \
-            --scenarios "${{ steps.shard.outputs.list }}" 2>&1 | tee run.log
+            --scenarios "${{ steps.shard.outputs.list }}" --keep 2>&1 | tee run.log
           echo "harness exit: ${PIPESTATUS[0]}" | tee -a run.log
           mkdir -p out && cp run.log out/
+          # Sunrise's own game log (the harness keeps its scratch with --keep), for a launch that fails.
+          for log in /tmp/hz-wire-stream-*/*/c.log; do [ -e "$log" ] && cp "$log" "out/sunrise-$(basename "$(dirname "$log")")-c.log"; done
           exit 0
       - name: No Mojang files in the upload, captures compressed
         run: |

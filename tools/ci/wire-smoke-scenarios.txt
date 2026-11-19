@@ -1,0 +1,2 @@
+walk
+sprint_hit_boat
