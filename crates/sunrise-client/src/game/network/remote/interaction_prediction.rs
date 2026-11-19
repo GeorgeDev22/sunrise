@@ -439,6 +439,16 @@ impl Game<'_> {
                 // click ends. Any other block passes on to Item.use.
                 self.with_hand(hand, Game::swing_arm);
                 return true;
+            } else if item_used
+                && held
+                    .as_ref()
+                    .is_some_and(|s| &*s.item == "minecraft:compass")
+                && &*self.block_name(hit.pos) == "minecraft:lodestone"
+            {
+                // CompassItem.useOn on a lodestone: SUCCESS on this client too (it
+                // links the compass), this hand swings and the click ends.
+                self.with_hand(hand, Game::swing_arm);
+                return true;
             } else if item_used && held.as_ref().is_some_and(|s| s.item.ends_with("minecart")) {
                 // MinecartItem.useOn: SUCCESS on a rail (the server spawns the
                 // cart), this hand swings; FAIL elsewhere, no swing. Either ends

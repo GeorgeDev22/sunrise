@@ -181,7 +181,8 @@ fn an_end_crystal_click_on_a_block_ends_there() {
 /// EnderEyeItem.useOn is SUCCESS into a frame without an eye: the arm swings and the click ends
 /// with one use_item_on. On a frame with an eye it passes, so Item.use follows (use_item).
 /// MinecartItem.useOn ends the click either way: SUCCESS (swing) on a rail, FAIL (no swing) on
-/// any other block. Neither the main hand's air use nor the off hand's torch is tried after.
+/// any other block. CompassItem.useOn on a lodestone is SUCCESS. After those, neither the main
+/// hand's air use nor the off hand's torch is tried.
 #[test]
 #[ignore = "daily"]
 fn an_ender_eye_and_a_minecart_end_the_click_where_vanilla_does() {
@@ -219,6 +220,14 @@ fn an_ender_eye_and_a_minecart_end_the_click_where_vanilla_does() {
         game.world
             .set(0, 63, 8, registry.default_state("minecraft:stone").unwrap())
             .unwrap();
+        game.world
+            .set(
+                0,
+                63,
+                10,
+                registry.default_state("minecraft:lodestone").unwrap(),
+            )
+            .unwrap();
         game.offhand = Some(ItemStack::new("minecraft:torch", 8));
         game.selected = 0;
         while peer.recv().is_ok() {}
@@ -250,8 +259,12 @@ fn an_ender_eye_and_a_minecart_end_the_click_where_vanilla_does() {
             click(game, "minecraft:ender_eye", [0, 63, 2]),
             (true, vec!["use_item_on"])
         );
-        let (_, with_eye) = click(game, "minecraft:ender_eye", [0, 63, 4]);
-        assert_eq!(&with_eye[..2], ["use_item_on", "use_item"]);
+        // EnderEyeItem.use PASSes too while the player looks at a frame, so the off hand's
+        // torch gets its turn.
+        assert_eq!(
+            click(game, "minecraft:ender_eye", [0, 63, 4]).1,
+            ["use_item_on", "use_item", "off_hand_use_item_on"]
+        );
         assert_eq!(
             click(game, "minecraft:minecart", [0, 64, 6]),
             (true, vec!["use_item_on"])
@@ -259,6 +272,11 @@ fn an_ender_eye_and_a_minecart_end_the_click_where_vanilla_does() {
         assert_eq!(
             click(game, "minecraft:minecart", [0, 63, 8]),
             (false, vec!["use_item_on"])
+        );
+        // CompassItem.useOn on a lodestone: SUCCESS, the click ends there.
+        assert_eq!(
+            click(game, "minecraft:compass", [0, 63, 10]),
+            (true, vec!["use_item_on"])
         );
     });
 }
