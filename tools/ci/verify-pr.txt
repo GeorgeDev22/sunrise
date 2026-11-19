@@ -1,0 +1,1 @@
+python3 tools/parity.py --fresh falling_first_tick
