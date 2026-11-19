@@ -1,0 +1,5 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client --lib --tests -- -D warnings
+env SUNRISE_TEST_RESOURCES=$PWD/.local/sunrise-client/26.3 cargo test --locked -p sunrise-client --lib -- --ignored --exact game::remote::interaction_event_tests::mapping_press_tests::input_burst_tests::a_players_burst_acts_on_the_next_tick_in_handle_keybinds_order game::remote::interaction_event_tests::mapping_press_tests::input_burst_tests::a_mods_burst_acts_64_entries_of_each_queue_a_tick game::remote::interaction_event_tests::mapping_press_tests::input_burst_tests::a_full_queue_refuses_the_entry_and_the_call_returns
+cargo test --locked -p sunrise-client --lib -- game::remote::
+python3 tools/ci/check_ignored_test_rows.py
