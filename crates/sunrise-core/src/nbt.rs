@@ -767,12 +767,30 @@ fn modified_utf8(bytes: &[u8]) -> Option<JavaString> {
 
 /// Read a file root (type, modified-UTF name, payload), returning bytes consumed.
 pub fn read_named(bytes: &[u8], limits: Limits) -> Result<(NamedTag, usize), Error> {
+    read_named_with_heap(bytes, limits, None)
+}
+
+/// [`read_named`] under a vanilla `NbtAccounter` heap quota: `quota` is in
+/// its estimated heap bytes, not encoded bytes (the root name is not charged).
+pub fn read_named_quota(
+    bytes: &[u8],
+    limits: Limits,
+    quota: u64,
+) -> Result<(NamedTag, usize), Error> {
+    read_named_with_heap(bytes, limits, Some(quota))
+}
+
+fn read_named_with_heap(
+    bytes: &[u8],
+    limits: Limits,
+    quota: Option<u64>,
+) -> Result<(NamedTag, usize), Error> {
     let mut reader = Reader {
         bytes,
         offset: 0,
         limits,
         nodes: 0,
-        heap: None,
+        heap: quota.map(|quota| (0, quota)),
         stream: None,
         bounded: None,
         strict: false,

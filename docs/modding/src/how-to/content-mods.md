@@ -1124,7 +1124,10 @@ Paths use vanilla's resource characters, at most 65,536 files, 16 MiB each and 5
 content is refused is left out, with the reason in the log. The game reads this content into its block and item
 tables (`sunrise_client::mod_content`, [modpacks.md](https://github.com/sunrise-org/sunrise/blob/main/docs/modpacks.md)). A tag entry
 naming an id nobody registers (a block a port left out, another mod's item) is dropped, so the rest of the tag
-loads; vanilla would drop the whole tag.
+loads; vanilla would drop the whole tag. In a block or item tag, an entry naming a `#minecraft:…` tag that neither
+vanilla nor an installed mod defines is also dropped. The warning names the entry and its file; an optional
+entry (`"required": false`) is dropped silently. If the base has no tag folder for that registry, the reference is
+left in place.
 
 Tags merge as a data pack's do. Every mod's file for one tag (vanilla's `data/minecraft/tags/`, the convention
 `data/c/tags/`, or another mod's) adds its values after vanilla's and the mods' before it, in load order. A file with
