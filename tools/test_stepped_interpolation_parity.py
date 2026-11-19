@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Compare how a client walks a living entity along its server's positions with vanilla.
 
-Vanilla's unmodified SteppedInterpolationHandler.InterpolationData (VanillaSteppedInterpolationOracle
-drives it as the handler does) and sunrise-world's SteppedInterpolation replay the same packets and
-client ticks: move packets with and without a position or rotation, straight or stepped paths,
-repeats of the one the entity is headed for, packets a tick apart that pile up and others after it
-stopped, for update intervals of 1 to 3 ticks, plus a punched pig's knockback as the server sends it
-(its first move at once, `needsSync`, then every update interval). Motion packets set the entity's
-velocity, which each tick's `LivingEntity.aiStep` decays while it isn't interpolating and zeroes when
-tiny (a player's by its horizontal length). The entity's position, rotation and velocity after every
-event must match bit for bit; the game places mobs with the same `PosRot::set_rot` and
-`client_motion` the probe calls. The handler's entity hooks (deltas, passengers) are out of
-scope.
+A real pig (or another player) in a client level, moved by vanilla's own `Entity.moveOrInterpolateTo`,
+its SteppedInterpolationHandler, `Entity.setRot`, `lerpMotion` and `aiStep` (VanillaSteppedInterpolationOracle),
+and sunrise-world's SteppedInterpolation, `mob_motion` and `PlayerMotion` replay the same packets and
+client ticks: move packets with and without a position or rotation, straight or stepped paths, repeats
+of the one the entity is headed for, packets a tick apart that pile up and others after it stopped, for
+update intervals of 1 to 3 ticks, plus a punched pig's knockback as the server sends it (its first move
+at once, `needsSync`, then every update interval). Motion packets set a mob's velocity, which each
+tick's `LivingEntity.aiStep` decays while it isn't interpolating and zeroes when tiny; another player
+eases to it instead (`RemotePlayer.aiStep`, which replaces that). The entity's position, rotation and
+velocity after every event must match bit for bit while it interpolates, just after and long after;
+the game moves mobs and players with the same functions. Nothing else moves the entity (riding,
+physics).
 """
 import os
 import random
