@@ -1002,6 +1002,8 @@ impl Game<'_> {
             if let Some(state) = transferred {
                 self.adopt_transferred_entity_state(a.id, state);
             }
+            // Entity.<init>: its own random's first draws, saved UUID or not.
+            let uuid = with_constructor_uuid(uuid);
             self.remember(a.id, uuid, tag);
             self.bind_saved_entity_attachments(a.id, &mut a.attachment_lifetime);
             self.armor_stands.push(a);
