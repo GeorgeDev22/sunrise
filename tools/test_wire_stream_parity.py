@@ -1926,6 +1926,96 @@ SCENARIOS = {
                f'item replace entity {PLAYER} hotbar.8 with minecraft:arrow 16'],
         ticks=60, steps={0: ['key w down', 'key ctrl down'], 6: ['mouse right down'], 20: ['key ctrl up'],
                          22: ['key ctrl down'], 34: ['mouse right up'], 50: ['key w up', 'key ctrl up']}),
+    # Section 28 (2026-11-19): every vanilla block with its own useItemOn, clicked with the item it takes, another
+    # and an empty hand, a torch in the off hand: a wrong client answer shows as a UseItem or a placed torch.
+    'answer_copper_golem_statue': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:copper_golem_statue', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.2 with minecraft:iron_axe'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_flower_pot_empty': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:flower_pot', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.1 with minecraft:poppy'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_flower_pot_full': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:potted_poppy', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:dandelion', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_cake_candle': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:cake', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:candle', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_pumpkin_shears': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:pumpkin', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:shears', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_tnt': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:tnt', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.2 with minecraft:gunpowder'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_berry_bush': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:sweet_berry_bush[age=1]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:bone_meal', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_berry_bush_ripe': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:sweet_berry_bush[age=3]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.2 with minecraft:bone_meal'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_lectern': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:lectern', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.1 with minecraft:writable_book'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_note_block': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:note_block', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.2 with minecraft:player_head'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_sign_dye': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_sign', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:black_dye', f'item replace entity {PLAYER} hotbar.1 with minecraft:glow_ink_sac', f'item replace entity {PLAYER} hotbar.2 with minecraft:honeycomb'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_sign_waxed': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_sign', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:honeycomb', f'item replace entity {PLAYER} hotbar.1 with minecraft:black_dye'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_hanging_sign': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_hanging_sign', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:red_dye', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_candle': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:candle[candles=1,lit=false]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:candle', f'item replace entity {PLAYER} hotbar.1 with minecraft:flint_and_steel'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_candle_cake': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:candle_cake[lit=true]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.2 with minecraft:flint_and_steel'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_redstone_ore': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:redstone_ore', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.2 with minecraft:cobblestone'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_decorated_pot': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:decorated_pot', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick', f'item replace entity {PLAYER} hotbar.2 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_chiseled_bookshelf': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:chiseled_bookshelf[facing=north]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.1 with minecraft:book'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_beehive_full': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:beehive[facing=north,honey_level=5]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.1 with minecraft:shears', f'item replace entity {PLAYER} hotbar.2 with minecraft:glass_bottle'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_jukebox': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:jukebox', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.1 with minecraft:music_disc_cat'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_composter': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:composter[level=3]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.1 with minecraft:wheat_seeds'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'answer_vault_inactive': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:vault[vault_state=inactive]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:trial_key', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
     # Section 26 (2026-11-19): PvP techniques anticheats watch, beside a mob's hits (KNOCKBACK from FAR_HUSK).
     'jump_reset_kb': dict(
         setup=[FAR_HUSK, SWORD],
