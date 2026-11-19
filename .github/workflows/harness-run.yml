@@ -60,8 +60,12 @@ jobs:
           python3 tools/ci/wire_grim_fetch.py --mc "$RUNNER_TEMP/mc" --servers "$RUNNER_TEMP/servers" > "$RUNNER_TEMP/fetch.log" 2>&1 || { tail -5 "$RUNNER_TEMP/fetch.log"; exit 1; }
           python3 tools/lab.py prepare --minecraft-dir "$RUNNER_TEMP/mc" --server-jar "$RUNNER_TEMP/servers/server.jar" > "$RUNNER_TEMP/prepare.log" 2>&1 || { echo "lab prepare failed"; exit 1; }
           cargo build --locked --profile fast -p sunrise-prepare > "$RUNNER_TEMP/prepare-build.log" 2>&1 || { echo "sunrise-prepare build failed"; exit 1; }
-          target/fast/sunrise-prepare --minecraft-dir "$RUNNER_TEMP/mc" --server-jar "$RUNNER_TEMP/servers/server.jar" --root "$PWD" --complete > "$RUNNER_TEMP/sunrise-prepare.log" 2>&1 || { echo "sunrise-prepare failed"; exit 1; }
+          target/fast/sunrise-prepare --minecraft-dir "$RUNNER_TEMP/mc" --server-jar "$RUNNER_TEMP/servers/server.jar" --root "$PWD" > "$RUNNER_TEMP/sunrise-prepare.log" 2>&1 || { echo "sunrise-prepare failed"; exit 1; }
           ls .local
+      - name: The sounds (the audio harnesses), not required for the rest
+        continue-on-error: true
+        run: |
+          target/fast/sunrise-prepare sounds --minecraft-dir "$RUNNER_TEMP/mc" --root "$PWD" > "$RUNNER_TEMP/sounds.log" 2>&1 || { tail -5 "$RUNNER_TEMP/sounds.log" | cut -c1-200; exit 1; }
       - name: Prebuild what the harnesses build, with parity.py's profile so they reuse it
         env:
           CARGO_PROFILE_RELEASE_LTO: 'false'
