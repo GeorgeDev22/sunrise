@@ -13,6 +13,9 @@ checks, from the files the server leaves:
   byte what the previous clean stop wrote, and a block placed before the panic is still there on the next start.
 - `hub`: the panic comes while a console line has the hub out of the game, with a player in
   (the fixture takes it out first, as a panic in the network tick leaves it). Same checks.
+- Bystander: a second player, given diamonds, is in when the panic interrupts the first one's turn.
+  `MinecraftServer.stopServer` saves the players after a crash too: the bystander's file holds the
+  diamonds, while the interrupted player's files are what the previous clean stop wrote.
 """
 import hashlib
 import os
@@ -44,13 +47,18 @@ def binary():
     return Path(json.loads(metadata)['target_directory']) / 'fast' / 'sunrise-client'
 
 
-def start(directory, fixture=None):
+def start(directory, fixture=None, guest=None):
+    """The server, with `fixture` set to panic at that point (in `guest`'s turn only, when named)."""
     if fixture:
         os.environ['SUNRISE_CRASH_FIXTURE'] = fixture
+    if guest:
+        os.environ['SUNRISE_CRASH_FIXTURE_GUEST'] = guest
     try:
-        server = Server([binary(), '--resources', lab.RESOURCES, '--dedicated', '--nogui'], directory, f'server-{fixture or "clean"}')
+        server = Server([binary(), '--resources', lab.RESOURCES, '--dedicated', '--nogui'], directory,
+                        f'server-{fixture or "clean"}{"-" + guest if guest else ""}')
     finally:
         os.environ.pop('SUNRISE_CRASH_FIXTURE', None)
+        os.environ.pop('SUNRISE_CRASH_FIXTURE_GUEST', None)
     server.wait_for(r'Done \(', timeout=600)
     return server
 
@@ -80,11 +88,11 @@ def offline_uuid(name):
     return str(uuid.UUID(bytes=bytes(digest)))
 
 
-def player_files(directory):
-    """The joined player's files (data, advancements, stats), by content. The server's own profile is
+def player_files(directory, name=PLAYER):
+    """A joined player's files (data, advancements, stats), by content. The server's own profile is
     not theirs: its files are written by every save."""
     folder = directory / 'world' / 'players'
-    me = offline_uuid(PLAYER)
+    me = offline_uuid(name)
     return {str(p.relative_to(folder)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted(folder.rglob(f'*{me}*')) if p.is_file()}
 
@@ -201,6 +209,59 @@ def signal_saves(build):
     print('connected player saved on SIGTERM: ok', flush=True)
 
 
+def crash_saves_bystander(build):
+    """A crash in one player's turn still saves the other player (MinecraftServer.stopServer), and
+    leaves the interrupted player's files as the last clean stop wrote them."""
+    try:
+        from . import anvil_dump, lan_e2e
+    except ImportError:
+        import anvil_dump
+        import lan_e2e
+    bystander = 'Bystander'
+    directory = build / 'bystander-server'
+    port = free_port()
+    write_server_dir(directory, port)
+    out = build / 'bystander-client'
+    out.mkdir()
+    server = start(directory)
+    try:
+        join(port, out).join(timeout=300)
+        server.wait_for(rf'{PLAYER} left the game', timeout=60)
+    finally:
+        server.stop()
+    saved = player_files(directory)
+    assert saved, 'the clean run wrote no player file'
+    file = directory / 'world' / 'players' / 'data' / f'{offline_uuid(bystander)}.dat'
+    server = start(directory, 'guest', guest=PLAYER)
+    other = lan_e2e.Game('bystander', binary().with_name('sunrise-ctl'), lab.RESOURCES)
+    try:
+        other.raw('launch', '--headless', '--game', binary())
+        other.raw('connect', f'127.0.0.1:{port}', bystander)
+        other.raw('wait-for', 'loaded', '--timeout', 300)
+        server.wait_for(rf'{bystander} joined the game')
+        server.console(f'give {bystander} minecraft:diamond 4')
+        server.console('say GIVEN-TO-BYSTANDER')
+        server.wait_for(r'\[Server\] GIVEN-TO-BYSTANDER')
+        assert not file.exists(), 'the bystander was saved before the crash'
+        client = join(port, out)
+        deadline = time.time() + 300
+        while server.process.poll() is None and time.time() < deadline:
+            time.sleep(0.2)
+        assert server.process.poll() not in (None, 0), 'the server did not exit with an error after the panic'
+        client.join(timeout=10)
+    finally:
+        other.close()
+        server.stop()
+    log = '\n'.join(server.lines)
+    assert f"The panic interrupted a player's turn ({PLAYER})" in log, 'the panic did not interrupt the player'
+    assert 'Saving players' in log, 'the crash stopped the server without saving players'
+    assert player_files(directory) == saved, f'the interrupted player\'s files changed: {saved} -> {player_files(directory)}'
+    assert file.exists(), 'the crash save did not write the bystander'
+    player = anvil_dump.plain(anvil_dump.read_dat(file), full=True)
+    diamonds = sum(i['count'] for i in player['Inventory'] if i['id'] == 'minecraft:diamond')
+    assert diamonds == 4, f'the bystander was saved with {diamonds} diamonds, not 4'
+    print('crash saves the bystander, keeps the interrupted player: ok', flush=True)
+
 def main():
     subprocess.run(['cargo', 'build', '--profile', 'fast', '-p', 'sunrise-game', '-p', 'sunrise-client-lib', '--bin', 'sunrise-client', '--bin', 'sunrise-ctl'], cwd=lab.ROOT, check=True)
     build = lab.LOCAL / 'dedicated-crash-save'
@@ -214,6 +275,7 @@ def main():
     problems = []
     connected_saves(build)
     signal_saves(build)
+    crash_saves_bystander(build)
 
     # A clean stop writes the player's file.
     server = start(directory)

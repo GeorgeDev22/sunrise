@@ -2338,10 +2338,10 @@ impl Game<'_> {
         self.native_players_leaving();
         log("INFO", "Saving players");
         // PlayerList.removeAll: each player's file, with the vehicle it
-        // alone rides, then its records.
-        if !crashed {
-            self.save_leaving_guests();
-        }
+        // alone rides, then its records. MinecraftServer.stopServer saves them
+        // after a crash as after a stop; a player the panic interrupted keeps
+        // the last saved file (`crash_save`), and a lost hub has none to save.
+        self.save_leaving_guests();
         if let Some(h) = self.lan.as_mut() {
             let conns: Vec<u32> = h.hub.guests.iter().map(|g| g.conn).collect();
             for conn in conns {
@@ -2362,7 +2362,8 @@ impl Game<'_> {
 }
 
 /// `tools/test_dedicated_crash_save.py`'s fixture: with `SUNRISE_CRASH_FIXTURE` naming `point`
-/// (`guest`: during a placed guest's turn, `hub`: after a console line while a player is in),
+/// (`guest`: during a placed guest's turn, the one `SUNRISE_CRASH_FIXTURE_GUEST` names when set;
+/// `hub`: after a console line while a player is in),
 /// the tick panics there, to see what crash teardown keeps.
 /// `armed` is asked only when the variable names `point`, so the tick pays one
 /// load of a `OnceLock` without it.
