@@ -82,13 +82,16 @@ fn a_mod_fits_a_build_where_what_it_uses_is_unchanged() {
 }
 
 #[test]
-fn a_list_with_no_hook_versions_is_no_list_once_a_hook_it_uses_is_past_its_first_version() {
-    let dir = project_dir("fit-old-list", Some(&[("hook:joined", "h1")]), None);
-    let uses_file = dir.join(uses::USES_FILE);
-    let old = std::fs::read_to_string(&uses_file)
-        .unwrap()
-        .replace(&format!("\"schema\":{}", uses::USES_SCHEMA), "\"schema\":1");
-    std::fs::write(&uses_file, old).unwrap();
+fn a_list_that_holds_no_version_of_a_hook_cannot_show_the_mod_fits() {
+    let dir = project_dir("fit-old-list", None, None);
+    let made_for = pin(&dir);
+    let list = |schema: u32, hash: &str, version: Option<u64>| {
+        let table = serde_json::json!({
+            "schema": schema, "made_for": made_for,
+            "entries": [{"id": "hook:joined", "hash": hash, "version": version}],
+        });
+        std::fs::write(dir.join(uses::USES_FILE), table.to_string()).unwrap();
+    };
     let target = |version: u64| -> mod_surface::Surface {
         serde_json::from_value(serde_json::json!({
             "schema": mod_surface::SCHEMA, "hash": "s",
@@ -99,16 +102,46 @@ fn a_list_with_no_hook_versions_is_no_list_once_a_hook_it_uses_is_past_its_first
         }))
         .unwrap()
     };
-    let made_for = pin(&dir);
+    let unversioned = Verdict::NoList {
+        made_for: made_for.clone(),
+        why: Unlisted::HookVersions,
+        hooks: vec!["hook:joined".into()],
+    };
+    // The mod may have been made for a later version than the first: the target's own version
+    // says nothing about it, whichever it is.
+    for schema in [1, uses::USES_SCHEMA] {
+        list(schema, "h1", None);
+        assert_eq!(judged(&dir, OTHER_BUILD, &target(1)), unversioned);
+        assert_eq!(judged(&dir, OTHER_BUILD, &target(2)), unversioned);
+    }
+    // What such a list can still judge is named.
+    list(1, "h0", None);
+    assert_eq!(
+        judged(&dir, OTHER_BUILD, &target(1)),
+        Verdict::DoesNotFit {
+            made_for: made_for.clone(),
+            misfits: vec![Misfit {
+                id: "hook:joined".into(),
+                change: Change::Changed
+            }],
+        }
+    );
+    list(uses::USES_SCHEMA, "h1", Some(1));
     assert_eq!(
         judged(&dir, OTHER_BUILD, &target(1)),
         Verdict::Fits {
             made_for: made_for.clone()
         }
     );
+    // A list a newer tool wrote is named as that, for a newer game build to read.
+    list(uses::USES_SCHEMA + 1, "h1", Some(1));
     assert_eq!(
-        judged(&dir, OTHER_BUILD, &target(2)),
-        Verdict::NoList { made_for }
+        judged(&dir, OTHER_BUILD, &target(1)),
+        Verdict::NoList {
+            made_for,
+            why: Unlisted::NewerSchema,
+            hooks: Vec::new(),
+        }
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -160,7 +193,9 @@ fn without_a_list_for_its_pin_a_mod_works_on_its_own_build_only() {
     assert_eq!(
         judged(&none, OTHER_BUILD, &target),
         Verdict::NoList {
-            made_for: pin(&none)
+            made_for: pin(&none),
+            why: Unlisted::Missing,
+            hooks: Vec::new(),
         }
     );
     // A list made for another build than the mod's pin says nothing about this one.
@@ -172,7 +207,9 @@ fn without_a_list_for_its_pin_a_mod_works_on_its_own_build_only() {
     assert_eq!(
         judged(&stale, OTHER_BUILD, &target),
         Verdict::NoList {
-            made_for: pin(&stale)
+            made_for: pin(&stale),
+            why: Unlisted::OtherBuild,
+            hooks: Vec::new(),
         }
     );
     // A list that does not read is no list: never a panic, never "fits".
@@ -184,7 +221,9 @@ fn without_a_list_for_its_pin_a_mod_works_on_its_own_build_only() {
     assert_eq!(
         judged(&none, OTHER_BUILD, &target),
         Verdict::NoList {
-            made_for: pin(&none)
+            made_for: pin(&none),
+            why: Unlisted::Unreadable,
+            hooks: Vec::new(),
         }
     );
     std::fs::remove_dir_all(none).unwrap();

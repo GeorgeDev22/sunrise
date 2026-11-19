@@ -2355,11 +2355,17 @@ pub enum Fit {
     Fits,
     /// What is removed or changed in the target, sorted by id.
     DoesNotFit(Vec<Misfit>),
+    /// Nothing the list can judge changed, but it holds no version of these hooks (their ids,
+    /// sorted), so it cannot say that they still mean what the mod was written for. A list this
+    /// crate's scan writes never gives this; one an older tool wrote does, until
+    /// [`UsesTable::pin_hook_versions`] fills it.
+    Unversioned(Vec<String>),
 }
 
 /// Whether every entry exists in `target` with an equal hash and under every path the mod writes,
 /// every type keeps its impls, every struct the mod builds can still be built (and keeps its
-/// field set when built in full), and every named hook version is unchanged.
+/// field set when built in full), and every hook keeps the version the entry names. A hook entry
+/// that names none is [`Fit::Unversioned`] when nothing else changed.
 pub fn fits<'a>(entries: impl IntoIterator<Item = &'a Entry>, target: &Surface) -> Fit {
     let hashes: BTreeMap<&str, &str> = target.entries().collect();
     let types: BTreeMap<&str, &Type> = target.types.iter().map(|t| (t.id.as_str(), t)).collect();
@@ -2387,6 +2393,7 @@ pub fn fits<'a>(entries: impl IntoIterator<Item = &'a Entry>, target: &Surface) 
     let refs = target.refs(true);
     let mut leads: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut misfits = Vec::new();
+    let mut unversioned = Vec::new();
     for entry in &entries {
         let id = entry.id.as_str();
         let mut misfit = |change| {
@@ -2455,18 +2462,23 @@ pub fn fits<'a>(entries: impl IntoIterator<Item = &'a Entry>, target: &Surface) 
                 }
             }
         }
-        if let (Some(named), Some(now)) = (entry.version, versions.get(id))
-            && named != *now
-        {
-            misfit(Change::Version { named, now: *now });
+        match (entry.version, versions.get(id)) {
+            (Some(named), Some(now)) if named != *now => {
+                misfit(Change::Version { named, now: *now })
+            }
+            (None, Some(_)) => unversioned.push(entry.id.clone()),
+            _ => {}
         }
     }
     misfits.sort();
     misfits.dedup();
-    if misfits.is_empty() {
-        Fit::Fits
-    } else {
+    unversioned.sort();
+    if !misfits.is_empty() {
         Fit::DoesNotFit(misfits)
+    } else if !unversioned.is_empty() {
+        Fit::Unversioned(unversioned)
+    } else {
+        Fit::Fits
     }
 }
 
@@ -2474,8 +2486,10 @@ pub fn fits<'a>(entries: impl IntoIterator<Item = &'a Entry>, target: &Surface) 
 pub const USES_SCHEMA: u32 = 2;
 
 /// The schema before it, which [`UsesTable::read`] still reads: published packages carry it. Its
-/// lists recorded a build wherever the scan was in doubt, so how they say a struct is built is
-/// not read, and the compile judges it.
+/// lists recorded a build wherever the scan was in doubt, with nothing to tell a doubt from a
+/// literal the scan had placed, so how they say a struct is built is not read and the compile
+/// judges it: a literal that no longer builds fails there, under the mod's name. They hold no
+/// hook versions either ([`Fit::Unversioned`]).
 const DOUBTING_SCHEMA: u32 = 1;
 
 /// The file a mod carries its [`UsesTable`] in, beside its `sunrise-mod.toml`.
@@ -2563,8 +2577,8 @@ impl UsesTable {
         Ok(table)
     }
 
-    /// Gives each hook entry that holds no version the one `made_for`, the surface of the build
-    /// the list was made for, has: a list of the schema before this one says none.
+    /// Gives each hook entry that holds no version the one `made_for` has, which must be the
+    /// surface of the build the list was made for: a list of the schema before this one says none.
     pub fn pin_hook_versions(&mut self, made_for: &Surface) {
         let versions: BTreeMap<&str, u64> = made_for
             .hooks
@@ -2576,23 +2590,6 @@ impl UsesTable {
                 .version
                 .or_else(|| versions.get(entry.id.as_str()).copied());
         }
-    }
-
-    /// Whether the list cannot say that some hook of it keeps its version in `target`: the entry
-    /// holds no version, and the hook there is past version 1, the one every hook starts at.
-    /// [`fits`] does not judge such a hook, so a caller that cannot [`Self::pin_hook_versions`]
-    /// treats the list as none.
-    pub fn lacks_a_hook_version(&self, target: &Surface) -> bool {
-        let unversioned: BTreeSet<&str> = self
-            .entries
-            .iter()
-            .filter(|e| e.version.is_none())
-            .map(|e| e.id.as_str())
-            .collect();
-        target
-            .hooks
-            .iter()
-            .any(|h| h.contract.version != 1 && unversioned.contains(h.id.as_str()))
     }
 
     /// The table as written: pretty JSON, entries sorted by id, ending in a newline.
