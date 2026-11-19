@@ -62,7 +62,7 @@ fn early_server_game_rules_saved_and_creation_values() {
                     game_rules: create.rules.by_name(),
                     ..Default::default()
                 };
-                level.write(scratch.path()).unwrap();
+                level.write(scratch.path(), &Default::default()).unwrap();
                 create.rules.save(scratch.path()).unwrap();
             }
             let observed = Arc::new(Mutex::new(Vec::new()));

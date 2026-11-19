@@ -168,7 +168,11 @@ impl WorldRequest {
                     // tick: a world made under the account names it from its first level.dat.
                     level.player_uuid = Some(sunrise_client::lan::playerdata::uuid_ints(account));
                 } else if sunrise_client::lan::playerdata::migrate_owner(
-                    &save_root, &mut level, old, account,
+                    &save_root,
+                    &mut level,
+                    old,
+                    account,
+                    res.items(),
                 ) {
                     log::info!(
                         "Sunrise: \"{folder}\" was made under the offline profile; \
@@ -322,7 +326,7 @@ impl WorldRequest {
 
         // Persist new metadata on the worker too, before publishing the world.
         if !save_root.join("level.dat").exists() {
-            level.write(&save_root)?;
+            level.write(&save_root, res.items())?;
         }
         Ok(PreparedWorld {
             save_root,
@@ -952,6 +956,7 @@ pub(super) fn make_streaming(
     let mut save = SaveDir::new(
         sunrise_client::save::dimension_dir(world_root, dim.id()),
         shape,
+        Some(res.shared_items()),
     );
     save.enable_trusted_fluid_load();
     let save = Arc::new(save);
@@ -1291,7 +1296,7 @@ mod tests {
                 name: "Recovered".into(),
                 ..Level::default()
             }
-            .write(&dir)
+            .write(&dir, &Default::default())
             .unwrap();
             std::fs::copy(dir.join("level.dat"), dir.join("level.dat_old")).unwrap();
             std::fs::write(dir.join("level.dat"), b"not a level").unwrap();
@@ -1447,13 +1452,17 @@ mod tests {
             data_packs: Some((vec!["vanilla".into(), "file/biomes".into()], vec![])),
             ..Level::default()
         }
-        .write(&root)
+        .write(&root, &Default::default())
         .unwrap();
         with_game(|game| {
             let before = game.res.biomes().with_packs([]);
             let mut chunk = sunrise_client::chunk::Chunk::empty(8, 8);
             chunk.set_biome_cell(1, 20, 2, before.saved_id("gone_mod:highland"));
-            let save = SaveDir::new(root.clone(), sunrise_client::chunk::LevelShape::OVERWORLD);
+            let save = SaveDir::new(
+                root.clone(),
+                sunrise_client::chunk::LevelShape::OVERWORLD,
+                Some(Default::default()),
+            );
             save.save(&[Arc::new(chunk)], game.pack.assets.registry, &before)
                 .unwrap();
             drop(save);
@@ -1589,7 +1598,7 @@ mod tests {
         // Before the loaded mods are known: a world without the list.
         let _restore = Restore(set_loaded(None));
         let plain = dir.join("plain");
-        level().write(&plain).unwrap();
+        level().write(&plain, &Default::default()).unwrap();
         assert_eq!(Level::read(&plain).unwrap().saved_mods, None);
         // Saved with version 1 of the mod, and with one since gone.
         let changed = dir.join("changed");
@@ -1597,7 +1606,7 @@ mod tests {
             record("mismatch_test", "1.0.0"),
             record("gone", "0.5.0"),
         ]));
-        level().write(&changed).unwrap();
+        level().write(&changed, &Default::default()).unwrap();
         set_loaded(Some(vec![record("mismatch_test", "2.0.0")]));
         mod_platform::testing::with_mods(
             vec![
@@ -1901,7 +1910,7 @@ mod unused_feature_startup_tests {
                 data_packs: Some((vec!["vanilla".into(), "file/h259".into()], vec![])),
                 ..Level::default()
             };
-            level.write(&root).unwrap();
+            level.write(&root, &Default::default()).unwrap();
             sunrise_client::save::write_world_gen_settings(
                 &root,
                 259,
@@ -2004,7 +2013,7 @@ mod unused_feature_preservation_tests {
             data_packs: Some((vec!["vanilla".into(), "file/h259".into()], vec![])),
             ..Level::default()
         };
-        level.write(&root).unwrap();
+        level.write(&root, &Default::default()).unwrap();
         sunrise_client::save::write_world_gen_settings(
             &root,
             259,

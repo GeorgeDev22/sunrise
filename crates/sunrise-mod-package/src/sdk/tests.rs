@@ -72,6 +72,25 @@ fn written_index_reads_back_and_unknown_fields_are_ignored() {
 }
 
 #[test]
+fn a_mixins_revision_that_is_not_a_full_sha_is_refused() {
+    let written = index(&[("surface.json", b"{}")]);
+    for rev in [
+        "",
+        "main",
+        &"A".repeat(40),
+        &"a".repeat(39),
+        &"a".repeat(41),
+    ] {
+        let mut value = json(&written);
+        value["mixins"]["rev"] = rev.into();
+        assert!(
+            matches!(read(&value), Err(Refusal::MixinsRev(found)) if found == rev),
+            "{rev:?}"
+        );
+    }
+}
+
+#[test]
 fn the_comparison_with_the_previous_sdk_is_written_and_read_back() {
     let mut written = index(&[(ENGINE, b"engine")]);
     let hash = written.surface.hash.clone();
@@ -350,6 +369,15 @@ fn asset_names_state_kind_target_and_side() {
                 Codec::Xz,
                 Some("x86_64-unknown-linux-gnu".into()),
                 Some(Side::Server),
+            )),
+        ),
+        (
+            "tool-x86_64-pc-windows-gnu.tar.xz",
+            Some((
+                Kind::Tool,
+                Codec::Xz,
+                Some("x86_64-pc-windows-gnu".into()),
+                None,
             )),
         ),
         ("engine-.tar.xz", None),

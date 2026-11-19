@@ -9,7 +9,7 @@ use sunrise_client::lan::recipes;
 use sunrise_client::{
     containers::{BlockEntity, ModMenuType},
     furnace::FurnaceCooking,
-    items::ItemStack,
+    items::{ItemStack, Items},
     lan::{
         guest::Guest,
         menu::{ModCraft, Slots, linked_slot_count, read_links, write_links},
@@ -126,10 +126,10 @@ pub(super) fn store_player(menu: &mut Menu, g: &mut Guest) {
 
 /// Inventory.placeItemBackInInventory for each stack: what doesn't fit is
 /// left for Player.drop (creative players keep it too).
-fn place_back(menu: &mut Menu, env: &Env, stacks: Vec<ItemStack>) {
+fn place_back(menu: &mut Menu, items: &Items, stacks: impl IntoIterator<Item = ItemStack>) {
     menu.creative = false;
     for mut stack in stacks {
-        menu.give(env, &mut stack);
+        menu.give(items, &mut stack);
         if stack.count > 0 {
             menu.dropped.push(stack);
         }
@@ -1358,12 +1358,13 @@ impl Game<'_> {
         for gi in 0..count {
             let host = self.lan.as_ref().unwrap();
             let g = &host.hub.guests[gi];
-            let Some((t, pos)) =
-                g.menu.as_ref().filter(|_| host.hub.here(g)).and_then(|m| {
-                    match (m.mod_type, m.slots) {
-                        (Some(t), Slots::Block(pos)) if t.links.is_some() => Some((t, pos)),
-                        _ => None,
-                    }
+            let Some((t, pos)) = g
+                .menu
+                .as_ref()
+                .filter(|_| host.hub.here(g) && !self.player_tick_canceled(g.conn))
+                .and_then(|m| match (m.mod_type, m.slots) {
+                    (Some(t), Slots::Block(pos)) if t.links.is_some() => Some((t, pos)),
+                    _ => None,
                 })
             else {
                 continue;
@@ -1444,12 +1445,13 @@ impl Game<'_> {
                 return;
             };
             let g = &host.hub.guests[gi];
-            let Some((t, pos)) =
-                g.menu.as_ref().filter(|_| host.hub.here(g)).and_then(|m| {
-                    match (m.mod_type, m.slots) {
-                        (Some(t), Slots::Block(pos)) if t.crafting.is_some() => Some((t, pos)),
-                        _ => None,
-                    }
+            let Some((t, pos)) = g
+                .menu
+                .as_ref()
+                .filter(|_| host.hub.here(g) && !self.player_tick_canceled(g.conn))
+                .and_then(|m| match (m.mod_type, m.slots) {
+                    (Some(t), Slots::Block(pos)) if t.crafting.is_some() => Some((t, pos)),
+                    _ => None,
                 })
             else {
                 continue;
@@ -1485,7 +1487,11 @@ impl Game<'_> {
                     .guests
                     .iter()
                     .find(|g| g.conn == c)
-                    .is_some_and(|g| host.hub.here(g) && !self.lan_table_valid(g, pos))
+                    .is_some_and(|g| {
+                        host.hub.here(g)
+                            && !self.player_tick_canceled(c)
+                            && !self.lan_table_valid(g, pos)
+                    })
             })
             .map(|(c, window, _)| (c, window))
             .collect();
@@ -1614,7 +1620,30 @@ impl Game<'_> {
     /// doesn't fit dropped (`clearContainer`).
     pub(super) fn lan_place_back(&mut self, gi: usize, stacks: Vec<ItemStack>) {
         let mut menu = Menu::new(Kind::Inventory);
-        self.guest_menu_op(gi, &mut menu, |menu, env| place_back(menu, env, stacks));
+        self.guest_menu_op(gi, &mut menu, |menu, env| {
+            place_back(menu, env.items, stacks)
+        });
+    }
+
+    /// `AbstractContainerMenu.removed`: return the closing player's cursor to their inventory
+    /// and send the emptied cursor. Only drop overflow after the player's own turn state is
+    /// restored: spawning it can call mods synchronously, before the Close and Open notices.
+    pub(super) fn guest_carried_back(&mut self, gi: usize) {
+        let overflow = self.with_own_record(gi, |lan, items| {
+            let overflow = lan.hub.guests.update(gi, |guest| {
+                let carried = guest.carried.take()?;
+                let mut menu = Menu::new(Kind::Inventory);
+                load_player(&mut menu, guest);
+                place_back(&mut menu, items, [carried]);
+                store_player(&mut menu, guest);
+                Some(std::mem::take(&mut menu.dropped))
+            })?;
+            lan.hub.send_inventory(gi);
+            Some(overflow)
+        });
+        if let Some(overflow) = overflow.filter(|stacks| !stacks.is_empty()) {
+            self.drop_guest_items(gi, overflow);
+        }
     }
 
     /// A guest left: what their crafting grids and workstation held goes back into their
@@ -1642,7 +1671,7 @@ impl Game<'_> {
         }
         let mut menu = Menu::new(Kind::Inventory);
         load_player(&mut menu, g);
-        place_back(&mut menu, &self.menu_env(), grid);
+        place_back(&mut menu, self.items(), grid);
         let dropped = std::mem::take(&mut menu.dropped);
         store_player(&mut menu, g);
         for stack in dropped {
@@ -2296,10 +2325,31 @@ mod empty_ingredient_placement_tests {
                         &[],
                         &[],
                     );
+                    // Malformed recipes abort registry loading; keep each refusal isolated
+                    // from the valid recipes whose empty ingredients we test over the wire.
+                    let invalid = ["direct", "missing", "a_invalid"].map(|id| {
+                        let path = pack.join(format!("data/empty_fixture/recipe/{id}.json"));
+                        let json = std::fs::read(&path).unwrap();
+                        std::fs::remove_file(&path).unwrap();
+                        (id, path, json)
+                    });
+                    for (id, path, json) in invalid {
+                        std::fs::write(&path, json).unwrap();
+                        let error = game
+                            .stage_world_tables(&stack, false, &resources)
+                            .err()
+                            .expect("malformed recipe must refuse the load")
+                            .to_string();
+                        assert!(
+                            error.contains(&format!("data/empty_fixture/recipe/{id}.json")),
+                            "{error}"
+                        );
+                        std::fs::remove_file(path).unwrap();
+                    }
                     game.world_tables = game
                         .stage_world_tables(&stack, false, &resources)
                         .unwrap()
-                        .0;
+                        .tables;
                     game.build_registries();
                     {
                         // The generated Host entrypoint serves native and wasm callers;

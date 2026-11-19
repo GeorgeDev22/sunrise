@@ -1,7 +1,7 @@
 //! Horses, donkeys, mules and the undead horses (`AbstractHorse`): random
 //! stats, coat colours and markings, eating, rearing, taming by riding,
 //! the ridden movement and jump, offspring stats and `AbstractEquineModel`.
-use super::finalize::{Attr, set_base};
+use super::finalize::{Attr, base_value, set_base};
 use super::{
     Mob, MobEvent, MobWorld, Seen, Species,
     anim::{Poses, State},
@@ -316,17 +316,17 @@ pub struct OffspringAttributes {
 }
 impl OffspringAttributes {
     pub fn draw(m: &mut Mob, partner: &Seen) -> Self {
+        // `setOffspringAttribute` reads `getAttributeBaseValue`: an effect's
+        // modifier is not inherited.
+        let (health, speed) = (
+            base_value(m, Attr::MaxHealth),
+            base_value(m, Attr::MovementSpeed),
+        );
         let r = &mut m.random;
         Self {
-            max_health: offspring(
-                f64::from(m.attrs.max_health),
-                partner.stats[0],
-                15.0,
-                30.0,
-                r,
-            ) as f32,
+            max_health: offspring(health, partner.stats[0], 15.0, 30.0, r) as f32,
             jump: offspring(m.extra.vector[0], partner.stats[1], 0.4, 1.0, r),
-            speed: offspring(m.attrs.speed, partner.stats[2], 0.1125, 0.3375, r),
+            speed: offspring(speed, partner.stats[2], 0.1125, 0.3375, r),
         }
     }
 }
@@ -906,7 +906,7 @@ pub fn ridden_step(m: &mut Mob, context: &LoopContext) {
             m.velocity.x += f64::from(-0.4 * s * r.jump);
             m.velocity.z += f64::from(0.4 * c * r.jump);
         }
-        crate::motion::native_living_jump(context, m.id, &m.kind.id);
+        m.living_jumped(context);
         if let Some(rider) = m.rider.as_mut() {
             rider.jump = 0.0;
         }
@@ -1419,8 +1419,14 @@ mod tests {
                         expected.next_long(),
                         "{name}: RNG continuation"
                     );
-                    let saved =
-                        crate::entity_nbt::mob_to_nbt(&m, [93, 0, 0, 1], None, None, |_| None);
+                    let saved = crate::entity_nbt::mob_to_nbt(
+                        &m,
+                        [93, 0, 0, 1],
+                        None,
+                        None,
+                        |_| None,
+                        &Default::default(),
+                    );
                     assert_eq!(
                         saved.get("Temper"),
                         Some(&sunrise_core::nbt::Tag::Int(if value < 0 {

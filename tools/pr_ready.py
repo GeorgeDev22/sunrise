@@ -10,12 +10,10 @@
 From the files the branch changes since its merge base with --base (committed or not) it decides what to run:
 rustfmt, and clippy with warnings denied exactly as CI's verify job runs it (the whole workspace with the game's code
 mods, plus the server build when sunrise-client is affected); the tests of the touched crates, with the features
-CI's workspace-wide run gives them; the launcher (its own workspace) the same way when CI's launcher job would run
-(tools/ci/rust_changes.py --launcher); crates/sunrise-theme/tokens.css against sunrise-theme; Cargo.lock changing
+CI's workspace-wide run gives them; crates/sunrise-theme/tokens.css against sunrise-theme; Cargo.lock changing
 only with a Cargo.toml; the Python tests (always, as in CI) and the public-tree check; and the vanilla harnesses the
-changes can affect, picked as CI's parity job picks them (tools/parity.py --changed). As in CI (parity-scope in
-.github/workflows/ci.yml), the harnesses run only when the branch changes a harness, an oracle, a probe or the
-runner; otherwise they are listed and left to parity-main, which runs them on main. --harnesses runs them anyway.
+changes can affect (tools/parity.py --changed). Locally, the harnesses run only when the branch changes a
+harness, an oracle, a probe or the runner; otherwise they are listed and left to the daily on main. --harnesses runs them anyway.
 Harnesses run where the vanilla data is (a prepared .local/ here, or the Mac mini); elsewhere they are listed for CI.
 Tests select library, binary and integration targets explicitly, followed by doc tests, so unrelated example
 executables are not built and linked again.
@@ -50,7 +48,6 @@ if "PARITY_SHARED" not in os.environ and not (ROOT / ".local" / "minecraft").exi
     # A fleet worktree without vanilla data still knows each harness's dependencies.
     os.environ["PARITY_SHARED"] = str(FLEET_SHARED)
 from tools import parity, process_tree, release_train  # noqa: E402
-from tools.ci import rust_changes  # noqa: E402
 
 RBUILD = Path.home() / "fleet" / "rbuild"
 # What rbuild's login shell needs on each fleet machine before cargo (it adds sccache itself). The ThinkPad no
@@ -73,10 +70,6 @@ mkdir -p "$state/parity-runner" "$state/parity-target"
 ln -sfn "$state/parity-runner" .local/parity-runner && ln -sfn "$state/parity-target" .local/parity-target""",
 }
 ROOT_RUST = {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml"}
-LAUNCHER_FEATURES = """export features=""
-if [ "$(uname)" = Darwin ] && ! xcrun metal --version > /dev/null 2>&1; then features="--features gpui_platform/runtime_shaders"; fi
-in_shell() { if [ "$(uname)" = Linux ] && ! pkg-config --exists xkbcommon 2>/dev/null && command -v nix-shell > /dev/null; then
-  nix-shell shell.nix --run "$1"; else bash -c "$1"; fi; }"""
 
 
 # Build-script inputs outside the crates: catalog-only edits still need to build and test their consumers.
@@ -97,11 +90,6 @@ def workspace_rust(path):
     """Whether a change to path is built by the main Cargo workspace."""
     return not is_doc(path) and (path.startswith(("crates/", "xtask/", ".cargo/", *MOD_API_INPUTS))
                                  or path in ROOT_RUST)
-
-
-def launcher_rust(path):
-    """Whether a change to path is built into the launcher (its own workspace): CI's launcher job's own rule."""
-    return rust_changes.needs_launcher([path])
 
 
 def touched_crates(paths, packages):
@@ -133,8 +121,6 @@ def area(path):
     if is_doc(path) or path.startswith(("tests/", "mods/", "docs/", "roadmap/")) or path == "research-lock.json" or \
             (path.startswith("tools/") and not path.startswith("tools/ci/")):
         return None
-    if path.startswith(("launcher/", "crates/sunrise-prepare/")):
-        return "launcher"
     if path.startswith((".github/", "tools/ci/")):
         return "CI"
     if path.startswith("crates/sunrise-theme/"):
@@ -159,13 +145,13 @@ def lock_problem(paths):
 
 
 def suggested_label(paths, exporter_paths=frozenset()):
-    if any(release_train.player_facing(path, kind, exporter_paths) for path in paths for kind in ("game", "launcher")):
+    if any(release_train.player_facing(path, "game", exporter_paths) for path in paths):
         return "player-facing: `feature` if players get something new, no label for a fix (`release-now` if urgent)"
     return "`skip-release`"
 
 
-# CI's parity-scope (.github/workflows/ci.yml): a pull request runs its harnesses itself only when it changes a
-# harness, an oracle, a probe or the runner. parity-main runs the others on main, a batch of merges at a time.
+# The local self-check runs harnesses when the branch changes a harness, oracle, probe or the runner.
+# CI runs parity only in the daily on main's head.
 PARITY_SCOPE = re.compile(
     r"^(tools/test_[a-z0-9_]+_parity\.py|tools/(parity[a-z_]*|lab)\.py|tools/parity_hosts\.json|mods/sunrise/src/test/"
     r"|crates/[^/]+/examples/|crates/sunrise-client/src/game/[a-z_]*(fixture|harness)\.rs"
@@ -173,7 +159,7 @@ PARITY_SCOPE = re.compile(
 
 
 def runs_parity(changed):
-    """Whether CI's parity job would run for a pull request that changes these files."""
+    """Whether the local self-check runs harnesses for a branch changing these files."""
     return any(PARITY_SCOPE.match(path) for path in changed)
 
 
@@ -369,7 +355,6 @@ HOLDER_ACTOR = "cargo build --locked -p sunrise-mod-package --features runtime-p
 def plan(args, base, changed, crates_of, libraries, dependencies):
     """The checks for these changed files, in the order they run."""
     rust = any(workspace_rust(path) for path in changed)
-    launcher = any(launcher_rust(path) for path in changed)
     # The Python tests also hold ROADMAP.md to roadmap/roadmap.toml (tests/test_roadmap.py).
     crates = touched_crates(changed, crates_of) if rust else []
     # An unrecognised Rust path must not silently skip validation.
@@ -404,7 +389,7 @@ def plan(args, base, changed, crates_of, libraries, dependencies):
         Step("rustfmt", "python3 tools/ci/format_scan.py", skip=None if rust else no_rust),
         Step("clippy", clippy, skip=None if rust else no_rust),
         Step("holder actor", HOLDER_ACTOR,
-             skip=None if crates is None or "sunrise-mod-package" in crates or launcher
+             skip=None if crates is None or "sunrise-mod-package" in crates
              else "holder tests untouched"),
         Step("tests" + (": workspace" if crates is None else f": {', '.join(crates)}" if crates else ""),
              f"cargo test --locked {selection}{mod_features(crates)} --tests",
@@ -432,26 +417,20 @@ def plan(args, base, changed, crates_of, libraries, dependencies):
                  f"CARGO_BUILD_JOBS=${{CARGO_BUILD_JOBS:-4}} cargo test --manifest-path {manifest}"
                  " --locked -- --test-threads=4", skip=skip, summary=tests_passed),
         ])
-    launcher_skip = None if launcher else "launcher untouched"
-    for name, command in [("launcher rustfmt", "cargo fmt --check"),
-                          ("launcher clippy", "python3 ../tools/ci/check_warnings.py cargo clippy --keep-going --all-targets --locked $features"),
-                          ("launcher tests", "cargo test --locked --lib --bins $features")]:
-        steps.append(Step(name, f"cd launcher && {LAUNCHER_FEATURES}\nin_shell {shlex.quote(command)}", skip=launcher_skip,
-                          summary=tests_passed if name == "launcher tests" else None))
     harness = Step("Parity", summary=parity_summary)
     affected = affected_here(changed)
     local_data = (ROOT / ".local" / "minecraft").exists() and (ROOT / ".local" / "sunrise-client").exists()
     in_scope = args.harnesses or runs_parity(changed)
     if not args.quick and not in_scope:
-        # What CI does with this pull request: nothing here, parity-main on main.
+        # What CI does with this pull request: nothing here, the daily on main.
         harness.status = "list"
         why = "no harness, oracle, probe or runner change; --harnesses runs them here"
         if affected is None:
-            harness.detail = f"not run ({why}): parity-main checks this on main"
+            harness.detail = f"not run ({why}): the daily checks this on main"
         elif not affected:
             harness.detail = "no harness affected"
         else:
-            harness.detail = f"{len(affected)} affected, left to parity-main on main ({why}): {short_list(affected)}"
+            harness.detail = f"{len(affected)} affected, left to the daily on main ({why}): {short_list(affected)}"
     elif args.quick or (args.host == "local" and not local_data) or (args.host != "local" and args.host not in HARNESS_SETUP):
         harness.status = "list"
         why = "--quick" if args.quick else "no vanilla data here"
@@ -576,16 +555,6 @@ def run_windows(steps, verbose, environment=None):
             command = shlex.split(step.command)
         elif step.name == "tokens.css up to date":
             command = shlex.split(step.command)
-        elif step.name == "launcher rustfmt":
-            command = ["cargo", "fmt", "--check"]
-            cwd = ROOT / "launcher"
-        elif step.name == "launcher clippy":
-            command = [sys.executable, "../tools/ci/check_warnings.py", "cargo", "clippy", "--keep-going",
-                       "--all-targets", "--locked"]
-            cwd = ROOT / "launcher"
-        elif step.name == "launcher tests":
-            command = ["cargo", "test", "--locked", "--lib", "--bins"]
-            cwd = ROOT / "launcher"
         elif step.name == "Parity":
             command = shlex.split(step.command)
             if command and command[0] == "PARITY_HOSTS=":

@@ -82,8 +82,6 @@ fn default_components_reader_baseline() -> client::Result<()> {
                     CALLS.fetch_add(1, Ordering::Relaxed);
                 }
             },
-            loot_function: |_, _, _, _, _| {},
-            loot_condition: |_, _, _, _, _| {},
         })
         .is_ok()
     );

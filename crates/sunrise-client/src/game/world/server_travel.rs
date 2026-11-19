@@ -108,8 +108,7 @@ impl Rideable for Mob {
         self.id
     }
     fn arrive(&mut self, at: Vec3, yaw: f32, _motion: Vec3) {
-        self.position = at;
-        self.previous = at;
+        sunrise_client::mobs::living::teleports::snap_to(self, at);
         self.velocity = Vec3::ZERO;
         self.yaw = yaw;
         self.previous_yaw = yaw;
@@ -1439,8 +1438,9 @@ impl Game<'_> {
         // All object-owned metadata moves, including rejected intermediate bodies;
         // ordinary destination queries still expose only admitted objects.
         for mut mob in self.move_entity_memory(source, id) {
-            mob.position = super::vehicle_teleport::passenger_destination(from, at, mob.position);
-            mob.previous = mob.position;
+            let destination =
+                super::vehicle_teleport::passenger_destination(from, at, mob.position);
+            sunrise_client::mobs::living::teleports::snap_to(&mut mob, destination);
             let [turned_yaw, pitch] = super::vehicle_teleport::passenger_rotation(
                 rotation,
                 [yaw, rotation[1]],
@@ -1763,6 +1763,10 @@ mod tests {
         struct Constructed(Arc<Mutex<Vec<Holder>>>);
         #[mod_api::__subscriptions]
         impl Hooks for Constructed {
+            fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+                r.register_attachment_type("natural_tree:state", false)
+                    .unwrap();
+            }
             fn entity_constructing(&self, host: HostSide<'_>, event: &mut EntityConstructingEvent) {
                 self.0.lock().unwrap().push(event.holder);
                 if let HostSide::Server(host) = host {

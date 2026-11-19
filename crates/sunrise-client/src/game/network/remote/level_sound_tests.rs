@@ -128,7 +128,13 @@ fn local_level_requests_can_mute_sound_without_undoing_prediction() {
             game.predict_use(
                 &(
                     vec![(at, new)],
-                    vec![(at, "block.wooden_door.open".into(), 1.0, 0.9)],
+                    vec![(
+                        at,
+                        "block.wooden_door.open".into(),
+                        mod_api::SoundSource::Blocks,
+                        1.0,
+                        0.9,
+                    )],
                 ),
                 1,
             );

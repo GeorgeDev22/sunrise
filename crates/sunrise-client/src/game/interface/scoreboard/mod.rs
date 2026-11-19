@@ -501,7 +501,11 @@ impl Game<'_> {
         host.hub.teams.clone_from(&self.score.board.teams);
         let view = sunrise_client::lan::scoreboard::View::of(&self.score.board);
         host.hub.guests.update_all(|g| {
-            if g.placed && g.scoreboard != view {
+            if g.placed && !g.scoreboard_synced {
+                g.send_all(&view.initial());
+                g.scoreboard = view.clone();
+                g.scoreboard_synced = true;
+            } else if g.placed && g.scoreboard != view {
                 g.send_all(&g.scoreboard.changes(&view));
                 g.scoreboard = view.clone();
             }
@@ -947,7 +951,6 @@ impl Game<'_> {
         for (location, rgba) in ready {
             self.store_skin(location, rgba);
         }
-        self.client_hooks_frame();
     }
     /// `Hud.extractTabList`: the player list while the player-list key is
     /// held. A local world shows it with a joined LAN guest or a `list`
@@ -1024,12 +1027,6 @@ impl Game<'_> {
         let board = &self.score.board;
         let objective = board.display_objective(sb::SLOT_LIST);
         let up = |id: u128| upside_down.contains(&id);
-        debug_assert!(
-            self.serving.is_none(),
-            "a server thread calls no client hook"
-        );
-        let marked = sunrise_hooks::engine::player_mark;
-
         let inputs = TabInputs {
             players: &players,
             board,
@@ -1038,12 +1035,8 @@ impl Game<'_> {
             online_mode,
             gui_ticks: self.visual_ticks() as i64,
             // Sunrise has no "chat background only" option: vanilla's default (on).
-            background: tab_list::row_background(
-                true,
-                f64::from(self.settings.text_background_opacity),
-            ),
+            background: tab_list::row_background(true, self.settings.text_background_opacity),
             upside_down: &up,
-            mark: &marked,
         };
         let draws = self.tab_list.layout(&inputs, &self.gui.atlas.font);
         sunrise_client::hud_layout::paint(batch, &self.gui.atlas, &draws);

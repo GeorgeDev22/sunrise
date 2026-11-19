@@ -114,10 +114,6 @@ pub fn state(m: &Mob) -> Option<&State> {
 pub fn state_mut(m: &mut Mob) -> &mut State {
     m.extra.raider.get_or_insert_with(Box::default)
 }
-/// `Raider.getCurrentRaid() != null`.
-pub fn in_raid(m: &Mob) -> bool {
-    state(m).is_some_and(|s| s.raid_id.is_some())
-}
 pub fn has_active_raid(m: &Mob) -> bool {
     state(m).is_some_and(|s| s.active_raid)
 }
@@ -834,7 +830,8 @@ mod tests {
                 .is_some_and(|d| d.ominous_banner)
         );
         assert!(is_captain(&m));
-        let saved = crate::entity_nbt::mob_to_nbt(&m, [0; 4], None, None, |_| None);
+        let saved =
+            crate::entity_nbt::mob_to_nbt(&m, [0; 4], None, None, |_| None, &Default::default());
         let chances = saved.get("drop_chances").unwrap();
         assert_eq!(
             chances.get("head"),

@@ -30,6 +30,7 @@ pub(super) fn unpack_loot(
     random: &mut LegacyRandom,
     sequences: &mut RandomSequences,
     world_seed: i64,
+    items: &crate::items::Items,
     context: ContainerLootContext<'_>,
 ) {
     let Tag::Compound(map) = tag else {
@@ -57,7 +58,7 @@ pub(super) fn unpack_loot(
     };
     if let Some(stack) = slots.into_iter().next().flatten() {
         let item = sunrise_client::structure_blocks::loot_item_with_components(&stack);
-        map.insert("item".into(), save::item_to_nbt(&item));
+        map.insert("item".into(), save::item_to_nbt(&item, items));
     }
 }
 
@@ -124,6 +125,7 @@ impl Game<'_> {
             &mut self.world.random,
             &mut self.rand_sequences,
             self.level.seed,
+            self.res.items(),
             ContainerLootContext::default(),
         );
         Some(tag)
@@ -186,7 +188,7 @@ impl Game<'_> {
         };
         let pitch_bend = inserted.count as f32 / self.max_stack(inserted) as f32;
         if let (Tag::Compound(map), Some(item)) = (&mut tag, &pot_item) {
-            map.insert("item".into(), save::item_to_nbt(item));
+            map.insert("item".into(), save::item_to_nbt(item, self.res.items()));
         }
         spill::put_saved_entity(&mut self.world, pos, tag);
         // The sherds and item go to the guests (BlockEntityData).

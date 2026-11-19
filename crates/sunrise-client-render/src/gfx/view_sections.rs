@@ -127,9 +127,9 @@ fn view_sections<T>(
     radius: i32,
     out: &mut Vec<resident::Visible>,
 ) {
-    let own = Frustum {
-        planes: frustum(ViewCamera::new(view, view.camera, far).own_view_proj),
-    };
+    let own = Frustum::from_planes(frustum(
+        ViewCamera::new(view, view.camera, far).own_view_proj,
+    ));
     sections.visible(view.camera, radius, &own, |_| true, |_, _| false, out);
     for v in out.iter_mut() {
         v.origin = resident::origin(v.key, sections.min_y(), frame_camera)
@@ -165,8 +165,8 @@ impl Renderer {
         let sections = &mut self.world_views.sections;
         sections.ask(max_side);
         sections.asked = true;
-        let views = sections.views.views().iter().map(|v| Frustum {
-            planes: super::frustum(ViewCamera::new(v, camera, far).view_proj),
+        let views = sections.views.views().iter().map(|v| {
+            Frustum::from_planes(super::frustum(ViewCamera::new(v, camera, far).view_proj))
         });
         let seen = JoinedFrusta::new(frustum, views);
         sections.seen = Some(seen);
@@ -230,10 +230,13 @@ impl Renderer {
             return;
         };
         let origin = [key.0 * 16, self.layout.min_y() + key.1 * 16, key.2 * 16];
-        if let Some(indices) =
-            s.sort
-                .update(camera.to_array(), origin, &mut self.translucent_sorter)
-        {
+        if let Some(indices) = s.sort.update(
+            camera.to_array(),
+            camera.to_array(),
+            origin,
+            false,
+            &mut self.translucent_sorter,
+        ) {
             self.uploads.buffer(
                 encoder,
                 self.sorted_indices.buffer(index_page),

@@ -152,7 +152,7 @@ fn a_mods_fluid_is_placed_flows_is_collected_and_saved() {
             game.world.set(2, 64, 1, flowing).unwrap();
             let biomes = game.res.biomes().clone();
             let chunk = game.world.chunks.get(&(0, 0)).unwrap();
-            let saved = sunrise_client::save::encode(chunk, registry, &biomes);
+            let saved = sunrise_client::save::encode(chunk, registry, &biomes, &Default::default());
             let loaded = sunrise_client::save::decode(&saved, registry, &biomes).unwrap();
             assert_eq!(loaded.block(1, 64, 1), oil);
             assert_eq!(loaded.block(2, 64, 1), flowing);

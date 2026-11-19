@@ -209,7 +209,9 @@ message SunriseOptions {
   optional uint32 max_view_distance = 1;
   // How far the server serves LOD tiles, in chunks; 0 when off.
   optional uint32 lod_distance = 2;
-  optional bool anticheat = 3;
+  // 3 was the anticheat switch, removed with the anticheat.
+  reserved 3;
+  reserved "anticheat";
 }
 
 enum ModKind {

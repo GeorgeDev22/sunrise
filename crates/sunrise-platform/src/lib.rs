@@ -57,17 +57,9 @@ pub use sunrise_java_properties as java_properties;
 /// [`hooks::register`] it before the game starts (docs/layers.md, "How a Sunrise crate plugs
 /// in"). The engine's dispatch side is not part of the API.
 pub mod hooks {
-    /// The players the game shows (`sunrise_hooks::players`): the views [`Hooks::frame`] and
-    /// [`Hooks::tick`] get, the pose a crate lays over a player's body, what goes by their names,
-    /// the crate's sprites, the camera, and what a crate draws on them.
-    pub use sunrise_hooks::players::{
-        BODY_PARTS, Badge, BodyPose, Bone, CameraOverride, CameraView, Frame, Gear, Kind, Light,
-        Look, Mark, Mesh, Motion, NameDecoration, PartPoses, Particle, Pass, PlayerDraw,
-        PlayerModel, PlayerModels, Quad, SpriteStore, Sprites, View,
-    };
     pub use sunrise_hooks::{
-        Activity, Client, Dimension, GameMode, GetTheGame, Hooks, Play, Started, TooLate, perf,
-        register, seat, tunnel,
+        Activity, Client, ClientIdentity, Dimension, GameMode, GetTheGame, Hooks, Play, Started,
+        TooLate, connection, perf, register, seat, tunnel,
     };
 }
 
@@ -88,9 +80,46 @@ pub mod lang {
     pub use sunrise_hooks::lang::{Files, register};
 }
 
+/// Rows a crate adds to the Mods screen (docs/layers.md, "Platform registries").
+pub mod mod_rows {
+    pub use sunrise_hooks::mod_rows::{Row, register};
+}
+
+/// The game's own release: [`release::VERSION`] is what its Mods screen row shows.
+pub use sunrise_core::release;
+
+/// Input and drawing on an open container screen, for the extras that act on one (docs/layers.md,
+/// "Container screens"); offered through [`hooks::Hooks::containers`].
+pub mod containers {
+    pub use sunrise_hooks::containers::{
+        Button, Click, Container, ContainerHooks, Panel, Role, Slot, SlotId, Stack,
+    };
+
+    // Compiled with the tests: a crate on the platform alone implements every hook.
+    #[cfg(test)]
+    mod consumer {
+        use super::{Button, Click, Container, ContainerHooks, SlotId};
+
+        struct PickOnRelease;
+        impl ContainerHooks for PickOnRelease {
+            fn press(&self, _: &mut dyn Container, _: Option<SlotId>, b: Button) -> bool {
+                b == Button::Middle
+            }
+            fn release(&self, c: &mut dyn Container, slot: Option<SlotId>, _: Button) -> bool {
+                slot.is_some_and(|s| c.click(s, Click::QuickMove))
+            }
+            fn drag(&self, _: &mut dyn Container, _: Option<SlotId>, b: Button) -> bool {
+                matches!(b, Button::Other(_))
+            }
+        }
+
+        const _: &dyn ContainerHooks = &PickOnRelease;
+    }
+}
+
 /// Drawing on the HUD (docs/layers.md, "Platform registries").
 pub mod hud {
-    pub use sunrise_hooks::hud::{Canvas, Corner, Layer, register};
+    pub use sunrise_hooks::hud::{Canvas, Corner, Layer, Stage, register};
 }
 
 /// The multiplayer server list as vanilla stores it (`servers.dat`): read, write, add, remove,

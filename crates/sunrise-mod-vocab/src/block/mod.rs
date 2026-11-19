@@ -17,6 +17,7 @@ pub(crate) mod block_tint;
 pub(crate) mod bundle_items;
 pub(crate) mod cauldron_fluid_content;
 pub(crate) mod cauldron_interactions;
+pub(crate) mod collision_query;
 pub(crate) mod fluid_capability;
 pub(crate) mod fluid_model;
 pub(crate) mod fluid_states;

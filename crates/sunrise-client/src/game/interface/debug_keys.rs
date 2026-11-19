@@ -311,16 +311,20 @@ impl Game<'_> {
             self.draw_debug_overlay_under(batch, size);
         }
     }
+    /// Whether this client's debug overlay passes the draw gate this frame.
+    pub(in crate::game) fn debug_overlay_visible(&self) -> bool {
+        let screen_open = self.title.is_some() || self.screen != Screen::Playing;
+        self.debug_entries
+            .any_enabled(self.debug, self.reduced_debug_info())
+            && (!self.ui.hide_gui || screen_open)
+    }
+
     /// `DebugScreenOverlay.extractRenderState`: the enabled entries' lines
     /// (`debug-profile.json`), at the debug GUI scale, and the charts while
     /// the overlay is open. F1 hides it unless a screen is open. Sunrise paints
     /// it 20 times a second and copies those vertices in between.
     pub(super) fn draw_debug_overlay_under(&self, batch: &mut HudBatch, size: [u32; 2]) {
-        let screen_open = self.title.is_some() || self.screen != Screen::Playing;
-        let reduced = self.reduced_debug_info();
-        if !self.debug_entries.any_enabled(self.debug, reduced)
-            || (self.ui.hide_gui && !screen_open)
-        {
+        if !self.debug_overlay_visible() {
             // Nothing reads the server's lines now: it stops computing them each tick.
             if let Some(server) = &self.integrated {
                 server.request_debug(None);
@@ -328,7 +332,20 @@ impl Game<'_> {
             return;
         }
         let now = Instant::now();
-        let layout = (size, batch.scale.to_bits(), self.gui.atlas.font.epoch());
+        // The lightmap chart's pixels: none until the texture drawn now has been read
+        // (`Renderer::lightmap_sample`). Whether there are any is part of the cache's key, so
+        // a sample that stops being current is not painted again from it.
+        let lightmap = self
+            .renderer
+            .as_ref()
+            .filter(|_| self.debug_shows_lightmap())
+            .and_then(|r| r.lightmap_sample());
+        let layout = (
+            size,
+            batch.scale.to_bits(),
+            self.gui.atlas.font.epoch(),
+            lightmap.is_some(),
+        );
         if let Some(vertices) = self.debug_paint.borrow().fresh(now, layout) {
             batch.vertices.extend_from_slice(vertices);
             return;
@@ -366,14 +383,8 @@ impl Game<'_> {
                 scale, scale,
             )]));
             draws.extend(charts);
-            if self.debug_charts.lightmap
-                && let Some(r) = &self.renderer
-            {
-                draws.extend(sunrise_client::debug_chart::lightmap(
-                    &r.lightmap_pixels,
-                    width,
-                    height,
-                ));
+            if let Some(pixels) = lightmap {
+                draws.extend(sunrise_client::debug_chart::lightmap(pixels, width, height));
             }
             draws.push(hud_layout::GuiDraw::Pop);
         }
@@ -381,6 +392,12 @@ impl Game<'_> {
         self.debug_paint
             .borrow_mut()
             .store(now, layout, &batch.vertices[first_vertex..]);
+    }
+    /// Whether F3's lightmap chart (F3+4) is on screen: the overlay drawn, open and charting
+    /// the lightmap. Only then does the renderer read a pack-drawn light texture back for it
+    /// (`Renderer::set_lightmap_readback`).
+    pub(in crate::game) fn debug_shows_lightmap(&self) -> bool {
+        self.debug_overlay_visible() && self.debug && self.debug_charts.lightmap
     }
     /// Whether the overlay is listing GPU pass times (its `system_specs` lines), the only reason
     /// it has to time passes.
@@ -420,7 +437,7 @@ impl Game<'_> {
                 _ => "",
             });
         let refresh = self.debug_refresh_rate().map_or("0".into(), |mhz| {
-            debug_overlay::refresh_rate_label(f64::from(mhz) / 1000.0)
+            sunrise_client_input::window::refresh_rate_label(mhz as f32 / 1000.0)
         });
         // Sunrise: with frame generation running, the frames reaching the screen too.
         let generated = self
@@ -506,9 +523,10 @@ impl Game<'_> {
                 d.group(
                     "system",
                     [format!(
-                        "Window: {}x{} ({density:.2}x pixel density)",
+                        "Window: {}x{} ({}x pixel density)",
                         logical.width.round() as i32,
-                        logical.height.round() as i32
+                        logical.height.round() as i32,
+                        sunrise_core::java_number::format_fixed2(f64::from(density as f32))
                     )],
                 );
             }
@@ -553,18 +571,23 @@ impl Game<'_> {
     /// `DebugEntryTps` for local and remote connections.
     pub(super) fn debug_tps_line(&self, d: &mut debug_overlay::Displayer) {
         if self.player.is_some() {
-            let [tx, rx] = self.debug_charts.packet_rates.map(|n| n.round() as i64);
+            use sunrise_core::java_number::format_fixed;
+            let [tx, rx] = self
+                .debug_charts
+                .packet_rates
+                .map(|n| format_fixed(f64::from(n), 0));
             let (target, status) = if self.clock.sprinting() {
                 ("-".to_owned(), " (sprinting)")
-            } else if self.clock.stepping() {
-                (
-                    format!("{:.1}", 1000.0 / self.clock.rate()),
-                    " (frozen - stepping)",
-                )
-            } else if self.clock.frozen() {
-                (format!("{:.1}", 1000.0 / self.clock.rate()), " (frozen)")
             } else {
-                (format!("{:.1}", 1000.0 / self.clock.rate()), "")
+                let target = format_fixed(f64::from(1000.0 / self.clock.rate()), 1);
+                let status = if self.clock.stepping() {
+                    " (frozen - stepping)"
+                } else if self.clock.frozen() {
+                    " (frozen)"
+                } else {
+                    ""
+                };
+                (target, status)
             };
             if self.remote.is_none() || self.integrated.is_some() {
                 let tick_ms = self
@@ -574,7 +597,8 @@ impl Game<'_> {
                         server.smoothed_tick_ms()
                     });
                 d.line(format!(
-                    "Integrated server @ {tick_ms:.1}/{target} ms{status}, {tx} tx, {rx} rx",
+                    "Integrated server @ {}/{target} ms{status}, {tx} tx, {rx} rx",
+                    format_fixed(f64::from(tick_ms), 1),
                 ));
             } else if let Some(remote) = &self.remote {
                 d.line(format!(
@@ -945,7 +969,7 @@ impl Game<'_> {
         let e = self.world.block_entities.get(&(pos[0], pos[1], pos[2]))?;
         let name = self.data_block_name(pos);
         let mut tag =
-            sunrise_client::save::block_entity_encode::encode((pos[0], pos[1], pos[2]), e, &name);
+            self.encode_live_block_entity((pos[0], pos[1], pos[2]), e, &name, self.res.items());
         if let Tag::Compound(c) = &mut tag {
             for key in ["id", "x", "y", "z", "keepPacked"] {
                 c.remove(&key.into());
@@ -1456,3 +1480,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tests/lightmap_chart_tests.rs"]
+mod lightmap_chart_tests;

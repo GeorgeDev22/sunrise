@@ -21,6 +21,10 @@ struct Listener(Calls);
 
 #[mod_api::__subscriptions]
 impl Hooks for Listener {
+    fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+        r.register_attachment_type("constructing:value", false)
+            .unwrap();
+    }
     fn entity_constructing(&self, host: HostSide<'_>, event: &mut EntityConstructingEvent) {
         self.0
             .lock()
@@ -447,6 +451,12 @@ struct Saving(Kinds);
 
 #[mod_api::__subscriptions]
 impl Hooks for Saving {
+    fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+        r.register_attachment_type("constructing:value", false)
+            .unwrap();
+        r.register_attachment_type("constructing:saved", false)
+            .unwrap();
+    }
     fn entity_constructing(&self, host: HostSide<'_>, event: &mut EntityConstructingEvent) {
         self.0
             .lock()
@@ -618,6 +628,10 @@ fn marker_constructor_store_reaches_its_real_owned_map() {
     struct Store(Arc<AtomicBool>);
     #[mod_api::__subscriptions]
     impl Hooks for Store {
+        fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+            r.register_attachment_type("constructing:value", false)
+                .unwrap();
+        }
         fn entity_constructing(&self, host: HostSide<'_>, event: &mut EntityConstructingEvent) {
             if let HostSide::Server(host) = host {
                 assert_eq!(VALUE.set(host, event.holder, 41), Ok(()));
@@ -628,7 +642,7 @@ fn marker_constructor_store_reaches_its_real_owned_map() {
     let ran = Arc::new(AtomicBool::new(false));
     mod_platform::testing::with_mods(
         vec![mod_api::ModEntry::new(
-            "store",
+            "constructing",
             Box::new(Store(ran.clone())),
         )]
         .into(),

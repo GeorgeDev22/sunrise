@@ -53,6 +53,8 @@ pub struct PartRegistrar {
     pub(crate) attachment_uses: Vec<(String, String, String)>,
     pub(crate) attachment_types: HashMap<String, HashMap<String, bool>>,
     pub(crate) custom_stats: Vec<String>,
+    /// The entity types each named to `entity_tick_each`, in order: `None` for every type.
+    pub(crate) entity_tick_each: Vec<Option<String>>,
     pub(crate) mod_id: &'static str,
     pub(crate) mod_index: usize,
     /// Whether the registering mod was loaded as a wasm module.
@@ -64,6 +66,8 @@ pub struct PartRegistrar {
     pub(crate) entity_selector_bytes: usize,
     pub(crate) tags: TagParts,
     pub(crate) block_entity_types: Vec<BlockEntityTypeDecl>,
+    /// The mod that declared each block entity type, by type id.
+    pub(crate) block_entity_owners: HashMap<String, &'static str>,
     pub(crate) block_entity_transforms: HashMap<String, Arc<dyn crate::BlockEntityTransform>>,
     pub(crate) entity_attributes: Vec<EntityAttributeDeclaration>,
     pub(crate) world_fluids: Vec<(String, crate::WorldFluid)>,
@@ -80,14 +84,17 @@ pub struct PartRegistrar {
     pub(crate) controllers: Vec<ControllerInfo>,
     pub(crate) arm_poses: Vec<PoseInfo>,
     pub(crate) structure_types: Vec<StructureTypeInfo>,
+    pub(crate) feature_types: Vec<FeatureTypeInfo>,
     pub(crate) loot_modifier_serializers: Vec<LootModifierSerializerInfo>,
+    pub(crate) loot_function_types: Vec<LootFunctionTypeInfo>,
+    pub(crate) loot_condition_types: Vec<LootConditionTypeInfo>,
     pub(crate) dimensions: Vec<DimensionInfo>,
     pub(crate) dimension_shape: fn(&crate::DimensionSettings) -> bool,
     pub(crate) chunk_generators: Vec<ChunkGeneratorInfo>,
     pub(crate) biome_sources: Vec<BiomeSourceInfo>,
     pub(crate) refused: Vec<String>,
-    /// The Part state keys this mod declared, with their types' Wire layouts and names.
-    pub(crate) part_states: HashMap<(&'static str, &'static str), (u64, &'static str)>,
+    /// The Part state keys this mod declared, with their type names.
+    pub(crate) part_states: HashMap<(&'static str, &'static str), &'static str>,
 }
 
 impl PartRegistrar {
@@ -108,6 +115,7 @@ impl PartRegistrar {
             attachment_uses: Vec::new(),
             attachment_types: HashMap::new(),
             custom_stats: Vec::new(),
+            entity_tick_each: Vec::new(),
             mod_id,
             mod_index: 0,
             mod_wasm: false,
@@ -116,6 +124,7 @@ impl PartRegistrar {
             entity_selector_bytes: 0,
             tags: TagParts::default(),
             block_entity_types: Vec::new(),
+            block_entity_owners: HashMap::new(),
             block_entity_transforms: HashMap::new(),
             entity_attributes: Vec::new(),
             world_fluids: Vec::new(),
@@ -131,7 +140,10 @@ impl PartRegistrar {
             controllers: Vec::new(),
             arm_poses: Vec::new(),
             structure_types: Vec::new(),
+            feature_types: Vec::new(),
             loot_modifier_serializers: Vec::new(),
+            loot_function_types: Vec::new(),
+            loot_condition_types: Vec::new(),
             dimensions: Vec::new(),
             dimension_shape: |_| false,
             chunk_generators: Vec::new(),
@@ -228,6 +240,10 @@ pub(crate) fn register_all(
         }
     }
     let _active = ActiveRegistration::enter();
+    // `register` runs in the registration phase and nowhere else: a declaration of a frozen registry
+    // (a general entity type) is refused after it. Production enters it already; a test thread's
+    // default phase is World.
+    let _phase = crate::__private::PhaseOwner::scope(crate::__private::ModPhase::Registration);
     let _scope = RestoreKeys(REGISTERING_KEYS.replace(Some(registrar.registry_keys.clone())));
     for (index, hooks) in mod_vocab::__private::entered_registration(mods, "register").enumerate() {
         registrar.mod_id = mod_vocab::__private::parts_installation::mod_entry_id(&mods[index]);
@@ -280,12 +296,14 @@ pub(crate) fn install_registrar(
         );
     }
     registrar.validate_recipe_types();
+    registrar.skip_absent_effect_parts();
     if !registrar.refused.is_empty() {
         return Err(registrar.refused);
     }
     registrar.validate_attachment_admission()?;
     let game_rule_slots = slots.expect("every schema refusal was collected");
     let installed = Installed {
+        effect_part_packages: crate::load_state::current_packages(),
         biome_modifiers: registrar.biome_modifiers,
         biome_regions: {
             let mut regions = registrar.biome_regions;
@@ -302,6 +320,7 @@ pub(crate) fn install_registrar(
         game_rule_categories: registrar.game_rule_categories,
         attachment_types: registrar.attachment_types,
         custom_stats: registrar.custom_stats,
+        entity_tick_each: mod_vocab::__private::EntityTickEach::of(&registrar.entity_tick_each),
         keys: registrar.parts,
         tags: registrar.tags,
         block_entity_types: registrar.block_entity_types,
@@ -329,7 +348,10 @@ pub(crate) fn install_registrar(
         controllers: registrar.controllers,
         arm_poses: registrar.arm_poses,
         structure_types: registrar.structure_types,
+        feature_types: registrar.feature_types,
         loot_modifier_serializers: registrar.loot_modifier_serializers,
+        loot_function_types: registrar.loot_function_types,
+        loot_condition_types: registrar.loot_condition_types,
         dimensions: registrar.dimensions,
         chunk_generators: registrar.chunk_generators,
         biome_sources: registrar.biome_sources,

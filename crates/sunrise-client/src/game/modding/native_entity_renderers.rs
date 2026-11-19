@@ -8,9 +8,11 @@
 //! The routes that read the table so far: the content mods' thrown types
 //! (`ProjectileKind::Thrown`, by [`ThrownType::slot`]), the living types drawn as mobs (by
 //! their shared `MobType`, which the game's types never replace while it runs), whose renderer
-//! draws in place of the model and its vanilla layers, primed TNT (`minecraft:tnt`) and experience
-//! orbs (`minecraft:experience_orb`). Each other entity family becomes a route of its own; until
-//! then a registration for one of its types is kept and the type keeps its drawing.
+//! draws in place of the model and its vanilla layers, primed TNT (`minecraft:tnt`), experience
+//! orbs (`minecraft:experience_orb`), paintings (`minecraft:painting`), and item frames
+//! (`minecraft:item_frame`, `minecraft:glow_item_frame`). Each other entity family becomes a route
+//! of its own; until then a registration for one of its types is kept and the type keeps its
+//! drawing.
 //! Each load also asks for the layers of the living renderers (`native_entity_layers`), which draw
 //! through the same guard ([`Game::guarded_entity_draw`]).
 use super::{
@@ -52,6 +54,12 @@ static ANY_TNT: AtomicBool = AtomicBool::new(false);
 /// Whether the last load resolved a renderer for an experience orb: a frame checks only this when
 /// none was registered, so the vanilla orb route stays off the table lock.
 static ANY_EXPERIENCE_ORB: AtomicBool = AtomicBool::new(false);
+/// Whether the last load resolved a renderer for a painting: a frame checks only this when none
+/// was registered, so the vanilla painting route stays off the table lock.
+static ANY_PAINTING: AtomicBool = AtomicBool::new(false);
+/// Whether the last load resolved a renderer for an item frame or a glow item frame: a frame
+/// checks only this when none was registered, so the vanilla frame route stays off the table lock.
+static ANY_ITEM_FRAME: AtomicBool = AtomicBool::new(false);
 
 /// The player's entity type: its model goes by its skin, not by entity type.
 const PLAYER: &str = "minecraft:player";
@@ -60,6 +68,13 @@ const PLAYER: &str = "minecraft:player";
 const TNT: &str = "minecraft:tnt";
 /// An experience orb's entity type.
 const EXPERIENCE_ORB: &str = "minecraft:experience_orb";
+/// A painting's entity type.
+const PAINTING: &str = "minecraft:painting";
+/// An item frame's entity type.
+const ITEM_FRAME: &str = "minecraft:item_frame";
+
+/// A glow item frame's entity type.
+const GLOW_ITEM_FRAME: &str = "minecraft:glow_item_frame";
 
 /// Keeps the mods' registrations, once per process (false when they already were).
 pub(super) fn register(renderers: BTreeMap<String, Arc<dyn EntityRenderer>>) -> bool {
@@ -92,6 +107,12 @@ pub(super) struct EntityRendererTable {
     tnt: Option<Arc<Resolved<dyn EntityRenderer>>>,
     /// An experience orb (`minecraft:experience_orb`).
     experience_orb: Option<Arc<Resolved<dyn EntityRenderer>>>,
+    /// A painting (`minecraft:painting`).
+    painting: Option<Arc<Resolved<dyn EntityRenderer>>>,
+    /// An item frame (`minecraft:item_frame`).
+    item_frame: Option<Arc<Resolved<dyn EntityRenderer>>>,
+    /// A glow item frame (`minecraft:glow_item_frame`).
+    glow_item_frame: Option<Arc<Resolved<dyn EntityRenderer>>>,
 }
 
 impl EntityRendererTable {
@@ -110,6 +131,9 @@ impl EntityRendererTable {
             living: FxHashMap::default(),
             tnt: None,
             experience_orb: None,
+            painting: None,
+            item_frame: None,
+            glow_item_frame: None,
         };
         let mut unknown = Vec::new();
         for (id, renderer) in registered {
@@ -122,6 +146,12 @@ impl EntityRendererTable {
                 table.tnt = Some(resolved());
             } else if id == EXPERIENCE_ORB {
                 table.experience_orb = Some(resolved());
+            } else if id == PAINTING {
+                table.painting = Some(resolved());
+            } else if id == ITEM_FRAME {
+                table.item_frame = Some(resolved());
+            } else if id == GLOW_ITEM_FRAME {
+                table.glow_item_frame = Some(resolved());
             } else if !known(id) {
                 unknown.push(id.clone());
             }
@@ -147,6 +177,20 @@ impl EntityRendererTable {
     /// The renderer of an experience orb, when a mod registered one for `minecraft:experience_orb`.
     pub(super) fn experience_orb(&self) -> Option<&Arc<Resolved<dyn EntityRenderer>>> {
         self.experience_orb.as_ref()
+    }
+
+    /// The renderer of a painting, when a mod registered one for `minecraft:painting`.
+    pub(super) fn painting(&self) -> Option<&Arc<Resolved<dyn EntityRenderer>>> {
+        self.painting.as_ref()
+    }
+
+    /// The renderer of an item frame or glow item frame, when a mod registered one for that type.
+    pub(super) fn item_frame(&self, glow: bool) -> Option<&Arc<Resolved<dyn EntityRenderer>>> {
+        if glow {
+            self.glow_item_frame.as_ref()
+        } else {
+            self.item_frame.as_ref()
+        }
     }
 }
 
@@ -188,6 +232,28 @@ pub(in crate::game) fn experience_orb_renderer() -> Option<Arc<Resolved<dyn Enti
     table.as_ref()?.experience_orb().cloned()
 }
 
+/// The renderer the last resource load resolved for a painting, when a mod registered one: with
+/// none registered, one flag check, with no lock.
+pub(in crate::game) fn painting_renderer() -> Option<Arc<Resolved<dyn EntityRenderer>>> {
+    if !ANY_PAINTING.load(Ordering::Relaxed) {
+        return None;
+    }
+    let table = TABLE.read().unwrap_or_else(PoisonError::into_inner);
+    table.as_ref()?.painting().cloned()
+}
+
+/// The renderer the last resource load resolved for an item frame or glow item frame, when a mod
+/// registered one for that type: with none registered for either, one flag check, with no lock.
+pub(in crate::game) fn item_frame_renderer(
+    glow: bool,
+) -> Option<Arc<Resolved<dyn EntityRenderer>>> {
+    if !ANY_ITEM_FRAME.load(Ordering::Relaxed) {
+        return None;
+    }
+    let table = TABLE.read().unwrap_or_else(PoisonError::into_inner);
+    table.as_ref()?.item_frame(glow).cloned()
+}
+
 impl Game<'_> {
     /// Resolves the registered renderers against the entity types of the resources now loaded, then
     /// asks for the living renderers' layers: at the first load and on every reload after it. A
@@ -209,10 +275,14 @@ impl Game<'_> {
         let any_living = !table.living.is_empty();
         let any_tnt = table.tnt.is_some();
         let any_experience_orb = table.experience_orb.is_some();
+        let any_painting = table.painting.is_some();
+        let any_item_frame = table.item_frame.is_some() || table.glow_item_frame.is_some();
         *TABLE.write().unwrap_or_else(PoisonError::into_inner) = Some(table);
         ANY_LIVING.store(any_living, Ordering::Relaxed);
         ANY_TNT.store(any_tnt, Ordering::Relaxed);
         ANY_EXPERIENCE_ORB.store(any_experience_orb, Ordering::Relaxed);
+        ANY_PAINTING.store(any_painting, Ordering::Relaxed);
+        ANY_ITEM_FRAME.store(any_item_frame, Ordering::Relaxed);
         self.resolve_entity_layers(&rows, registered);
     }
 

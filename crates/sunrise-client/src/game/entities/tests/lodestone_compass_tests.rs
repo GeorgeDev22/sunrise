@@ -36,6 +36,7 @@ fn framed_compass(id: u32, pos: [i32; 3], facing: u8, rotation: i8) -> ItemFrame
         fixed: false,
         invisible: false,
         check_interval: 0,
+        ticks: 0,
         attachment_lifetime: Default::default(),
         join: Default::default(),
         custom_name: None,
@@ -45,7 +46,7 @@ fn framed_compass(id: u32, pos: [i32; 3], facing: u8, rotation: i8) -> ItemFrame
 
 /// A game with the client's item definitions and atlas: resolving a stack to
 /// its model needs both, and `server_game` loads neither.
-fn client_game() -> Game<'static> {
+fn client_game<'a>(resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>) -> Game<'a> {
     let root = std::path::PathBuf::from(
         std::env::var_os("SUNRISE_TEST_RESOURCES")
             .expect("set SUNRISE_TEST_RESOURCES to prepared resources"),
@@ -67,7 +68,7 @@ fn client_game() -> Game<'static> {
     let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
     options.resources = root.clone();
     options.execution_role = execution_role::ExecutionRole::IntegratedServer;
-    let res: &'static _ = Box::leak(Box::new(loaded.resources));
+    let res = &*resources.insert(loaded.resources);
     Game::new(
         res,
         loaded.pack,
@@ -91,7 +92,7 @@ fn drawn_needle(game: &mut Game<'_>, frame: ItemFrame) -> String {
     // The camera sits at the frame, so the frame passes `shouldRender`.
     let camera = glam::DVec3::from(super::center(&game.item_frames[0]));
     let mut out = Vec::new();
-    game.frame_geometry(camera, &mut out);
+    game.frame_geometry(camera, 0.0, &mut out);
     let near =
         |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1.0e-5 && (a[1] - b[1]).abs() < 1.0e-5;
     let drawn: Vec<&str> = game
@@ -119,7 +120,8 @@ fn drawn_needle(game: &mut Game<'_>, frame: ItemFrame) -> String {
 #[test]
 #[ignore = "daily"]
 fn a_framed_lodestone_compass_needle_turns_with_its_frame() {
-    let mut game = client_game();
+    let mut resources = None;
+    let mut game = client_game(&mut resources);
     // `ItemFrame.position` is the block's centre, 0.46875 back along the
     // facing; `getVisualRotationYInDegrees` is 180 + the direction's 2D data
     // value * 90 + the item's rotation * 45. The lodestone at 5 70 16 is

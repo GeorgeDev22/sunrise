@@ -32,6 +32,41 @@ mob's movement speed already reads as that modifier (a cat's or ocelot's own AI 
 handle, on a client and for a kind with no sprinting flag. It is the flag `Entity.isSprinting` reads, not
 the player's sprint key: a player's own client sets its flag again from its input.
 
+## Fire, water and consumption
+
+`EntityRef::is_on_fire(host)` reads vanilla `Entity.isOnFire` on either side: an entity that is not
+fire immune and has positive fire ticks or, on a client, synced shared flag 0. It covers players,
+mobs, armor stands, dropped items and tracked remote players. On a client it reads that
+client's copy, including the local player's predicted timer, not a server query.
+
+`EntityRef::fire_immune(host)` reads type immunity or a live grant on that side, not
+separate species-specific damage rules. On the server, use `set_fire_immunity(host, immune)` for a player, mob or armor
+stand. Granting it stops ignition and fire damage and silently clears any existing burn.
+Clearing the grant cannot remove built-in immunity. The grant belongs to the live body:
+it is not saved, a replacement body (including a respawn) starts without it, and a level
+transfer keeps it only if it carries the same body. The last write wins.
+
+For equipment-driven immunity, recompute the grant from the wearer's gear on the server and
+use `set_client_fire_immunity(host, immune)` on the client copy from its synced equipment.
+There is no grant packet: fire itself still uses vanilla's synced flag. The client grant only
+affects local prediction and drawing, without replacing remote entities' synced fire state.
+It ends when that entity copy is discarded.
+
+`EntityRef::is_under_water(host)` reads `Entity.isUnderWater` for players and mobs on either side:
+the previous eye-in-water sample AND current water contact. The local client player follows the
+`LocalPlayer.isUnderWater` override instead: its saved eye sample alone, even when current water
+contact is false. It is deliberately not equivalent to checking `eye_fluid` now. Both reads return
+`None` for unsupported kinds or stale handles.
+
+`PlayerRef::trigger_consume_item(host, &stack)` is server-only and fires just
+`CriteriaTriggers.CONSUME_ITEM.trigger(serverPlayer, stack)`, the vanilla public call that NeoForge
+mods can also use. It uses the same advancement path as food and potions, with the supplied stack,
+in the player's own level. It does not eat, update inventory, or award a used statistic.
+`Ok(())` means reached, whether or not a criterion matched. Invalid stacks return
+`TriggerCriterionError::Stack` before firing; clients return `NotServer`, and stale, offline or
+nested-turn displaced players return `PlayerUnavailable`. The generic `trigger_criterion` still
+refuses `minecraft:` trigger identifiers.
+
 ## Portals and leashes
 
 `EntityRef::portal_cooldown` takes `&dyn Host` and reads the remaining portal cooldown in ticks from the

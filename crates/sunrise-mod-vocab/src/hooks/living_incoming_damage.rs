@@ -27,7 +27,6 @@ pub trait Hooks {
     /// is in the middle of its hit.
     #[hook(
         side = "server",
-        version = 2,
         contract = "cancel",
         out = "canceled",
         host = "hit",

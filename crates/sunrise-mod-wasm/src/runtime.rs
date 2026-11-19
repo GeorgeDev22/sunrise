@@ -17,7 +17,8 @@ mod runtime_tests;
 mod threads_tests;
 use crate::{
     Refusal,
-    boundary::{Cx, Frame, serve},
+    boundary::{Cx, Frame},
+    imports::{Bound, resolve},
     link::{Group, Member},
 };
 use mod_api::{
@@ -27,7 +28,7 @@ use mod_api::{
 use std::{
     cell::Cell,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -126,7 +127,7 @@ pub(crate) struct State {
     depth: usize,
     /// The member each open crossing entered, as `(name slot, export id)`. A slot costs no
     /// refcount, so a successful crossing clones no name; only a depth refusal resolves them.
-    path: Vec<(usize, u32)>,
+    path: Vec<(usize, u64)>,
     /// The group's member names by slot, resolved only when a depth refusal is formatted.
     names: Vec<Arc<str>>,
     refusals: std::collections::HashSet<String>,
@@ -181,34 +182,152 @@ pub(crate) fn test_engine() -> Engine {
     Engine::new(without_threads(&mut wasmtime::Config::new())).unwrap()
 }
 
+/// A fixture build may name the Wasmtime target in `SUNRISE_FIXTURE_TARGET` (a Pulley one), so a
+/// host with a Cranelift backend can run the interpreter's path. Game builds never read it.
+fn fixture_target(config: &mut wasmtime::Config) {
+    #[cfg(feature = "runtime-fixture")]
+    if let Ok(target) = std::env::var("SUNRISE_FIXTURE_TARGET") {
+        config.target(&target).expect("a Wasmtime target");
+    }
+    #[cfg(not(feature = "runtime-fixture"))]
+    let _ = config;
+}
+
+/// Whether mod code runs as native code or in Pulley, read from the engine the settings below
+/// build (Wasmtime picks Pulley where Cranelift has no backend for the host, as on 32-bit).
+/// This is the one place the guest stack policy is decided: the workers' reservation, the stack
+/// check and the bound on the guest's own stack all follow it, and the entry points settle it
+/// through [`install_stack_policy`] before they start a worker.
+pub fn guest_engine() -> sunrise_guest_stack::GuestEngine {
+    use sunrise_guest_stack::GuestEngine;
+    static DECIDED: OnceLock<GuestEngine> = OnceLock::new();
+    *DECIDED.get_or_init(|| {
+        let mut config = wasmtime::Config::new();
+        without_threads(&mut config);
+        fixture_target(&mut config);
+        // A host that cannot build the engine refuses at `engine()` with the reason.
+        match Engine::new(&config) {
+            Ok(engine) if engine.is_pulley() => GuestEngine::Interpreter,
+            _ => GuestEngine::Native,
+        }
+    })
+}
+
+/// Settles the process's guest stack policy from [`guest_engine`]. Call it before any
+/// guest-capable thread starts.
+pub fn install_stack_policy() -> Result<(), &'static str> {
+    sunrise_guest_stack::set_engine(guest_engine())
+}
+
 /// The settings of the engine mods run on, without its epoch ticker.
 pub(crate) fn engine_config() -> wasmtime::Config {
+    let policy = guest_engine();
     let mut config = wasmtime::Config::new();
     without_threads(&mut config);
+    fixture_target(&mut config);
     config.epoch_interruption(ENGINE_CONFIG.1);
-    config.max_wasm_stack(sunrise_guest_stack::GUEST_STACK_BYTES);
+    // Native: the thread's own stack, bounded below its reservation. Pulley: its heap stack.
+    config.max_wasm_stack(policy.wasm_stack());
     // Wasmtime validates this bound even for synchronous engines. No async
     // support or fiber execution is enabled by setting its size.
-    config.async_stack_size(
-        sunrise_guest_stack::GUEST_STACK_BYTES + sunrise_guest_stack::HOST_HEADROOM,
-    );
+    config.async_stack_size(policy.wasm_stack() + sunrise_guest_stack::HOST_HEADROOM);
     config
 }
 
+/// The one place an engine for mod code is built: the process's stack policy is settled here, from
+/// the engine itself, before any worker or guest check can settle it as native code. A policy
+/// decided differently earlier refuses by name.
 pub(crate) fn engine() -> wasmtime::Result<Engine> {
+    install_stack_policy().map_err(wasmtime::Error::msg)?;
     let config = engine_config();
     let engine = Engine::new(&config)?;
-    let weak = engine.weak();
-    std::thread::Builder::new()
-        .name("wasm epoch".into())
-        .spawn(move || {
-            loop {
-                std::thread::sleep(Duration::from_millis(1));
-                let Some(engine) = weak.upgrade() else { break };
-                engine.increment_epoch();
-            }
-        })?;
+    let ticker = TICKER
+        .as_ref()
+        .map_err(|why| wasmtime::Error::msg(format!("wasm epoch thread: {why}")))?;
+    ticker.register(&engine);
     Ok(engine)
+}
+
+/// What the epoch thread shares with the guest calls: how many are running, and the engines
+/// to tick.
+struct Shared {
+    running: AtomicUsize,
+    engines: Mutex<Vec<wasmtime::EngineWeak>>,
+}
+
+/// Drives the epoch of every engine, one tick a millisecond, but only while a guest runs: an
+/// idle game never wakes it. Deadlines count ticks, so a guest's budget is as long as when the
+/// thread ticked for the engines' whole life.
+struct Ticker {
+    shared: Arc<Shared>,
+    thread: std::thread::Thread,
+}
+
+impl Ticker {
+    fn start(name: &str) -> std::io::Result<Self> {
+        let shared = Arc::new(Shared {
+            running: AtomicUsize::new(0),
+            engines: Mutex::new(Vec::new()),
+        });
+        let ticking = shared.clone();
+        let thread = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                loop {
+                    if ticking.running.load(Ordering::Acquire) == 0 {
+                        // A guest that starts after the check above leaves the unpark token.
+                        std::thread::park();
+                        continue;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                    ticking
+                        .engines
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .retain(|weak| {
+                            weak.upgrade().is_some_and(|engine| {
+                                engine.increment_epoch();
+                                true
+                            })
+                        });
+                }
+            })?
+            .thread()
+            .clone();
+        Ok(Self { shared, thread })
+    }
+
+    fn register(&self, engine: &Engine) {
+        self.shared
+            .engines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(engine.weak());
+    }
+
+    /// Ticks until the returned guard drops, together with any other guard held.
+    fn ticking(&self) -> Ticking {
+        if self.shared.running.fetch_add(1, Ordering::AcqRel) == 0 {
+            self.thread.unpark();
+        }
+        Ticking(self.shared.clone())
+    }
+}
+
+static TICKER: std::sync::LazyLock<std::io::Result<Ticker>> =
+    std::sync::LazyLock::new(|| Ticker::start("wasm epoch"));
+
+/// Held for as long as a guest runs on this thread: the epoch ticks while any is held.
+pub(crate) struct Ticking(Arc<Shared>);
+impl Ticking {
+    pub(crate) fn begin() -> Option<Self> {
+        TICKER.as_ref().ok().map(Ticker::ticking)
+    }
+}
+impl Drop for Ticking {
+    fn drop(&mut self) {
+        self.0.running.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 struct Releases<T> {
@@ -251,7 +370,7 @@ enum CallMode {
 }
 
 // Names are resolved once, outside dispatch. A contended payload only clones Arcs.
-static EXPORT_NAMES: std::sync::LazyLock<std::collections::HashMap<u32, Arc<str>>> =
+static EXPORT_NAMES: std::sync::LazyLock<std::collections::HashMap<u64, Arc<str>>> =
     std::sync::LazyLock::new(|| {
         crate::boundary::EXPORT_NAMES
             .iter()
@@ -279,7 +398,7 @@ struct Running {
 /// prints it, so a successful crossing does no lookup. A busy refusal names the export by id.
 struct Holder {
     module: Arc<str>,
-    export: u32,
+    export: u64,
     thread: Arc<str>,
     since: Instant,
 }
@@ -328,9 +447,9 @@ impl Running {
 }
 
 /// A depth refusal's open crossings, named from the group's table when the refusal is built.
-/// Its `Debug` prints exactly what a `Vec<(Arc<str>, u32)>` of the same path printed.
+/// Its `Debug` prints exactly what a `Vec<(Arc<str>, u64)>` of the same path printed.
 struct DepthPath<'a> {
-    path: &'a [(usize, u32)],
+    path: &'a [(usize, u64)],
     names: &'a [Arc<str>],
 }
 impl std::fmt::Debug for DepthPath<'_> {
@@ -459,14 +578,14 @@ pub struct WasmMod {
     slot: usize,
     running: Arc<Running>,
     input: TypedFunc<u32, u32>,
-    hook: TypedFunc<u32, u64>,
+    hook: TypedFunc<u64, u64>,
     pub subscribed: &'static [Option<HookId>],
     pub(crate) listeners: &'static [mod_api::Listener],
     released: Arc<Releases<Id>>,
     prepared_releases: Arc<Releases<(u32, u32)>>,
     prepared: Arc<Mutex<crate::prepared::Slots>>,
-    prepared_entries: Arc<std::collections::HashMap<u32, TypedFunc<(), u64>>>,
-    subscriptions: Arc<Mutex<std::collections::HashMap<(Id, u32), &'static [Option<HookId>]>>>,
+    prepared_entries: Arc<std::collections::HashMap<u64, TypedFunc<(), u64>>>,
+    subscriptions: Arc<Mutex<std::collections::HashMap<(Id, u64), &'static [Option<HookId>]>>>,
 }
 /// A guest object never owns the store that may itself retain that object.
 #[derive(Clone)]
@@ -475,14 +594,14 @@ pub(crate) struct WeakWasmMod {
     slot: usize,
     running: Weak<Running>,
     input: TypedFunc<u32, u32>,
-    hook: TypedFunc<u32, u64>,
+    hook: TypedFunc<u64, u64>,
     subscribed: &'static [Option<HookId>],
     pub(crate) listeners: &'static [mod_api::Listener],
     released: Arc<Releases<Id>>,
     prepared_releases: Arc<Releases<(u32, u32)>>,
     prepared: Arc<Mutex<crate::prepared::Slots>>,
-    prepared_entries: Arc<std::collections::HashMap<u32, TypedFunc<(), u64>>>,
-    subscriptions: Arc<Mutex<std::collections::HashMap<(Id, u32), &'static [Option<HookId>]>>>,
+    prepared_entries: Arc<std::collections::HashMap<u64, TypedFunc<(), u64>>>,
+    subscriptions: Arc<Mutex<std::collections::HashMap<(Id, u64), &'static [Option<HookId>]>>>,
 }
 impl WeakWasmMod {
     pub(crate) fn equip_instance(&self) -> usize {
@@ -613,7 +732,7 @@ impl WeakWasmMod {
         &self,
         class: CallClass,
         frame: Frame,
-        id: u32,
+        id: u64,
         handler: Option<Id>,
         args: impl FnOnce(&mut Writer),
         reply: impl FnOnce(&mut Reader<'_>) -> Result<R, WireError>,
@@ -624,7 +743,7 @@ impl WeakWasmMod {
     pub(crate) fn call_payload<R>(
         &self,
         frame: Frame,
-        id: u32,
+        id: u64,
         handler: Option<Id>,
         args: impl FnOnce(&mut Writer),
         reply: impl FnOnce(&mut Reader<'_>) -> Result<R, WireError>,
@@ -681,7 +800,7 @@ impl WasmHandler {
     pub fn belongs_to(&self, module: &WasmMod) -> bool {
         self.module.running.ptr_eq(&Arc::downgrade(&module.running))
     }
-    pub fn subscriptions(&self, owner: &'static str, export_id: u32) -> &'static [Option<HookId>] {
+    pub fn subscriptions(&self, owner: &'static str, export_id: u64) -> &'static [Option<HookId>] {
         if let Some(value) = self
             .module
             .subscriptions
@@ -766,9 +885,47 @@ impl Drop for Resumed {
     }
 }
 
+/// What an import of a call the game serves does.
+#[derive(Clone, Copy)]
+enum Served {
+    /// A host call: the generated function that decodes, serves and encodes it.
+    Call(crate::boundary::Invoke),
+    /// The guest lets go of an object it held.
+    Release,
+    /// The guest sends the game a message (a panic's text).
+    Log,
+}
+
+/// The function a module's import of `sunrise` name `name` is bound to, which [`crate::imports`]
+/// has already found the game serves.
+fn bind(store: &mut Store<State>, name: &str) -> Option<Extern> {
+    Some(Extern::Func(match resolve(name).ok()? {
+        Bound::Call(invoke) => Func::wrap(
+            store,
+            move |caller: Caller<'_, State>, ptr: u32, len: u32, out: u32, cap: u32| {
+                host(caller, Served::Call(invoke), ptr, len, out, cap)
+            },
+        ),
+        Bound::Release => Func::wrap(
+            store,
+            |caller: Caller<'_, State>, ptr: u32, len: u32, out: u32, cap: u32| {
+                host(caller, Served::Release, ptr, len, out, cap)
+            },
+        ),
+        Bound::Log => Func::wrap(
+            store,
+            |caller: Caller<'_, State>, ptr: u32, len: u32, out: u32, cap: u32| {
+                host(caller, Served::Log, ptr, len, out, cap)
+            },
+        ),
+        Bound::HostReply => Func::wrap(store, host_reply),
+        Bound::Mark => Func::wrap(store, || {}),
+    }))
+}
+
 fn host(
     mut caller: Caller<'_, State>,
-    id: u32,
+    served: Served,
     ptr: u32,
     len: u32,
     out: u32,
@@ -811,7 +968,7 @@ fn host(
         previous: LENT.get(),
     };
     LENT.set(&loan);
-    let result = if id == mod_api::wire::HOST_RELEASE {
+    let result = if matches!(served, Served::Release) {
         let mut reader = Reader::new(&input);
         let id = reader.take::<Id>()?;
         if !reader.rest().is_empty() {
@@ -822,7 +979,7 @@ fn host(
             .remove(id)
             .map(|_| ())
             .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))
-    } else if id == mod_api::wire::HOST_LOG {
+    } else if matches!(served, Served::Log) {
         let mut reader = Reader::new(&input);
         let message: String = reader.take()?;
         if !reader.rest().is_empty() {
@@ -833,11 +990,13 @@ fn host(
             .ok_or_else(|| wasmtime::Error::msg("no calling module"))?;
         log::error!("wasm mod {module}: {message}");
         Ok(())
-    } else {
-        // SAFETY: Cx is boxed and stable; serve must release its frame borrows before
+    } else if let Served::Call(invoke) = served {
+        // SAFETY: Cx is boxed and stable; the call must release its frame borrows before
         // invoking native code that can synchronously reenter the guest.
-        unsafe { serve(id, cx, &input, &mut reply) }
+        unsafe { invoke(cx, &input, &mut reply) }
             .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))
+    } else {
+        unreachable!("every served kind is handled")
     };
     drop(loan);
     drop(resources);
@@ -942,6 +1101,9 @@ impl WasmMod {
         cache: Option<&crate::module_cache::ModuleCache>,
     ) -> Result<Vec<Self>, Refusal> {
         sunrise_guest_stack::check_current().map_err(|error| Refusal::Runtime(error.into()))?;
+        // The table of what the mods use against the game's, before anything is compiled or run.
+        crate::imports::check(members)?;
+        let _ticking = Ticking::begin();
         std::sync::LazyLock::force(&EXPORT_NAMES);
         std::sync::LazyLock::force(&OUTSIDE_GUEST);
         let group: Vec<_> = members
@@ -966,11 +1128,7 @@ impl WasmMod {
             if module != "sunrise" {
                 return None;
             }
-            match name {
-                "host" => Some(Extern::Func(Func::wrap(store, host))),
-                "host_reply" => Some(Extern::Func(Func::wrap(store, host_reply))),
-                _ => None,
-            }
+            bind(store, name)
         })
         .map_err(Refusal::from_link)?;
         group.store.data_mut().memory = Some(group.memory);
@@ -978,42 +1136,12 @@ impl WasmMod {
         for (name, instance) in group.members.clone() {
             // The std member is a library, not a mod.
             if instance
-                .get_func(&mut group.store, "sunrise_layout")
+                .get_func(&mut group.store, "sunrise_hook")
                 .is_none()
             {
                 continue;
             }
             let load = |e: wasmtime::Error| Refusal::Runtime(format!("{e:#}"));
-            let layout = instance
-                .get_typed_func::<(), u64>(&mut group.store, "sunrise_layout")
-                .map_err(load)?
-                .call(&mut group.store, ())
-                .map_err(load)?;
-            if layout != *mod_api::wire::LAYOUT {
-                if layout == mod_api::wire_core_layout() {
-                    return Err(Refusal::Runtime("prepared can_equip ABI layout mismatch: guest carries the old unprepared layout; rebuild the wasm mod".into()));
-                }
-                return Err(Refusal::Layout {
-                    built: layout,
-                    game: *mod_api::wire::LAYOUT,
-                });
-            }
-            if instance
-                .get_func(&mut group.store, "sunrise_layout_ext")
-                .is_some()
-            {
-                let built = instance
-                    .get_typed_func::<(), u64>(&mut group.store, "sunrise_layout_ext")
-                    .map_err(load)?
-                    .call(&mut group.store, ())
-                    .map_err(load)?;
-                if built != mod_points::POINT_LAYOUT {
-                    return Err(Refusal::PointLayout {
-                        built,
-                        game: mod_points::POINT_LAYOUT,
-                    });
-                }
-            }
             let input = instance
                 .get_typed_func(&mut group.store, "sunrise_in")
                 .map_err(load)?;
@@ -1076,7 +1204,7 @@ impl WasmMod {
         &self,
         class: CallClass,
         frame: Frame,
-        id: u32,
+        id: u64,
         handler: Option<Id>,
         args: impl FnOnce(&mut Writer),
         reply: impl FnOnce(&mut Reader<'_>) -> Result<R, WireError>,
@@ -1090,7 +1218,7 @@ impl WasmMod {
         &self,
         mode: CallMode,
         frame: Frame,
-        id: u32,
+        id: u64,
         handler: Option<Id>,
         args: impl FnOnce(&mut Writer),
         reply: impl FnOnce(&mut Reader<'_>) -> Result<R, WireError>,
@@ -1198,6 +1326,8 @@ impl WasmMod {
         // Deferred releases run only on a top-level call: a resumed nested call is still
         // inside another export of the guest.
         let top = resumed.is_none();
+        // A resumed call runs inside the top-level call that lent it, which already ticks.
+        let _ticking = top.then(Ticking::begin);
         let mut store = match resumed.as_mut() {
             Some(resumed) => resumed.context(),
             None => {
@@ -1378,7 +1508,7 @@ impl WasmMod {
     fn invoke(
         &self,
         store: &mut StoreContextMut<'_, State>,
-        id: u32,
+        id: u64,
         input: &Writer,
         output: &mut Vec<u8>,
     ) -> Result<(), CallError> {

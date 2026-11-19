@@ -56,10 +56,7 @@ impl Game<'_> {
     /// pick (unless refused) call for another frame than the renderer's, it is made again before
     /// this frame draws. Without the switch a frame stays until the next start, as before.
     pub(super) fn follow_frame(&mut self) {
-        if !native_shaders::linear_frame_switch()
-            || self.options.paced_by_split
-            || self.options.split_guest
-        {
+        if !native_shaders::linear_frame_switch() {
             return;
         }
         let picked = shader_packs::picked_pack(&self.settings);
@@ -168,7 +165,7 @@ impl Game<'_> {
         if reload {
             self.all_sections_changed();
         }
-        self.audio.master = self.settings.master_volume;
+        self.audio.master = self.settings.master_volume as f32;
         if self.settings.sound_device != self.audio.device() {
             let _ = self.audio.set_device(&self.settings.sound_device);
         }
@@ -229,13 +226,15 @@ impl Game<'_> {
     /// The renderer for the window, with the current block sprites, GUI
     /// atlas and world border texture.
     /// A new renderer's atlas holds only the pack's sprites: what was drawn into it at run time
-    /// (skins, maps, the themed UI's glyphs and corners) has to be drawn again.
+    /// (skins, maps, mods' dynamic textures, the themed UI's glyphs and corners) has to be drawn
+    /// again.
     pub(super) fn forget_atlas_slots(&mut self) {
         self.skin_slots.forget();
         self.maps.slots.forget();
         self.trim_slots.forget();
         self.map_patches.clear();
         self.text_patches.get_mut().clear();
+        self.dynamic_textures.forget_uploads();
         self.kept_block_entities.get_mut().clear();
         sunrise_client::ui_theme::reset_atlas();
     }

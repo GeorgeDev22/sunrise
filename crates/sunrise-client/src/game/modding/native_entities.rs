@@ -1042,6 +1042,7 @@ mod tests {
                     width: 1,
                     height: 1,
                     check_interval: 0,
+                    ticks: 0,
                 });
                 game.item_frames.push(sunrise_client::entities::ItemFrame {
                     attachment_lifetime: Default::default(),
@@ -1058,6 +1059,7 @@ mod tests {
                     custom_name: None,
                     random: sunrise_core::random::LegacyRandom::new(0),
                     check_interval: 0,
+                    ticks: 0,
                 });
                 let mut dragon = super::super::dragon::Dragon::new(Vec3::ZERO, 0.0, 0);
                 dragon.id = base + 8;

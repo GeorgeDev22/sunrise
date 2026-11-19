@@ -117,7 +117,7 @@ fn a_compiled_guests_suggestion_provider_answers_like_the_native_one_on_guest_st
     let manifest = Package::read(std::path::Path::new(&path)).unwrap().manifest;
     let info = mod_api::PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         mod_api::PackageKind::Code,
         mod_api::Side::Both,
         vec![manifest.id.clone()],
@@ -132,7 +132,11 @@ fn a_compiled_guests_suggestion_provider_answers_like_the_native_one_on_guest_st
     );
     assert!(loaded.refused.is_empty(), "{:?}", loaded.refused);
     loaded.initialize(&[info]).unwrap();
-    mod_platform::testing::with_mods(loaded.mods.into(), || {
+    let mods: mod_api::Mods = loaded.mods.into();
+    mod_platform::testing::with_mods(mods.clone(), || {
+        // `with_mods` registers for the test's controllers only; the argument types a game asks are
+        // the installed Parts', as a loaded game has them.
+        crate::game::api_values::install_parts(&mods).unwrap();
         mod_api::__private::mark_game_thread();
         let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
         let arguments = command_arguments();
@@ -149,7 +153,8 @@ fn a_compiled_guests_suggestion_provider_answers_like_the_native_one_on_guest_st
             from_guest,
             [(
                 "press".to_owned(),
-                Some("pr|world=survival|Simon=0x5eed:3".to_owned())
+                // The sender's uuid (`0x5eed` above) prints as a decimal u128 in both providers.
+                Some("pr|world=survival|Simon=24301:3".to_owned())
             )],
             "the guest's provider answers what the engine asks"
         );

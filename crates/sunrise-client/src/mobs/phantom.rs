@@ -9,10 +9,10 @@ use sunrise_core::geometry::trig::Mth;
 use sunrise_core::{geometry::Vec3, random::RandomSource};
 
 /// Phantom state in `Extra`: `flag` swooping, `home` the anchor,
-/// `vector` the move target, `attrs.speed` the move control's speed.
+/// `vector` the move target, `phantom_move_speed` the move control's speed.
 pub fn register(m: &mut Mob) {
     m.ai.mov.kind = MoveKind::Custom;
-    m.attrs.speed = 0.1;
+    m.extra.phantom_move_speed = 0.1;
     m.extra.home = Some([
         m.position.x.floor() as i32,
         m.position.y.floor() as i32 + 5,
@@ -307,7 +307,7 @@ fn wrap(d: f32) -> f32 {
 /// `PhantomMoveControl`: bank toward the move target, faster on a straight
 /// line.
 pub fn move_control(m: &mut Mob) {
-    let mut speed = m.attrs.speed as f32;
+    let mut speed = m.extra.phantom_move_speed;
     if m.horizontal_collision {
         m.yaw += 180.0;
         speed = 0.1;
@@ -351,7 +351,7 @@ pub fn move_control(m: &mut Mob) {
             v.z + (tz - v.z) * 0.2,
         );
     }
-    m.attrs.speed = f64::from(speed);
+    m.extra.phantom_move_speed = speed;
     // PhantomBodyRotationControl: the head follows the body.
     m.head_yaw = m.body_yaw;
 }
@@ -638,7 +638,14 @@ mod anchor_save_tests {
         // What the phantom circles now is what its chunk save keeps.
         m.extra.home = Some([9, 70, -3]);
         let source = saved_phantom(Some([100, 64, -40]));
-        let saved = mob_to_nbt(&m, [0; 4], Some(&source), None, |_| None);
+        let saved = mob_to_nbt(
+            &m,
+            [0; 4],
+            Some(&source),
+            None,
+            |_| None,
+            &Default::default(),
+        );
         assert_eq!(
             saved.get("anchor_pos"),
             Some(&Tag::IntArray(vec![9, 70, -3]))
@@ -649,7 +656,14 @@ mod anchor_save_tests {
         assert_eq!(loose.extra.home, None, "a save without anchor_pos");
         loose.extra.home = None;
         let stale = saved_phantom(Some([100, 64, -40]));
-        let saved = mob_to_nbt(&loose, [0; 4], Some(&stale), None, |_| None);
+        let saved = mob_to_nbt(
+            &loose,
+            [0; 4],
+            Some(&stale),
+            None,
+            |_| None,
+            &Default::default(),
+        );
         assert_eq!(saved.get("anchor_pos"), None, "no anchor, no key");
     }
 

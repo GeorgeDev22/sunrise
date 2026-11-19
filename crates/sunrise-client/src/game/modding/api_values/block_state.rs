@@ -103,7 +103,7 @@ mod tests {
         impl mod_api::BlockPart for Part {
             fn analog_output(
                 &self,
-                _: &dyn mod_api::LevelHost,
+                _: &mut dyn mod_api::LevelRandomHost,
                 event: &mut mod_api::AnalogOutputEvent,
             ) {
                 event.output += 1;
@@ -165,7 +165,7 @@ mod tests {
         impl mod_api::BlockPart for Part {
             fn analog_output(
                 &self,
-                _: &dyn mod_api::LevelHost,
+                _: &mut dyn mod_api::LevelRandomHost,
                 event: &mut mod_api::AnalogOutputEvent,
             ) {
                 event.output += 1;

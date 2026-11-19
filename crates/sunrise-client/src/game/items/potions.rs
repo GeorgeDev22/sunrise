@@ -617,6 +617,8 @@ pub(super) struct BodyPotions {
 #[derive(Default)]
 pub(super) struct PotionState {
     pub(super) effects: PlayerEffects,
+    /// Reused holder snapshot for the read-only mod effect tick event.
+    tick_keys: std::cell::RefCell<Vec<mod_api::EffectKey>>,
     pub(super) thrown: Vec<ThrownPotion>,
     /// The area effect clouds a server tracks (game/network/remote_projectiles.rs).
     pub(super) clouds: Vec<super::remote_projectiles::RemoteCloud>,
@@ -980,35 +982,38 @@ impl Game<'_> {
         // trigger, with the stack as drunk (before it shrinks).
         self.award_stat("used", &stack.item, 1);
         self.trigger_item("minecraft:consume_item", stack);
-        self.post_entity_event("minecraft:drink", sunrise_client::mobs::Who::Player);
         if ominous {
-            self.drink_ominous_bottle(slot, stack);
-            return true;
+            self.drink_ominous_bottle(stack);
+        } else {
+            // PotionContents.onConsume: the potion's and the custom effects,
+            // at the stack's POTION_DURATION_SCALE.
+            let (lasting, now) = PlayerEffects::contents_effects(
+                &brewing::contents_effects(stack),
+                stack.potion_duration_scale(),
+            );
+            for e in lasting {
+                self.add_player_effect(e);
+            }
+            for a in now {
+                self.apply_effect_action(a);
+            }
         }
-        // PotionContents.onConsume: the potion's and the custom effects, at the
-        // stack's POTION_DURATION_SCALE.
-        let (lasting, now) = PlayerEffects::contents_effects(
-            &brewing::contents_effects(stack),
-            stack.potion_duration_scale(),
-        );
-        for e in lasting {
-            self.add_player_effect(e);
-        }
-        for a in now {
-            self.apply_effect_action(a);
-        }
-        if !self.creative {
+        self.apply_drink_effects(stack);
+        self.post_entity_event("minecraft:drink", sunrise_client::mobs::Who::Player);
+        if !self.creative && self.stack_in(slot) == Some(stack) {
             if let Some(s) = self.stack_in_mut(slot).as_mut() {
                 s.count -= 1;
                 if s.count == 0 {
                     *self.stack_in_mut(slot) = None;
                 }
             }
-            let bottle = ItemStack::new("minecraft:glass_bottle", 1);
-            if self.stack_in(slot).is_none() {
-                *self.stack_in_mut(slot) = Some(bottle);
-            } else if let Some(rest) = self.add_stack_to_inventory(bottle) {
-                self.spawn_item(rest, eye, [0.0, 0.1, 0.0], 40);
+            if !ominous {
+                let bottle = ItemStack::new("minecraft:glass_bottle", 1);
+                if self.stack_in(slot).is_none() {
+                    *self.stack_in_mut(slot) = Some(bottle);
+                } else if let Some(rest) = self.add_stack_to_inventory(bottle) {
+                    self.spawn_item(rest, eye, [0.0, 0.1, 0.0], 40);
+                }
             }
         }
         true
@@ -1153,7 +1158,7 @@ impl Game<'_> {
             }
             EffectAction::Hurt(source, amount) => {
                 let mut canceled = false;
-                if let Some(id) = self.motion.health.damage.id(source)
+                if let Some(id) = self.health_resources.damage.id(source)
                     && let Ok(o) = p.hurt_blocking(
                         crate::game::entity::damage_level_of!(
                             self,
@@ -1161,7 +1166,7 @@ impl Game<'_> {
                             no_push,
                             None
                         ),
-                        &self.motion.health,
+                        &self.health_resources,
                         rules,
                         id,
                         amount,
@@ -1184,7 +1189,7 @@ impl Game<'_> {
                             no_push,
                             None
                         ),
-                        &self.motion.health,
+                        &self.health_resources,
                         rules,
                         id,
                         1.0,
@@ -1282,7 +1287,7 @@ impl Game<'_> {
             Vec::new()
         };
         let (actions, raid_omen_added) = effects.tick_with(
-            &mut |e, t, actions, dispatch| {
+            &mut |e, t, actions, dispatch, active_effects| {
                 for action in actions.drain(..) {
                     self.apply_effect_action(action);
                 }
@@ -1309,10 +1314,7 @@ impl Game<'_> {
                         exhaustion: food.exhaustion,
                     }));
                     let (keep, changes) = self.mod_effect_tick(
-                        mod_api::__private::effect_key_by_index(
-                            e.registry_index.expect("active effect registry index"),
-                        )
-                        .expect("effects resolved at load"),
+                        e.registry_index,
                         None,
                         t,
                         e.amplifier,
@@ -1320,8 +1322,11 @@ impl Game<'_> {
                         health,
                         max_health,
                         food,
+                        active_effects
+                            .iter()
+                            .filter_map(|effect| effect.registry_index),
                     );
-                    let registry = &self.motion.health.damage;
+                    let registry = &self.health_resources.damage;
                     actions.extend(changes.into_iter().filter_map(|change| {
                         match change {
                             EffectTickChange::Heal(amount) => Some(EffectAction::Heal(amount)),
@@ -1541,7 +1546,7 @@ impl Game<'_> {
     /// may end it. Whether it stays.
     fn mod_effect_tick(
         &self,
-        effect: mod_api::EffectKey,
+        index: Option<usize>,
         entity: Option<i32>,
         tick_count: i32,
         amplifier: i32,
@@ -1549,25 +1554,49 @@ impl Game<'_> {
         health: f32,
         max_health: f32,
         food: Option<PlayerFood>,
+        active_effects: impl Iterator<Item = usize>,
     ) -> (bool, Vec<EffectTickChange>) {
-        let mut apply = false;
-        self.native_should_apply_effect_tick_this_tick(effect, tick_count, amplifier, &mut apply);
+        if !mod_api::__private::has_part_hook(mod_api::HookId::ShouldApplyEffectTickThisTick) {
+            return (true, Vec::new());
+        }
+        let Some(effect) = index.and_then(mod_api::__private::effect_key_by_index) else {
+            static MISSING_EFFECT: std::sync::Once = std::sync::Once::new();
+            MISSING_EFFECT.call_once(|| {
+                log::debug!("Skipping mod effect tick: missing registry key or declaring mod for index {index:?}");
+            });
+            return (true, Vec::new());
+        };
         let mut keep = true;
         let mut changes = Vec::new();
-        if apply {
-            self.native_apply_effect_tick(mod_api::__private::ApplyEffectTickCall {
-                effect,
-                dimension: self.dim.id(),
-                entity,
-                amplifier,
-                holder,
-                health,
-                max_health,
-                food,
-                changes: &mut changes,
-                keep: &mut keep,
-            });
-        }
+        let keys = std::cell::OnceCell::new();
+        let (keep_out, changes_out) = (&mut keep, &mut changes);
+        mod_api::__private::dispatch_mob_effect_tick(
+            self,
+            tick_count,
+            effect,
+            amplifier,
+            |effect, amplifier| {
+                let keys = keys.get_or_init(|| {
+                    let mut keys = self.potions.tick_keys.borrow_mut();
+                    keys.clear();
+                    keys.extend(active_effects.filter_map(mod_api::__private::effect_key_by_index));
+                    keys
+                });
+                mod_api::__private::ApplyEffectTickCall {
+                    effect,
+                    dimension: self.dim.id(),
+                    entity,
+                    amplifier,
+                    holder,
+                    health,
+                    max_health,
+                    food,
+                    active_effects: keys,
+                    changes: changes_out,
+                    keep: keep_out,
+                }
+            },
+        );
         (keep, changes)
     }
     /// The effects' attribute modifiers, armor protection and status flags
@@ -2732,11 +2761,8 @@ impl sunrise_client::mobs::ModEffectTicks for Game<'_> {
             return true;
         };
         let holder = LivingRef::new(EntityRef::new(epoch, mob.id));
-        let Some(effect) = mod_api::__private::effect_key_by_index(effect) else {
-            return true;
-        };
         let (keep, changes) = self.mod_effect_tick(
-            effect,
+            Some(effect),
             Some(mob.id as i32),
             tick_count,
             amplifier,
@@ -2744,13 +2770,17 @@ impl sunrise_client::mobs::ModEffectTicks for Game<'_> {
             mob.health,
             mob.attrs.max_health,
             None,
+            mob.extra
+                .effects
+                .iter()
+                .filter_map(|effect| effect.registry_index),
         );
         for change in changes {
             match change {
                 EffectTickChange::Heal(amount) => mob.heal(&self.loop_context, amount),
                 // An unregistered damage type hurts nothing.
                 EffectTickChange::Hurt(source, amount) => {
-                    let registry = &self.motion.health.damage;
+                    let registry = &self.health_resources.damage;
                     if registry.id(&source).is_some() {
                         let kind = Self::damage_kind(registry, &source);
                         mob.damage(level, amount, Damage::of(kind));
@@ -2921,11 +2951,313 @@ mod tests {
         });
     }
 
+    #[derive(Clone)]
+    struct FoodEffectMod(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for FoodEffectMod {
+        fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+            for id in ["test:comfort", "test:nourishment"] {
+                let key = r.effect_key(id);
+                r.mob_effect_part(&key, self.clone()).unwrap();
+            }
+        }
+        fn mob_effect_expired(
+            &self,
+            _: &dyn mod_api::Host,
+            event: &mut mod_api::MobEffectExpiredEvent,
+        ) -> mod_api::Flow {
+            if self.0.load(std::sync::atomic::Ordering::SeqCst)
+                && event.effect == mod_api::__private::effect_key("minecraft:regeneration").unwrap()
+            {
+                mod_api::Flow::Cancel
+            } else {
+                mod_api::Flow::Continue
+            }
+        }
+    }
+    #[mod_api::sunrise_part]
+    impl mod_api::MobEffectPart for FoodEffectMod {
+        fn should_apply_effect_tick_this_tick(
+            &self,
+            _: &dyn mod_api::Host,
+            event: &mut mod_api::ShouldApplyEffectTickThisTickEvent,
+        ) {
+            let comfort = mod_api::__private::effect_key("test:comfort").unwrap();
+            event.apply = event.effect != comfort || event.tick_count % 80 == 0;
+        }
+        fn apply_effect_tick(
+            &self,
+            host: &dyn mod_api::Host,
+            event: &mut mod_api::ApplyEffectTickEvent<'_>,
+        ) {
+            let level = host.level(event.dimension).unwrap();
+            let natural = level
+                .game_rule(host, "minecraft:natural_health_regeneration")
+                .unwrap()
+                .unwrap();
+            let mod_api::GameRuleValue::Bool(natural) = natural else {
+                panic!("boolean game rule")
+            };
+            if event.effect == mod_api::__private::effect_key("test:comfort").unwrap() {
+                if !event
+                    .has_effect(mod_api::__private::effect_key("minecraft:regeneration").unwrap())
+                    && event.food.is_none_or(|food| food.saturation <= 0.0)
+                    && event.health < event.max_health
+                {
+                    event.heal(1.0);
+                }
+            } else if let Some(food) = event.food {
+                if event.amplifier == 1 {
+                    // Pin FoodData.addExhaustion's lack of a lower clamp.
+                    event.add_exhaustion(-5.0);
+                } else if !(natural && event.health < event.max_health && food.level >= 18)
+                    && food.exhaustion > 0.0
+                {
+                    event.add_exhaustion(-food.exhaustion.min(4.0));
+                }
+            }
+        }
+    }
+    struct OtherEffectMod;
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for OtherEffectMod {
+        fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+            let effect = r.effect_key("other-mod:foreign");
+            r.mob_effect_part(&effect, OtherEffectMod).unwrap();
+        }
+    }
+    #[mod_api::sunrise_part]
+    impl mod_api::MobEffectPart for OtherEffectMod {
+        fn should_apply_effect_tick_this_tick(
+            &self,
+            _: &dyn mod_api::Host,
+            _: &mut mod_api::ShouldApplyEffectTickThisTickEvent,
+        ) {
+            panic!("another mod's shouldApply listener must not run");
+        }
+        fn apply_effect_tick(
+            &self,
+            _: &dyn mod_api::Host,
+            _: &mut mod_api::ApplyEffectTickEvent<'_>,
+        ) {
+            panic!("another mod's apply listener must not run");
+        }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn owned_effect_ticks_read_live_effects_and_rules_and_subtract_exhaustion() {
+        if super::super::native_entity_refs::tests::run_fresh_cases(
+            "game::potions::tests::owned_effect_ticks_read_live_effects_and_rules_and_subtract_exhaustion",
+            "SUNRISE_OWNED_EFFECT_CHILD",
+            &["effects"],
+        ) {
+            return;
+        }
+        let cancel_expiry = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        mod_platform::testing::with_mods(
+            std::sync::Arc::from([
+                mod_api::ModEntry::new(
+                    "effect-owner",
+                    Box::new(FoodEffectMod(cancel_expiry.clone())),
+                ),
+                mod_api::ModEntry::new("other-mod", Box::new(OtherEffectMod)),
+            ]),
+            || {
+                assert!(brewing::register_mod_effects(
+                    [
+                        ("test:comfort", "effect-owner"),
+                        ("test:nourishment", "effect-owner"),
+                        ("other-mod:foreign", "other-mod"),
+                    ]
+                    .map(|(id, owner)| (
+                        id.into(),
+                        0,
+                        brewing::Category::Beneficial,
+                        None,
+                        owner.into(),
+                    ))
+                ));
+                super::super::native_entity_refs::tests::with_game(|game| {
+                    game.options.dedicated = Some(Vec::new());
+                    game.player =
+                        Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+                    game.player
+                        .as_mut()
+                        .unwrap()
+                        .set_health(10.0, false)
+                        .unwrap();
+                    game.player.as_mut().unwrap().health.food.saturation = 0.0;
+                    game.potions
+                        .effects
+                        .add(EffectInstance::new("test:comfort", 80, 0));
+                    game.tick_mob_effects();
+                    assert_eq!(game.player.as_ref().unwrap().health.health(), 11.0);
+                    game.tick_mob_effects();
+                    assert_eq!(
+                        game.player.as_ref().unwrap().health.health(),
+                        11.0,
+                        "only each 80 ticks"
+                    );
+                    game.potions.effects = PlayerEffects::default();
+                    game.potions
+                        .effects
+                        .add(EffectInstance::new("regeneration", 100, 0));
+                    game.potions
+                        .effects
+                        .add(EffectInstance::new("test:comfort", 80, 0));
+                    game.tick_mob_effects();
+                    assert_eq!(
+                        game.player.as_ref().unwrap().health.health(),
+                        12.0,
+                        "regeneration alone healed"
+                    );
+                    game.potions.effects = PlayerEffects::default();
+                    game.potions
+                        .effects
+                        .add(EffectInstance::new("regeneration", 1, 0));
+                    game.potions
+                        .effects
+                        .add(EffectInstance::new("test:comfort", 80, 0));
+                    game.tick_mob_effects();
+                    assert_eq!(
+                        game.player.as_ref().unwrap().health.health(),
+                        13.0,
+                        "an earlier expired regeneration is no longer present"
+                    );
+                    game.potions.effects = PlayerEffects::default();
+                    game.player.as_mut().unwrap().health.food.saturation = 1.0;
+                    game.potions
+                        .effects
+                        .add(EffectInstance::new("test:comfort", 80, 0));
+                    game.tick_mob_effects();
+                    assert_eq!(
+                        game.player.as_ref().unwrap().health.health(),
+                        13.0,
+                        "saturated players skip comfort"
+                    );
+
+                    game.potions.effects = PlayerEffects::default();
+                    game.potions
+                        .effects
+                        .add(EffectInstance::new("test:nourishment", 20, 0));
+                    let food = &mut game.player.as_mut().unwrap().health.food;
+                    food.food = 18;
+                    food.exhaustion = 6.0;
+                    game.tick_mob_effects();
+                    assert_eq!(
+                        game.player.as_ref().unwrap().health.food.exhaustion,
+                        6.0,
+                        "natural regeneration keeps its exhaustion"
+                    );
+                    assert!(game.ui.rules.set(
+                        "natural_health_regeneration",
+                        sunrise_client::gamerules::Value::Bool(false)
+                    ));
+                    game.tick_mob_effects();
+                    assert_eq!(game.player.as_ref().unwrap().health.food.exhaustion, 2.0);
+                    game.tick_mob_effects();
+                    assert_eq!(
+                        game.player.as_ref().unwrap().health.food.exhaustion,
+                        0.0,
+                        "subtract up to four"
+                    );
+                    game.potions.effects = PlayerEffects::default();
+                    game.potions
+                        .effects
+                        .add(EffectInstance::new("test:nourishment", 20, 1));
+                    game.player.as_mut().unwrap().health.food.exhaustion = 1.0;
+                    game.tick_mob_effects();
+                    assert_eq!(
+                        game.player.as_ref().unwrap().health.food.exhaustion,
+                        -4.0,
+                        "no exhaustion floor"
+                    );
+
+                    game.world.chunks.insert(
+                        (0, 0),
+                        std::sync::Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)),
+                    );
+                    let kind = game.res.mob_types().get("minecraft:pig").unwrap().clone();
+                    let mut mob = Mob::new(12, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
+                    mob.no_ai = true;
+                    mob.health = 5.0;
+                    mob.add_effect("test:comfort", 80, 0);
+                    mob.add_effect("test:nourishment", 20, 0);
+                    game.mobs.push(mob);
+                    game.tick_creature_entities().unwrap();
+                    assert_eq!(
+                        game.mobs[0].health, 6.0,
+                        "comfort heals a mob; nourishment has no food to change"
+                    );
+                    game.mobs[0].retain_effects(|_| false);
+                    game.mobs[0].add_effect("minecraft:regeneration", 99, 0);
+                    game.mobs[0].add_effect("test:comfort", 80, 0);
+                    game.tick_creature_entities().unwrap();
+                    assert_eq!(
+                        game.mobs[0].health, 6.0,
+                        "active regeneration suppresses comfort on a mob"
+                    );
+                    game.mobs[0].retain_effects(|_| false);
+                    game.mobs[0].add_effect("minecraft:regeneration", 1, 0);
+                    game.mobs[0].add_effect("test:comfort", 80, 0);
+                    game.tick_creature_entities().unwrap();
+                    assert_eq!(
+                        game.mobs[0].health, 7.0,
+                        "earlier mob expiry is visible to comfort"
+                    );
+
+                    game.mobs[0].retain_effects(|_| false);
+                    game.mobs[0].add_effect("minecraft:regeneration", 1, 0);
+                    game.mobs[0].add_effect("test:comfort", 80, 0);
+                    cancel_expiry.store(true, std::sync::atomic::Ordering::SeqCst);
+                    game.tick_creature_entities().unwrap();
+                    assert_eq!(
+                        game.mobs[0].health, 7.0,
+                        "cancelled expiry still suppresses comfort at duration zero"
+                    );
+                    assert!(game.mobs[0].has_effect("minecraft:regeneration"));
+                    cancel_expiry.store(false, std::sync::atomic::Ordering::SeqCst);
+                    game.mobs[0].add_effect("test:comfort", 80, 0);
+                    game.tick_creature_entities().unwrap();
+                    assert_eq!(
+                        game.mobs[0].health, 8.0,
+                        "a previously cancelled expiry is asked again before comfort"
+                    );
+
+                    game.mobs[0].retain_effects(|_| false);
+                    game.mobs[0].add_effect("minecraft:regeneration", 200, 0);
+                    game.mobs[0].add_effect("minecraft:regeneration", 1, 1);
+                    game.mobs[0].add_effect("test:comfort", 80, 0);
+                    game.tick_creature_entities().unwrap();
+                    assert_eq!(
+                        game.mobs[0].health, 8.0,
+                        "a promoted hidden regeneration still suppresses comfort"
+                    );
+                    let regen = game.mobs[0]
+                        .extra
+                        .effects
+                        .iter()
+                        .find(|effect| effect.id == "minecraft:regeneration")
+                        .unwrap();
+                    assert_eq!((regen.duration, regen.amplifier), (199, 0));
+                });
+            },
+        );
+    }
+
     fn effect_test_mod() {
         use mod_api::{self, *};
         struct TestMod;
         #[mod_api::__subscriptions]
         impl Hooks for TestMod {
+            fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+                let key = r.effect_key("test:effect");
+                r.mob_effect_part(&key, TestMod).unwrap();
+            }
+        }
+        #[mod_api::sunrise_part]
+        impl MobEffectPart for TestMod {
             fn should_apply_effect_tick_this_tick(
                 &self,
                 _: &dyn Host,
@@ -2956,6 +3288,7 @@ mod tests {
             0,
             brewing::Category::Neutral,
             None,
+            "test-potions".into(),
         )]));
     }
 

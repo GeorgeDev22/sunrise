@@ -9,121 +9,30 @@ and every launcher and `sunrise-server update` install it ([Nightly only](#night
 ## Pull request checks
 
 Rollups, syncs and main's pushes are checked by one gate, `dyna-checks` (`.github/workflows/dyna-ci.yml`: `lint`,
-`verify`, `verify-static`, `launcher`); a plain pull request gets its cheap checks there (`format`, `verify-static`)
-([CONTRIBUTING.md](../CONTRIBUTING.md#ci-tiers)). The `checks` workflow (`.github/workflows/ci.yml`) adds a free
-full `verify` on GitHub's runners for a fork's pull request only (opened, pushed to or reopened; labels never start
-it): this repository's own pull requests get the cheap checks alone, and their rollups the heavy gate. It also runs
-every 6 hours on main to save the Rust caches its pull request runs read. Its by-hand jobs (Windows ARM64,
-vanilla-parity, jfr-analysis) run only on dispatch:
+`verify`, `verify-static`); a plain pull request gets its cheap checks there (`format`, `verify-static`)
+([CONTRIBUTING.md](../CONTRIBUTING.md#ci-tiers)), forks' included. The `checks` workflow (`.github/workflows/ci.yml`)
+runs a full `verify` of main on GitHub's runners every 6 hours, on any ref by hand
+(`gh workflow run checks --ref <ref> -f verify=true`), and on a pull request, a fork's included, when a maintainer adds
+the label `ci:verify`. Pushes never start it: until 2026-11-18 every push to a fork's pull request ran it, which held
+the organisation's GitHub-hosted runners ahead of the release jobs. The label stays after the run (a fork's run has a
+read-only token, and no fork code ever gets a writing one); remove it and add it again to run `verify` on a newer
+head. A dispatch without `verify` runs only its by-hand jobs (Windows ARM64 and JFR analysis):
 
 | Job | Runs on | What | Time |
 | --- | --- | --- | --- |
-| `verify` | Forks' pull requests and scheduled runs on main only, on GitHub's `ubuntu-24.04` (a fork's pull request sees no repository variable, so no switch could move it off a machine that is off); `SELF_HOSTED_CI=all` sends the scheduled runs to our checks runners (label `sunrise-checks`), `light` or `off` keeps them on GitHub ([CI runners](ci-runners.md)). This repository's own pull requests skip it | Three jobs side by side: the public-tree check and Python tests (`verify (tree and tools)`), rustfmt and clippy with warnings denied (`verify (format and lint)`), the Rust tests (`verify (Rust tests)`); `verify` waits for them and passes when each passed or had nothing to do. Dependencies and the workspace build come from a cache saved by scheduled runs on main (GitHub) or the runner's own build folder (ours) | ~8 min |
+| `verify` | Scheduled runs on main, dispatches with `verify` and pull requests labelled `ci:verify`, on GitHub's `ubuntu-24.04` | Three jobs side by side: the public-tree check and Python tests (`verify (tree and tools)`), rustfmt and clippy with warnings denied (`verify (format and lint)`), the Rust tests of the whole workspace (`verify (Rust tests)`); `verify` waits for them and passes when each passed. Dependencies and the workspace build come from a cache saved by scheduled runs on main | ~8 min |
 
-A pull request's harnesses run by dispatch on Dyna's runners: `gh workflow run dyna-ci.yml -f pr=<N> -f parity=true`.
-
-`verify` runs even in a cancelled run of `checks`, so it fails there instead of being skipped. A pull request that
-changes no Rust (docs, tools) runs only its quick steps and finishes in about a minute. A pull request's public-tree check reads only
-its own commits (`--range base..head`); scheduled runs on main read every ref's history.
-
-### The parity job
-
-The job is `.github/workflows/parity.yml`, a reusable workflow: `run-parity.yml` calls it for a fork's pull request a
-maintainer labels `run-parity`.
-
-A pull request every harness reaches (a crate split moves files every probe links: #2160 ran all 352 harnesses, 71
-minutes on a Mac mini runner, while five other pull requests' jobs queued behind it) carries the `full-parity` label:
-its job runs on playsunrise's runner only (4 harnesses at a time), and waits for it while that runner is busy
-instead of taking the Mac mini's. Labels don't start `checks`: add it when opening the pull request
-(`gh pr create --label full-parity`), or before the next push.
-
-A pull request that must leave the picture alone (HDR, shader packs) carries the `frame-identity` label: its job also
-runs `frame_identity` ([parity-workflow.md](parity-workflow.md)), which no automatic selection picks, since it fails
-any change that moves the picture on purpose. Like `full-parity`, it is read when the job starts.
-
-Sunrise never downloads the game, so harnesses that compare with vanilla run only where the maintainer's own
-copy is: the Mac mini and playsunrise (below). Their runners run as the maintainer's account and keep their checkout
-between runs (`clean: false`), so the probes build incrementally into `.local/parity-target` and earlier passes
-stand.
-
-The job tests the pull request's head merged into main's current tip, which is what merging it would land: harness
-and game fixes that reached main after the branch was made apply to it too, and an old branch runs main's runner
-scripts and selection unless it changes them. The base for the selection is that main commit, so only the pull
-request's own changes count. The job summary names the main commit. A head that conflicts with main is tested
-alone, with a warning. The check is still reported on the head.
-
-1. `tools/ci/runner-env.sh` puts the machine's Python 3.13 and the JDK `research-lock.json` pins on the PATH
-   (Homebrew and `java_home` on the Mac; on Linux what `linux-runner.sh` pinned, else nixpkgs), and sccache when
-   the machine has it.
-2. `tools/ci/vanilla-data.sh` links `.local/` to the runner's copy of the vanilla data, cloned once from
-   `~/code/sunrise-parity/shared-local` into `~/.actions-runners/sunrise/_work/sunrise/shared-local`, and
-   prepares `.local/sunrise-client` with the pull request's own `sunrise-prepare` once per preparer version
-   (its sources, the exporters in `mods/sunrise/src/test/java` and `research-lock.json`). The game's sounds, which
-   depend only on the Minecraft version, are kept once in `shared-local/sounds/<version>/` (copied from a folder
-   `sunrise-prepare sounds` made from the maintainer's own game; the Mac mini has no official launcher of its own)
-   and cloned into each preparation (not linked: vanilla's packs refuse symbolic links), for the audio harnesses.
-   `tools/prepare_output.py check` then compares what was prepared with `crates/sunrise-prepare/output-versions.txt`:
-   launchers keep a player's prepared resources across releases whose preparer declares the same `OUTPUT_VERSION`
-   (`crates/sunrise-prepare/src/lib.rs`), so a change to the prepared files fails here until it bumps the number
-   and appends the new digest (the error gives both lines).
-3. `tools/parity.py --changed <base sha>` picks the harnesses whose traced dependencies (their script, Python
-   modules, Java oracles and every Rust source their probes compile) changed since the merge base, plus any
-   harness nothing is recorded about yet, and runs those that have no pass for their current inputs. A change to
-   `Cargo.lock` or `research-lock.json` affects every harness. Each harness has 25 minutes, the job 45.
-
-Failed harnesses' logs are uploaded as the `parity-logs` artifact.
-
-**Platform-specific harnesses.** A harness listed under `linux_only` in `tools/parity_hosts.json` gives
-different results on macOS for a reason that is not a Sunrise bug (the reason is printed). `parity.py` skips it on
-other platforms unless it is named on the command line. Today it holds only `save_roundtrip` (it needs `vscreen`):
-`options`, `chunk_generation`, `world_border_render` and `mob_ai`, which once differed on macOS through the
-platform's libm, pass on the Mac mini since `sunrise_core::jmath` computes what HotSpot computes (checked
-2026-10-14).
-
-**Pull requests from forks** never run code on the Mac mini by themselves. A maintainer who has read the change
-adds the `run-parity` label: that runs the job once, on the commit the pull request had then. To run it again
-after new pushes, remove the label and add it again.
-
-**Two runners.** The Mac mini has two runners for this repository, `ludovics-mac-mini`
-(`~/.actions-runners/sunrise`, `CARGO_BUILD_JOBS=10`) and `ludovics-mac-mini-2` (`~/.actions-runners/sunrise-2`,
-`CARGO_BUILD_JOBS=6`), with the same labels, so the 30-minute nightly audit or a long parity job never holds a
-release's macOS build back. Each keeps its own checkout, `target/` and Rust install; the second's
-`_work/sunrise/shared-local` links to the first's, so they share the vanilla data, the preparations (one at a
-time, under a lock) and the parity passes and slots.
-
-**The desktop's runner.** Since 2026-11-03 (the maintainer's decision) `ludodesktop-sunrise` takes pull requests'
-parity jobs too, beside the Mac mini and playsunrise: labels `self-hosted`, `X64`, `sunrise-game`, `ludodesktop`, and no
-`Linux`, so ci.yml's by-hand `[self-hosted, linux, sunrise-game]` jobs stay on playsunrise. It is declared in the
-maintainer's NixOS configuration (`services.github-runners`, his private fleet repo), not installed by
-`tools/ci/linux-runner.sh`. A fork's job reaches it only through `run-parity`, so it runs as a system user, `gha`, with
-no sudo, SSH keys or logins; its service sees no `/home` and no device (no GPU: Vulkan is Mesa's lavapipe, on an Xvfb
-of its own), the system is read-only to it, and it runs in a slice at CPU and I/O weight 20, at most 16 of the 24
-threads, 20 GB of memory, nice 10 (`CARGO_BUILD_JOBS=16`, 8 harness slots). It runs only while the maintainer isn't at
-the machine: a timer stops it within a minute when he is at the screen (an unlocked session) and starts it 2 minutes
-after he leaves. A job it stops fails: rerun it, and it goes to whichever runner is free. Its vanilla data is his own
-copy, kept in the runner's folder; a clean-up before each start keeps its build folders under 40 GB and its 2 newest
-preparations. The nightly audit and parity-main stay on the Mac mini's runners: the audit compares with the previous
-night, so it stays on one platform, and a parity-main job stopped because he came back would bisect and comment on
-merges for nothing. The desktop is no parity host for `tools/parity.py --hosts` any more (its `tools/parity_hosts.json`
-entry points at the 10-26 setup, whose pause file stays set, so it refuses work).
-
-**playsunrise's runner.** `playsunrise-sunrise` runs on a server a hosting partner lends the project (Ubuntu, 8
-AMD EPYC threads, 30 GB, in Detroit; reachable only through the maintainer's tailnet). Nobody sits at it, so the
-watcher never pauses it except by hand. It gets half the machine: `RUNNER_MEMORY=24`, `CARGO_BUILD_JOBS` and the
-harness slots at 4, and a drop-in (`~/.config/systemd/user/sunrise-runner.service.d/cpus.conf`) that starts it under
-`taskset -c 4-7` (the user slice can't set `AllowedCPUs`: systemd doesn't delegate the cpuset controller to it).
-Agents' `tools/remote.sh` runs and benchmarks share CPUs 0-3, so they never slow a pull request's job.
-Without Nix, `linux-runner.sh` takes the build libraries, the JDK, sccache, Xvfb and Mesa's software Vulkan
-(lavapipe; there is no GPU) from apt, and Python 3.13 from uv. The partner can reach the machine, so gh is not
-logged in there: the registration token comes from another machine (`RUNNER_TOKEN`), and no job with secrets may
-run there (parity has none). It is also a parity host (`playsunrise` in `tools/parity_hosts.json`, 3 jobs on CPUs 0-3). Since
-2026-10-26 it has the `sunrise-game` label: pull requests' parity jobs run there, on the Mac mini or on the desktop, and
-`full-parity` ones only there.
+A maintainer-requested check on a fork may skip individual parts only when a complete diff of the pull request's
+base and head rules them out. Scheduled runs and manual verification run every part. `verify` still reports the
+combined result even if the run is cancelled. Its public-tree check reads every ref's history.
 
 ## Merging
 
-Pull requests go through the merge queue, which squashes each one into a single commit titled with the pull
-request's title and number (`kind(area): what changes (#123)`); never `gh pr merge --auto`. Branch protection on main
+Pull requests merge with a merge commit (`Merge pull request #123 from ...`), most of them through a rollup: a
+`sunrise-review-rollup-<n>` branch that carries reviewed pull requests at their heads, with integration fixes as carry
+commits on top, and is checked by `dyna-checks` like any rollup. A pull request's own commits stay as they are, and it
+shows as merged when its rollup merges. No workflow has a `merge_group` trigger: there is no merge queue. Never
+`gh pr merge --auto`. Branch protection on main
 requires `verify` for everyone, and a council member's review (team `council`) for the files `.github/CODEOWNERS` lists (what builds, signs
 and ships releases). Branches don't have to be up to date with main: main's own `dyna-checks` run catches the rare
 semantic conflict.
@@ -134,10 +43,8 @@ request doesn't wait for them.
 
 **An ordinary pull request merges on CI.** A Team member:
 
-1. reads the whole diff (for a fork, before adding `run-parity`: that runs the fork's code on a maintainer's machine);
-2. adds `run-parity` to a fork's pull request; our own branches run `parity` by themselves. Since #2448 it tests
-   the pull request merged into main;
-3. merges once `verify` and `parity` pass, nobody's change request is open, and every comment has been read (a
+1. reads the whole diff;
+2. merges once `verify` passes, nobody's change request is open, and every comment has been read (a
    "don't merge" from anyone holds it).
 
 Never merge your own pull request: another Team member reviews and merges it. Never push to, force-push or rebase a
@@ -154,48 +61,25 @@ paths, `lan_e2e`, a screenshot for anything visible) before it merges. Risky mea
 - world generation (`worldgen/`): seeds must keep generating the same terrain;
 - the launcher's installs and updates, or the mod runtime;
 - the harnesses themselves (`tools/test_*_parity.py`, the Java oracles): a wrong harness hides regressions;
-- over ~3000 lines of code ([what counts](../CONTRIBUTING.md#pull-requests)), or `parity` failed, was skipped or ran no harness for gameplay code.
+- over ~3000 lines of code ([what counts](../CONTRIBUTING.md#pull-requests)).
 
 Unsure? Add `needs-proof`: it costs a few hours, a broken release costs more.
 
-`parity` becomes required once it has run green on pull requests for a while (a week without a false failure):
-
-```sh
-gh api -X POST repos/horizon-rust/horizon/branches/main/protection/required_status_checks/contexts -f 'contexts[]=parity / parity'
-```
-
-A skipped `parity` (a fork's pull request without the label) counts as passed, so requiring it never blocks a
-fork's pull request: the Team member decides whether to run it, and a skipped run makes the pull request risky.
-
 ## Parity on main
 
-Most pull requests merge on `verify` alone and leave the vanilla harnesses to `.github/workflows/parity-main.yml`,
-which runs them on main a batch of merges at a time, on the Mac mini's runner:
+The [daily run](#daily-run) is the only CI entry point for vanilla parity. It calls `.github/workflows/parity.yml`
+on every real (writing) run, which takes only commits of main, so no run can move `daily-green` or start the
+Nightly without it. Dry runs, rollups and pull requests do not run parity. The Dyna runners use their prepared
+vanilla data and run all automatic harnesses in shares of one plan (`tools/ci/parity_shards.py`,
+`tools/parity.py --harness-file`). They replay an earlier vanilla oracle run from the CI host's keep only when its
+command, JDK and inputs match ([parity workflow](parity-workflow.md)); the daily summary reads the shares' merged verdict.
+`named_only` in `tools/parity_hosts.json` lists the exceptions, such as `frame_identity`, each with its reason; run them
+locally by name. Proofs that need arguments (a saved capture to replay) declare `PARITY_MANUAL` in their script instead,
+which no automatic run selects.
 
-- It starts on every push to main, one run at a time (`concurrency: parity-main`). A run that started always
-  finishes; merges that land while it goes on wait in one pending run: GitHub keeps only the newest and cancels the
-  others, so the next run takes them all. The many `cancelled` runs in the list are those pending ones.
-- `tools/parity_main.py base` gives the newest commit main contains whose parity-main passed (else the last
-  merge's parent), and the run is `tools/parity.py --changed <that commit>`: the union of the harnesses every merge
-  since then can affect, once, with every earlier pass reused.
-- On a failure, `tools/parity_main.py bisect` checks out the batch's first-parent merges by halves and runs only
-  the failing harnesses, names the first merge they fail on in the run's summary and comments on its pull request
-  (`🤖 Agent: parity-main found that this merge breaks ...`). Fix it with a pull request as usual; the next
-  run checks from the last green commit again. The search has 90 minutes (`--budget`): after that it says between
-  which merges each harness broke, and the next run goes on from there (`.local/parity-runner/bisect.json`, kept
-  while the base is the same), without commenting again on a merge it already named. Before 2026-11-11 a search
-  over many merges ran into the job's 240 minutes and said nothing.
-- Nightlies build only on a commit both `checks` and `parity-main` passed on (`tools/release_train.py`,
-  `tools/ci/nightly.py`, see below), so a broken merge holds them instead of reaching players. They take the
-  newest such commit even when a later batch failed: that failure is in merges the green commit doesn't contain, so
-  a broken or flaky harness holds only what landed after the last green run, never the whole Nightly (before
-  2026-11-03, any later failure held every Nightly until a run passed again: 30 h without one). `release.yml`
-  also starts when a parity-main run finishes. A forced run (`force=true`) doesn't wait for parity-main.
-
-A pull request still runs its own parity job when it changes a harness script, an oracle
-(`mods/sunrise/src/test/`), a probe (`crates/*/examples/`, `game/*_fixture.rs`, `game/*_harness.rs`), the runner
-(`tools/parity*.py`, `tools/lab.py`, `tools/parity_hosts.json`, `parity*.yml`), or carries the `run-parity` label
-(`run-parity.yml` runs it when the label is added).
+The daily summary files one `bug` issue per failing harness with the merges since the previous green daily as
+suspects. A failed or incomplete required parity leg holds `daily-green` and the automatic Nightly, but not the
+SDK. Only names and outcomes are public; raw harness output and retry details stay on the runner.
 
 ## Game releases
 
@@ -209,8 +93,8 @@ Three kinds of game build (CI tiers, owner 2026-11-13):
 
 | Build | Who starts it | What it needs | Published as |
 |---|---|---|---|
-| [Snapshot](#snapshot) | root, by dispatching `release.yml -f kind=snapshot -f dry_run=false` on main | the gate (`lint`, `verify`, `verify-static`, `launcher`) green on that commit | pre-release `snapshot-<date>-<short>`; no launcher offers it |
-| Nightly | dispatch, or the [daily run](#daily-run) | main’s head or an explicit commit of main, with its dyna-checks gate green; SDK when published | pre-release `nightly`, every launcher's update |
+| [Snapshot](#snapshot) | root, by dispatching `release.yml -f kind=snapshot -f dry_run=false` on main | the gate (`lint`, `verify`, `verify-static`) green on that commit | pre-release `snapshot-<date>-<short>`; no launcher offers it |
+| Nightly | dispatch, or the [daily run](#daily-run) | main’s head or an explicit commit of main, with its dyna-checks gate green and its SDK published first | pre-release `nightly`, every launcher's update |
 | Release (`v*`) | by hand, from a Nightly | | the release |
 
 ### Snapshot
@@ -223,7 +107,9 @@ commit on main. In order:
    newest dyna-checks main-push run did not pass every gate job (a pending job is not passed). Nothing else holds
    it: no daily tests, no `daily-green`, no batch rules, no daily cap, no pause, no release-blocker.
 2. `snapshot-sdk` builds the commit's prebuilt SDK on every OS (`prebuilt-game-build.yml`; skipped when
-   `sdk-<sha>` already exists) and `snapshot-sdk-publish` signs and publishes it as `sdk-<sha>` from this run's
+   `sdk-<sha>` already exists). A build it makes runs the SDK's own checks too, as the daily run's does: the native
+   linkage probe on the Linux and Windows client legs and the API-source check on Linux; an `sdk-<sha>` that already
+   exists is reused as it is, and neither check runs again. `snapshot-sdk-publish` signs and publishes it as `sdk-<sha>` from this run's
    artifacts through `sdk-publish.yml`, the one workflow that publishes an SDK (the daily run and `prebuilt-game.yml` call it too).
 3. `snapshot` starts `nightly build` with `kind=snapshot` and that commit. It re-checks the gate and the SDK, builds
    the commit alone (no picked pull requests, no build branch, no nightly-state), as `SUNRISE_VERSION`
@@ -248,16 +134,19 @@ dispatches it (`-f commit=<sha>`, `-f dry_run=false` to write). One run runs and
 dispatch replaces an older waiting one. The schedule stops when main's head already has a completed real daily run;
 a hand dispatch never does, so it retries a run whose tag move, issues or nightly failed. Its legs are the workflows that left main pushes:
 the ignored-tests data shards (`ignored-tests.yml`), the wasm fixture and guest stacks (`wasm-mods.yml`),
-`fn-replace-check.yml`, the native linkage probe (`native-dylib-probe.yml`), the launcher's Windows runtime-lease
-tests (`launcher-windows-check.yml`), the machine sample built against the commit's mod API (`machine-sample.yml`)
-and the prebuilt SDK of the commit
-(`prebuilt-game-build.yml`; each leg packs its slices, and `sdk-publish` signs and publishes them as the mod SDK's
+`fn-replace-check.yml`, the game's Windows runtime-lease tests (`windows-runtime-leases.yml`), every
+`cargo-sunrise-mod` binstall archive built from the commit and published nowhere (`cargo-sunrise-mod-build.yml`; a pull
+request's check builds only the Linux x86_64 archive, and only a `cargo-sunrise-mod-v*` tag's push publishes, from
+`cargo-sunrise-mod.yml`), the wasm std member's names built on Linux and on Windows (`wasm-std-names.yml`), the machine sample built against the commit's mod API (`machine-sample.yml`) and the
+prebuilt SDK of the commit
+(`prebuilt-game-build.yml`; each leg packs its slices after the checks, including the [native linkage probe](native-dylib-probe.md)
+on the Linux and Windows client builds. `sdk-publish` signs and publishes the slices as the mod SDK's
 release `sdk-<sha>` (`sdk-publish.yml`) only when its own legs are green on a real run on main, before the Nightly that
 needs them; a failed publish files one issue, `Daily: sdk-publish did not complete`), each called
-with the commit. Its
+with the commit. The [vanilla parity leg](#parity-on-main) runs after the shards when applicable. Its
 summary (`tools/ci/daily_summary.py`) reads each leg's result and its sanitised verdict file, never a log:
 
-- every leg green: the tag `daily-green` moves to the commit, and `release.yml` (kind `nightly`) publishes the
+- every applicable leg green: the tag `daily-green` moves to the commit, and `release.yml` (kind `nightly`) publishes the
   Nightly of that commit whenever a player-facing pull request merged since the published one (no batch-size or
   age rule; the pause switch and release-blockers still hold it);
 - a failing test: one issue `Daily: <crate> <test>` (label `bug`) with its panic location, the first daily run that
@@ -266,20 +155,20 @@ summary (`tools/ci/daily_summary.py`) reads each leg's result and its sanitised 
   sample is no break: its one issue, `Daily: update the machine sample for the mod API change`, asks for the sample
   to follow the API change and its pin to move.
 
-The SDK publishes on its own legs (`sdk`, `linkage`, `machine-sample`, `fn-replace-check`: the summary's `sdk_green`) until a runner with prepared data exists (umceko, 2026-11-16).
+The SDK publishes on its own legs (`sdk`, `machine-sample`, `fn-replace-check`: the summary's `sdk_green`) until a runner with prepared data exists (umceko, 2026-11-16). A red linkage probe fails its `sdk / build linux` or `sdk / build windows` job and blocks publication.
 
 Only a run on `main` with `dry_run` false moves the tag, files issues or publishes; any other run prints what it
-would do. On Sunrise a Nightly ships a commit of main with its dyna-checks gate green; a published SDK is optional.
+would do. On Sunrise a Nightly ships a commit of main with its dyna-checks gate green and its SDK, `sdk-<sha>`, published
+first on the same commit: a game build without its SDK is never published (owner, 2026-11-17).
 A [snapshot](#snapshot) (`release.yml -f kind=snapshot`) needs only dyna-checks' gate on its commit of main.
 
 ```mermaid
 flowchart LR
-    pr(["pull request"]) --> checks{"verify<br/>parity"}
-    checks -- green --> merge["merge queue<br/>(squash)"]
+    pr(["pull request"]) --> checks{"verify"}
+    checks -- green --> merge["merge commit<br/>(most through a rollup)"]
     merge --> main(["main"])
-    main --> mainchecks{"checks and<br/>parity-main"}
-    mainchecks -- green --> decide{"decide<br/>tools/release_train.py"}
-    daily(["daily run, every leg green"]) --> decide
+    main --> daily["daily run, including parity on main’s head"]
+    daily -- every applicable leg green --> decide{"decide<br/>tools/release_train.py"}
     decide -- "5 player-facing PRs settled 5 min,<br/>the oldest waited 6 h, or release-now" --> nightly["nightly build:<br/>that commit + the reviewers' picks"]
     decide -- otherwise --> wait(["wait"])
     nightly --> gate{"smoke test drew a world,<br/>no release-blocker is open"}
@@ -308,9 +197,8 @@ commits) since the commit the published Nightly was built on:
 - One Nightly build at a time: while one runs or waits, the train starts none. At most 12 builds a UTC day (the
   reviewers' `/nightly` builds count): past that the train waits for the next day, except for `release-now` and
   `force=true`.
-- A scheduled run takes main's newest commit where `checks` and `parity-main` passed (a later failed
-  parity-main batch doesn't change it); after a run of either, the commit it passed on, once both passed there.
-  On Sunrise the commit is main's head or an explicit base, with its dyna-checks main-push gate green.
+- The daily calls the release train only from its green summary. A by-hand Sunrise dispatch selects main's head or
+  an explicit base on main with its dyna-checks main-push gate green.
 
 ### Nightly only
 
@@ -336,11 +224,9 @@ keep a working build until they update themselves. `.github/release-line.txt` st
 | Label | Effect |
 | --- | --- |
 | `feature` | Listed under **New** in the Nightly's and the launcher's notes |
-| `release-now` | A Nightly as soon as main's checks and parity-main pass, past the batch rule and the day's cap |
+| `release-now` | A Nightly past the batch rule and the day’s cap |
 | `skip-release` | Doesn't trigger a Nightly or a launcher release and isn't listed in the notes |
-| `run-parity` | Runs the parity job once on a fork's pull request |
-| `full-parity` | Runs the pull request's parity job on playsunrise's runner only (a change every harness reaches) |
-| `parity-regression` | Opened by the nightly audit for a harness that fails on main |
+| `bug` | Opened by the daily summary for a failing harness on main |
 | `release-blocker` | On an issue: no Nightly is published while it is open ([When it releases](#when-it-releases)) |
 
 Pull requests without `feature` are listed under **Fixed**. Titles are written for players, since they become
@@ -350,19 +236,19 @@ the notes.
 
 | Archive | Runs on | Checks |
 | --- | --- | --- |
-| `sunrise-linux-x86_64.tar.gz` | GitHub `ubuntu-22.04` (an older glibc, so it runs on any recent distribution) | the standard loader and libraries only (`tools/check_imports.py`) |
-| `sunrise-linux-musl-x86_64.tar.gz` | Alpine 3.22 in Docker on GitHub `ubuntu-22.04`, targeting `x86_64-unknown-linux-musl` | musl loader and libraries only (`tools/check_imports.py --musl`), CPU baseline and every program's startup checked inside Alpine |
+| `sunrise-linux-x86_64.tar.gz` | Blacksmith `ubuntu-2204` (GitHub's `ubuntu-22.04` with `BLACKSMITH=off`; an older glibc, so it runs on any recent distribution) | the standard loader and libraries only (`tools/check_imports.py`) |
+| `sunrise-linux-musl-x86_64.tar.gz` | Alpine 3.22 in Docker on Blacksmith `ubuntu-2204`, targeting `x86_64-unknown-linux-musl` | musl loader and libraries only (`tools/check_imports.py --musl`), CPU baseline and every program's startup checked inside Alpine |
 | `sunrise-server-linux-x86_64.tar.gz` | the same Linux job, after the client archive: `sunrise-server`, `sunrise-prepare` and the game built with `--no-default-features` as `sunrise-engine` (docs/server.md) | as above, and neither `libasound.so.2` nor `libudev.so.1` (`tools/check_imports.py --server`) |
-| `sunrise-windows-x64.zip` | GitHub `windows-latest`, C runtime linked in | system DLLs only (`tools/check_imports.py`); PE machine is x64 |
-| `sunrise-windows-arm64.zip` | GitHub `windows-11-vs2026-arm`, built for `aarch64-pc-windows-msvc`, C runtime linked in | system DLLs only (`tools/check_imports.py`); PE machine is ARM64 and binaries start on the native runner |
-| `sunrise-macos-arm64.zip` | The Mac mini's runner (`vars.MAC_RUNNER=macos-latest` sends it to GitHub) | system libraries only (`otool -L`); a 1500-frame offscreen run of a new world (about 12 s; 300 frames end before the world has loaded) with resources prepared from the runner's own Minecraft (`--offscreen --world smoke --frames 1500 --smoke-report`: frames drawn, chunks generated and meshed, a player, no error) |
-| `sunrise-macos-x64.zip` | The same runner, cross-built for `x86_64-apple-darwin` and signed there (#1161) | system libraries only (`otool -L`); startup checks of every program from the packaged archive on native Intel (`macos-15-intel`, #1602), which the archive must pass to ship; no Intel world smoke, so only the arm64 build's `smoke-test.json` is published |
+| `sunrise-windows-x64.zip` | Blacksmith `windows-2025` (GitHub's `windows-latest` with `BLACKSMITH=off`), C runtime linked in | system DLLs only (`tools/check_imports.py`); PE machine is x64 |
+| `sunrise-windows-arm64.zip` | Blacksmith `windows-2025`, cross-built for `aarch64-pc-windows-msvc` (natively on GitHub's `windows-11-vs2026-arm` with `BLACKSMITH=off`), C runtime linked in | system DLLs only (`tools/check_imports.py`); PE machine is ARM64; every program's startup checks from the packaged archive on GitHub's native `windows-11-vs2026-arm` |
+| `sunrise-macos-arm64.zip` | Blacksmith's M4 `macos-15` (GitHub's `macos-15` with `BLACKSMITH=off`) | system libraries only (`otool -L`) and every program's startup checks |
+| `sunrise-macos-x64.zip` | The same machine type, cross-built for `x86_64-apple-darwin` (#1161) | system libraries only (`otool -L`); startup checks of every program from the packaged archive on native Intel (GitHub's `macos-15-intel`, #1602), which the archive must pass to ship |
 
-Each builds `sunrise-client`, `sunrise-ctl`, `sunrise-prepare` and `sunrise-server` in release mode, checks they
+Each builds `sunrise-client`, `sunrise-ctl`, `sunrise-prepare`, `sunrise-server` and `sunrise-port-pack` in release mode, checks they
 exist, verifies Windows PE architectures, checks the `--help` and `--version` entry points, packages the folder with
 `cargo run -p xtask -- package` and archives it. The
-GitHub jobs keep their Cargo caches (`Swatinem/rust-cache`); the Mac mini keeps its `target/`. Only the Mac
-runs the game: GitHub's runners have neither a GPU worth the name nor the game files.
+legs are fresh machines. The game's run of a new world (1500 offscreen frames, `smoke-test.json`, which the Nightly
+publishes) is `linux-smoke`'s, on Dyna's runner with the prepared files, from the hosted Linux archive.
 
 The musl archive is an optional manual download for musl-based Linux desktops; see
 [installation and updates](native-client.md#musl-linux-manual-installation). The launcher still selects the
@@ -464,9 +350,36 @@ open `release-blocker`. The reviewers' `/nightly` and the 20:17 UTC build still 
 
 To stop the next Nightlies while a problem is fixed, label an issue about it `release-blocker`. The way out is
 forward: revert the pull request (or `/nightly remove` a pick), label the revert `release-now`, and a fixed Nightly
-is out as soon as main's checks and parity-main pass. Meanwhile a player can pick an earlier build on the launcher's
+can go out once the daily and gate pass. Meanwhile a player can pick an earlier build on the launcher's
 Versions page (the last week's `nightly-<date>`, or a `vX.Y.Z`), and `sunrise-server update --version <tag>` does
 the same for a server.
+
+## Rolling mod tool
+
+`mod-tool.yml` keeps one release, the pre-release `mod-tool` (never "latest"), holding the newest `cargo-sunrise-mod`
+built from main: `tool-<target>.tar.xz` for each host (the archives an SDK holds, made by `tools/prebuilt_game.py tool`),
+`tool.json` (the commit, its date, the `native-*` contract number), `SHA256SUMS` and `SHA256SUMS.sig`. The sums are signed
+with the release key for the tag `mod-tool` (message `horizon release mod-tool\n` and the sums), so `tool.json`'s commit is
+signed too; `sunrise-release-sign verify --tag mod-tool` checks it, and `signed_digest` refuses the tag as a game release.
+Why it exists: the tool shipped only inside each `sdk-<commit>`, so a tool fix reached modders with the next Nightly.
+
+- When: after dyna-checks finishes a main push (so the gate's result exists when it is read) and by dispatch, never on
+  a pull request. `decide` builds only when a file of the tool changed
+  since the commit `mod-tool` holds (`tools/ci/mod_tool.py crates` lists the folders: the workspace crates
+  `cargo-sunrise-mod` depends on, from `cargo metadata`, plus the lock, the compiler pin and the files that build and sign
+  it) and dyna-checks' gate is green on the commit, as for a snapshot. It refuses a commit not on main and one that does
+  not contain what `mod-tool` holds, so an older commit never replaces a newer tool.
+- Who signs: the `sign` job alone, in the `release` environment, on main with publishing on; it checks out only
+  `tools/ci/sign_release.sh`. Any other run, a dry run included, signs with a throwaway key and publishes nothing.
+- Publishing: a dispatch with `-f dry_run=false` on main, or a push while the repository variable `MOD_TOOL_AUTOPUBLISH`
+  is `true` (without it a push run is a dry run). The archives are replaced first and the sums and signature last, so a
+  reader catching the release between them fails its check and tries again; the tag moves to the commit.
+- A tool is built against any SDK whose layout it knows. A pinned SDK older than the tool's needs stops the build with
+  the command that repins it and the SDK's own tool (`sdk-<commit>/tool-<target>.tar.xz`); the install page says which
+  tool to take when.
+- Not done: immutable per-commit tags (`mod-tool-<commit>`, each signed for its own tag) beside the moving one. Until
+  then an old `mod-tool` set that was once signed still verifies if it were served again; `tool.json`'s commit and date
+  and `cargo sunrise-mod --version` show which tool a user has.
 
 ## Prebuilt SDK retention design (#3011)
 
@@ -477,13 +390,15 @@ of downloads or caches belong to #3009; retaining a release does not authenticat
 ### Current publication contract
 
 The fork's [Nightly workflow](../.github/workflows/nightly-build.yml) selects a gate-checked commit of main through
-[`tools/ci/nightly.py`](../tools/ci/nightly.py). When its complete SDK is published, it carries `sdk.json` and
-checks `require-sdk` before rotation and again before publication. Otherwise it omits `sdk.json` and adds a
-known issue: native mods cannot be built for this build. A complete SDK means a published, non-draft `sdk-<40 lowercase hex SHA>` release holding every asset
+[`tools/ci/nightly.py`](../tools/ci/nightly.py). It carries its complete SDK's `sdk.json` and
+checks `require-sdk` before rotation and again before publication. Without a complete SDK, a real Nightly stops at
+the pick, before it pushes a build branch; a dry run goes on without `sdk.json`. A complete SDK means a published, non-draft `sdk-<40 lowercase hex SHA>` release holding every asset
 `nightly.py sdk-assets` names: `sdk.json`, `SHA256SUMS` signed for `sdk-<sha>` (`SHA256SUMS.sig`), `surface.json`,
 `build-data.tar.xz` and the `runtime`, `api` and `engine` slices of the four packages (Linux client, Linux server,
 Windows GNU and macOS ARM64); its `sdk.json` must match those sums and name that build and this package format. The
-Nightly carries that `sdk.json` in its own signed sums. The SDK signature's message names `sdk-<sha>`, so it never
+Nightly carries that `sdk.json` in its own signed sums. Every Nightly and snapshot also carries
+`sunrise-release.json` in them, the facts a launcher reads before it runs anything in the build
+([api/release-file.md](api/release-file.md)). The SDK signature's message names `sdk-<sha>`, so it never
 passes for a game release, nor a game release's for an SDK (`sunrise-release-sign`: `signed_digest`, `sdk_digest`).
 One publish step ([sdk-publish.yml](../.github/workflows/sdk-publish.yml)), called by the daily run (`sdk-publish`
 in [daily.yml](../.github/workflows/daily.yml)), by a [snapshot](#snapshot) and by the [SDK workflow](../.github/workflows/prebuilt-game.yml)'s
@@ -616,53 +531,29 @@ No SDK compilation is needed to evaluate this design.
 
 ## Launcher releases
 
-`.github/workflows/launcher.yml` releases the launcher the same way. It starts on a push to main that changes
-`launcher/`, `crates/sunrise-prepare/` or `crates/sunrise-theme/` (what the launcher builds in), every hour at :47,
-and by hand; pushes to `launcher` and `launcher-*` branches only build.
+The launcher lives in [sunrise-org/sunrise-launcher](https://github.com/sunrise-org/sunrise-launcher) and is built, tested and released there. This repository
+no longer builds it: `.github/workflows/launcher-bridge.yml` takes a launcher release from that repository, signs its
+checksums here with the game's release key (`tools/ci/sign_release.sh`; `tools/ci/verify_launcher_release.sh` checks
+the result against `crates/sunrise-release-sign/release-keys.txt`) and publishes it there and here as `launcher@X.Y.Z`, so
+launchers installed from here update to it. Making a launcher release GitHub's latest here would break servers: every
+`sunrise-server` already installed, `install.sh` and `install.ps1` ask for `releases/latest` and expect the game's
+archives there, so the game release stays the latest.
 
-- `tools/release_train.py decide --kind launcher` counts the pull requests merged since the last published
-  launcher release that changed those paths (not `launcher/links.json`, which the launcher reads from main, nor
-  tests or Markdown), with the same batching rule (5 pull requests settled 5 minutes, or the oldest 6 hours), `release-now`, `skip-release` and `RELEASES_PAUSED`.
-- The tag is `launcher@X.Y.Z` on the release line (`launcher@0.2.0` first; the game and the launcher count their
-  patches separately). Without `.github/release-line.txt`, `launcher-vX.Y.Z`: the patch after the last launcher tag,
-  or the next minor (`X.Y+1.0`) when one of those pull requests is labelled `feature`. `launcher-v0.2.0` was taken
-  long before 0.2, hence the new prefix.
-- No version-bump commits: the build gets the version in `SUNRISE_LAUNCHER_VERSION` and the tag in
-  `SUNRISE_LAUNCHER_TAG`, which `launcher/src/backend.rs` reads with `option_env!` (falling back to `Cargo.toml`'s),
-  so `--version`, the window, the User-Agent and the self-update comparison all use them. Each build checks
-  `--version` says it.
-- Linux on GitHub `ubuntu-22.04`, Windows x64 on `windows-latest`, Windows ARM64 on `windows-11-vs2026-arm`, and
-  macOS on the Mac mini's runner; each runs the launcher's tests and checks its libraries. The smoke test installs
-  the newest game build for that platform; Intel macOS skips only the install step while no matching build is
-  available yet, and Windows ARM64 installs the x64 build (under emulation) from a Nightly without an ARM64 one.
-- Published as a pre-release with `--latest=false`: the repository's latest release stays a game release. Notes list the pull
-  requests under New and Fixed; Kira posts launcher releases without pinging.
-- Windows also publishes `sunrise-launcher-setup.exe` (x64) and `sunrise-launcher-setup-arm64.exe`, the launcher's
-  binary under another name: with no
-  arguments it opens the per-user setup (`launcher/src/installer.rs`) instead of Home, and
-  `sunrise-launcher.exe uninstall` removes it again. Both files are in the release's signed `SHA256SUMS`.
-
-Making a launcher release GitHub's latest instead would break servers: every `sunrise-server` already installed,
-`install.sh` and `install.ps1` ask for `releases/latest` and expect the game's archives there, and a server that
-can't update can't fetch the fix either. So the game release stays the latest, and it sends people to the launcher
-(#1647): its notes open with a "Want to play? Download the Sunrise launcher" block (`PLAYERS` in
-`tools/release_train.py`: raw HTML, which GitHub shows and launchers' notes skip; the site's Releases page leaves
-it out too), which `PLAYERS_FOOTER` repeats above the disclaimer at the end, and its archives carry labels ("Game files the
-launcher installs: Linux (…)") that GitHub shows in place of the file names. Everything that downloads matches
-the asset's name, which is unchanged.
-
-Starting by hand, pausing and rolling back work as for the game (`gh workflow run launcher …`,
-`RELEASES_PAUSED`, `gh release edit launcher@X.Y.Z --draft`). Launchers older than the withdrawn release then
-see the previous one as the newest; launchers that already updated keep running.
-
-With several game releases a day, the newest launcher release soon falls out of the newest 100 releases the
-launcher and the website read: both then look the newest launcher tags up one by one
-(`git/matching-refs/tags/launcher@`, then `launcher-v` if there is none, then `releases/tags/<tag>`).
+The game's release notes still send people to the launcher (#1647): they open with a "Want to play? Download the
+Sunrise launcher" block (`PLAYERS` in `tools/release_train.py`: raw HTML, which GitHub shows and launchers' notes skip;
+the site's Releases page leaves it out too), which `PLAYERS_FOOTER` repeats above the disclaimer at the end, and the
+game archives carry labels ("Game files the launcher installs: Linux (…)") that GitHub shows in place of the file
+names. Everything that downloads matches the asset's name, which is unchanged.
 
 ## Nightly channel
 
-On Sunrise, Nightly builds main's head (or an explicit `base` on main) only after its dyna-checks main-push
-gate passes, using the same selection check as Snapshot. No daily-green tag is required. A complete published
+On Sunrise, a Nightly builds the commit the `daily-green` tag points to (the newest fully green daily run), after
+its dyna-checks main-push gate passes; any other commit is refused. The owner may grant a one-time exception for
+another commit of main: root then runs `gh workflow run release.yml -f kind=nightly -f dry_run=false -f commit=<full sha>
+-f exception="<who, when, why>"` (or `nightly-build.yml` with `base` and `exception`), and the run names the grant in
+a warning. A grant names its commit in full; a blank one is no grant. The commit's SDK, `sdk-<sha>`, is published
+first, as for every Nightly. The gate
+still holds, and an exception never changes the rule (owner, 2026-11-17). A complete published
 `sdk-<sha>` is verified and carried when available; without it, notes say native mods cannot be built for this
 build and no `sdk.json` is signed or published. Linux and Windows x64 are required. macOS, Windows ARM64 and
 musl Linux are optional: failed archives are omitted from signed checksums and publication with a warning.
@@ -671,10 +562,9 @@ The upstream Nightly selection machinery below describes Sunrise's picked-PR cha
 
 `.github/workflows/nightly-build.yml` builds and publishes the Nightly, the only build players get since
 2026-10-28: when the batch train decides ([Game releases](#game-releases), with the commit as `base`), once a night
-(20:17 UTC) and when a trusted reviewer asks (#2681). It builds main's newest commit where
-`checks` and `parity-main` passed, as a release does (or the `base` input), plus the pull requests the trusted
-reviewers picked, merged in their order; with none picked, that commit alone (`tools/ci/nightly.py pick`). No green
-commit (main's newest `checks` or `parity-main` run failed) builds nothing. A night with nothing new publishes nothing. A pull request goes in without a review: a trusted
+(20:17 UTC) and when a trusted reviewer asks (#2681). The legacy picked-PR path starts from the green daily tag (or the `base` input), plus the pull requests the trusted
+reviewers picked, merged in their order; with none picked, that commit alone (`tools/ci/nightly.py pick`). Without a
+base it builds nothing. A night with nothing new publishes nothing. A pull request goes in without a review: a trusted
 reviewer or Ludovic can pick any open pull request to main, reviewed or not (Ludovic, 2026-10-30, at the Team's
 request, because they were often blocked on the launcher; from 2026-10-28 it needed an approving review at the
 head that is built). The guards stay: the pull request must be open and target main, it must leave the
@@ -753,7 +643,7 @@ comment on any issue or pull request (`.github/workflows/nightly-command.yml`, `
   2026-10-27), and lists each in its summary. It never deletes the newest build, a build a published `nightly` or
   `nightly-<date>` release points to, or any other branch (`nightly.py prune-builds`).
 - **Refused.** A pull request that changes a path CODEOWNERS gives to the council (`.github/`, `tools/ci/`, the
-  signing and update code, `launcher/src/backend.rs`, `launcher/links.json`…), more than 30 in a set, and more than
+  signing and update code, `https://github.com/sunrise-org/sunrise-launcher/blob/main/src/backend.rs`, `https://github.com/sunrise-org/sunrise-launcher/blob/main/links.json`…), more than 30 in a set, and more than
   12 builds a day (the scheduled one always runs; 6 until 2026-10-28).
 - **No repository role.** Reviewers need no permission on the repository: the list file and the workflow are the
   whole of it.
@@ -778,14 +668,12 @@ comment on any issue or pull request (`.github/workflows/nightly-command.yml`, `
 - **The signing key never meets the pull requests' code.** Every workflow file and script runs from main's copy (a
   schedule and `issue_comment` run the default branch; `uses: ./…` takes the caller's commit), never a pull
   request's `.github/`, and a pull request that changes `.github/` or `tools/ci/` is refused. `build` compiles the
-  merge with a read-only token that isn't kept in the checkout and no secrets; the runner's Developer ID keychain
-  stays locked. `sign` is the only job with the key, and checks out only main's `tools/ci/sign_release.sh`, which
+  merge with a read-only token that isn't kept in the checkout and no secrets, and signs nothing with Developer ID
+  (`developer_id: false`). `sign` is the only job with the key, and checks out only main's `tools/ci/sign_release.sh`, which
   hashes the archives with the runner's `sha256sum` and signs with its OpenSSL: it never runs what `build` made.
   `publish` runs main's `sunrise-release-sign`, never the archives. Nothing a nightly's build leaves reaches a
-  release either: `game-build.yml`'s `trusted` input is true only for `release.yml`. An untrusted build runs its
-  macOS jobs on the Mac mini's nightly runner (`sunrise-nightly`, its own so a nightly never waits behind pull
-  requests' parity queue; same machine and trust as the `sunrise-game` runner), never the release runner
-  (`MAC_RUNNER`), and its Rust cache has its own key and is never saved. A trusted build doesn't use the machine's
+  release either: `game-build.yml`'s `trusted` input is true only for `release.yml`. An untrusted build's legs
+  run on fresh Blacksmith (or GitHub) machines, and its Rust cache has its own key and is never saved. A trusted build doesn't use the machine's
   shared sccache, which pull requests' jobs write (`SUNRISE_NO_SCCACHE`, `tools/ci/runner-env.sh`).
 - **Players.** Every launcher and `sunrise-server update` install the `nightly` pre-release
   ([Nightly only](#nightly-only)). It is never GitHub's latest: the last `vX.Y.Z` stays that, for launchers,
@@ -797,27 +685,11 @@ gh workflow run "nightly build" -f force=true    # build and publish anyway
 gh workflow run "nightly build" -f dry_run=true  # build and sign with a throwaway key, publish nothing
 ```
 
-## Nightly audit
-
-`.github/workflows/nightly.yml` runs every harness from scratch (`tools/parity.py --all`) on main at 03:00 Paris
-time, on the Mac mini's runner, after preparing the resources again if the preparer or its exporters changed.
-`tools/ci/parity_issues.py` then compares the results with the previous audit
-(`.local/parity-runner/audit.json` in the runner's checkout):
-
-- a harness that fails now and passed last night, or is in its first audit, gets an issue labelled
-  `parity-regression`, titled `Parity regression: <harness>`, with the commit, the run and the end of its log (one
-  issue per harness: an open one gets a comment instead);
-- a harness with an open issue that passes again gets its issue closed.
-
-The bugs session picks the issues up. The audit's logs are the run's `nightly-parity-logs` artifact; harnesses
-listed `linux_only` are skipped there (see above). By hand: `gh workflow run "nightly audit"` (add
-`-f dry_run=true` to leave issues alone).
-
 ## Disk
 
 Releases ship often, so nothing they leave behind may grow without bound.
 
-- **Artifacts:** every upload keeps 3 days (nightly parity logs 7); a release's assets live on the release itself.
+- **Artifacts:** daily parity verdicts keep 7 days; their raw logs stay on the runner. A release's assets live on the release itself.
 - **Mac runners:** `tools/ci/runner-gc.sh` runs every 30 minutes from launchd (`StartInterval` 1800) on the Mac mini, as a copy taken from main
   (`~/.actions-runners/runner-gc.sh`, plist `dev.sunrise.runner-gc`), never from a pull request's checkout. It skips a
   runner in a job, removes a checkout's cargo build folders past 12 GB (`MAX_TARGET_GB`) and harness work folders

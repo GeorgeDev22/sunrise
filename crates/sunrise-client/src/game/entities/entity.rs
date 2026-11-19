@@ -699,6 +699,7 @@ mod render_bounds_tests {
             fixed: false,
             invisible: false,
             check_interval: 0,
+            ticks: 0,
             custom_name: None,
             random: sunrise_core::random::LegacyRandom::new(0),
         };

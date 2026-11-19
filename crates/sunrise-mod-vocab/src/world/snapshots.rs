@@ -121,7 +121,7 @@ pub struct LootContext {
     pub luck: f32,
     /// Biome identifier, when available.
     pub biome: Option<String>,
-    /// Seed drawn by the engine only when the mod's kind participates.
+    /// Zero in registered codec contexts; use `LootTypeContext::random` for actual roll draws.
     pub seed: i64,
     /// Origin, block entity and level facts at the moment of the roll.
     pub place: Option<LootPlace>,
@@ -231,7 +231,7 @@ impl LootStack {
     }
 }
 impl LootContext {
-    /// An empty roll context with its captured random seed.
+    /// An empty facts snapshot. Registered codec contexts pass zero for `seed`.
     pub fn new(seed: i64) -> Self {
         Self {
             queried_table_id: sunrise_core::UNKNOWN_LOOT_TABLE.into(),

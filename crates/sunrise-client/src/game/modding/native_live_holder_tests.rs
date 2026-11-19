@@ -221,6 +221,7 @@ fn data_slot_sizing_after_creation_and_load_joins_the_existing_journal() {
                 pos,
                 game.world.block_entities.get(&pos).unwrap(),
                 "minecraft:stone",
+                &Default::default(),
             );
             let (loaded_pos, loaded) = sunrise_client::save::decode_block_entity(&saved).unwrap();
             game.world.block_entities.remove(&pos);

@@ -1,5 +1,8 @@
 //! Concrete authoring extracted verbatim from the vocabulary layer.
 use super::*;
+#[cfg(test)]
+#[path = "effects/part_tests.rs"]
+mod part_tests;
 
 /// Fixtures that tests of other crates use to install Parts.
 #[cfg(any(test, feature = "testing"))]
@@ -125,6 +128,39 @@ pub mod tests {
 }
 
 impl EffectsRegistrar for PartRegistrar {
+    fn attach_mob_effect_part(
+        &mut self,
+        effect: &crate::EffectKey,
+        kind: &'static str,
+        part: Arc<dyn MobEffectPart>,
+    ) -> Result<(), MobEffectPartError> {
+        let slot = mod_vocab::__private::parts_installation::effect_key_slot(*effect);
+        let id = self
+            .registry_keys
+            .borrow()
+            .effects
+            .id(slot)
+            .map(str::to_owned);
+        let Some(id) = id else {
+            self.refused.push(format!(
+                "mod {} attached {kind} to an invalid effect key",
+                self.mod_id
+            ));
+            return Err(MobEffectPartError::InvalidKey { effect: *effect });
+        };
+        if id.starts_with("minecraft:") {
+            return Err(MobEffectPartError::VanillaEffect { effect: *effect });
+        }
+        if self.attach_known(|parts| &mut parts.effects, kind, &id, part) {
+            Ok(())
+        } else {
+            Err(MobEffectPartError::Duplicate {
+                effect: *effect,
+                part: kind.into(),
+            })
+        }
+    }
+
     fn effect_key(&mut self, id: &str) -> crate::EffectKey {
         match self
             .registry_keys
@@ -137,6 +173,36 @@ impl EffectsRegistrar for PartRegistrar {
                 self.refused.push(error);
                 mod_vocab::__private::parts_installation::effect_key(u32::MAX)
             }
+        }
+    }
+}
+
+impl PartRegistrar {
+    /// Skip absent optional packages before unknown effect requests are resolved.
+    /// Actual declaration ownership is checked after content has loaded.
+    pub(crate) fn skip_absent_effect_parts(&mut self) {
+        let packages = crate::load_state::current_packages();
+        let mut ids: Vec<_> = self.parts.effects.keys().cloned().collect();
+        ids.sort_unstable();
+        for id in ids {
+            let namespace = id.split_once(':').map_or("", |(namespace, _)| namespace);
+            let owner = packages
+                .iter()
+                .find(|package| package.namespaces().any(|owned| owned == namespace));
+            let owner_id = owner.map_or(namespace, |package| package.id());
+            let parts = self.parts.effects.get_mut(&id).unwrap();
+            parts.retain(|part| {
+                if part.mod_id == owner_id { return true; }
+                let dependency = packages.iter().find(|package| package.id() == part.mod_id)
+                    .and_then(|package| package.dependencies().iter().find(|dependency| dependency.id() == owner_id));
+                if owner.is_none() && dependency.is_some_and(|dependency| dependency.kind() == crate::DependencyKind::Optional) {
+                    self.registry_keys.borrow_mut().effects.withdraw(part.mod_id, &id);
+                    log::debug!("mod {} skipped {} on effect {id}: optional dependency {owner_id} is absent", part.mod_id, part.type_name);
+                    return false;
+                }
+                true
+            });
+            parts.sort_by_key(|part| (part.mod_index, part.order));
         }
     }
 }

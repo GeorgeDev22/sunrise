@@ -4,6 +4,7 @@ use mod_api::{ChunkDataLoadEvent, ChunkDataSaveEvent, ChunkDiskHost, Hooks};
 use std::sync::atomic::AtomicUsize;
 #[path = "../../../sunrise-mod-wasm/tests/fixture/src/chunk_disk.rs"]
 mod fixture;
+mod writer_stack;
 
 #[derive(Default)]
 struct Listener {
@@ -80,7 +81,11 @@ fn capture_7_callback_8_live_9_round_trips_through_region_writer() {
     let biomes = Arc::new(biomes);
     let path = root();
     with_listener(|saves, _| {
-        let save = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         context(&save);
         let mut live = chunk(7);
         save.save_later(&[Arc::new(live.clone())], registry, &biomes)
@@ -95,7 +100,11 @@ fn capture_7_callback_8_live_9_round_trips_through_region_writer() {
         save.flush().unwrap();
         assert_eq!(saves.load(Ordering::Relaxed), 1);
         assert_eq!(value(&mut live), 9);
-        let disk = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+        let disk = SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         assert_eq!(value(&mut disk.load(2, -3, registry, &biomes).unwrap()), 8);
     });
     fs::remove_dir_all(path).unwrap();
@@ -106,12 +115,20 @@ fn load_disk_8_callback_increment_publishes_9_once_through_decode() {
     let (registry, biomes) = super::loot_tests::fixture();
     let path = root();
     mod_platform::testing::with_mods(Vec::new().into(), || {
-        SaveDir::new(path.clone(), LevelShape::OVERWORLD)
-            .save(&[Arc::new(chunk(8))], &registry, &biomes)
-            .unwrap();
+        SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        )
+        .save(&[Arc::new(chunk(8))], &registry, &biomes)
+        .unwrap();
     });
     with_listener(|_, loads| {
-        let save = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         context(&save);
         assert_eq!(value(&mut save.load(2, -3, &registry, &biomes).unwrap()), 9);
         assert_eq!(loads.load(Ordering::Relaxed), 1);
@@ -126,7 +143,11 @@ fn full_and_proto_writer_records_each_invoke_once_before_encode() {
     let biomes = Arc::new(biomes);
     let path = root();
     with_listener(|saves, _| {
-        let save = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         context(&save);
         save.save_later(&[Arc::new(chunk(7))], registry, &biomes)
             .unwrap();
@@ -145,7 +166,7 @@ fn full_and_proto_writer_records_each_invoke_once_before_encode() {
         assert_eq!(saves.load(Ordering::Relaxed), 2);
         assert_eq!(
             value(
-                &mut SaveDir::new(path.clone(), LevelShape::OVERWORLD)
+                &mut SaveDir::new(path.clone(), LevelShape::OVERWORLD, None)
                     .load_proto(2, -3, registry, &biomes)
                     .unwrap()
                     .column
@@ -185,9 +206,13 @@ fn with_echo(run: impl FnOnce(Arc<Mutex<Vec<(mod_api::ChunkDiskKind, i32)>>>)) {
     mod_platform::testing::with_mods(mods, || run(seen));
 }
 fn disk_value(path: &Path, registry: &BlockRegistry, biomes: &Biomes) -> Option<i32> {
-    SaveDir::new(path.to_path_buf(), LevelShape::OVERWORLD)
-        .load(2, -3, registry, biomes)
-        .map(|mut chunk| value(&mut chunk))
+    SaveDir::new(
+        path.to_path_buf(),
+        LevelShape::OVERWORLD,
+        Some(Default::default()),
+    )
+    .load(2, -3, registry, biomes)
+    .map(|mut chunk| value(&mut chunk))
 }
 
 #[test]
@@ -197,7 +222,11 @@ fn revisions_10_then_11_queued_together_leave_disk_at_11() {
     let biomes = Arc::new(biomes);
     let path = root();
     with_echo(|seen| {
-        let save = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         context(&save);
         save.save_later(&[Arc::new(chunk(10))], registry, &biomes)
             .unwrap();
@@ -220,7 +249,11 @@ fn every_save_kind_runs_exactly_one_callback_per_captured_record() {
     let biomes = Arc::new(biomes);
     let path = root();
     with_echo(|seen| {
-        let save = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         context(&save);
         // Asynchronous full saves: explicit, forced, late and unload all queue this way.
         save.save_later(&[Arc::new(chunk(1))], registry, &biomes)
@@ -275,12 +308,20 @@ fn save_refused_during_open_action_savepoint_runs_no_callback_and_keeps_disk_7()
     let biomes = Arc::new(biomes);
     let path = root();
     mod_platform::testing::with_mods(Vec::new().into(), || {
-        SaveDir::new(path.clone(), LevelShape::OVERWORLD)
-            .save(&[Arc::new(chunk(7))], registry, &biomes)
-            .unwrap();
+        SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        )
+        .save(&[Arc::new(chunk(7))], registry, &biomes)
+        .unwrap();
     });
     with_echo(|seen| {
-        let save = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         context(&save);
         let savepoint = crate::join_seq::visibility::PassLease::enter();
         // Tentative 9 is open: asynchronous and synchronous saves both refuse.
@@ -304,7 +345,11 @@ fn unload_then_reload_reads_saved_8_in_a_fresh_holder() {
     let biomes = Arc::new(biomes);
     let path = root();
     with_listener(|_, _| {
-        let save = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         context(&save);
         save.save_later(&[Arc::new(chunk(7))], registry, &biomes)
             .unwrap();
@@ -326,15 +371,23 @@ fn disk_write_failure_keeps_old_disk_7_and_snapshot_8_for_recovery() {
     let biomes = Arc::new(biomes);
     let path = root();
     mod_platform::testing::with_mods(Vec::new().into(), || {
-        SaveDir::new(path.clone(), LevelShape::OVERWORLD)
-            .save(&[Arc::new(chunk(7))], registry, &biomes)
-            .unwrap();
+        SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        )
+        .save(&[Arc::new(chunk(7))], registry, &biomes)
+        .unwrap();
     });
     let region = path.join("region/r.0.-1.mca");
     let writable = fs::metadata(&region).unwrap().permissions();
     fs::set_permissions(&region, fs::Permissions::from_mode(0o444)).unwrap();
     with_listener(|saves, _| {
-        let save = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(
+            path.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         context(&save);
         save.save_later(&[Arc::new(chunk(7))], registry, &biomes)
             .unwrap();
@@ -368,9 +421,13 @@ fn failed_load_keeps_stored_8_and_runs_no_save_listener_for_every_save_path() {
     for (load_only, sync) in [(true, true), (true, false), (false, true), (false, false)] {
         let path = root();
         mod_platform::testing::with_mods(Vec::new().into(), || {
-            SaveDir::new(path.clone(), LevelShape::OVERWORLD)
-                .save(&[Arc::new(chunk(8))], registry, &biomes)
-                .unwrap();
+            SaveDir::new(
+                path.clone(),
+                LevelShape::OVERWORLD,
+                Some(Default::default()),
+            )
+            .save(&[Arc::new(chunk(8))], registry, &biomes)
+            .unwrap();
         });
         let saves = Arc::new(AtomicUsize::new(0));
         let listener: Box<dyn Hooks> = if load_only {
@@ -382,7 +439,11 @@ fn failed_load_keeps_stored_8_and_runs_no_save_listener_for_every_save_path() {
         };
         let mods = vec![mod_api::ModEntry::new("wasm_fixture", listener)].into();
         mod_platform::testing::with_mods(mods, || {
-            let save = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+            let save = SaveDir::new(
+                path.clone(),
+                LevelShape::OVERWORLD,
+                Some(Default::default()),
+            );
             context(&save);
             let mut loaded = save
                 .load(2, -3, registry, &biomes)

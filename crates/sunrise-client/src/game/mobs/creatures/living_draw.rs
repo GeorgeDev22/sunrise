@@ -248,25 +248,6 @@ impl Game<'_> {
             self.spin_attack_geometry(mob, camera, alpha as f32, packed, out);
             self.stuck_in_body_geometry(mob, mob.id as i32, camera, alpha as f32, packed, out);
         }
-        // What a hook draws on a player (`Hooks::player_layers`), posed on the GPU with the
-        // mob's own jobs: culled with it.
-        if !(layers_only || modded)
-            && sunrise_hooks::engine::any()
-            && (is_player || &*mob.kind.id == "minecraft:mannequin")
-        {
-            let mark = self.skin_frame.borrow().mark();
-            let base = sunrise_client::mobs::render::base_transform(mob, alpha as f32, camera);
-            let gpu = skinning;
-            if let Some((lo, hi)) =
-                self.player_layers_geometry(mob, base, camera, alpha as f32, packed, gpu, out)
-            {
-                skinned = Some(match skinned {
-                    Some((first, Some((l, h)))) => (first, Some((l.min(lo), h.max(hi)))),
-                    Some((first, None)) => (first, Some((lo, hi))),
-                    None => (mark, Some((lo, hi))),
-                });
-            }
-        }
         // CustomHeadLayer (a pumpkin, skull or head item) included.
         if layers {
             if !modded {

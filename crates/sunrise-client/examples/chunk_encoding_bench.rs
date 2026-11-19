@@ -99,7 +99,13 @@ fn main() -> sunrise_client::Result<()> {
                     || s.properties.get("waterlogged").is_some_and(|v| v == "true"),
             )
         });
-        let mut e = ChunkEncoder::new(states, &sync.builtin, &biome_names, &biome_registry);
+        let mut e = ChunkEncoder::new(
+            states,
+            &sync.builtin,
+            &biome_names,
+            &biome_registry,
+            Default::default(),
+        );
         e.tables = Some(tables.clone());
         e
     };

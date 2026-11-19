@@ -615,7 +615,10 @@ mod tests {
             m.velocity.z *= drag;
             // LivingEntity.updateWalkAnimation.
             m.update_walk_animation();
-            distance = (m.position.x - m.previous.x).hypot(m.position.z - m.previous.z);
+            distance = sunrise_core::geometry::length(
+                m.position.x - m.previous.x,
+                m.position.z - m.previous.z,
+            );
             last = m.position;
         }
         // The ground speed: the input (0.06 + 0.125 * (0.25 - 0.06) =

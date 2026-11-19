@@ -7,8 +7,10 @@ pub mod camera;
 pub(crate) mod client_reload;
 pub(crate) mod client_session;
 pub(crate) mod debug_entries;
+pub(crate) mod dynamic_texture;
 pub(crate) mod entity_layers;
 pub(crate) mod entity_renderers;
+pub(crate) mod item_extensions;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod extras;
@@ -61,6 +63,7 @@ pub(crate) mod posed_parts;
 pub(crate) mod recipe_page;
 pub(crate) mod render_pipeline;
 pub(crate) mod scene;
+pub(crate) mod screen_slot_refusal;
 pub(crate) mod screenshot;
 pub(crate) mod skull_models;
 pub(crate) mod special_model_renderers;

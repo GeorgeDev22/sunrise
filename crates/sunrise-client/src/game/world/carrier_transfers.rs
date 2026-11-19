@@ -277,7 +277,12 @@ impl Game<'_> {
                 .block_entities
                 .get(&(key[0], key[1], key[2]))
                 .map(|entity| {
-                    block_entity_encode::encode((key[0], key[1], key[2]), entity, &descriptor.name)
+                    block_entity_encode::encode(
+                        (key[0], key[1], key[2]),
+                        entity,
+                        &descriptor.name,
+                        self.res.items(),
+                    )
                 });
             operation_cells.push(OperationCell {
                 world: key,
@@ -850,7 +855,12 @@ impl Game<'_> {
                         .state(state)
                         .map(|descriptor| descriptor.name.as_str())
                         .unwrap_or("");
-                    let encoded = block_entity_encode::encode((pos[0], pos[1], pos[2]), live, name);
+                    let encoded = block_entity_encode::encode(
+                        (pos[0], pos[1], pos[2]),
+                        live,
+                        name,
+                        self.res.items(),
+                    );
                     if !entities_content_equal(&encoded, image) {
                         return Err(TransferError::Revalidation(pos));
                     }
@@ -1017,9 +1027,7 @@ impl Game<'_> {
 
 /// Stops the session after a failed carrier commit, the same way any
 /// fatal save error does: `Game::error` is set (the first error wins),
-/// the event loop exits through it — a tick's error reaches
-/// `Game::exit_on_error` from the event handler's result
-/// (runtime/window_handler.rs), which calls `event_loop.exit()` — and
+/// the event handler sees the error and exits the loop (`runtime/window_handler.rs`), and
 /// every world save refuses while the fences are broken
 /// (`save_game_with`, world/autosave.rs), so the exit path's save and
 /// any autosave write nothing over the affected regions. The prepared
@@ -1170,6 +1178,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1209,6 +1218,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1263,6 +1273,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1315,6 +1326,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1351,6 +1363,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1372,6 +1385,7 @@ mod tests {
                 (4, 64, 4),
                 &entity,
                 "minecraft:chest",
+                &Default::default(),
             );
             spill::put_saved_entity(&mut game.world, [4, 64, 4], tag.clone());
             assert!(matches!(
@@ -1427,6 +1441,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1447,6 +1462,7 @@ mod tests {
                 (4, 64, 4),
                 &entity,
                 "minecraft:chest",
+                &Default::default(),
             );
             spill::put_saved_entity(&mut game.world, [4, 64, 4], tag.clone());
             let images = [crate::carrier_store::OperationCell {
@@ -1512,6 +1528,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1566,6 +1583,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1630,6 +1648,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1706,6 +1725,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1800,6 +1820,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1871,6 +1892,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -1887,8 +1909,7 @@ mod tests {
             );
 
             // The session stopped like a fatal save error: `Game::error`
-            // is set — the same flag the event loop's error path exits
-            // the loop through (`exit_on_error`).
+            // is set, which tells the event handler to exit the loop.
             assert!(game.error.is_some(), "the failed commit stops the session");
 
             // A further edit of the fenced cell refuses.
@@ -2139,6 +2160,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/the_nether"),
                 sunrise_client::save::LevelShape::NETHER,
+                Some(Default::default()),
             ));
             game.world
                 .chunks
@@ -2266,6 +2288,7 @@ mod tests {
             let save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             let registry = game.pack.assets.registry;
             let stone = registry.default_state("minecraft:stone").unwrap();
@@ -2362,6 +2385,7 @@ mod tests {
             game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
                 root.join("dimensions/minecraft/overworld"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.world
                 .chunks

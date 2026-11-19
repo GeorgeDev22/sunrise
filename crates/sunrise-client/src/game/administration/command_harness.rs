@@ -343,7 +343,7 @@ impl Game<'_> {
                             .ok_or("projectile type: missing model")?;
                         // Read the live save adapter's type, not the generic selector alias.
                         // No Duration value is supplied by this admission observation.
-                        let saved = sunrise_client::entity_nbt::arrow_to_nbt(p, actual, None, None, None)
+                        let saved = sunrise_client::entity_nbt::arrow_to_nbt(p, actual, None, None, None, g.res.items())
                             .ok_or("projectile type: not an actual arrow")?;
                         Ok(json!({"uuid":actual,"kind":sunrise_client::entity_nbt::kind(&saved)
                             .ok_or("projectile type: missing saved type")?,

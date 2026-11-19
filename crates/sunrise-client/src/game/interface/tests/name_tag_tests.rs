@@ -122,7 +122,7 @@ fn a_sniffers_tag_hangs_from_its_name_tag_attachment() {
     );
 }
 
-fn game() -> Game<'static> {
+fn game<'a>(resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>) -> Game<'a> {
     let root = std::path::PathBuf::from(
         std::env::var_os("SUNRISE_TEST_RESOURCES")
             .expect("set SUNRISE_TEST_RESOURCES to prepared resources"),
@@ -144,7 +144,7 @@ fn game() -> Game<'static> {
     let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
     options.resources = root.clone();
     options.execution_role = execution_role::ExecutionRole::IntegratedServer;
-    let res: &'static _ = Box::leak(Box::new(loaded.resources));
+    let res = &*resources.insert(loaded.resources);
     let mut game = Game::new(
         res,
         loaded.pack,
@@ -208,7 +208,8 @@ fn take_interacts() -> Vec<(&'static str, [f64; 3], Option<Who>)> {
 #[test]
 #[ignore = "daily"]
 fn naming_posts_entity_interact_at_the_named_entity() {
-    let mut game = game();
+    let mut resources = None;
+    let mut game = game(&mut resources);
     TEST_POSTED_EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));
     // A mob names itself in `Mob.interact`: the event goes out at the mob,
     // from the player who used the tag.
@@ -251,7 +252,8 @@ fn naming_posts_entity_interact_at_the_named_entity() {
 #[test]
 #[ignore = "daily"]
 fn an_armour_stands_name_ignores_f1_and_team_visibility() {
-    let mut game = game();
+    let mut resources = None;
+    let mut game = game(&mut resources);
     let mut stand = ArmorStand::new(42, Vec3::new(0.0, 64.0, 4.0), 0.0);
     stand.custom_name = Some(Text::literal("Holo"));
     stand.name_visible = true;
@@ -294,7 +296,8 @@ fn an_armour_stands_name_ignores_f1_and_team_visibility() {
 #[test]
 #[ignore = "daily"]
 fn a_trades_title_draws_the_names_style() {
-    let mut game = game();
+    let mut resources = None;
+    let mut game = game(&mut resources);
     // `MerchantScreen.extractLabels` draws the menu's title, the merchant's
     // `getDisplayName()`: a name with a colour keeps it, instead of coming out
     // in the screen's grey (-12566464).
@@ -324,7 +327,8 @@ fn a_trades_title_draws_the_names_style() {
 #[test]
 #[ignore = "daily"]
 fn a_creative_player_keeps_the_tag_it_names_a_stand_with() {
-    let mut game = game();
+    let mut resources = None;
+    let mut game = game(&mut resources);
     game.armor_stands
         .push(ArmorStand::new(9, Vec3::new(0.5, 64.0, 0.5), 0.0));
     let mut tag = ItemStack::new("minecraft:name_tag", 2);

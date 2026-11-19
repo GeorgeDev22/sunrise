@@ -41,8 +41,8 @@ use {
 /// GameEvent types (ClientboundGameEventPacket).
 pub mod advancements;
 mod block_changes;
+mod carried_check;
 pub mod chat;
-pub mod chat_filter;
 mod fake_kicks;
 mod item_particles;
 mod joined;
@@ -231,7 +231,7 @@ pub enum HostEvent {
         sender: u128,
         text: String,
     },
-    /// A chat message the sender's chain and the chat filter let through,
+    /// A chat message the sender's chain let through,
     /// not yet broadcast: with server mods loaded, the game tells them
     /// (`native_server_chat`, NeoForge's `ServerChatEvent`) and then
     /// broadcasts it with `Hub::broadcast_chat`.
@@ -244,27 +244,10 @@ pub enum HostEvent {
     /// INITIALIZE_CHAT) held behind a `ChatSubmitted` of the same tick: the
     /// game broadcasts it once it has relayed that message.
     ChatSessionStarted(Box<play::PlayerInfoUpdate>),
-    /// A player's text the chat filter refused (docs/chat-filter.md): relayed to nobody, for the
-    /// game to log and to carry out `action`.
-    ChatFiltered {
-        sender: u128,
-        name: String,
-        place: chat_filter::Place,
-        text: String,
-        /// The hit's number in the filter's window.
-        count: u32,
-        action: sunrise_server_files::chat_guard::Action,
-    },
     /// A server log warning (ServerGamePacketListenerImpl's LOGGER.warn).
     Warn(String),
     /// A server log error (LOGGER.error).
     Error(String),
-    /// The anticheat bans this player (`banned-players.json`, then the ban's kick).
-    Ban {
-        uuid: u128,
-        name: String,
-        reason: String,
-    },
 }
 
 /// The criteria `CriteriaTriggers.TICK` granted one player.
@@ -405,10 +388,13 @@ pub struct Hub {
     /// The `player_movement_check` and `elytra_movement_check` game rules,
     /// set by the game before each tick.
     pub movement_checks: (bool, bool),
-    /// The anticheat, when `server.toml` turns it on (dedicated servers).
-    pub anticheat: Option<Box<super::anticheat::Anticheat>>,
-    /// The chat filter, when `server.toml` turns it on (dedicated servers).
-    pub chat_filter: Option<Box<dyn sunrise_server_files::chat_guard::ChatGuard>>,
+    /// The level's entities that can be solid to a player (boats, shulkers, happy ghasts), set by
+    /// the game once before each tick's packets: the moved-wrongly check resolves a report
+    /// against those meeting the move's swept box (`Entity.collide`'s entity collisions).
+    pub move_solids: Vec<crate::entity_solids::Candidate>,
+    /// The boxes of those meeting the move being checked: kept so a reported move allocates
+    /// nothing once it has grown.
+    pub(super) move_boxes: Mutex<Vec<sunrise_core::geometry::Aabb>>,
     /// The far ring, when `server.toml`'s `max_view_distance` turns it on (dedicated servers).
     pub far: Option<super::far::Far>,
     /// The `immediate_respawn` game rule, as the players were last told.
@@ -472,6 +458,10 @@ pub struct Hub {
     chat_type: i32,
     dimension_type: i32,
     clock_ids: Vec<i32>,
+    /// The total and rate the guests are told of every clock but the Overworld's and the one
+    /// `World.day_time` follows, by registry id (`set_clock_state`). A clock the world has not
+    /// met is missing: the server holds it at 0, not advancing.
+    clock_states: std::collections::HashMap<i32, (i64, f32)>,
     item_ids: std::collections::HashMap<Arc<str>, i32>,
     entity_types: std::collections::HashMap<String, i32>,
     /// Each level's tracked entities, by dimension.
@@ -488,9 +478,6 @@ pub struct Hub {
     pub synced: Vec<(i32, i32)>,
     /// What one tick of entity tracking sends each guest, kept between ticks.
     entity_out: Vec<Vec<super::Body>>,
-    /// Each placed guest's entities gone this tick, where they were last sent (only while the
-    /// prediction records).
-    entity_gone: Vec<Vec<[f64; 3]>>,
     /// Server mods' commands, a root in the commands report's format, sent
     /// after vanilla's; the key the game last set them for.
     mod_commands: (serde_json::Value, Option<u64>),
@@ -824,8 +811,8 @@ impl Hub {
             reduced_debug_info: false,
             limited_crafting: false,
             movement_checks: (true, true),
-            anticheat: None,
-            chat_filter: None,
+            move_solids: Vec::new(),
+            move_boxes: Mutex::default(),
             far: None,
             singleplayer_owner: None,
             flat_world: false,
@@ -849,6 +836,7 @@ impl Hub {
             chat_type,
             dimension_type,
             clock_ids,
+            clock_states: Default::default(),
             item_ids: Default::default(),
             entity_types: Default::default(),
             entities: Default::default(),
@@ -856,7 +844,6 @@ impl Hub {
             fresh_joined: Default::default(),
             synced: Vec::new(),
             entity_out: Vec::new(),
-            entity_gone: Vec::new(),
             mod_commands: (serde_json::Value::Null, None),
             selector_tokens: Vec::new(),
             native_menu_events: Vec::new(),
@@ -2075,13 +2062,13 @@ impl Hub {
             self.guests
                 .update(i, |guest| guest.above_ground_ticks = value);
         }
-        self.teleport_relative(i, position, 0);
+        self.teleport_relative(i, position, 0, [0.0; 3]);
     }
 
     /// `ServerGamePacketListenerImpl.teleport` alone (a refused or too fast
     /// move, a teleport sent again): the flying ticks go on.
     pub(super) fn resend_teleport(&mut self, i: usize, position: Option<[f64; 3]>) {
-        self.teleport_relative(i, position, 0);
+        self.teleport_relative(i, position, 0, [0.0; 3]);
     }
 
     /// A teleport to `position` that keeps the player's motion and look
@@ -2094,7 +2081,7 @@ impl Hub {
         }
         use play::relative::{DELTA_X, DELTA_Y, DELTA_Z, ROTATE_DELTA, X_ROT, Y_ROT};
         let relatives = Y_ROT | X_ROT | DELTA_X | DELTA_Y | DELTA_Z | ROTATE_DELTA;
-        self.teleport_relative(i, Some(position), relatives);
+        self.teleport_relative(i, Some(position), relatives, [0.0; 3]);
     }
 
     /// A command's teleport to `position` (`ServerGamePacketListenerImpl.teleport`
@@ -2118,7 +2105,7 @@ impl Hub {
             self.guests
                 .update(i, |guest| guest.above_ground_ticks = value);
         }
-        self.teleport_relative(i, Some(position), relatives);
+        self.teleport_relative(i, Some(position), relatives, [0.0; 3]);
     }
 
     /// A rider's own teleport when its vehicle is teleported
@@ -2133,17 +2120,81 @@ impl Hub {
                 .update(i, |guest| guest.above_ground_ticks = value);
         }
         use play::relative::{DELTA_X, DELTA_Y, DELTA_Z};
-        self.teleport_relative(i, Some(position), DELTA_X | DELTA_Y | DELTA_Z);
+        self.teleport_relative(i, Some(position), DELTA_X | DELTA_Y | DELTA_Z, [0.0; 3]);
     }
 
+    /// A displacement of the player by `by` to `target`, made on its server copy by the caller
+    /// (its body is at `target`; `Guest::position` is set here), told to its client as a
+    /// relative teleport: the client adds `by` to where it is now (`Relative.X/Y/Z`), keeps its motion and look
+    /// (`DELTA_*`, `ROTATE_DELTA`, `Y_ROT`, `X_ROT`), and nothing snaps back by what it
+    /// walked while the packet was on its way. On confirmation, the server snaps to the awaited
+    /// target, then validates the client's reported landing as an ordinary move. Until
+    /// confirmation, the server drops the position in the player's own reports as for any teleport.
+    ///
+    /// A player a moving collider carries stays carried when the target is still on the
+    /// collider as the server places it now, with the place on the collider re-derived from the
+    /// target; otherwise it lets go, and its next report that fits attaches it again. Either
+    /// way no report is counted against it. Nothing happens for a player the hub has no more.
+    pub fn displace(&mut self, conn: u32, target: [f64; 3], by: [f64; 3]) {
+        let Some(i) = self.guests.connection_index(conn) else {
+            return;
+        };
+        let carried = self.guests[i].on_collider;
+        self.guests.update(i, |g| g.above_ground_ticks = 0);
+        use play::relative::{DELTA_X, DELTA_Y, DELTA_Z, ROTATE_DELTA, X, X_ROT, Y, Y_ROT, Z};
+        let relatives = X | Y | Z | Y_ROT | X_ROT | DELTA_X | DELTA_Y | DELTA_Z | ROTATE_DELTA;
+        self.teleport_relative(i, Some(target), relatives, by);
+        self.keep_carried_at(i, carried, target);
+        self.note_displaced(i);
+    }
+
+    /// A development build's warning for a player displaced on 20 ticks in a row: each
+    /// pending confirmation drops that player's own movement reports, so a mod that moves a
+    /// player every tick holds it still. Once per streak, and nothing is built unless it fires.
+    #[cfg(debug_assertions)]
+    fn note_displaced(&mut self, i: usize) {
+        const STREAK: u32 = 20;
+        let ticks = self.ticks;
+        let streak = self.guests.update(i, |g| {
+            let (last, run) = g.displaced_streak;
+            let run = match ticks.checked_sub(last) {
+                Some(0) => run,
+                Some(1) => run + 1,
+                _ => 1,
+            };
+            g.displaced_streak = (ticks, run);
+            run
+        });
+        if streak == STREAK {
+            log::warn!(
+                "{} was moved by a mod on {STREAK} ticks in a row: each pending confirmation drops \
+                 the player's own movement reports, so it cannot walk; use a velocity push \
+                 (`entity_push`) or a client-side write for motion every tick",
+                self.guests[i].name
+            );
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn note_displaced(&mut self, _: usize) {}
+
     /// ServerGamePacketListenerImpl.teleport with `relatives`: the rotation
-    /// and motion they name are sent as zero changes.
-    fn teleport_relative(&mut self, i: usize, position: Option<[f64; 3]>, relatives: i32) {
+    /// and motion they name are sent as zero changes, and a position axis it names
+    /// as `shift` (no change when `shift` is zero).
+    fn teleport_relative(
+        &mut self,
+        i: usize,
+        position: Option<[f64; 3]>,
+        relatives: i32,
+        shift: [f64; 3],
+    ) {
         let ticks = self.ticks;
         self.guests.update(i, |g| {
             g.teleport_tick = ticks;
             g.held_ticket_chunk = Some(g.ticket_chunk()); // teleport has no move
             g.pending_move = None;
+            g.on_collider = None;
+            g.carry_hint = None;
             if let Some(p) = position {
                 g.position = p;
                 g.previous_position = p;
@@ -2152,11 +2203,11 @@ impl Hub {
             g.teleport_counter = (g.teleport_counter + 1) & 0x7FFF_FFFF;
             let id = g.teleport_counter;
             g.awaiting_teleport = Some((id, g.position));
-            use play::relative::{DELTA_X, DELTA_Y, DELTA_Z};
-            g.awaiting_keeps_motion = relatives & (DELTA_X | DELTA_Y | DELTA_Z) != 0;
             let turn = relatives & (play::relative::Y_ROT | play::relative::X_ROT) != 0;
-            // A relative axis (X, Y, Z: bits 0 to 2) goes as no change (`follow_passage`).
-            let at = std::array::from_fn(|k| [g.position[k], 0.0][(relatives >> k & 1) as usize]);
+            // A relative axis (X, Y, Z: bits 0 to 2) goes as its shift: none for a rotation or
+            // motion alone (`follow_passage`), the displacement for a move.
+            let at =
+                std::array::from_fn(|k| [g.position[k], shift[k]][(relatives >> k & 1) as usize]);
             g.send(&C::PlayerPosition(play::PlayerPosition {
                 teleport: id,
                 position: at,
@@ -2229,9 +2280,9 @@ impl Hub {
         }));
     }
 
-    /// ServerClockManager.createFullSyncPacket: every clock. Sunrise keeps the
-    /// overworld clock (the day time); the End's clock runs with the game
-    /// time. Clocks do not advance without the advance_time rule.
+    /// ServerClockManager.createFullSyncPacket: every clock, each with its own total and rate
+    /// (the Overworld's, the one the level in place follows, the others' from
+    /// `set_clock_state`). Clocks do not advance without the advance_time rule.
     pub(in crate::lan) fn time_packet(&self, world: &World, rate: f32) -> C {
         let overworld = self
             .sync
@@ -2264,16 +2315,27 @@ impl Hub {
                             rate: level_rate,
                         }
                     } else {
+                        let (total_ticks, rate) =
+                            self.clock_states.get(&id).copied().unwrap_or((0, 0.0));
                         play::ClockState {
                             clock: id,
-                            total_ticks: world.end_clock,
+                            total_ticks,
                             partial_tick: 0.0,
-                            rate: if rate > 0.0 { 1.0 } else { 0.0 },
+                            rate,
                         }
                     }
                 })
                 .collect(),
         })
+    }
+
+    /// The total of `clock` (a `minecraft:world_clock` id) and the rate its guests see, 0 while it
+    /// is paused or `advance_time` is off, for the full time packet. A clock no client was sent
+    /// is not kept.
+    pub fn set_clock_state(&mut self, clock: &str, total: i64, rate: f32) {
+        if let Some(id) = self.sync.id("minecraft:world_clock", clock) {
+            self.clock_states.insert(id, (total, rate));
+        }
     }
 
     /// ServerPlayer.initInventoryMenu / sendAllDataToRemote for the inventory menu.
@@ -2331,7 +2393,6 @@ impl Hub {
     /// packets queued for its own level's pass.
     pub fn poll(&mut self, ctx: &mut TickCtx) -> Vec<HostEvent> {
         self.ticks += 1;
-        self.anticheat_tick(ctx.tick_rate);
         let mut events = self.begin_payload_poll();
         self.finish_fake_kicks(&mut events);
         self.expire_arrivals(&mut events);
@@ -3323,6 +3384,7 @@ impl Hub {
             spectator: false,
             watching: false,
             hidden: None,
+            general: false,
         }
     }
 
@@ -3413,15 +3475,9 @@ impl Hub {
             g.participates_online() && (g.placed || g.held) && g.dimension == *dimension
         };
         outs.resize_with(self.guests.iter().filter(|g| here(g)).count(), Vec::new);
-        // The prediction's replay excuses a client that may still have an entity that left it.
-        let recording = self.recording();
-        let mut gone = std::mem::take(&mut self.entity_gone);
-        gone.resize_with(outs.len(), Vec::new);
         let mut viewers = self.guests.tracking_viewers_and_views(
             here,
-            outs.iter_mut()
-                .zip(gone.iter_mut())
-                .map(|(out, gone)| (out, recording.then_some(gone))),
+            outs.iter_mut(),
             true,
             (dimension, &mut views),
         );
@@ -3456,26 +3512,6 @@ impl Hub {
             self.hold_sound_removals(g.conn, out);
             g.sender.send_many(out.drain(..));
         }
-        let ticks = self.ticks;
-        let mut gone_rows = gone.iter_mut();
-        self.guests.update_all(|g| {
-            if !here(g) {
-                return;
-            }
-            let gone = gone_rows.next().expect("one output per visible guest");
-            let slack = super::prediction::slack(std::array::from_fn(|i| {
-                g.position[i] - g.previous_position[i]
-            }));
-            for at in gone.drain(..) {
-                let block = at.map(|v| v.floor() as i32);
-                if let Some(record) = g.record.as_deref_mut()
-                    && super::prediction::near(g.position, block, slack)
-                {
-                    record.entity_gone(ticks);
-                }
-            }
-        });
-        self.entity_gone = gone;
         self.entity_out = outs;
         self.send_view_entities(views);
         self.entities.insert(self.config.dimension.clone(), level);
@@ -3580,6 +3616,10 @@ impl Hub {
                         if let Some(add) = first.recipe_book_add {
                             g.send(&raw(ids::RECIPE_BOOK_ADD, add));
                         }
+                        // The game's own TICK trigger may have awarded these in the guest's
+                        // turn before this first tick: announced here, flush_advancements
+                        // must not send them again (vanilla awards them once).
+                        g.recipes_unlocked.retain(|id| !first.recipes.contains(id));
                         g.send(&raw(ids::UPDATE_ADVANCEMENTS, first.update_advancements));
                         g.advancements_visible = sync.advancements.visibility(&g.advancements);
                         g.advancements_changed.clear();
@@ -4000,7 +4040,6 @@ impl Hub {
     fn set_sprinting(&mut self, i: usize, sprinting: bool) {
         self.guests.update(i, |g| {
             g.sprinting = sprinting;
-            g.client_sprinting = sprinting;
             if let Some(m) = g.motion.as_mut() {
                 let _ = m.set_sprint_modifier(sprinting);
             }
@@ -4104,7 +4143,6 @@ impl Hub {
                     if !self.guests[i].client_loaded() => {}
                 // handleAcceptTeleportPacket.
                 S::AcceptTeleportation(p) => {
-                    let recording = self.recording();
                     let g = &self.guests[i];
                     if p.id == g.teleport_counter && g.awaiting_teleport.is_none() {
                         self.kick(conn, invalid_movement());
@@ -4125,14 +4163,12 @@ impl Hub {
                         self.guests.update(i, |g| {
                             g.position = at;
                             g.awaiting_teleport = None;
-                            // The prediction's replay starts again where the client now is.
-                            if recording {
-                                let kept = g.awaiting_keeps_motion;
-                                g.record.get_or_insert_default().teleported(at, kept);
-                            }
                         });
-                        let rot = (p.yaw, p.pitch);
-                        self.position_change(i, at, rot, 0, Hearing::Confirmation, ctx, events);
+                        // The confirmation is then an ordinary report of where the client
+                        // is: its own position goes through the speed test, the collided
+                        // replay and the moved-wrongly test, from the target just snapped to.
+                        let (to, rot) = ([p.x, p.y, p.z], (p.yaw, p.pitch));
+                        self.position_change(i, to, rot, 0, Hearing::Confirmation, ctx, events);
                     }
                 }
                 // handlePlayerAbilities: the client flies only if it may.
@@ -4158,6 +4194,13 @@ impl Hub {
                 }
                 S::MovePlayerStatus(p) => {
                     self.move_player(i, None, None, p.flags, ctx, events);
+                }
+                S::CustomPayload(p) if p.channel == sunrise_protocol::carry_age::CHANNEL => {
+                    // A payload that does not decode is no hint: it is only where a search starts.
+                    if let Ok(hint) = sunrise_protocol::carry_age::decode(&p.data) {
+                        self.guests
+                            .update(i, |g| g.carry_hint = Some((hint.collider, hint.ticks)));
+                    }
                 }
                 S::CustomPayload(p)
                     if p.channel == sunrise_protocol::passage_sync::CROSS_CHANNEL =>
@@ -4188,22 +4231,18 @@ impl Hub {
                         g.max_unacknowledged = 10;
                     });
                 }
-                S::Pong(p) => self.anticheat_pong(i, p.id),
+                // The server sends no pings during play: nothing answers one.
+                S::Pong(_) => {}
                 // ServerGamePacketListenerImpl.handlePingRequest: echo on this connection.
                 S::PingRequest(p) => self.send_to(conn, &C::PongResponse(p)),
                 // handleAttack is the game's too: a move queued behind an attack would move
                 // the player (or land them on the ground, losing a falling attack's critical
                 // hit) before the game checks their reach and state.
                 S::Attack(p) => {
-                    if !self.anticheat_attack(i, p.id, events) {
-                        events.push(HostEvent::Packet(conn, Box::new(S::Attack(p))));
-                        *held = self.move_queued(i);
-                    }
+                    events.push(HostEvent::Packet(conn, Box::new(S::Attack(p))));
+                    *held = self.move_queued(i);
                 }
-                S::Punch(p) => {
-                    self.anticheat_swing(i);
-                    events.push(HostEvent::Packet(conn, Box::new(S::Punch(p))));
-                }
+                S::Punch(p) => events.push(HostEvent::Packet(conn, Box::new(S::Punch(p)))),
                 S::ClientTickEnd(_) => {
                     // handleClientTickEnd: no move this tick, no known movement.
                     self.guests.update(i, |g| {
@@ -4212,7 +4251,6 @@ impl Hub {
                         }
                         g.position_this_tick = false;
                     });
-                    self.anticheat_tick_end(i, events);
                 }
                 // ServerGamePacketListenerImpl.handleRecipeBookSeenRecipePacket:
                 // the display the player looked at stops being a new one, so
@@ -4439,9 +4477,6 @@ impl Hub {
             self.kick(conn, invalid_movement());
             return;
         }
-        if self.anticheat.is_some() {
-            self.anticheat_moved(i, pos, rot, flags);
-        }
         let repeated = self.guests.update(i, |g| {
             if pos.is_some() {
                 if g.position_this_tick {
@@ -4465,6 +4500,13 @@ impl Hub {
         if let Some((_, at)) = g.awaiting_teleport {
             if self.ticks - g.teleport_tick > 20 {
                 self.resend_teleport(i, Some(at));
+            }
+            // The awaiting check applies the report's rotation and drops its position, its
+            // ground flag and its collision flag. Nothing is counted against the player.
+            if let Some((yaw, pitch)) = rot {
+                self.guests.update(i, |g| {
+                    (g.yaw, g.pitch) = (wrap_degrees(yaw), wrap_degrees(pitch))
+                });
             }
             return;
         }
@@ -4491,6 +4533,11 @@ impl Hub {
             to[2].clamp(-3.0E7, 3.0E7),
         ];
         let (yaw, pitch) = (wrap_degrees(yaw), wrap_degrees(pitch));
+        // A carried player's report is measured in the collider's frame, and judged in it.
+        let plan = (hearing != Hearing::Confirmation)
+            .then(|| self.carry_plan(i, to))
+            .flatten();
+        let reference = self.carry_speed_delta(i, to, plan.as_ref());
         let begin = self.guests.update(i, |g| {
             let owner = self.singleplayer_owner == Some(g.uuid);
             // A passenger only turns: its vehicle carries it (absSnapTo where it is).
@@ -4499,7 +4546,7 @@ impl Hub {
                 g.release_tickets();
                 return std::ops::ControlFlow::Break(false);
             }
-            let d = [0, 1, 2].map(|k| to[k] - g.first_good[k]);
+            let d = reference.unwrap_or_else(|| [0, 1, 2].map(|k| to[k] - g.first_good[k]));
             let moved = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
             if g.sleeping {
                 if moved > 1.0 {
@@ -4544,40 +4591,51 @@ impl Hub {
             std::ops::ControlFlow::Continue(start) => start,
             std::ops::ControlFlow::Break(resend) => {
                 if resend {
-                    self.resend_teleport(i, None);
+                    // A carried player's refusal puts it back where the server has it on its
+                    // collider, and is counted like any other.
+                    let carried = self.guests[i].on_collider;
+                    if carried.is_some() && reference.is_some() {
+                        self.carry_rejected(i);
+                    }
+                    let back = self.guests[i].carry_correction;
+                    self.guests.update(i, |g| g.carry_correction = None);
+                    self.resend_teleport(i, back);
+                    self.keep_carried(i, carried, back);
                 }
                 return;
             }
         };
-        let (wrongly, refused, stands) = self.collide(i, to, ctx);
+        // The confirmation of a teleport (a carried player's correction included) is committed in
+        // place against the world as it stands.
+        let (wrongly, refused, stands) = if hearing == Hearing::Confirmation {
+            self.collide(i, to, ctx)
+        } else {
+            self.collide_carried(i, to, ctx, plan)
+        };
         if wrongly {
             let line = format!("{} moved wrongly!", self.guests[i].name);
             events.push(HostEvent::Warn(line));
         }
         if refused {
             self.guests.update(i, |g| (g.yaw, g.pitch) = (yaw, pitch));
-            self.resend_teleport(i, Some(start));
+            // A carried player goes back to where the server has it on its collider now.
+            let back = self.guests[i].carry_correction.unwrap_or(start);
+            self.guests.update(i, |g| g.carry_correction = None);
+            let carried = self.guests[i].on_collider;
+            self.resend_teleport(i, Some(back));
+            self.keep_carried(i, carried, Some(back));
             return;
         }
-        // The anticheat's `ground`: a claim of the ground with nothing to
-        // stand on is dropped (no-fall, walking on water).
-        let (mut flags, mut corrected) = (flags, false);
-        if flags & 1 != 0 && self.anticheat.is_some() {
-            match self.anticheat_ground(i, to, stands, ctx, events) {
-                Some(true) => {
-                    self.guests.update(i, |g| (g.yaw, g.pitch) = (yaw, pitch));
-                    return;
-                }
-                Some(false) => (flags, corrected) = (flags & !1, true),
-                None => {}
-            }
-        }
+        // A carried player is where the server puts it: its local position under the
+        // collider's transform now, not the position in the frame the client held.
+        let committed = self.guests[i].carry_commit;
+        self.guests.update(i, |g| g.carry_commit = None);
+        let to = committed.unwrap_or(to);
         // clientIsFloating, from the move that is accepted: no upward-or-level
         // step onto something, nothing but air around the body, and nothing
         // that lets the player hover (the server's allow-flight, mayfly,
-        // levitation, gliding, riptide). A move whose ground claim the anticheat dropped never counts:
-        // a false claim ends in the anticheat's own kick, logged and told to the operators, or not at all.
-        let floating = !corrected && ctx.collision.is_some() && {
+        // levitation, gliding, riptide).
+        let floating = ctx.collision.is_some() && {
             let g = &self.guests[i];
             to[1] - g.position[1] >= -0.03125
                 && !stands
@@ -4623,7 +4681,16 @@ impl Hub {
             at[1] + f64::from(d.height) + 0.0625,
             at[2] + half,
         ];
+        // A moving collider's box under the feet holds the player up as a block does: it is not
+        // floating on one, and the colliders are where they stand now, as the player is committed.
         no_blocks_in(world, lo, hi, &self.encoder)
+            && !sunrise_client_render::moving_colliders::overlaps(
+                sunrise_world::entity_obstruction::EntityIdentity(self.guests[i].entity_id as u64),
+                sunrise_core::geometry::Aabb::new(
+                    sunrise_core::geometry::Vec3::new(lo[0], lo[1], lo[2]),
+                    sunrise_core::geometry::Vec3::new(hi[0], hi[1], hi[2]),
+                ),
+            )
     }
 
     /// `ServerGamePacketListenerImpl.forceSendPlayerSupportBlocks`: the blocks just under the
@@ -4877,10 +4944,6 @@ impl Hub {
                 spawn: info,
                 keep: 0,
             }));
-            // ClientPacketListener.handleRespawn without KEEP_ENTITY_DATA: the client's new player
-            // starts with wasSprinting false. (A level change keeps it: the new player sprints on, or
-            // says STOP.)
-            g.client_sprinting = false;
             // The respawned player is a new one, without effects; so is the
             // client's (ClientPacketListener.handleRespawn).
             g.effects = Default::default();
@@ -5172,7 +5235,7 @@ pub fn guest_body(g: &Guest) -> BodyFlags {
         crawling: m.is_some_and(|m| m.pose == crate::pose::Pose::Swimming && !m.swimming),
         crouching: m.is_some_and(|m| m.pose == crate::pose::Pose::Crouching),
         spin_attack: m.is_some_and(|m| m.auto_spin_attack_ticks > 0),
-        on_fire: m.is_some_and(|m| m.fire_ticks > 0),
+        on_fire: m.is_some_and(crate::motion::PlayerMotion::is_on_fire),
         // ServerPlayer.updateInvisibilityStatus: a spectator is always invisible.
         invisible: g.effects.get("invisibility").is_some() || g.spectator(),
         glowing: g.effects.get("glowing").is_some(),
@@ -5235,11 +5298,16 @@ fn equipment_source(g: &Guest, index: usize) -> Option<&ItemStack> {
 
 #[cfg(test)]
 mod tests {
+    mod carried_check_tests;
     mod cave_air_tests;
     mod collision_exclusion_tests;
+    mod collision_part_tests;
+    mod displace_tests;
     mod effect_meta_tests;
+    mod entity_move_check_tests;
     #[path = "../far_tests.rs"]
     mod far_tests;
+    mod first_tick_recipe_tests;
     mod live_player_limit_tests;
     mod ordered_inbox_tests;
     mod pending_move_bound_tests;
@@ -5272,7 +5340,8 @@ mod tests {
                 .clone(),
         );
         let states = ["minecraft:air", "test:machine"].map(|n| (Arc::<str>::from(n), false, None));
-        hub.encoder = ChunkEncoder::with_types(states, &builtin, &[], &[], Some(&types));
+        hub.encoder =
+            ChunkEncoder::with_types(states, &builtin, &[], &[], Some(&types), Default::default());
         hub.encoder.mod_update_tag = Some(|_, entity| {
             BUILT.fetch_add(1, Ordering::Relaxed);
             Some(entity.nbt.clone())
@@ -5782,6 +5851,7 @@ mod tests {
             &sunrise_protocol::registry::Builtin::default(),
             &[],
             &[],
+            Default::default(),
         );
         let hub_config = HubConfig {
             default_game_mode: 0,
@@ -5829,6 +5899,42 @@ mod tests {
         bob.dimension = "minecraft:overworld".into();
         hub.guests.push(bob);
         (hub, rx)
+    }
+
+    /// ServerClockManager.createFullSyncPacket: every clock goes with its own total and rate, so
+    /// a paused pack clock is not told to advance at the Overworld's rate, nor given the End's
+    /// total.
+    #[test]
+    fn a_full_time_sync_sends_each_clocks_own_state() {
+        let mut sync = SyncData::empty();
+        let clocks = [
+            "minecraft:overworld",
+            "minecraft:the_end",
+            "demo:moon",
+            "demo:unmet",
+        ];
+        sync.dynamic.registries.insert(
+            "minecraft:world_clock".into(),
+            clocks.iter().map(|n| (n.to_string(), None)).collect(),
+        );
+        let (mut hub, _rx) = hub_with_sync(sync);
+        hub.set_clock_state("minecraft:the_end", 700, 1.0);
+        hub.set_clock_state("demo:moon", 42, 0.0);
+        let mut world = World::new(sunrise_world::registry::BlockStateId(0), 0);
+        world.day_time = 1_000;
+        world.end_clock = 9_999;
+        let C::SetTime(time) = hub.time_packet(&world, 2.0) else {
+            panic!("not a time packet");
+        };
+        let states: Vec<_> = time
+            .clocks
+            .iter()
+            .map(|c| (c.clock, c.total_ticks, c.rate))
+            .collect();
+        assert_eq!(
+            states,
+            [(0, 1_000, 2.0), (1, 700, 1.0), (2, 42, 0.0), (3, 0, 0.0)]
+        );
     }
 
     #[test]

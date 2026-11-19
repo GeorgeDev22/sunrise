@@ -4,6 +4,31 @@
 level, position, block state and `include_data`, true when a creative player picks with Ctrl. Return
 `None` to keep the game's item.
 
+## Breaking-crack display
+
+`BlockPart::break_progress_positions(host, event)` supplies extra positions for a
+client crack, with a mutable `ClientHost`. The event identifies the client `level`,
+original `pos`, cracked `state` and `progress` (0 through 9). Append positions to
+`event.positions`, which starts empty. The original position is drawn separately.
+For example, a multi-block can add its other three cells so all four show the same
+crack stage. NeoForge has no counterpart to this vanilla
+`LevelRenderer.destroyBlockProgress` moment.
+
+The part runs only on the cracked state's subscribed block, when a crack is set
+or changes stage/position, for both local prediction and other players' cracks.
+Repeated updates at the same stage refresh the remote crack's expiry without
+asking again. Rendering reads the stored answer, never your callback. Clearing
+the crack, closing/resetting the client level or expiring a remote crack after
+400 ticks removes its extras too. Local extras disappear with local mining.
+
+These are **display bounds**, not interaction limits: at most 64 distinct extras,
+each within Euclidean distance 8 blocks of the original position. `BlockPos`
+coordinates refer to the supplied level. The original position, duplicates,
+out-of-range values and extras past the limit are dropped with a debug log,
+never a panic. Existing render-distance and block-overlay eligibility filters
+still apply. Overlapping cracks use the highest stage for each cell. The callback
+changes neither break speed nor which blocks break, and never runs on a server.
+
 ## Light emission
 
 `BlockPart::light_emission` supplies positional light for blocks that declare
@@ -24,17 +49,26 @@ Keep the callback a pure function of the level, position and state, without side
 
 ## Path classification
 
-`BlockPart::block_path_type` answers for `event.state` at `event.pos`, with a read-only
-host for the owning level. Return `Some(PathType)` to replace the whole static classification,
-even for air, or `None` to use vanilla. The same state may answer differently by position.
+`BlockPart::block_path_type` answers for `event.state` at `event.pos`, with an owning
+`&dyn LevelHost`. Return `Some(PathType)` to replace
+the whole static classification, even for air, or `None` to use vanilla. The callback runs on
+the server only, and no mob is supplied. The same state may answer differently by position.
+Queries on the supplied level (such as `level.block_state(pos)` or looking up a block entity via
+`level.block_entity(pos)` and `level.block_entity_data(entity)`) are strictly read-only: they never
+perform writes, random draws, chunk loads or lazy loot generation. `level.block_entity(pos)`
+returns `None` when no block entity is present, the chunk is unloaded, `pos` is outside the build
+height, or the block entity is temporarily out of the world for its own tick.
+`level.block_entity_data(entity)` returns validated saved data without identity metadata, or
+`None` for stale generations and handles from another level or world.
+
 This is separate from `is_pathfindable`, which remains state-only. The server caches the final
 static classification in 4096 direct-mapped positional slots shared by its AI workers, including
 `Open` for missing navigation-region chunks. A collision replaces a slot. A matching
 `sendBlockUpdated` notification clears it: ordinary writes require an actual state change,
 `UPDATE_CLIENTS` and full chunk status at least `BLOCK_TICKING`; direct block-entity notifications
-clear even unchanged state. Time, `/reload`, chunk load and chunk unload do not clear it. Keep
-the answer deterministic for that lifetime. Neighbour and mob-specific adjustments are not
-stored in this cache; existing per-search evaluator caches remain.
+clear even unchanged state. Time, `/reload`, chunk load and chunk unload do not clear it, and
+there is no neighbour invalidation. Keep the answer deterministic for that lifetime. Neighbour
+and mob-specific adjustments are not stored in this cache; existing per-search evaluator caches remain.
 
 `BlockPart::adjacent_block_path_type` answers for a neighbour at its own `event.pos`;
 `event.path_type` is that neighbour's classified type, not the node's type. Return `Some`
@@ -108,10 +142,18 @@ template block writes still call the rotation Part at their placed world positio
 ## Landing writes
 
 `BlockPart::fall_on` runs at vanilla's landing moment on a read-only level random host.
+Hook version 2 exposes writable `event.distance` and `event.damage_multiplier`, not calculated
+damage. Vanilla blocks supply their own pair: hay uses 0.2, beds 0.5, slime 0,
+and pointed dripstone adds 2.5 to distance and uses 2.0. Other blocks start at 1.0.
+The engine applies `floor((distance + 1e-6 - safe_fall_distance) * damage_multiplier * fall_damage_multiplier_attribute)`.
+The safe fall distance attribute defaults to 3: halving distance is not halving damage.
+A zero multiplier or distance within the safe fall means no damage or generic fall sounds.
+Creative and fall-immune entities and items keep their immunity regardless of edits.
+
 Request a deferred write with `event.request(LandingWrite::SetBlock(state))`, where `state`
 is an API `BlockState`, or `LandingWrite::DestroyBlock { drop }`. The game checks the
 complete write batch before queuing it. An invalid block key or ordinal refuses that
-callback's writes and other outputs, including damage; it never applies a valid prefix.
+callback's writes and other outputs, including distance and multiplier; it never applies a valid prefix.
 After the entity batch ticks, writes apply in request order if the block still matches
 its original landed state. That guard runs once, so a first write can change the state
 without suppressing the next write. SetBlock notifies neighbors and clients; DestroyBlock
@@ -170,10 +212,11 @@ is not empty, passing the fluid (`FluidState`) and its position. The contract is
 |---|---|
 | `Some(true)` | This position waters the farmland; the first one ends the scan and moisture goes to 7. |
 | `Some(false)` | This position does not water it, whatever the fluid. |
-| `None` | Vanilla's rule for this position: a fluid in `#minecraft:water`. |
+| `None` | Vanilla's rule for this position if the owner's rule is not held: a fluid in `#minecraft:water`. |
 
-Rain on the block above, the watered-area ticket, moisture changes and drying out are unchanged. With no part on the
-farmland the scan is vanilla's.
+Normally rain on the block above, session water tickets and dry-out work as usual. With no Part on the farmland the
+scan is vanilla's. When the content owner's subscribed rule is [switched off](../disabled-content.md), only earlier
+enabled Parts or an enabled mod's session water ticket can wet the block. Rain and dry-out are held, not trampling.
 Bookshelf slot-occupancy flags and the last-interacted slot are transactional storage bookkeeping,
 not notification effects. Aborting restores them with the items. Changed observers, comparator
 ticks and data-send requests already issued still survive that abort.

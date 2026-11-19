@@ -41,6 +41,9 @@ pub fn check(host: &dyn ServerHost) {
             files.list(&folder, None, mod_api::CONFIG_LIST_MAX as u32 + 1),
             Err(ConfigFileError::InvalidPage)
         );
+        assert_eq!(files.remove(&second), Ok(true));
+        assert_eq!(files.remove(&second), Ok(false));
+        assert_eq!(files.stat(&second), Ok(None));
     }
     // Root paths must survive the checked wire decoder, not only named folders.
     assert!(host.data_files().list(&ConfigPath::root(), None, 1).is_ok());
@@ -72,4 +75,5 @@ pub fn no_world(host: &dyn ServerHost) {
         Err(ConfigFileError::NoWorld)
     );
     assert_eq!(files.stat(&path), Err(ConfigFileError::NoWorld));
+    assert_eq!(files.remove(&path), Err(ConfigFileError::NoWorld));
 }

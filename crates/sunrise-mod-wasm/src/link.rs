@@ -77,7 +77,10 @@ impl fmt::Display for LinkError {
             Self::Malformed { member, why } => write!(f, "{member}: {why}"),
             Self::TooLarge { member } => write!(f, "{member}: needs more memory than a group has"),
             Self::Unresolved { member, symbol } => {
-                write!(f, "{member}: imports {symbol}, which no earlier member has")
+                write!(
+                    f,
+                    "{member}: imports {symbol}, which no earlier member has. It was built against another game build's libraries, or a mod it needs is missing: rebuild it with this build's SDK (cargo sunrise-mod update, then build --wasm)"
+                )
             }
             Self::Duplicate {
                 symbol,
@@ -421,10 +424,7 @@ impl<T: 'static> Group<T> {
             for (name, extern_) in exports {
                 if layout.private_exports.contains(&name)
                     || name.starts_with("__wasm_")
-                    || matches!(
-                        name.as_str(),
-                        "sunrise_layout" | "sunrise_layout_ext" | "sunrise_in" | "sunrise_hook"
-                    )
+                    || matches!(name.as_str(), "sunrise_in" | "sunrise_hook")
                     || crate::boundary::PREPARED_EXPORTS
                         .iter()
                         .any(|(_, entries)| entries.iter().any(|(entry, _)| *entry == name))

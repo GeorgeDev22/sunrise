@@ -147,6 +147,8 @@ fn wire_loopback_entity_layers_register_and_draw_alike_for_native_and_guest_mods
                     living: None,
                     tnt_fuse: None,
                     orb_value: None,
+                    painting: None,
+                    item_frame: None,
                 }
                 .into();
                 let still = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];

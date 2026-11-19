@@ -19,11 +19,14 @@ impl Hooks for Rewrite {
     ) -> Flow {
         match self.0.load(Ordering::Relaxed) {
             0 => event.value *= 2,
-            1 => {
+            1 if event.stat_type.as_str() == "minecraft:custom"
+                && event.stat.as_str() == "minecraft:jump" =>
+            {
                 *event.stat_type = "minecraft:custom".into();
                 *event.stat = "rewrite:steps".into();
                 event.value = 3;
             }
+            1 => return Flow::Continue,
             2 => {
                 *event.stat = "test:missing".into();
                 event.value = 99;
@@ -417,6 +420,12 @@ fn lan_real_break_and_jump(mods: mod_api::Mods, custom: &str, mode: Option<&Atom
             let play = &mut game.lan.as_mut().unwrap().play.get_mut(&12).unwrap();
             assert_eq!(play.stats.get("custom", custom), 3);
             assert_eq!(play.stats.get("custom", "minecraft:jump"), 0);
+            if mode.is_some() {
+                assert_eq!(play.stats.get("custom", "minecraft:play_time"), 1);
+                assert_eq!(play.stats.get("custom", "minecraft:total_world_time"), 1);
+                assert_eq!(play.stats.get("custom", "minecraft:time_since_death"), 1);
+                assert_eq!(play.stats.get("custom", "minecraft:time_since_rest"), 1);
+            }
             let dirty = play.stats.take_dirty();
             assert!(dirty.contains(&("minecraft:custom".into(), custom.into(), 3)));
             game.lan.as_ref().unwrap().hub.send_stats(12, &dirty);
@@ -506,7 +515,7 @@ fn wasm_real_break_and_jump_rewrite_awards() {
         let manifest = Package::read(&path).unwrap().manifest;
         let info = mod_api::PackageInfo::new(
             manifest.id.clone(),
-            manifest.version.clone(),
+            manifest.version.to_string(),
             mod_api::PackageKind::Code,
             mod_api::Side::Both,
             vec![manifest.id.clone()],

@@ -4,7 +4,10 @@
 //! still leaves items and screen-effect blits to its caller.
 use super::super::{Blend, GuiDraw, PoseOp, paint};
 use super::{GuiItems, Undrawable, paint_checked, paint_items};
-use crate::hud::{Blend as Run, HudAtlas, HudBatch, MINIMAP_SPRITE};
+use crate::hud::{Blend as Run, HudAtlas, HudBatch};
+
+/// A run-time atlas slot every atlas has: map slot 0 (`hud::map_slot_sprite`).
+const SLOT: &str = "sunrise/map0";
 
 fn atlas() -> HudAtlas {
     HudAtlas::build(&crate::resource_source::ResourceSource::directory(
@@ -142,10 +145,10 @@ fn every_blit_blend_draws_with_its_blend() {
     let atlas = atlas();
     let mut batch = HudBatch::scratch([854, 480]);
     let draws = [
-        blit(MINIMAP_SPRITE, Blend::Textured, [8, 8]),
-        blit(MINIMAP_SPRITE, Blend::Vignette, [8, 8]),
-        blit(MINIMAP_SPRITE, Blend::Nausea, [8, 8]),
-        blit(MINIMAP_SPRITE, Blend::Crosshair, [8, 8]),
+        blit(SLOT, Blend::Textured, [8, 8]),
+        blit(SLOT, Blend::Vignette, [8, 8]),
+        blit(SLOT, Blend::Nausea, [8, 8]),
+        blit(SLOT, Blend::Crosshair, [8, 8]),
     ];
     assert_eq!(
         paint_checked(&mut batch, &atlas, &draws, &mut Items::default()),
@@ -205,10 +208,7 @@ fn an_op_the_paint_cannot_draw_refuses_the_buffer_and_draws_nothing_of_it() {
             blit("test:missing", Blend::Vignette, [8, 8]),
             Undrawable::BlitTexture("test:missing".into()),
         ),
-        (
-            blit(MINIMAP_SPRITE, Blend::Textured, [0, 8]),
-            Undrawable::BlitSize,
-        ),
+        (blit(SLOT, Blend::Textured, [0, 8]), Undrawable::BlitSize),
         (sprite, Undrawable::Sprite("test:missing".into())),
         (atlas_sprite, Undrawable::Sprite("test:missing".into())),
     ];
@@ -298,9 +298,9 @@ fn plain_paint_still_leaves_items_and_screen_effect_blits_to_its_caller() {
     let mut batch = HudBatch::scratch([854, 480]);
     let draws = [
         item(0, 0, 0, [1.0, 1.0], [0.0, 0.0]),
-        blit(MINIMAP_SPRITE, Blend::Vignette, [8, 8]),
-        blit(MINIMAP_SPRITE, Blend::Nausea, [8, 8]),
-        blit(MINIMAP_SPRITE, Blend::Crosshair, [8, 8]),
+        blit(SLOT, Blend::Vignette, [8, 8]),
+        blit(SLOT, Blend::Nausea, [8, 8]),
+        blit(SLOT, Blend::Crosshair, [8, 8]),
     ];
     paint(&mut batch, &atlas, &draws);
     assert!(batch.vertices.is_empty());

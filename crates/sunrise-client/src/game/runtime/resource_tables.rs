@@ -36,6 +36,9 @@ impl Resources {
     pub(super) fn items(&self) -> &Items {
         &self.rest().items
     }
+    pub(super) fn shared_items(&self) -> Arc<Items> {
+        self.rest().items.clone()
+    }
     pub(super) fn recipes(&self) -> &Recipes {
         &self.rest().recipes
     }
@@ -135,6 +138,35 @@ pub struct UiResources {
     pub panorama: Arc<sunrise_client::gfx::panorama::Faces>,
     /// The title screen's splashes (`sunrise_client::splashes::pool`).
     pub splashes: Arc<str>,
+    /// The `Text` of each plain string mods draw (`DrawContext::text`).
+    pub plain_texts: PlainTexts,
+}
+
+/// The `Text` of each plain string a mod draws by `&str` (`DrawContext::text`), kept so drawing
+/// the same string again builds no new `Text`. It holds at most [`PlainTexts::MAX`] strings and
+/// starts over past that, so text that changes every frame can't grow it.
+#[derive(Default)]
+pub struct PlainTexts(
+    std::cell::RefCell<std::collections::HashMap<Box<str>, sunrise_client::text::Text>>,
+);
+
+impl PlainTexts {
+    const MAX: usize = 256;
+    /// `draw` with the `Text` of `text`, made the first time it is asked for.
+    pub(in crate::game) fn with<R>(
+        &self,
+        text: &str,
+        draw: impl FnOnce(&sunrise_client::text::Text) -> R,
+    ) -> R {
+        let mut texts = self.0.borrow_mut();
+        if !texts.contains_key(text) {
+            if texts.len() >= Self::MAX {
+                texts.clear();
+            }
+            texts.insert(text.into(), sunrise_client::text::Text::literal(text));
+        }
+        draw(&texts[text])
+    }
 }
 
 impl Game<'_> {
@@ -144,18 +176,22 @@ impl Game<'_> {
     }
 }
 
-/// Whether the HUD atlas packs the mod image slot (`sunrise/modimage`): whenever a client mod is
-/// loaded, native or wasm, since any of them can call `ClientHost::mod_image`, with no mixin and
-/// no opt-in (#4437). A game with no mod pays none of its 4 MiB. Read where the atlas is built:
-/// at the first load and on a resource reload.
-pub(in crate::game) fn mod_image_slot() -> bool {
+/// Whether the HUD atlas packs the pool of dynamic texture slots: whenever a client mod is
+/// loaded, native or wasm, since any of them can call `ClientHost::create_dynamic_texture`, with
+/// no mixin and no opt-in (#4437). A game with no mod packs no slot and its atlas does not grow.
+/// Read where the atlas is built: at the first load and on a resource reload.
+pub(in crate::game) fn dynamic_texture_pool() -> bool {
     !mod_api::__private::mods().is_empty()
 }
 
 impl UiResources {
-    /// The resolved resource generation, including the base layer and pack filters.
+    /// The resolved resource generation, including the base layer and pack filters, over the
+    /// game's own resources at `vanilla` (which tell the packs' core shaders from the game's).
     /// Its splash pool is empty until `with_splashes`.
-    pub fn load(root: &sunrise_assets::resource_source::ResourceSource) -> Result<Self> {
+    pub fn load(
+        root: &sunrise_assets::resource_source::ResourceSource,
+        vanilla: &Path,
+    ) -> Result<Self> {
         // The title screen waits for both: the panorama's six faces decode
         // beside the atlas.
         std::thread::scope(|scope| {
@@ -164,9 +200,10 @@ impl UiResources {
                     sunrise_client::gfx::panorama::Faces::load(root, root)
                 })
             });
-            let mod_image = mod_image_slot();
+            let pool = dynamic_texture_pool();
+            let game = sunrise_assets::resource_source::ResourceSource::directory(vanilla.into());
             let atlas = startup::time("ui.atlas", || {
-                HudAtlas::build_over_with_image(root, root, mod_image)
+                HudAtlas::build_over_with_dynamic_textures(root, root, &game, pool)
             });
             let panorama = panorama
                 .join()
@@ -175,6 +212,7 @@ impl UiResources {
                 atlas: atlas?,
                 panorama: Arc::new(panorama),
                 splashes: Arc::from(""),
+                plain_texts: PlainTexts::default(),
             })
         })
     }
@@ -195,6 +233,7 @@ impl UiResources {
             atlas: HudAtlas::fonts(root)?,
             panorama: Arc::new(sunrise_client::gfx::panorama::Faces::colour([0; 4])),
             splashes: Arc::from(""),
+            plain_texts: PlainTexts::default(),
         })
     }
 }
@@ -322,6 +361,7 @@ impl PackResources {
             data_source: root.data().clone(),
             data_changes: root.data_changes().clone(),
             additional_data: Arc::from([]),
+            mod_layers: root.mod_layers().clone(),
             names: Arc::new(names),
             clouds: Arc::new(clouds),
             forcefield: Arc::new(forcefield),
@@ -381,4 +421,21 @@ fn read_colors(
     sunrise_client::pack_palette::set(&colors);
     sunrise_client::brewing::set_pack_colors(colors.effects.clone());
     colors
+}
+
+#[cfg(test)]
+mod plain_text_tests {
+    use super::PlainTexts;
+
+    #[test]
+    fn a_string_drawn_again_reuses_its_text_and_the_store_stays_bounded() {
+        let texts = PlainTexts::default();
+        let first = texts.with("Jump", |t| t as *const _);
+        assert_eq!(texts.with("Jump", |t| t as *const _), first);
+        assert_eq!(texts.with("Jump", |t| t.plain()), "Jump");
+        for i in 0..PlainTexts::MAX * 2 {
+            texts.with(&i.to_string(), |_| ());
+        }
+        assert!(texts.0.borrow().len() <= PlainTexts::MAX);
+    }
 }

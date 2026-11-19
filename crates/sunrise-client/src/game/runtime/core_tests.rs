@@ -7,7 +7,12 @@ fn reload_resolves_parts_against_reloaded_tags() {
     struct TagPart;
     #[mod_api::sunrise_part]
     impl BlockPart for TagPart {
-        fn analog_output(&self, _: &dyn mod_api::LevelHost, _: &mut mod_api::AnalogOutputEvent) {}
+        fn analog_output(
+            &self,
+            _: &mut dyn mod_api::LevelRandomHost,
+            _: &mut mod_api::AnalogOutputEvent,
+        ) {
+        }
     }
     struct ReloadMod;
     #[mod_api::__subscriptions]
@@ -190,7 +195,7 @@ fn client_modifier_snapshot_tracks_focus_loss() {
         assert!(snapshot.alt());
         assert!(!snapshot.control());
         assert!(!snapshot.super_key());
-        game.handle_window_event_inner(&TestLoop, WindowEvent::Focused(false));
+        game.handle_window_event_inner(&TestLoop, WindowEvent::Focused(false), None);
         assert_eq!((game as &dyn ClientHost).modifiers().bits, 0);
         assert_eq!(snapshot.bits, 5);
     });
@@ -501,7 +506,6 @@ fn screen_ids_are_distinct_and_stable() {
         Screen::Win,
         Screen::Mod,
         Screen::HudEditor,
-        Screen::Studio,
         Screen::DebugOptions,
     ];
     let ids: Vec<&'static str> = all.iter().map(|screen| screen.id()).collect();
@@ -518,8 +522,6 @@ fn screen_ids_are_distinct_and_stable() {
     assert_eq!(Screen::Playing.id(), "playing");
     assert_eq!(Screen::Inventory.id(), "inventory");
     assert_eq!(Screen::Win.id(), "win");
-    assert_eq!(Screen::Studio.id(), "studio");
-    assert_ne!(Screen::Studio.id(), Screen::Chat.id());
 }
 
 /// The `modifiers` a native mod's input hooks hand over are GLFW's bits
@@ -753,8 +755,7 @@ fn falling_block_does_not_descend_through_scaffolding() {
             .collect(),
         },
     )
-    .unwrap()
-    .expect("scaffolding collision rule");
+    .unwrap();
 
     // When a falling block is falling downward (wanted.y < 0) above the scaffolding top (y = 11.0):
     let falling_y = 11.0;
@@ -949,10 +950,10 @@ fn shared_resources_can_cross_threads() {
 #[test]
 fn selecting_creative_tabs_does_not_drop_the_carried_stack_on_release() {
     let mut creative = Creative::from_json(&serde_json::json!({
-        "schema": 2,
+        "schema": 4, "item_features": {}, "potion_features": {},
         "tabs": [
-            {"type": "CATEGORY", "items": ["{count:1,id:\"minecraft:stone\"}"]},
-            {"type": "INVENTORY"}
+            {"id":"minecraft:building_blocks","type":"CATEGORY","build":[]},
+            {"id":"minecraft:inventory","type":"INVENTORY","build":[]}
         ]
     }))
     .unwrap();
@@ -960,7 +961,7 @@ fn selecting_creative_tabs_does_not_drop_the_carried_stack_on_release() {
         let mut clicks = Clicks::default();
         for tab in [1, 1, 0, 1] {
             select_creative_tab(&mut creative, &mut clicks, tab);
-            assert_eq!(creative.selected, tab);
+            assert_eq!(creative.selected_index(), tab);
             assert_eq!(creative.tab().inventory, tab == 1);
             assert_eq!(
                 clicks.release(
@@ -1116,7 +1117,7 @@ fn integrated_server_save_persists_owner_player_data() {
         game_mode: 1,
         ..Level::default()
     };
-    level.write(&dir).unwrap();
+    level.write(&dir, &Default::default()).unwrap();
 
     // The integrated server stores the owner's state in `level` and saves the world.
     level.position = Some([128.5, 72.0, -64.25]);
@@ -1125,6 +1126,8 @@ fn integrated_server_save_persists_owner_player_data() {
         &mut level,
         &dir,
         execution_role::ExecutionRole::IntegratedServer,
+        &Default::default(),
+        false,
     )
     .unwrap();
 
@@ -1145,6 +1148,8 @@ fn integrated_server_save_persists_owner_player_data() {
         &mut dedicated,
         &dir,
         execution_role::ExecutionRole::DedicatedServer,
+        &Default::default(),
+        false,
     )
     .unwrap();
 
@@ -1157,28 +1162,6 @@ fn integrated_server_save_persists_owner_player_data() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// `Screen::Studio` is the Studio script slot: it never draws the chat screen
-/// (`Screen::Studio => {}` in `game.rs`'s draw match, unlike
-/// `Screen::Chat => draw_chat_screen`), it never blurs the background, and
-/// while it is up gameplay does not own the keyboard (WASD cannot walk
-/// through it, and movement keys are cleared on open).
-#[test]
-fn studio_screen_stays_off_the_chat_slot() {
-    assert!(Screen::Studio != Screen::Chat);
-    assert_eq!(Screen::Studio.id(), "studio");
-    assert!(!Screen::Studio.blurs_background(false));
-    assert!(!Screen::Studio.blurs_background(true));
-    assert!(!gameplay_has_keyboard(Screen::Studio, false, false));
-    // The pure gate behind `Game::open_studio_screen`, as
-    // `native_mod_screen_open`'s `mod_screen_opens` is gated.
-    use super::studio::studio_screen_opens;
-    assert_eq!(studio_screen_opens(Screen::Playing, false), None);
-    assert_eq!(studio_screen_opens(Screen::Playing, true), Some(false));
-    assert_eq!(studio_screen_opens(Screen::Chat, false), Some(false));
-    assert_eq!(studio_screen_opens(Screen::Studio, false), Some(true));
-    assert_eq!(studio_screen_opens(Screen::Studio, true), Some(true));
 }
 
 #[test]
@@ -1259,6 +1242,7 @@ fn eager_saves_wait_for_an_open_world_and_for_light() {
     game.save = Arc::new(sunrise_client::save::SaveDir::new(
         dir.clone(),
         sunrise_client::save::LevelShape::OVERWORLD,
+        Some(Default::default()),
     ));
     Arc::make_mut(game.world.chunks.get_mut(&(0, 0)).unwrap()).lit = true;
     game.world

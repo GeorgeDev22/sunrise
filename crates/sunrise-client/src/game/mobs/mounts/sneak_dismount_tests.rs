@@ -45,7 +45,8 @@ pub(in crate::game) fn with_horse(test: impl FnOnce(&mut Game<'_>, u32, &AtomicB
     )]
     .into();
     mod_platform::testing::with_mods(mods, || {
-        let mut game = game();
+        let mut resources = None;
+        let mut game = game(&mut resources);
         // A server hears its mounts' `entity_mount`.
         game.options.dedicated = Some(Vec::new());
         assert!(game.run_command("summon horse 8.5 100 8.5 {NoAI:1b,Silent:1b,Tame:1b}"));

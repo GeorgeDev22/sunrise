@@ -1,7 +1,7 @@
 //! Fishing: `FishingRodItem.use` (cast / reel in), the `FishingHook` (flight,
 //! bobbing, lure and bite timers, open water, hooking mobs, retrieving the
 //! `gameplay/fishing` loot) and `FishingHookRenderer` (bobber and line).
-use super::{Game, creatures::ProjectileHitter, lan_mobs::guest_bounds, view_vector};
+use super::{Game, billboard_axes, creatures::ProjectileHitter, lan_mobs::guest_bounds};
 use std::sync::Arc;
 use sunrise_client::advancements::EntityView;
 use sunrise_client::lan::entity::States;
@@ -113,32 +113,41 @@ pub(super) struct Hook {
     lerp: HookLerp,
     pub(super) random: LegacyRandom,
 }
-/// What a hook keeps of the mod's fishing medium it floats in.
+/// What a hook keeps of the mod's fishing medium it floats in, on the server.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct HookMedium {
+    /// The mod that answered.
+    mod_id: &'static str,
+    /// The table the mod answered, as it answered it.
+    answered: Option<String>,
+    /// The table a catch rolls: the answer's, once checked; None rolls vanilla's.
     loot_table: Option<String>,
-    lure_ticks: Option<(i32, i32)>,
+    lure_ticks: Option<[i32; 2]>,
 }
 /// The medium a mod answered, when the hook is in it: in the block of its
-/// surface or below, as a hook is in water anywhere in a water block.
-fn inside_medium(
-    position: Vec3,
-    medium: Option<super::native_hooks::NativeFishingMedium>,
-) -> Option<super::native_hooks::NativeFishingMedium> {
-    medium.filter(|m| m.surface.is_finite() && position.y < m.surface.floor() + 1.0)
+/// surface or below, as a hook is in water anywhere in a water block. A
+/// surface that is not finite is no medium.
+fn inside_medium(position: Vec3, medium: &mod_api::FishingMedium) -> bool {
+    medium.surface.is_finite() && position.y < medium.surface.floor() + 1.0
 }
 /// `catchingFish`'s wait for a fish: vanilla's 100 to 600 ticks, or a medium's
-/// own range, less the rod's Lure.
-fn lure_wait(random: &mut LegacyRandom, range: Option<(i32, i32)>, lure: i32) -> i32 {
-    match range {
-        None => 100 + random.next_int_bound(501).unwrap_or(0) - lure,
-        Some((min, max)) => {
+/// own `[min, max]` with `min` at least 1 and `max` at least `min`, less the
+/// rod's Lure. Not clamped: a wait of 0 or less goes on to the hook phase.
+fn lure_wait(random: &mut LegacyRandom, range: Option<[i32; 2]>, lure: i32) -> i32 {
+    let (min, span) = match range {
+        None => (100, 501),
+        Some([min, max]) => {
             let min = min.max(1);
-            let max = max.max(min);
-            min + random.next_int_bound(max - min + 1).unwrap_or(0) - lure
+            // `max - min + 1` fits: `min` is at least 1.
+            (min, max.max(min) - min + 1)
         }
-    }
+    };
+    // `min + draw` is at most `max`.
+    (min + random.next_int_bound(span).unwrap_or(0)).saturating_sub(lure)
 }
+/// Mods' table ids already warned about, so each malformed or missing one warns once.
+static WARNED_TABLES: std::sync::Mutex<Vec<(&'static str, String)>> =
+    std::sync::Mutex::new(Vec::new());
 /// A player a hook can catch (`canHitEntity`): their entity id, which
 /// guest they are (none: the host) and their box.
 pub(super) struct HookTarget {
@@ -430,6 +439,7 @@ impl Game<'_> {
                 "vx": hook.velocity.x.to_bits() as i64, "vy": hook.velocity.y.to_bits() as i64,
                 "vz": hook.velocity.z.to_bits() as i64, "nibble": hook.nibble, "next": hook.random.next_long(),
             }));
+            self.hook.retire_extracted(hook.id, hook.join);
         }
         // The client must take the same block hit before moving as the server;
         // otherwise it lands farther away and slides back on the next update.
@@ -451,7 +461,7 @@ impl Game<'_> {
             let mut state = (Vec3::new(x, 301.1, z), motion, State::Flying, false);
             let mut random = LegacyRandom::new(0);
             for tick in 0..5 {
-                state = self.client_hook_step(1, None, state, &mut random);
+                state = self.client_hook_step(1, None, false, state, &mut random);
                 rows.push(serde_json::json!({
                     "case": case, "tick": tick,
                     "position": [state.0.x - f64::from(block[0]), state.0.y, state.0.z - f64::from(block[2])],
@@ -1047,22 +1057,39 @@ impl Game<'_> {
         ];
         let liquid = self.water_height(b[0], b[1], b[2]).map_or(0.0, |w| w.0);
         // Out of water, a mod may say the bobber floats here all the same.
-        let medium = if liquid > 0.0 || matches!(h.state, State::Hooked(_)) {
+        let hooked = matches!(h.state, State::Hooked(_));
+        let medium = if liquid > 0.0 || hooked {
             None
         } else {
-            self.hook_medium(h.id, h.position, Some(owner))
+            self.hook_medium(h.id, h.position, Some(owner), true)
         };
-        match &medium {
+        let surface = medium.as_ref().map(|m| m.answer.surface);
+        match medium {
             Some(m) => {
+                let loot_table = match h.medium.take() {
+                    Some(kept)
+                        if kept.mod_id == m.mod_id && kept.answered == m.answer.loot_table =>
+                    {
+                        kept.loot_table
+                    }
+                    _ => m
+                        .answer
+                        .loot_table
+                        .as_deref()
+                        .and_then(|id| self.medium_table(m.mod_id, id)),
+                };
                 h.medium = Some(HookMedium {
-                    loot_table: m.loot_table.clone(),
-                    lure_ticks: m.lure_ticks,
-                })
+                    mod_id: m.mod_id,
+                    answered: m.answer.loot_table,
+                    loot_table,
+                    lure_ticks: m.answer.lure_ticks,
+                });
             }
-            None if liquid > 0.0 => h.medium = None,
+            // Out of the medium (in water, or answered None) it rolls vanilla's table again.
+            None if !hooked => h.medium = None,
             None => {}
         }
-        let in_water = liquid > 0.0 || medium.is_some();
+        let in_water = liquid > 0.0 || surface.is_some();
         match h.state {
             State::Flying => {
                 if in_water {
@@ -1242,8 +1269,8 @@ impl Game<'_> {
             }
             State::Bobbing => {
                 let v = h.velocity;
-                let mut force = match &medium {
-                    Some(m) => h.position.y + v.y - m.surface,
+                let mut force = match surface {
+                    Some(surface) => h.position.y + v.y - surface,
                     None => h.position.y + v.y - f64::from(b[1]) - f64::from(liquid),
                 };
                 if force.abs() < 0.01 {
@@ -1257,7 +1284,7 @@ impl Game<'_> {
                     // A medium has no water around it to be open: it counts as open.
                     h.open_water = h.open_water
                         && h.out_of_water < 10
-                        && (medium.is_some() || self.calculate_open_water(b));
+                        && (surface.is_some() || self.calculate_open_water(b));
                 }
                 if in_water {
                     h.out_of_water = (h.out_of_water - 1).max(0);
@@ -1403,9 +1430,8 @@ impl Game<'_> {
         else {
             return;
         };
-        let forward = glam::DVec3::from_array(view_vector(self.yaw, self.pitch));
-        let right = forward.cross(glam::DVec3::Y).normalize_or_zero();
-        let up = right.cross(forward).normalize_or_zero();
+        // FishingHookRenderer.submit: turned by the camera's orientation.
+        let [right, up] = billboard_axes(self.camera_orientation());
         let s = 0.25;
         let uv = [[r.u0, r.v1], [r.u1, r.v1], [r.u1, r.v0], [r.u0, r.v0]];
         for p in hooks {
@@ -1437,9 +1463,7 @@ impl Game<'_> {
     /// from a quarter block above the hook to the rod in its owner's hand,
     /// `width` pixels wide (`Window.getAppropriateLineWidth`).
     pub(super) fn fishing_line(&self, alpha: f64, size: [u32; 2]) -> Vec<Line> {
-        let own = self
-            .hook_position(alpha)
-            .zip(self.rod_hand_position(alpha, size));
+        let own = self.hook_position(alpha).zip(self.rod_hand_position(alpha));
         let width = sunrise_client::gfx::outline_width(size[0]);
         let mut lines = Vec::new();
         for (hook, hand) in own.into_iter().chain(self.remote_hook_ends(alpha)) {
@@ -1459,7 +1483,7 @@ impl Game<'_> {
     }
     /// `FishingHookRenderer.getPlayerHandPos`: on the near plane in first
     /// person, beside the body otherwise.
-    fn rod_hand_position(&self, alpha: f64, size: [u32; 2]) -> Option<glam::DVec3> {
+    fn rod_hand_position(&self, alpha: f64) -> Option<glam::DVec3> {
         let p = self.player.as_ref()?;
         let right_arm = self.main_hand_rod() != self.settings.main_hand_left;
         let invert: f32 = if right_arm { 1.0 } else { -1.0 };
@@ -1470,36 +1494,7 @@ impl Game<'_> {
         let eye = glam::DVec3::new(feet.x, feet.y + f64::from(p.dimensions.eye_height), feet.z);
         if self.camera_type.is_first_person() {
             let fov = self.settings.fov as i32 as f32;
-            // Camera.getNearPlane(fov).getPointOnPlane(invert * 0.525, -0.1).
-            let aspect = f64::from(size[0]) / f64::from(size[1].max(1));
-            let height =
-                (f64::from(fov * (std::f64::consts::PI / 180.0) as f32) / 2.0).tan() * 0.05;
-            let forward = glam::DVec3::from_array(view_vector(self.yaw, self.pitch));
-            let left = -forward.cross(glam::DVec3::Y).normalize_or_zero();
-            let up = forward.cross(left).normalize_or_zero();
-            let point = forward * 0.05 + up * (height * -0.1)
-                - left * (height * aspect * f64::from(invert * 0.525));
-            let point = point * (960.0 / f64::from(fov));
-            // Vec3.yRot(swing * 0.5), then xRot(-swing * 0.7).
-            let (s, c) = (
-                f64::from(trig::sin(f64::from(swing * 0.5))),
-                f64::from(trig::cos(f64::from(swing * 0.5))),
-            );
-            let point = glam::DVec3::new(
-                point.x * c + point.z * s,
-                point.y,
-                point.z * c - point.x * s,
-            );
-            let (s, c) = (
-                f64::from(trig::sin(f64::from(-swing * 0.7))),
-                f64::from(trig::cos(f64::from(-swing * 0.7))),
-            );
-            let point = glam::DVec3::new(
-                point.x,
-                point.y * c + point.z * s,
-                point.z * c - point.y * s,
-            );
-            Some(eye + point)
+            Some(eye + near_plane_hand(self.near_plane(), fov, invert, swing))
         } else {
             let model = self.player_model.as_ref()?;
             let body = mod_api::client::camera::lerp(
@@ -1524,6 +1519,36 @@ impl Game<'_> {
             )
         }
     }
+}
+/// `FishingHookRenderer.getPlayerHandPos` in first person, from the eye: the camera's
+/// `getNearPlane(fov).getPointOnPlane(invert * 0.525, -0.1)` scaled by 960 / fov, then
+/// `Vec3.yRot(swing * 0.5)` and `xRot(-swing * 0.7)`.
+fn near_plane_hand(
+    plane: sunrise_client::camera::NearPlane,
+    fov: f32,
+    invert: f32,
+    swing: f32,
+) -> glam::DVec3 {
+    let point = glam::DVec3::from_array(plane.point_on_plane(invert * 0.525, -0.1))
+        * (960.0 / f64::from(fov));
+    let (s, c) = (
+        f64::from(trig::sin(f64::from(swing * 0.5))),
+        f64::from(trig::cos(f64::from(swing * 0.5))),
+    );
+    let point = glam::DVec3::new(
+        point.x * c + point.z * s,
+        point.y,
+        point.z * c - point.x * s,
+    );
+    let (s, c) = (
+        f64::from(trig::sin(f64::from(-swing * 0.7))),
+        f64::from(trig::cos(f64::from(-swing * 0.7))),
+    );
+    glam::DVec3::new(
+        point.x,
+        point.y * c + point.z * s,
+        point.z * c - point.y * s,
+    )
 }
 impl Game<'_> {
     /// The hooks drawn here, with their owners' ids (0 for this player's own).
@@ -1945,6 +1970,7 @@ impl Game<'_> {
             (h.position, h.velocity, h.state, h.on_ground) = self.client_hook_step(
                 h.id,
                 owner,
+                true,
                 (h.position, h.velocity, h.state, h.on_ground),
                 &mut h.random,
             );
@@ -1964,6 +1990,7 @@ impl Game<'_> {
             (h.position, h.velocity, h.state, h.on_ground) = self.client_hook_step(
                 h.id,
                 owner,
+                false,
                 (h.position, h.velocity, h.state, h.on_ground),
                 &mut h.random,
             );
@@ -1972,24 +1999,85 @@ impl Game<'_> {
         self.remote_hooks = hooks;
     }
 
-    /// The fishing medium a mod says the hook at `position` floats in
-    /// (`native_fishing_medium`), when it is in it. API 578.
+    /// The fishing medium a mod says the hook `id` at `position` floats in
+    /// (`fishing_medium`), when it is in it, and the mod that said so. `owner` is
+    /// where its caster stands; `own` says the caster is this game's player (the
+    /// one swapped in, on a server). On a client the answer's table and wait are
+    /// dropped. With no listener nothing is built.
     fn hook_medium(
         &mut self,
         id: u32,
         position: Vec3,
         owner: Option<Vec3>,
-    ) -> Option<super::native_hooks::NativeFishingMedium> {
+        own: bool,
+    ) -> Option<mod_api::Answered<mod_api::FishingMedium>> {
+        if !mod_api::__private::listened(mod_api::HookId::FishingMedium) {
+            return None;
+        }
+        let epoch = self.native_lifecycle.epoch()?;
+        let server = self.is_logical_server();
+        let level = if server {
+            self.level(self.dim.id())
+        } else {
+            self.native_client_level()
+        }?;
+        let caster = match (own, server) {
+            (false, _) => None,
+            (true, true) => self
+                .lan_acting_uuid
+                .or_else(|| {
+                    self.level
+                        .player_uuid
+                        .map(sunrise_client::lan::playerdata::ints_uuid)
+                })
+                .and_then(|uuid| self.player(uuid)),
+            (true, false) => self.local_player(),
+        };
         let mut medium = None;
-        let dimension = self.dim.id();
         self.native_fishing_medium(
-            dimension,
-            id,
+            level,
+            mod_api::EntityRef::new(epoch, id),
             [position.x, position.y, position.z],
+            caster,
             owner.map(|o| [o.x, o.y, o.z]),
             &mut medium,
         );
-        inside_medium(position, medium)
+        let mut medium = medium.filter(|m| inside_medium(position, &m.answer))?;
+        if !server {
+            medium.answer.loot_table = None;
+            medium.answer.lure_ticks = None;
+        }
+        Some(medium)
+    }
+    /// The table `id` a mod's medium names, as a catch rolls it: None, so vanilla's
+    /// table rolls, for an id that is not an identifier or names no table the server
+    /// has, with one warning naming the mod and the id.
+    fn medium_table(&self, mod_id: &'static str, id: &str) -> Option<String> {
+        let table = sunrise_core::identifier::Identifier::parse(id)
+            .ok()
+            .map(|table| table.to_string());
+        let Some(loot) = self.server_loot.get() else {
+            // No tables loaded: nothing rolls, so there is nothing to check against.
+            return table;
+        };
+        let malformed = table.is_none();
+        if let Some(table) = table.filter(|table| loot.has_table(table)) {
+            return Some(table);
+        }
+        let mut warned = WARNED_TABLES.lock().unwrap_or_else(|e| e.into_inner());
+        if !warned.iter().any(|(m, t)| *m == mod_id && t == id) {
+            let why = if malformed {
+                "not an identifier"
+            } else {
+                "not loaded"
+            };
+            log::warn!(
+                "mod {mod_id}: fishing_medium names the loot table {id:?}, which is {why}; \
+                 the catch rolls {FISHING_TABLE}"
+            );
+            warned.push((mod_id, id.to_owned()));
+        }
+        None
     }
     /// `FishingHook.checkCollision` clips blocks on both sides of the connection.
     fn hook_block_hit(&self, from: Vec3, to: Vec3) -> Option<BlockHit> {
@@ -2018,6 +2106,7 @@ impl Game<'_> {
         &mut self,
         id: u32,
         owner: Option<Vec3>,
+        own: bool,
         (mut position, mut velocity, state, mut on_ground): (Vec3, Vec3, State, bool),
         random: &mut impl RandomSource,
     ) -> (Vec3, Vec3, State, bool) {
@@ -2028,12 +2117,14 @@ impl Game<'_> {
         ];
         let liquid = self.water_height(b[0], b[1], b[2]).map_or(0.0, |w| w.0);
         // The same fishing medium the server's hook floats in, so it is drawn floating too.
-        let medium = if liquid > 0.0 || matches!(state, State::Hooked(_)) {
+        // Only the surface: a client rolls no table and draws no wait.
+        let surface = if liquid > 0.0 || matches!(state, State::Hooked(_)) {
             None
         } else {
-            self.hook_medium(id, position, owner)
+            self.hook_medium(id, position, owner, own)
+                .map(|m| m.answer.surface)
         };
-        let in_water = liquid > 0.0 || medium.is_some();
+        let in_water = liquid > 0.0 || surface.is_some();
         match state {
             State::Flying if in_water => {
                 velocity = Vec3::new(velocity.x * 0.3, velocity.y * 0.2, velocity.z * 0.3);
@@ -2088,8 +2179,8 @@ impl Game<'_> {
                 };
             }
             State::Bobbing => {
-                let mut force = match &medium {
-                    Some(m) => position.y + velocity.y - m.surface,
+                let mut force = match surface {
+                    Some(surface) => position.y + velocity.y - surface,
                     None => position.y + velocity.y - f64::from(b[1]) - f64::from(liquid),
                 };
                 if force.abs() < 0.01 {
@@ -2209,6 +2300,81 @@ fn cast_direction(yaw: f32, pitch: f32) -> (f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::{Hook, cast_direction, entity_hit_margin, first_entity_hit, pull_item, rebound};
+
+    /// `FishingHookRenderer.getPlayerHandPos` in first person on HotSpot 25.0.4.1: the camera at
+    /// yaw 30 looking straight up, fov 70 on 854 x 480, the right arm mid-swing (0.5). The
+    /// offset from the eye, as double bits.
+    #[test]
+    fn the_rod_hand_stays_on_the_near_plane_looking_straight_up() {
+        let mut camera = sunrise_client::camera::Camera::default();
+        camera.set_rotation(30.0, -90.0);
+        let plane = camera.near_plane(70.0, 854.0, 480.0);
+        assert_eq!(
+            super::near_plane_hand(plane, 70.0, 1.0, 0.5)
+                .to_array()
+                .map(f64::to_bits),
+            [
+                0xbfdc_771f_22e0_62d8,
+                0x3fe5_6f4f_fc00_3d1e,
+                0x3fc5_139d_516c_7487,
+            ]
+        );
+    }
+
+    /// `fishing_medium`'s surface: a bobber is in the medium below `floor(surface) + 1`, and a
+    /// surface that is not finite, or under the bobber, is no medium.
+    #[test]
+    fn a_medium_holds_the_bobber_up_to_the_top_of_its_surface_block() {
+        use sunrise_core::geometry::Vec3;
+        let medium = |surface| mod_api::FishingMedium {
+            surface,
+            ..Default::default()
+        };
+        let at = |y| Vec3::new(0.5, y, 0.5);
+        assert!(super::inside_medium(at(64.9), &medium(64.0)));
+        assert!(!super::inside_medium(at(65.0), &medium(64.0)));
+        assert!(super::inside_medium(at(-63.5), &medium(-64.0)));
+        assert!(!super::inside_medium(at(-62.5), &medium(-64.0)));
+        for surface in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -5.0] {
+            assert!(
+                !super::inside_medium(at(64.0), &medium(surface)),
+                "{surface}"
+            );
+        }
+    }
+
+    /// `catchingFish`'s wait in a medium: one `nextInt(max - min + 1)` from `min`, less Lure,
+    /// unclamped, and no range panics or overflows.
+    #[test]
+    fn a_mediums_lure_range_draws_once_and_never_overflows() {
+        use sunrise_core::random::{LegacyRandom, RandomSource};
+        // java.util.Random(42): nextInt(41) is 14, and the next nextInt(1000) is 763.
+        let mut random = LegacyRandom::new(42);
+        assert_eq!(super::lure_wait(&mut random, Some([20, 60]), 0), 34);
+        assert_eq!(random.next_int_bound(1000).unwrap(), 763, "one draw");
+        // Lure III (300 ticks) takes any wait of 20 to 60 below zero, not clamped.
+        let mut random = LegacyRandom::new(42);
+        assert_eq!(super::lure_wait(&mut random, Some([20, 60]), 300), -266);
+        // [0, -5] is [1, 1] and [60, 20] is [60, 60]: the one value, after one draw.
+        let mut random = LegacyRandom::new(42);
+        assert_eq!(super::lure_wait(&mut random, Some([0, -5]), 0), 1);
+        assert_eq!(super::lure_wait(&mut random, Some([60, 20]), 100), -40);
+        // java.util.Random(7): nextInt(2147483647) is 1569164236.
+        let mut random = LegacyRandom::new(7);
+        assert_eq!(
+            super::lure_wait(&mut random, Some([1, i32::MAX]), 0),
+            1_569_164_237
+        );
+        let mut random = LegacyRandom::new(7);
+        assert_eq!(
+            super::lure_wait(&mut random, Some([i32::MAX, i32::MAX]), 300),
+            i32::MAX - 300
+        );
+        assert_eq!(
+            super::lure_wait(&mut random, Some([i32::MIN, i32::MIN]), i32::MAX),
+            1 - i32::MAX
+        );
+    }
 
     /// Compare the production loot selector to a real FishingHook.retrieve oracle.
     #[test]
@@ -2572,3 +2738,7 @@ mod fishing_air_tests;
 #[cfg(test)]
 #[path = "fishing_tests/fishing_catch_tests.rs"]
 mod fishing_catch_tests;
+
+#[cfg(test)]
+#[path = "fishing_tests/fishing_medium_tests.rs"]
+mod fishing_medium_tests;

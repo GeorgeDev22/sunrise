@@ -25,6 +25,14 @@ pub(crate) struct Vanilla {
     pub motion: MotionResources,
 }
 
+impl Vanilla {
+    /// A collision binding of this test's own, for a test that marks part states: the marks live
+    /// in the binding, so tests that share `collision` would see each other's.
+    pub fn own_collision(&self) -> BlockCollisionRegistry<'static> {
+        crate::collisions::load(&self.root, self.assets.registry).unwrap()
+    }
+}
+
 /// The prepared vanilla data at `SUNRISE_TEST_RESOURCES`, or the checkout's
 /// `.local/sunrise-client/<version>`; `None` when neither has it (CI).
 pub(crate) fn vanilla() -> Option<&'static Vanilla> {

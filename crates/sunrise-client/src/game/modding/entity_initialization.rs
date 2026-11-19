@@ -156,6 +156,8 @@ pub(super) struct TransferredEntityState {
     journaled: Option<u32>,
     /// Filled by an abort that comes before the arrival: the contents the arrival puts back.
     rollback: Option<super::transactions::ArrivalRollback>,
+    /// The id the entity had before it travelled, which a kill credit may still name.
+    source: u32,
 }
 
 impl TransferredEntityState {
@@ -199,6 +201,7 @@ impl Game<'_> {
             died,
             journaled,
             rollback,
+            source: id,
             initialized: self
                 .entity_initialization
                 .initialized
@@ -214,9 +217,13 @@ impl Game<'_> {
         state: TransferredEntityState,
     ) {
         self.journal_arrival(id);
+        let level = self.dim;
+        self.entity_attachments.move_collider(id, level);
         if let Some(source) = state.journaled {
             self.journal_travel(source, id);
         }
+        let now = self.world.game_time;
+        self.levels.note_travel(state.source, id, now);
         if state.died {
             self.died.insert(id);
         }

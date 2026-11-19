@@ -57,7 +57,13 @@ mod tests {
         mod_api::Screen {
             width: 176.0,
             height: 166.0,
-            slots: vec![Some([8.0, 8.0]); 3],
+            slots: vec![
+                Some(mod_api::ScreenSlot {
+                    position: [8.0, 8.0],
+                    ..Default::default()
+                });
+                3
+            ],
             ..Default::default()
         }
     }
@@ -96,7 +102,10 @@ mod tests {
     fn screen_cannot_define_slots_outside_actual_storage() {
         let menu = menu();
         let mut geometry = screen();
-        geometry.slots.push(Some([8.0, 26.0]));
+        geometry.slots.push(Some(mod_api::ScreenSlot {
+            position: [8.0, 26.0],
+            ..Default::default()
+        }));
         let roles = RecipeBookLayout::Furnace {
             input: 0,
             fuel: 1,
@@ -116,7 +125,13 @@ mod tests {
             ..menu()
         };
         let geometry = mod_api::Screen {
-            slots: vec![Some([8.0, 8.0]); 8],
+            slots: vec![
+                Some(mod_api::ScreenSlot {
+                    position: [8.0, 8.0],
+                    ..Default::default()
+                });
+                8
+            ],
             ..screen()
         };
         let roles = RecipeBookLayout::Crafting {

@@ -9,7 +9,11 @@ impl Game<'_> {
         &mut self,
         guest: Option<u32>,
     ) -> sunrise_world::loot::LootEntity {
-        let own = |g: &Self| {
+        let capture_nbt = self
+            .server_loot
+            .get()
+            .is_some_and(|data| data.copies_entity_nbt());
+        let own = |g: &mut Self| {
             let mut e = sunrise_world::loot::LootEntity::new("minecraft:player");
             let slots = [
                 ("mainhand", g.stack_in(g.selected)),
@@ -23,6 +27,11 @@ impl Game<'_> {
                 if let Some(stack) = stack {
                     e.equipment.push((slot.into(), to_loot(stack)));
                 }
+            }
+            if capture_nbt {
+                e.nbt = g
+                    .command_target_nbt(crate::game::commands::Target::Player)
+                    .map(std::sync::Arc::new);
             }
             e
         };

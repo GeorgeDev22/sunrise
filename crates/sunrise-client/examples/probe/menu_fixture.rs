@@ -58,20 +58,20 @@ impl sunrise_client::menu::Maps for CaseMaps {
     }
 }
 
-fn state(menu: &Menu) -> String {
+fn state(menu: &Menu, catalog: &Items) -> String {
     let slots: Vec<String> = (0..menu.slot_count())
-        .map(|i| canon_stack(menu.slot(i)))
+        .map(|i| canon_stack(menu.slot(i), catalog))
         .collect();
     let data: String = menu.data.iter().map(|d| format!(" {d}")).collect();
     let equipped: Vec<String> = menu
         .equipped
         .iter()
-        .map(|(slot, stack)| format!("{slot}:{}", canon_stack(stack.as_ref())))
+        .map(|(slot, stack)| format!("{slot}:{}", canon_stack(stack.as_ref(), catalog)))
         .collect();
     let line = format!(
         "{} | {} |{data} | {} | {} | {}",
         slots.join(" "),
-        canon_stack(menu.carried.as_ref()),
+        canon_stack(menu.carried.as_ref(), catalog),
         menu.drops.join(";"),
         equipped.join(";"),
         menu.player_sounds.join(";")
@@ -81,7 +81,7 @@ fn state(menu: &Menu) -> String {
     }
     // No inventory slots: the inventory Take Book fills.
     let items: String = (0..36)
-        .map(|i| format!(" {}", canon_stack(menu.player_item(i))))
+        .map(|i| format!(" {}", canon_stack(menu.player_item(i), catalog)))
         .collect();
     format!("{line} | inv{items}")
 }
@@ -209,7 +209,7 @@ pub fn main() -> sunrise_client::Result<()> {
         menu.drops.clear();
         menu.equipped.clear();
         menu.player_sounds.clear();
-        out += &format!("init {}\n", state(&menu));
+        out += &format!("init {}\n", state(&menu, &items));
         for op in case["ops"].as_array().ok_or("ops")? {
             let slot = op[0].as_i64().unwrap_or(0) as i32;
             let button = op[1].as_i64().unwrap_or(0) as i32;
@@ -217,13 +217,13 @@ pub fn main() -> sunrise_client::Result<()> {
                 // ServerboundContainerButtonClickPacket: clickMenuButton.
                 "BUTTON" => {
                     menu.button(&env, slot);
-                    out += &format!("{}\n", state(&menu));
+                    out += &format!("{}\n", state(&menu, &items));
                     continue;
                 }
                 // ServerboundRenameItemPacket: AnvilMenu.setItemName.
                 "RENAME" => {
                     menu.rename(&env, op[3].as_str().unwrap_or_default());
-                    out += &format!("{}\n", state(&menu));
+                    out += &format!("{}\n", state(&menu, &items));
                     continue;
                 }
                 // ServerboundSetBeaconPacket: BeaconMenu.updateEffects.
@@ -237,7 +237,7 @@ pub fn main() -> sunrise_client::Result<()> {
                         power(effects.as_ref(), &op[4]),
                     );
                     menu.beacon_update(&env, primary, secondary);
-                    out += &format!("{}\n", state(&menu));
+                    out += &format!("{}\n", state(&menu, &items));
                     continue;
                 }
                 // ServerboundContainerSlotStateChangedPacket.
@@ -245,7 +245,7 @@ pub fn main() -> sunrise_client::Result<()> {
                     if (0..9).contains(&slot) {
                         menu.set_slot_state(slot as usize, button == 1);
                     }
-                    out += &format!("{}\n", state(&menu));
+                    out += &format!("{}\n", state(&menu, &items));
                     continue;
                 }
                 _ => {}
@@ -273,7 +273,7 @@ pub fn main() -> sunrise_client::Result<()> {
                 menu.data[3] = f.cooking_total;
             }
             match clicked {
-                Ok(()) => out += &format!("{}\n", state(&menu)),
+                Ok(()) => out += &format!("{}\n", state(&menu, &items)),
                 Err(name) => out += &format!("error {name}\n"),
             }
         }

@@ -305,29 +305,40 @@ impl DatapackRegistryDeclaration {
         let Value::Object(object) = json else {
             return Err(DatapackDecodeError::NotAnObject);
         };
-        if let Some(unknown) = object
-            .keys()
-            .find(|key| !self.fields.iter().any(|field| &field.name == *key))
-        {
-            return Err(DatapackDecodeError::UnknownField {
-                field: unknown.clone(),
-            });
-        }
-        let mut values = Vec::with_capacity(self.fields.len());
-        for field in &self.fields {
-            let value = match object.get(&field.name) {
-                Some(json) => decode_value(field, json)?,
-                None => field
-                    .default
-                    .clone()
-                    .ok_or_else(|| DatapackDecodeError::MissingField {
-                        field: field.name.clone(),
-                    })?,
-            };
-            values.push((field.name.clone(), value));
-        }
-        Ok(DatapackEntry { values })
+        decode_record(&self.fields, &object, &[])
     }
+}
+
+/// Decodes a JSON object against a flat record schema, the same way for every user of it (a
+/// datapack registry's entries, a mod feature type's configs): an undeclared key (other than
+/// the `ignored` ones the caller owns, a configured feature's `type`), a missing required key, a
+/// wrong type or an out-of-range value fails the whole record. Nothing here runs mod code.
+pub(crate) fn decode_record(
+    fields: &[DatapackField],
+    object: &serde_json::Map<String, Value>,
+    ignored: &[&str],
+) -> Result<DatapackEntry, DatapackDecodeError> {
+    if let Some(unknown) = object.keys().find(|key| {
+        !ignored.contains(&key.as_str()) && !fields.iter().any(|field| &field.name == *key)
+    }) {
+        return Err(DatapackDecodeError::UnknownField {
+            field: unknown.clone(),
+        });
+    }
+    let mut values = Vec::with_capacity(fields.len());
+    for field in fields {
+        let value = match object.get(&field.name) {
+            Some(json) => decode_value(field, json)?,
+            None => field
+                .default
+                .clone()
+                .ok_or_else(|| DatapackDecodeError::MissingField {
+                    field: field.name.clone(),
+                })?,
+        };
+        values.push((field.name.clone(), value));
+    }
+    Ok(DatapackEntry { values })
 }
 
 fn decode_value(field: &DatapackField, json: &Value) -> Result<DatapackValue, DatapackDecodeError> {

@@ -112,6 +112,9 @@ pub struct Hook {
     pub engine: HookEngine,
     #[serde(default, skip_serializing_if = "Counterparts::is_empty")]
     pub counterparts: Counterparts,
+    /// The name a built wasm mod exports a listener as ([`crate::call`]); outside the hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
     #[serde(flatten)]
     pub contract: HookContract,
     /// Its arguments and output as member records, `hook:<name>.<argument>`, in declaration
@@ -232,6 +235,10 @@ pub struct Method {
     /// Why it is not on wasm, when it is not; documentation, outside the hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wasm_reason: Option<String>,
+    /// The name a built wasm mod imports or exports this method as ([`crate::call`]), when it
+    /// crosses; outside the hash. Two builds' exports say offline whether a built mod loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
     #[serde(flatten)]
     pub contract: MethodContract,
 }
@@ -483,6 +490,61 @@ pub struct Capability {
     pub doc: String,
     #[serde(flatten)]
     pub contract: CapabilityContract,
+}
+
+/// A point, loop or internal from the SDK's source catalogs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineItem {
+    pub id: String,
+    pub hash: String,
+    #[serde(flatten)]
+    pub contract: EngineContract,
+}
+
+impl EngineItem {
+    /// Seal a catalog row's contract independently of its identity.
+    pub fn new(id: String, contract: EngineContract) -> Self {
+        Self {
+            id,
+            hash: crate::contract_hash(&contract),
+            contract,
+        }
+    }
+}
+
+/// What can change on a catalog row without changing its identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EngineContract {
+    Point {
+        name: String,
+        signature_hash: String,
+    },
+    Loop {
+        entry: String,
+        generic: String,
+        slot: String,
+        side: String,
+    },
+    Internal {
+        signature: String,
+        signature_hash: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        shape_only: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opaque_reason: Option<String>,
+    },
+}
+
+/// An engine-owned tag that a package may extend. Documentation is outside the contract hash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtensionTag {
+    /// Tag registry directory (for example `block`).
+    pub registry: String,
+    /// Namespaced tag identifier.
+    pub id: String,
+    /// The engine reader's contract.
+    pub doc: String,
 }
 
 /// A behaviour's contract: only its `version`, which is compared on its own and stays out of the

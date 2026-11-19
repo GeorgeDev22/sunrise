@@ -27,7 +27,7 @@ use sunrise_client::{
         visible_effect_particles,
     },
     lan::{
-        self, Lan, NetConfig,
+        self, NetConfig,
         chunks::ChunkEncoder,
         data::{BIOME_REGISTRY, SyncData},
         entity::{EntityState, States},
@@ -1100,7 +1100,7 @@ impl Game<'_> {
         {
             // The hub is the server thread's.
             let status = server
-                .call(|g| g.lan_status())
+                .ask(super::owner_link::OwnerRequest::LanStatus)
                 .ok_or(super::integrated::NO_ANSWER)?;
             return Ok(Some(status));
         }
@@ -1131,7 +1131,7 @@ impl Game<'_> {
     }
 
     /// `sunrise-ctl lan status`.
-    fn lan_status(&self) -> serde_json::Value {
+    pub(super) fn lan_status(&self) -> serde_json::Value {
         use serde_json::json;
         match &self.lan {
             Some(h) if !self.serving() || self.published_port().is_some() => json!({
@@ -1182,7 +1182,7 @@ impl Game<'_> {
         let port = if let Some(server) = &self.integrated {
             // ShareToLanScreen: IntegratedServer.publishServer.
             server
-                .call(move |g| g.publish(settings))
+                .ask(|reply| super::owner_link::OwnerRequest::Publish(settings, reply))
                 .ok_or(super::integrated::NO_ANSWER)??
         } else if self.serving() {
             return self.publish(settings).map(drop).map_err(Into::into);
@@ -1262,6 +1262,7 @@ impl Game<'_> {
             &sync.builtin,
             &biome_names,
             &registry,
+            self.res.shared_items(),
         );
         encoder.tables = Some(
             self.save
@@ -1272,7 +1273,7 @@ impl Game<'_> {
         self.lan_update_tag_sources(&mut encoder);
         let far = (net.lod_distance > 0)
             .then(|| sunrise_client::lod_net::Service::new(net.lod_distance, biome_names.clone()));
-        let lan = Lan::start_with(sync.clone(), net)?;
+        let lan = super::lan_configuration_tasks::start(sync.clone(), net)?;
         let mut hub = Hub::new(lan, sync, encoder, config, self.loop_context.clone());
         self.bind_guest_residency(&mut hub);
         self.passages.record_on(&mut hub);
@@ -1314,7 +1315,9 @@ impl Game<'_> {
     pub(super) fn lan_close(&mut self, announce: bool) {
         if self.integrated.is_some() || self.serving() {
             let closed = match &self.integrated {
-                Some(server) => server.call(|g| g.unpublish()).unwrap_or(false),
+                Some(server) => server
+                    .ask(super::owner_link::OwnerRequest::Unpublish)
+                    .unwrap_or(false),
                 None => self.unpublish(),
             };
             if closed {
@@ -1372,13 +1375,18 @@ impl Game<'_> {
         };
         // Every open menu closes first, in its guest's level
         // (`ServerPlayer.disconnect` -> `doCloseContainer`), so the cursor,
-        // the trade and the inputs are back in the file that is saved.
+        // the trade and the inputs are back in the file that is saved. An interrupted
+        // guest's file is not written, so its menu is left alone.
         let back = self.dim;
         let open: Vec<(u32, super::Dim)> = host
             .hub
             .guests
             .iter()
-            .filter(|g| g.placed && g.participates_in_player_simulation())
+            .filter(|g| {
+                g.placed
+                    && g.participates_in_player_simulation()
+                    && !self.crash_save.excludes(g.conn)
+            })
             .map(|g| (g.conn, super::Dim::from_id(&g.dimension)))
             .collect();
         for (conn, dim) in open {
@@ -1418,7 +1426,7 @@ impl Game<'_> {
             return;
         }
         // A proxy released this record to another server, which now owns saving it.
-        if guest.placed && !guest.released {
+        if guest.placed && !guest.released && !self.crash_save.excludes(guest.conn) {
             let _ = self.finish_player_autosaves(true);
             if self
                 .lan
@@ -1426,9 +1434,10 @@ impl Game<'_> {
                 .and_then(|host| host.owner.as_ref())
                 .is_some_and(|o| o.uuid == guest.uuid)
             {
-                playerdata::save_owner(guest, &mut self.level, &self.world_root);
+                playerdata::save_owner(guest, &mut self.level, &self.world_root, self.res.items());
             } else {
-                self.player_autosaves.save_after(guest, &self.world_root);
+                self.player_autosaves
+                    .save_after(guest, &self.world_root, self.res.items());
             }
             let directory = playerdata::directory(&self.world_root);
             self.native_player_save_to_file(guest.uuid, &guest.name, &directory);
@@ -1494,8 +1503,13 @@ impl Game<'_> {
     /// `PlayerList.remove` of a guest out of the hub: its file takes the
     /// vehicle it alone rides (`saveParentVehicle`'s RootVehicle, kept in
     /// `saved` as a file not yet ridden again), the vehicle tree leaves the
-    /// world, and the guest stops riding (`unRide`).
+    /// world, and the guest stops riding (`unRide`). A guest the crash save excludes keeps
+    /// the vehicle in the world: its file is not written, so nothing would hold it.
     pub(super) fn take_parent_vehicle(&mut self, guest: &mut sunrise_client::lan::guest::Guest) {
+        // An interrupted player's file is not written, so the vehicle stays in the world.
+        if self.crash_save.excludes(guest.conn) {
+            return;
+        }
         let Some(vehicle) = guest.vehicle.take() else {
             return;
         };
@@ -1581,7 +1595,7 @@ impl Game<'_> {
     /// live record, independently of the dirty entries sent to their client.
     pub(super) fn save_connected_guest_statistics(&self, host: &LanHost) {
         for guest in &host.hub.guests {
-            if !guest.placed || guest.released {
+            if !guest.placed || guest.released || self.crash_save.excludes(guest.conn) {
                 continue;
             }
             let Some(uuid) = self.records_uuid(host, guest.uuid) else {
@@ -1687,7 +1701,7 @@ impl Game<'_> {
             .hub
             .guests
             .iter()
-            .position(|g| g.uuid == uuid && g.placed)
+            .position(|g| g.uuid == uuid && g.placed && !self.crash_save.excludes(g.conn))
         {
             let live = Some(self.player_state.attachments.clone());
             host.hub.guests.update(i, |g| {
@@ -1780,7 +1794,11 @@ impl Game<'_> {
     /// New command access and game mode forcing settings of the open world.
     pub(super) fn lan_apply_settings(&mut self, guest_commands: bool, force: bool) {
         if let Some(server) = &self.integrated {
-            server.call(move |g| g.lan_apply_settings(guest_commands, force));
+            server.ask(|done| super::owner_link::OwnerRequest::LanApplySettings {
+                guest_commands,
+                force,
+                done,
+            });
             return;
         }
         // An integrated server gives guests commands only where the world
@@ -2063,15 +2081,6 @@ impl Game<'_> {
                 event @ (HostEvent::Chat { .. } | HostEvent::Warn(_) | HostEvent::Error(_)) => {
                     self.lan_log_event(event);
                 }
-                HostEvent::Ban { uuid, name, reason } => self.anticheat_ban(uuid, &name, &reason),
-                HostEvent::ChatFiltered {
-                    sender,
-                    name,
-                    place,
-                    text,
-                    count,
-                    action,
-                } => self.chat_filtered(sender, &name, place, &text, count, action),
                 HostEvent::PlayerChat { sender, text } => {
                     self.lan_player_chatted(sender, &text);
                 }
@@ -2430,7 +2439,7 @@ impl Game<'_> {
         if self.level_pass.packets_drained {
             return;
         }
-        let Some(mut host) = self.lan.take() else {
+        let Some(mut host) = self.take_lan_for_packet_tick() else {
             return;
         };
         let holding = lan::Holding::start();
@@ -2438,6 +2447,9 @@ impl Game<'_> {
         // before this tick moves anyone.
         let entities = std::mem::take(&mut host.states);
         let spawn = self.world_spawn_position();
+        let mut solids = std::mem::take(&mut host.hub.move_solids);
+        self.fill_move_solids(&mut solids, !host.hub.guests.is_empty());
+        host.hub.move_solids = solids;
         let events = {
             let clock_rate = self.network_clock_rate();
             let mut ctx = TickCtx {
@@ -2773,11 +2785,22 @@ impl Game<'_> {
             }
             host.hub.far_level(&self.save);
             let spawn = self.world_spawn_position();
+            let mut solids = self
+                .lan
+                .as_mut()
+                .map(|host| std::mem::take(&mut host.hub.move_solids))
+                .unwrap_or_default();
+            let guests = self
+                .lan
+                .as_ref()
+                .is_some_and(|host| !host.hub.guests.is_empty());
+            self.fill_move_solids(&mut solids, guests);
             let (events, last) = {
                 let clock_rate = self.network_clock_rate();
                 let Some(host) = self.lan.as_mut() else {
                     return;
                 };
+                host.hub.move_solids = solids;
                 let mut ctx = TickCtx {
                     sea_level: self.end.locator().map_or(63, |terrain| terrain.sea_level()),
                     world: &mut self.world,
@@ -2907,9 +2930,6 @@ impl Game<'_> {
         self.lan_update_waypoints();
         self.lan_sync_scoreboard();
         self.lan_sync_border();
-        if let Some(host) = self.lan.as_mut() {
-            host.hub.anticheat_ping();
-        }
         drop(holding);
         self.flush_attachment_sync();
         self.flush_far_terrain();
@@ -3604,7 +3624,43 @@ impl Game<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventTimings, OFFHAND_SLOT, equipment_slot_name, living_flags, mob_freeze_meta};
+    use super::{
+        EventTimings, Hub, LanHost, LanSettings, OFFHAND_SLOT, equipment_slot_name, living_flags,
+        mob_freeze_meta,
+    };
+
+    impl LanHost {
+        /// Install an already configured fixture hub without touching the process-wide sync cache.
+        pub(in crate::game) fn for_test(hub: Hub) -> Self {
+            Self {
+                settings: LanSettings {
+                    port: hub.lan.port,
+                    guest_commands: false,
+                    force_game_mode: false,
+                },
+                hub,
+                players_told_left: false,
+                play: Default::default(),
+                menus: Default::default(),
+                broken: Default::default(),
+                mob_state: Default::default(),
+                poses: Default::default(),
+                mob_players: Default::default(),
+                owner: None,
+                waypoints: Default::default(),
+                waypoint_dead: Default::default(),
+                border_sent: None,
+                commands: Default::default(),
+                quiet: Default::default(),
+                far: None,
+                native_commands_sent: None,
+                sleep_ignored: Default::default(),
+                states: Default::default(),
+                states_next_entity: None,
+                idle_states: Default::default(),
+            }
+        }
+    }
 
     #[test]
     fn a_burst_of_short_events_still_has_a_slow_tick_note() {
@@ -3700,6 +3756,7 @@ mod tests {
             &sunrise_protocol::registry::Builtin::default(),
             &[],
             &[],
+            Default::default(),
         );
         let config = sunrise_client::lan::hub::HubConfig {
             default_game_mode: 0,
@@ -3744,33 +3801,7 @@ mod tests {
         guest.placed = true;
         guest.dimension = "minecraft:overworld".into();
         hub.guests.push(guest);
-        game.lan = Some(super::LanHost {
-            hub,
-            players_told_left: false,
-            settings: super::LanSettings {
-                port: 0,
-                guest_commands: false,
-                force_game_mode: false,
-            },
-            play: Default::default(),
-            menus: Default::default(),
-            broken: Default::default(),
-            mob_state: Default::default(),
-            poses: Default::default(),
-            mob_players: Default::default(),
-            owner: None,
-            waypoints: Default::default(),
-            waypoint_dead: Default::default(),
-            border_sent: None,
-            commands: Default::default(),
-            quiet: Default::default(),
-            far: None,
-            native_commands_sent: None,
-            sleep_ignored: Default::default(),
-            states: Default::default(),
-            states_next_entity: None,
-            idle_states: Default::default(),
-        });
+        game.lan = Some(LanHost::for_test(hub));
         for (block, expected) in [
             ("minecraft:ladder", false),
             ("minecraft:scaffolding", false),
@@ -4029,17 +4060,23 @@ mod tests {
         let damage = Catalog::load(&root, &PackOverlay::NONE).unwrap();
         let initial = vec![(
             "dialog/demo:before".into(),
-            vec![br#"{"type":"minecraft:notice"}"#.to_vec()],
+            vec![br#"{"type":"minecraft:notice","title":"Before"}"#.to_vec()],
         )];
-        let mut cache = SyncCache::default();
-        initialize_world_sync_data(
-            &mut cache,
+        let initial = PackOverlay::new(&initial);
+        let packed = sunrise_client::lan::data::SyncData::stage_registry_definitions(
             &root,
-            &PackOverlay::new(&initial),
-            &damage,
-            &item_data,
+            item_data.defaults(),
+            &initial,
+            &Default::default(),
+            &Default::default(),
+            |_| true,
         )
         .unwrap();
+        let mut cache = SyncCache {
+            packed_registries: Some(std::sync::Arc::new(packed)),
+            ..SyncCache::default()
+        };
+        initialize_world_sync_data(&mut cache, &root, &initial, &damage, &item_data).unwrap();
         assert!(cache.data.is_none());
         // A late vanilla helper cannot install its overlay over this world.
         cached_sync_data(&mut cache, &root, &PackOverlay::NONE, &item_data).unwrap();
@@ -4055,7 +4092,7 @@ mod tests {
             ),
             (
                 "dialog/demo:after".into(),
-                vec![br#"{"type":"minecraft:notice"}"#.to_vec()],
+                vec![br#"{"type":"minecraft:notice","title":"After"}"#.to_vec()],
             ),
             (
                 "tags/demo:damage_type/reloaded".into(),
@@ -4071,11 +4108,8 @@ mod tests {
         let wire = cached_sync_data(&mut cache, &root, &overlay, &item_data).unwrap();
         assert!(wire.id("minecraft:damage_type", "demo:too_late").is_none());
         assert!(health.id("demo:too_late").is_none());
-        assert!(wire.id("minecraft:dialog", "demo:before").is_none());
-        assert!(
-            wire.id("minecraft:dialog", "demo:after").is_some(),
-            "unrelated registries stay lazy"
-        );
+        assert!(wire.id("minecraft:dialog", "demo:before").is_some());
+        assert!(wire.id("minecraft:dialog", "demo:after").is_none());
         let fall = wire.id("minecraft:damage_type", "minecraft:fall").unwrap();
         let packets = wire.registry_packets(false, &sunrise_client::chunk::LevelShapes::VANILLA);
         let packet = packets
@@ -4925,17 +4959,6 @@ mod tests {
             ]
             .into();
             mod_platform::testing::with_mods(mods, || {
-                // The game fixture bypasses content_root, which normally resolves
-                // the particle registry before any hook converts particle values.
-                let particles: Vec<_> = ParticleType::ALL
-                    .iter()
-                    .map(|ty| format!("minecraft:{}", ty.name()))
-                    .collect();
-                mod_api::__private::resolve_particles(particles.iter().map(String::as_str), |id| {
-                    ParticleType::from_name(id)
-                        .map(|ty| mod_api::__private::ParticleKind::Vanilla(ty as u32))
-                })
-                .unwrap();
                 // The zombie's speed is replaced, its hidden strength shown,
                 // its omen back at the default and its regeneration hidden,
                 // and the strength it shows keeps the flag off. The guest's
@@ -5526,247 +5549,9 @@ mod mob_swing_sync_tests {
         );
     }
 }
-#[cfg(test)]
-mod owner_attachment_save_tests {
-    use super::*;
-    use sunrise_core::nbt::Tag;
-    use sunrise_mod_runtime::attachments::{
-        AttachmentCodec, AttachmentError, AttachmentType, Attachments,
-    };
-
-    static PROGRESS: AttachmentType<i32> = AttachmentType {
-        namespace: "test",
-        name: "progress",
-        default: || 0,
-        codec: Some(AttachmentCodec {
-            encode: |n: &i32| Ok([("n".into(), Tag::Int(*n))].into()),
-            decode: |c| match c.get(&"n".into()) {
-                Some(Tag::Int(n)) => Ok(*n),
-                _ => Err(AttachmentError::Decode),
-            },
-        }),
-        copy_on_death: true,
-        sync: false,
-    };
-
-    /// The live value as the named owner file would hold it.
-    fn saved_value(game: &Game<'_>) -> Option<i32> {
-        let Some(Tag::Compound(map)) = game.level.player_extra.as_ref() else {
-            return None;
-        };
-        let data = sunrise_mod_runtime::attachments::attachment_compound(
-            map.get(&sunrise_mod_runtime::attachments::ATTACHMENTS_KEY.into()),
-        )
-        .ok()
-        .flatten()?;
-        PROGRESS
-            .get_existing(
-                &mut Attachments::from_nbt(data.clone()),
-                sunrise_mod_runtime::attachments::Holder::Level,
-            )
-            .ok()
-            .flatten()
-    }
-
-    #[test]
-    #[ignore = "daily"]
-    fn an_autosave_writes_the_owners_live_attachments_to_the_file_it_loads() {
-        let mut resources = None;
-        let mut game = crate::game::game_tests::tests::server_game(&mut resources);
-        let _rx = super::world_spawn_sync_tests::host_for(&mut game);
-        let uuid = 1;
-        game.lan.as_mut().unwrap().owner = Some(Owner { uuid, saved: None });
-        // While the owner plays, its attachments are the game's, not the guest's.
-        PROGRESS
-            .set(
-                &mut game.player_state.attachments,
-                sunrise_mod_runtime::attachments::Holder::Level,
-                7,
-            )
-            .unwrap();
-        assert!(game.store_owner().is_some());
-        assert_eq!(
-            saved_value(&game),
-            Some(7),
-            "the autosave stores the live value"
-        );
-        let host = game.lan.as_ref().unwrap();
-        let g = host.hub.guests.iter().find(|g| g.uuid == uuid).unwrap();
-        assert!(
-            g.attachments.to_nbt().is_empty(),
-            "the map stays their one owner"
-        );
-        // A later change is what the next autosave writes.
-        PROGRESS
-            .set(
-                &mut game.player_state.attachments,
-                sunrise_mod_runtime::attachments::Holder::Level,
-                9,
-            )
-            .unwrap();
-        game.store_owner();
-        assert_eq!(saved_value(&game), Some(9));
-    }
-}
 
 #[cfg(test)]
-mod connected_statistics_save_tests {
-    use std::fs;
-
-    fn connected_stats_save_control(stale: bool) {
-        use super::super::{execution_role::ExecutionRole, stats};
-        use std::sync::{Arc, Mutex};
-        let mut resources = None;
-        let mut game = crate::game::game_tests::tests::server_game(&mut resources);
-        game.options.execution_role = ExecutionRole::DedicatedServer;
-        // The command's dedicated-only guard also checks the launch mode.
-        game.options.dedicated = Some(Vec::new());
-        let dir = std::env::current_dir().unwrap().join(if stale {
-            "stats-stale"
-        } else {
-            "stats-missing"
-        });
-        fs::create_dir_all(&dir).unwrap();
-        game.world_root = dir.clone();
-        game.save = Arc::new(sunrise_client::save::SaveDir::new(
-            dir.clone(),
-            sunrise_client::save::LevelShape::OVERWORLD,
-        ));
-        use sunrise_client::server::user_lists::{BanList, IpBanList, OpList, WhiteList};
-        game.server_lists = Some(Arc::new(Mutex::new(super::super::dedicated::Lists {
-            ops: OpList::new(dir.join("ops.json")),
-            white: WhiteList::new(dir.join("whitelist.json")),
-            bans: BanList::new(dir.join("banned-players.json")),
-            ip_bans: IpBanList::new(dir.join("banned-ips.json")),
-            use_whitelist: false,
-            enforce_whitelist: false,
-            op_level: 4,
-            player_idle_timeout: 0,
-            stop: false,
-            autosave: true,
-            whitelist_bypass: Vec::new(),
-        })));
-        game.set_allow_commands(true);
-        let _rx = super::world_spawn_sync_tests::host_for(&mut game);
-        let host = game.lan.as_mut().unwrap();
-        host.owner = None;
-        host.hub
-            .guests
-            .update(0, |guest| guest.dimension = "minecraft:overworld".into());
-        assert!(host.hub.guests[0].placed);
-        assert!(!host.hub.guests[0].released);
-        assert_eq!(host.hub.guests[0].uuid, 1);
-        let path = stats::player_json(&dir, "stats", [0, 0, 0, 1]);
-        assert!(!path.exists());
-        let play = host.play.entry(1).or_default();
-        play.stats.loaded = true;
-        if stale {
-            play.stats.add("used", "minecraft:diamond_sword", 4);
-            play.stats.write(&path);
-        }
-        play.stats.add("used", "minecraft:diamond_sword", 1);
-        let expected = if stale { 5 } else { 1 };
-        // Packet dirty state is not the file's authority: a stats response can
-        // consume it before the connected player's next server save.
-        assert!(!play.stats.take_dirty().is_empty());
-        assert_eq!(play.stats.get("used", "minecraft:diamond_sword"), expected);
-        assert!(play.stats.take_dirty().is_empty());
-        for command in ["save-all", "save-all flush"] {
-            game.chat_capture = Some(Vec::new());
-            // Match dedicated registration without changing the process-wide
-            // tree used by unrelated integrated-server tests.
-            let dispatcher = sunrise_client::command::vanilla::build_for(false, true);
-            game.ui.registries.permission = 4;
-            let parsed = dispatcher.parse(command, &game.ui.registries);
-            let (ctx, _) = parsed.executable().expect("registered dedicated command");
-            let (root, ctx) = (parsed.context.clone(), ctx.clone());
-            assert_eq!(game.run_chain(&root, &ctx).unwrap(), 1);
-            let messages = game.chat_capture.take().unwrap();
-            assert!(
-                messages
-                    .iter()
-                    .any(|m| m.translation_key() == Some("commands.save.success")),
-                "actual save completion"
-            );
-            let host = game.lan.as_ref().unwrap();
-            assert_eq!(host.hub.guests.len(), 1, "saved while still connected");
-            assert_eq!(
-                host.play[&1].stats.get("used", "minecraft:diamond_sword"),
-                expected
-            );
-            let raw = fs::read_to_string(&path)
-                .expect("save-all must write the connected guest's actual stats file");
-            let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
-            assert_eq!(
-                json["stats"]["minecraft:used"]["minecraft:diamond_sword"], expected,
-                "{command}: current live value, not stale disk data"
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "daily"]
-    fn save_all_creates_the_connected_guests_statistics_file() {
-        connected_stats_save_control(false);
-    }
-
-    #[test]
-    #[ignore = "daily"]
-    fn save_all_replaces_stale_connected_guest_statistics() {
-        connected_stats_save_control(true);
-    }
-}
-
-#[cfg(test)]
-mod connected_statistics_save_exclusion_tests {
-
-    /// Source controls for the bounded eligibility gates; these excluded
-    /// guests are not counted as successfully saved players.
-    #[test]
-    #[ignore = "daily"]
-    fn excluded_guest_records_are_not_invented_or_written() {
-        let mut resources = None;
-        let mut game = crate::game::game_tests::tests::server_game(&mut resources);
-        let _rx = super::world_spawn_sync_tests::host_for(&mut game);
-        game.world_root = std::env::current_dir().unwrap().join("stats-excluded");
-        std::fs::create_dir_all(&game.world_root).unwrap();
-        let path = super::super::stats::player_json(&game.world_root, "stats", [0, 0, 0, 1]);
-        let mut host = game.lan.take().unwrap();
-        host.play
-            .entry(1)
-            .or_default()
-            .stats
-            .add("used", "minecraft:diamond_sword", 1);
-        host.hub.guests.update(0, |guest| guest.placed = false);
-        game.save_connected_guest_statistics(&host);
-        assert!(!path.exists(), "not placed: no statistics file");
-        host.hub.guests.update(0, |guest| guest.placed = true);
-        host.hub.guests.update(0, |guest| guest.released = true);
-        game.save_connected_guest_statistics(&host);
-        assert!(!path.exists(), "released: no statistics file");
-        host.hub.guests.update(0, |guest| guest.released = false);
-        let play = host.play.remove(&1).unwrap();
-        game.save_connected_guest_statistics(&host);
-        assert!(!path.exists(), "no play record: no invented statistics");
-        host.play.insert(1, play);
-        game.lan = Some(host);
-        game.options.dedicated = None;
-        game.save_game_metadata().unwrap();
-        assert!(!path.exists(), "the existing dedicated gate is preserved");
-        game.options.dedicated = Some(Vec::new());
-        game.options.execution_role = crate::game::execution_role::ExecutionRole::Client;
-        game.save_game_metadata().unwrap();
-        assert!(!path.exists(), "the existing nonclient gate is preserved");
-        game.options.execution_role = crate::game::execution_role::ExecutionRole::DedicatedServer;
-        let host = game.lan.take().unwrap();
-        game.save_game_metadata().unwrap();
-        assert!(!path.exists(), "no hub: no substituted record");
-        assert_eq!(
-            host.play[&1].stats.get("used", "minecraft:diamond_sword"),
-            1
-        );
-    }
-}
+mod owner_attachment_connected_statistics_save_tests;
 
 use super::stats;
 mod advancement_records;
@@ -5822,6 +5607,7 @@ mod merchant_packet_tests {
                 &sunrise_protocol::registry::Builtin::default(),
                 &[],
                 &[],
+                Default::default(),
             );
             let config = sunrise_client::lan::hub::HubConfig {
                 default_game_mode: 0,

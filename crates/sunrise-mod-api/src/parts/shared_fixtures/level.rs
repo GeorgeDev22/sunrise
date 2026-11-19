@@ -2,6 +2,8 @@
 /// State 1 is a `test:gauge`, state 2 a `test:other`.
 pub(crate) struct Level;
 #[cfg(test)]
+impl crate::LevelRandomHost for Level {}
+#[cfg(test)]
 impl LevelHost for Level {
     fn block_state(&self, _: [i32; 3]) -> Option<crate::BlockState> {
         None

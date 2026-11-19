@@ -4,8 +4,10 @@
 //! return to the owner, pickup) with `ThrownTridentRenderer`, and Channeling's
 //! lightning on a hit (`channeling.json`).
 use super::level_sounds::LevelSound;
-use super::{Game, commands::Target, minecarts::CartHit, view_vector};
+use super::{Game, commands::Target, minecarts::CartHit};
+use crate::game::collision_source::Mover;
 use mod_api::SoundSource;
+use sunrise_client::motion::MotionWorld;
 use sunrise_client::{
     arrows::{Pickup, back_off, clip_block_hit},
     collisions::SceneCollisions,
@@ -144,6 +146,7 @@ impl ThrownTrident {
         uuid: [i32; 4],
         registry: &sunrise_world::registry::BlockRegistry,
         raw: Option<&sunrise_core::nbt::Tag>,
+        items: &crate::items::Items,
     ) -> sunrise_core::nbt::Tag {
         let mut tag = sunrise_client::entity_nbt::trident_to_nbt(
             &sunrise_client::entity_nbt::TridentSave {
@@ -168,6 +171,7 @@ impl ThrownTrident {
             },
             uuid,
             raw,
+            items,
         );
         // `AbstractArrow.addAdditionalSaveData`: `storeNullable("inBlockState")`,
         // never a stale value from the loaded compound.
@@ -352,8 +356,10 @@ impl ThrownTrident {
         } else {
             (m.x, m.z)
         };
-        self.yaw = x.atan2(z).to_degrees() as f32;
-        self.pitch = m.y.atan2(m.x.hypot(m.z)).to_degrees() as f32;
+        // Projectile.updateRotation's targets: Mth.atan2 times the folded 180F / (float)PI, the pitch over
+        // Vec3.horizontalDistance.
+        self.yaw = sunrise_core::geometry::trig::atan2_degrees(x, z);
+        self.pitch = sunrise_core::geometry::trig::atan2_degrees(m.y, m.horizontal_distance());
         let to = self.position.add_vector(m);
         if !self.no_physics
             && let Some((at, _, _)) = w.clip(self.position, to)
@@ -557,46 +563,51 @@ impl Game<'_> {
             // trident_spin_attack_strength: 1.5 + 0.75 per level above the first.
             let spin_stack = self.held().cloned();
             let strength = 1.5 + 0.75 * (riptide as f32 - 1.0);
-            let d = view_vector(self.yaw, self.pitch);
+            // TridentItem.releaseUsing: the look in floats from Mth's sine table, scaled to
+            // the strength by its float length (Mth.sqrt), then Entity.push.
+            use sunrise_core::geometry::trig;
+            let (y, x) = (
+                f64::from(self.yaw * trig::DEG_TO_RAD),
+                f64::from(self.pitch * trig::DEG_TO_RAD),
+            );
+            let xd = -trig::sin(y) * trig::cos(x);
+            let yd = -trig::sin(x);
+            let zd = trig::cos(y) * trig::cos(x);
+            let scale = strength / f64::from(xd * xd + yd * yd + zd * zd).sqrt() as f32;
             if let Some(p) = self.player.as_mut() {
                 p.velocity = Vec3::new(
-                    p.velocity.x + d[0] * f64::from(strength),
-                    p.velocity.y + d[1] * f64::from(strength),
-                    p.velocity.z + d[2] * f64::from(strength),
+                    p.velocity.x + f64::from(xd * scale),
+                    p.velocity.y + f64::from(yd * scale),
+                    p.velocity.z + f64::from(zd * scale),
                 );
                 // Player.startAutoSpinAttack(20, 8, stack).
                 p.auto_spin_attack_ticks = 20;
                 p.auto_spin_attack_dmg = 8.0;
                 p.auto_spin_attack_item = spin_stack;
             }
-            // `player.move(SELF, (0, 1.1999999, 0))` when on the ground: the lift
-            // stops at a ceiling. A self move through the move gate (#2414);
-            // PR 1a records the movement unchanged.
-            let lift = self
-                .player
-                .as_ref()
-                .filter(|p| p.ground.on_ground)
-                .map(|p| p.bounds());
-            if let Some(bounds) = lift {
-                let mut scene = SceneCollisions {
-                    world: &self.world,
-                    binding: self.collision,
-                    subject: None,
-                };
-                let up = Vec3::new(0.0, f64::from(1.1999999f32), 0.0);
-                let mut gate = sunrise_client::move_gate::armed(
-                    &self.loop_context,
-                    self.player.as_ref().map_or(0, |p| p.entity_id as u32),
-                    "minecraft:player",
-                    sunrise_world::entity_move::MoverType::SelfMovement,
-                    up,
-                );
-                let moved = sunrise_client::move_gate::scene_resolve(
-                    &mut gate, &mut scene, bounds, up, 0.0, true,
-                )
-                .unwrap_or(Vec3::ZERO);
-                if let Some(p) = self.player.as_mut() {
-                    p.position.y += moved.y;
+            // `player.move(SELF, (0, 1.1999999, 0))` when on the ground: the player's own move
+            // (LocalPlayer.move, through the move gate, #2414), which stops at a ceiling and whose
+            // end writes the ground state, so the rest of the tick travels in the air.
+            if self.player.as_ref().is_some_and(|p| p.ground.on_ground) {
+                let entities = self.entity_collisions(Mover::Player);
+                if let Some(player) = self.player.as_mut() {
+                    let _ = MotionWorld {
+                        entities: &entities,
+                        player,
+                        scene: &mut self.world,
+                        assets: &self.pack.assets,
+                        collision_binding: self.collision,
+                        resources: self.motion,
+                        health: &self.health_resources,
+                        loop_context: &self.loop_context,
+                        damage_hooks: &self.damage_hooks,
+                        tag_items: Some(world_items!(self)),
+                        block_registries: Some(&self.pack.block_registries),
+                    }
+                    .move_self(
+                        &mut sunrise_world::move_gate::MoveGate::new(),
+                        Vec3::new(0.0, f64::from(1.1999999f32), 0.0),
+                    );
                 }
             }
             if !server_client {
@@ -1619,14 +1630,17 @@ mod tests {
     fn a_trident_hits_with_its_own_sound_once() {
         use sunrise_core::nbt::Tag;
         let registry = stone_registry();
-        let saved =
-            |t: &ThrownTrident| t.to_nbt([0; 4], &registry, None).get("SoundEvent").cloned();
+        let saved = |t: &ThrownTrident| {
+            t.to_nbt([0; 4], &registry, None, &Default::default())
+                .get("SoundEvent")
+                .cloned()
+        };
         let sound = |id: &str| Some(Tag::String(id.into()));
         let mut t = ThrownTrident::remote(1, Vec3::ZERO, 0.0, 0.0);
         assert_eq!(saved(&t), sound("minecraft:item.trident.hit_ground"));
         assert_eq!(t.hit_ground_sound(), "minecraft:item.trident.hit_ground");
         assert_eq!(saved(&t), sound("minecraft:entity.arrow.hit"));
-        let tag = t.to_nbt([0; 4], &registry, None);
+        let tag = t.to_nbt([0; 4], &registry, None, &Default::default());
         let n = sunrise_client::entity_nbt::trident_from_nbt(&tag).unwrap();
         let mut back = ThrownTrident::from_nbt(n, &tag, &registry);
         assert_eq!(back.hit_ground_sound(), "minecraft:entity.arrow.hit");
@@ -1668,7 +1682,7 @@ mod tests {
         // `inGroundTime` is not saved: Loyalty's count starts at 0 whatever
         // `life` was, so a negative `life` does not hold the trident back.
         assert_eq!((back.life, back.in_ground_time), (-1, 0));
-        let saved = back.to_nbt([1; 4], &registry, None);
+        let saved = back.to_nbt([1; 4], &registry, None, &Default::default());
         assert_eq!(saved.get("life"), Some(&Tag::Short(-1)));
         assert_eq!(saved.get("shake"), Some(&Tag::Byte(-1)));
     }
@@ -1680,12 +1694,12 @@ mod tests {
         let registry = stone_registry();
         let mut t = ThrownTrident::remote(1, Vec3::ZERO, 0.0, 0.0);
         assert!(
-            t.to_nbt([1; 4], &registry, None)
+            t.to_nbt([1; 4], &registry, None, &Default::default())
                 .get("inBlockState")
                 .is_none()
         );
         t.last_state = registry.default_state("minecraft:stone");
-        let tag = t.to_nbt([1; 4], &registry, None);
+        let tag = t.to_nbt([1; 4], &registry, None, &Default::default());
         assert_eq!(
             tag.get("inBlockState"),
             Some(&Tag::String("minecraft:stone".into()))
@@ -1706,14 +1720,20 @@ mod tests {
             _ => None,
         };
         let fresh = ThrownTrident::remote(1, Vec3::ZERO, 0.0, 0.0);
-        assert_eq!(fall(&fresh.to_nbt([1; 4], &registry, None)), Some(0.0));
+        assert_eq!(
+            fall(&fresh.to_nbt([1; 4], &registry, None, &Default::default())),
+            Some(0.0)
+        );
         let tag = Tag::compound([
             ("Pos", Tag::List(vec![Tag::Double(0); 3])),
             ("fall_distance", Tag::Double(5.0_f64.to_bits())),
         ]);
         let loaded = sunrise_client::entity_nbt::trident_from_nbt(&tag).unwrap();
         let back = ThrownTrident::from_nbt(loaded, &tag, &registry);
-        assert_eq!(fall(&back.to_nbt([1; 4], &registry, None)), Some(5.0));
+        assert_eq!(
+            fall(&back.to_nbt([1; 4], &registry, None, &Default::default())),
+            Some(5.0)
+        );
     }
 
     /// `AbstractArrow.startFalling` on `new Random(42)`: its first three
@@ -1858,5 +1878,111 @@ mod tests {
         game.release_trident(10);
         assert_eq!(game.tridents[1].pickup, super::Pickup::CreativeOnly);
         assert!(game.held().is_some());
+    }
+
+    /// `TridentItem.releaseUsing` launches a Riptide III player along the float look vector
+    /// scaled to 3.0 by its float length, added to the velocity it had. The expected components
+    /// are computed apart from the code, with every step rounded to f32 as the look is.
+    #[test]
+    #[ignore = "daily"]
+    fn riptide_launch_preserves_float_push() {
+        use crate::game::{Audio, Options, PlayerMotion, Progress, Settings, load_resources};
+        let root = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            sunrise_assets::resource_source::ResourceRoot::directory(root.clone()),
+            Vec::new(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            crate::game::execution_role::ExecutionRole::IntegratedServer,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.game_dir = Some(
+            std::path::PathBuf::from(std::env::var_os("SUNRISE_HOME").unwrap())
+                .join("trident-riptide"),
+        );
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let mut game = super::Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&sunrise_assets::resource_source::ResourceSource::directory(
+                root.to_path_buf(),
+            )),
+            None,
+        )
+        .unwrap();
+        game.world.chunks.insert(
+            (0, 0),
+            std::sync::Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)),
+        );
+        let water = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:water")
+            .unwrap();
+        game.world.set(4, 200, 4, water).unwrap();
+        let mut player = PlayerMotion::new(game.motion, super::Vec3::new(4.5, 200.0, 4.5)).unwrap();
+        player.velocity = super::Vec3::new(0.1, 0.2, 0.3);
+        game.player = Some(player);
+        game.yaw = 30.0;
+        game.pitch = 20.0;
+        let mut stack = super::ItemStack::new("minecraft:trident", 1);
+        stack
+            .data_mut()
+            .enchantments
+            .push(("minecraft:riptide".into(), 3));
+        *game.held_mut() = Some(stack.clone());
+        assert!(game.use_trident(&stack));
+        game.release_trident(10);
+        let velocity = game.player.as_ref().unwrap().velocity;
+        assert_eq!(velocity.x, f64::from_bits(0xbff4_f3bb_2666_6666));
+        assert_eq!(velocity.y, f64::from_bits(0xbfea_6d1e_9999_999a));
+        assert_eq!(velocity.z, f64::from_bits(0x4005_ee9e_c666_6666));
+    }
+
+    /// TridentItem.releaseUsing on the ground: the riptide's `move(SELF, (0, 1.1999999, 0))` is the player's own
+    /// move, whose end writes the ground state, so the player is in the air for the rest of the tick (and travels
+    /// with air friction) as vanilla's is.
+    #[test]
+    #[ignore = "daily"]
+    fn a_riptide_from_the_ground_leaves_the_player_in_the_air() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            use std::sync::Arc;
+            use sunrise_client::{chunk::Chunk, motion::PlayerMotion};
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let registry = game.pack.assets.registry;
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            let water = registry.default_state("minecraft:water").unwrap();
+            game.world.set(0, 63, 0, stone).unwrap();
+            game.world.set(0, 64, 0, water).unwrap();
+            let mut player = PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap();
+            player.ground.on_ground = true;
+            game.player = Some(player);
+            let mut stack = super::ItemStack::new("minecraft:trident", 1);
+            stack.enchant("minecraft:riptide", 3);
+            *game.held_mut() = Some(stack.clone());
+            assert!(game.use_trident(&stack));
+            game.release_trident(20);
+            let p = game.player.as_ref().unwrap();
+            assert!(!p.ground.on_ground);
+            assert!(
+                (p.position.y - (64.0 + f64::from(1.1999999_f32))).abs() < 1e-9,
+                "{}",
+                p.position.y
+            );
+        });
     }
 }

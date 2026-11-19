@@ -34,7 +34,7 @@ pub fn main() -> sunrise_client::Result<()> {
         for (i, row) in rows.iter().enumerate() {
             let _ = write!(out, "{i}:");
             for stack in row {
-                let _ = write!(out, " {}", canon_stack(stack.as_ref()));
+                let _ = write!(out, " {}", canon_stack(stack.as_ref(), &Default::default()));
             }
             out.push_str(" | ");
         }

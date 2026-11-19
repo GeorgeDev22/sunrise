@@ -44,6 +44,38 @@ const VEHICLE_DELAY: i32 = 10;
 /// `Projectile.getDimensionChangingDelay`.
 const PROJECTILE_DELAY: i32 = 2;
 
+/// One level's loaded state the portal search reads: the level in place or a parked one.
+pub(in crate::game) struct PortalSide<'a> {
+    pub(in crate::game) dim: Dim,
+    pub(in crate::game) world: &'a sunrise_client::world::World,
+    border: &'a sunrise_client::worldborder::WorldBorder,
+}
+
+impl PortalSide<'_> {
+    /// `PortalForcer`'s search radius in blocks: 16 into the Nether, 128 out of it.
+    pub(in crate::game) fn search_radius(to_nether: bool) -> i32 {
+        if to_nether { 16 } else { 128 }
+    }
+    /// The chunks the search of `radius` around chunk (`cx`, `cz`) reads.
+    pub(in crate::game) fn search_chunks(
+        cx: i32,
+        cz: i32,
+        radius: i32,
+    ) -> impl Iterator<Item = (i32, i32)> {
+        let reach = radius.div_euclid(16) + 1;
+        (cz - reach..=cz + reach).flat_map(move |z| (cx - reach..=cx + reach).map(move |x| (x, z)))
+    }
+    fn bounds_of(border: &sunrise_client::worldborder::WorldBorder) -> BorderBounds {
+        let [min_x, min_z, max_x, max_z] = border.bounds();
+        BorderBounds {
+            min_x,
+            min_z,
+            max_x,
+            max_z,
+        }
+    }
+}
+
 /// Where in its portal a traveller stood, and where its exit is to be found.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Plan {
@@ -234,7 +266,11 @@ fn touches_end_portal(from: Vec3, to: Vec3, width: f32, height: f32, pos: BlockP
 /// of an entity facing `[yaw, pitch]`: into the End it faces west and keeps
 /// its pitch (`Relative.X_ROT`); out of it both turn by the world spawn's
 /// angles (`Relative.ROTATION`). The pitch stays within ±90.
-fn end_portal_rotation(into_end: bool, [yaw, pitch]: [f32; 2], spawn: [f32; 2]) -> [f32; 2] {
+pub(in crate::game) fn end_portal_rotation(
+    into_end: bool,
+    [yaw, pitch]: [f32; 2],
+    spawn: [f32; 2],
+) -> [f32; 2] {
     let (yaw, pitch) = if into_end {
         // Direction.WEST.toYRot().
         (90.0, pitch)
@@ -346,13 +382,27 @@ impl Game<'_> {
         } else {
             self.levels.parked_border(dim).unwrap_or(&self.border)
         };
-        let [min_x, min_z, max_x, max_z] = border.bounds();
-        BorderBounds {
-            min_x,
-            min_z,
-            max_x,
-            max_z,
+        PortalSide::bounds_of(border)
+    }
+    /// The level in place as a side of the portal search.
+    pub(in crate::game) fn in_place_side(&self) -> PortalSide<'_> {
+        PortalSide {
+            dim: self.dim,
+            world: &self.world,
+            border: &self.border,
         }
+    }
+    /// The loaded level of `dim` as a side of the portal search: the level in place or a
+    /// parked one, None for a level that is not open. Reads no saved data.
+    pub(in crate::game) fn portal_side(&self, dim: Dim) -> Option<PortalSide<'_>> {
+        if dim == self.dim {
+            return Some(self.in_place_side());
+        }
+        Some(PortalSide {
+            dim,
+            world: self.levels.parked_world(dim)?,
+            border: self.levels.parked_border(dim)?,
+        })
     }
     /// `ServerLevel.isAllowedToEnterPortal`.
     pub(super) fn may_enter(&self, target: Dim) -> bool {
@@ -373,12 +423,31 @@ impl Game<'_> {
         height: f32,
         reset_forward: bool,
     ) -> Plan {
-        let target = if self.dim == Dim::Nether {
+        self.portal_plan_from(
+            &self.in_place_side(),
+            entry,
+            at,
+            width,
+            height,
+            reset_forward,
+        )
+    }
+    /// [`Self::portal_plan`] for a portal in `side`'s level.
+    pub(in crate::game) fn portal_plan_from(
+        &self,
+        side: &PortalSide<'_>,
+        entry: BlockPos,
+        at: Vec3,
+        width: f32,
+        height: f32,
+        reset_forward: bool,
+    ) -> Plan {
+        let target = if side.dim == Dim::Nether {
             Dim::Overworld
         } else {
             Dim::Nether
         };
-        let state = self.world.block(entry.x, entry.y, entry.z);
+        let state = side.world.block(entry.x, entry.y, entry.z);
         let b = self.res.behaviours();
         let (entry_x_axis, offset) = match b.portal_axis(state) {
             Some(x_axis) => {
@@ -388,7 +457,7 @@ impl Game<'_> {
                     21,
                     Axis::Y,
                     21,
-                    |p| self.world.block(p.x, p.y, p.z) == state,
+                    |p| side.world.block(p.x, p.y, p.z) == state,
                 );
                 let mut offset = relative_position(area, x_axis, at, width, height);
                 if reset_forward {
@@ -400,7 +469,7 @@ impl Game<'_> {
         };
         // DimensionType.getTeleportationScale: the coordinate scales of the two levels.
         let scale = sunrise_world::dimension_type::DimensionFacts::teleportation_scale(
-            self.dimension_type(),
+            self.dimension_type_of(side.dim),
             self.dimension_type_of(target),
         );
         Plan {
@@ -473,26 +542,33 @@ impl Game<'_> {
         Vec3::new(centre.x, f64::from(y), centre.z)
     }
     /// The nether portal blocks of the chunks within `radius` of `center`
-    /// (the points of interest `PortalForcer` searches): loaded chunks as
-    /// they are, the others as saved (each read once until it is saved again);
-    /// chunks never generated have none.
-    fn portal_blocks(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+    /// in `side` (the points of interest `PortalForcer` searches): loaded
+    /// chunks as they are; the others as saved in `save` (each read once until
+    /// it is saved again), or none without one; chunks never generated have none.
+    fn portal_blocks(
+        &self,
+        side: &PortalSide<'_>,
+        save: Option<&sunrise_client::save::SaveDir>,
+        center: BlockPos,
+        radius: i32,
+    ) -> Vec<BlockPos> {
         let b = self.res.behaviours();
         let is_portal = |state| b.portal_axis(state).is_some();
-        let chunk_radius = radius.div_euclid(16) + 1;
         let (cx, cz) = (center.x >> 4, center.z >> 4);
         let mut out = Vec::new();
-        for z in cz - chunk_radius..=cz + chunk_radius {
-            for x in cx - chunk_radius..=cx + chunk_radius {
-                match self.world.chunks.get(&(x, z)) {
-                    Some(c) => out.extend(c.blocks_where(is_portal)),
-                    None => out.extend_from_slice(&self.save.saved_portal_blocks(
-                        x,
-                        z,
-                        self.pack.assets.registry,
-                        world_biomes!(self),
-                        is_portal,
-                    )),
+        for (x, z) in PortalSide::search_chunks(cx, cz, radius) {
+            match side.world.chunks.get(&(x, z)) {
+                Some(c) => out.extend(c.blocks_where(is_portal)),
+                None => {
+                    if let Some(save) = save {
+                        out.extend_from_slice(&save.saved_portal_blocks(
+                            x,
+                            z,
+                            self.pack.assets.registry,
+                            world_biomes!(self),
+                            is_portal,
+                        ));
+                    }
                 }
             }
         }
@@ -501,13 +577,23 @@ impl Game<'_> {
     /// `PortalForcer.findClosestPortalPosition` and the rectangle around it,
     /// for `plan` in the loaded dimension; builds nothing.
     pub(in crate::game) fn find_exit_portal(
-        &mut self,
+        &self,
+        plan: &Plan,
+    ) -> Option<(BlockPos, FoundRectangle)> {
+        self.find_portal_in(&self.in_place_side(), Some(&self.save), plan)
+    }
+    /// [`Self::find_exit_portal`] in `side`'s level, reading the chunks that are not
+    /// loaded from `save` when it is given.
+    pub(in crate::game) fn find_portal_in(
+        &self,
+        side: &PortalSide<'_>,
+        save: Option<&sunrise_client::save::SaveDir>,
         plan: &Plan,
     ) -> Option<(BlockPos, FoundRectangle)> {
         let to_nether = plan.dim == Dim::Nether;
-        let radius = if to_nether { 16 } else { 128 };
-        let border = self.border_bounds();
-        let portals = self.portal_blocks(plan.approximate, radius);
+        let radius = PortalSide::search_radius(to_nether);
+        let border = PortalSide::bounds_of(side.border);
+        let portals = self.portal_blocks(side, save, plan.approximate, radius);
         let (min_section, max_section) = if to_nether { (0, 15) } else { (-4, 19) };
         let found = closest_portal(
             &portals,
@@ -517,7 +603,7 @@ impl Game<'_> {
             min_section,
             max_section,
         )?;
-        let state = self.world.block(found.x, found.y, found.z);
+        let state = side.world.block(found.x, found.y, found.z);
         let x_axis = self.res.behaviours().portal_axis(state).unwrap_or(true);
         let rectangle = largest_rectangle_around(
             found,
@@ -525,21 +611,33 @@ impl Game<'_> {
             21,
             Axis::Y,
             21,
-            |p| self.world.block(p.x, p.y, p.z) == state,
+            |p| side.world.block(p.x, p.y, p.z) == state,
         );
         Some((found, rectangle))
     }
     /// The exit portal of `plan` in the loaded dimension: the closest one
     /// within reach, else one built by `PortalForcer.createPortal`.
     pub(super) fn nether_exit_portal(&mut self, plan: &Plan) -> Option<FoundRectangle> {
-        let to_nether = plan.dim == Dim::Nether;
-        let border = self.border_bounds();
         if let Some((found, rectangle)) = self.find_exit_portal(plan) {
             // NetherPortalBlock.getExitPortal: the ticket goes on the chunk
             // of the portal found.
             self.place_portal_ticket((found.x >> 4, found.z >> 4));
             return Some(rectangle);
         }
+        let created = self.create_exit_portal(plan);
+        if let Some(exit) = created {
+            // A portal built for the entity: the ticket goes on the chunk it
+            // arrives in (`TeleportTransition.PLACE_PORTAL_TICKET`).
+            let (at, _) = self.arrival(plan, exit);
+            self.place_portal_ticket(Self::chunk_of(at));
+        }
+        created
+    }
+    /// `PortalForcer.createPortal` for `plan` in the loaded dimension, then the
+    /// `portal_create` hook, which hears a portal whose blocks are in the world.
+    pub(in crate::game) fn create_exit_portal(&mut self, plan: &Plan) -> Option<FoundRectangle> {
+        let to_nether = plan.dim == Dim::Nether;
+        let border = self.border_bounds();
         let logical = if to_nether { 128 } else { 384 };
         let (approximate, x_axis) = (plan.approximate, plan.entry_x_axis);
         let created = self.with_level(|b, level, ticks| {
@@ -554,10 +652,6 @@ impl Game<'_> {
             };
             let corner = exit.min_corner;
             self.native_portal_create(dim, [corner.x, corner.y, corner.z]);
-            // A portal built for the entity: the ticket goes on the chunk it
-            // arrives in (`TeleportTransition.PLACE_PORTAL_TICKET`).
-            let (at, _) = self.arrival(plan, exit);
-            self.place_portal_ticket(Self::chunk_of(at));
         }
         created
     }
@@ -579,10 +673,19 @@ impl Game<'_> {
     /// `NetherPortalBlock.createDimensionTransition`: the arrival position
     /// and the yaw turned by.
     pub(super) fn arrival(&self, plan: &Plan, exit: FoundRectangle) -> (Vec3, f32) {
+        self.arrival_in(&self.in_place_side(), plan, exit)
+    }
+    /// [`Self::arrival`] in `side`'s level.
+    pub(in crate::game) fn arrival_in(
+        &self,
+        side: &PortalSide<'_>,
+        plan: &Plan,
+        exit: FoundRectangle,
+    ) -> (Vec3, f32) {
         let b = self.res.behaviours();
         let corner = exit.min_corner;
         let exit_x_axis = b
-            .portal_axis(self.world.block(corner.x, corner.y, corner.z))
+            .portal_axis(side.world.block(corner.x, corner.y, corner.z))
             .unwrap_or(true);
         let (bottom, rotation) = exit_position(
             exit,
@@ -592,9 +695,9 @@ impl Game<'_> {
             plan.width,
             plan.height,
         );
-        let border = self.border_bounds();
+        let border = PortalSide::bounds_of(side.border);
         let at = collision_free_position(bottom, plan.width, plan.height, &border, |p| {
-            b.collision_shape(self.world.block(p.x, p.y, p.z))
+            b.collision_shape(side.world.block(p.x, p.y, p.z))
                 .map(|s| s.moved(Vec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z))))
         });
         (at, rotation)
@@ -629,7 +732,12 @@ impl Game<'_> {
     /// approximate exit.
     pub(super) fn arrival_centre(&self, plan: &Plan) -> Vec3 {
         let to_nether = plan.dim == Dim::Nether;
-        let portals = self.portal_blocks(plan.approximate, if to_nether { 16 } else { 128 });
+        let portals = self.portal_blocks(
+            &self.in_place_side(),
+            Some(&self.save),
+            plan.approximate,
+            PortalSide::search_radius(to_nether),
+        );
         let (min_section, max_section) = if to_nether { (0, 15) } else { (-4, 19) };
         let border = self.border_bounds();
         let found = closest_portal(
@@ -1346,7 +1454,7 @@ impl Game<'_> {
         }
         let (mut tag, list, i) = if let Some(i) = self.dropped.iter().position(|e| e.id == id) {
             let uuid = self.uuid_for(id);
-            let tag = sunrise_client::entity_nbt::item_entity_to_nbt_with_items(
+            let tag = sunrise_client::entity_nbt::item_entity_to_nbt(
                 &self.dropped[i],
                 uuid,
                 self.persist_raw(id),
@@ -1357,12 +1465,21 @@ impl Game<'_> {
             (self.tnt_nbt(i), List::Tnt, i)
         } else if let Some(i) = self.tridents.iter().position(|t| t.id == id) {
             let uuid = self.uuid_for(id);
-            let tag =
-                self.tridents[i].to_nbt(uuid, self.pack.assets.registry, self.persist_raw(id));
+            let tag = self.tridents[i].to_nbt(
+                uuid,
+                self.pack.assets.registry,
+                self.persist_raw(id),
+                self.res.items(),
+            );
             (tag, List::Trident, i)
         } else if let Some(i) = self.rockets.iter().position(|r| r.id == id) {
             let uuid = self.uuid_for(id);
-            let tag = self.rockets[i].to_nbt(uuid, self.level.player_uuid, self.persist_raw(id));
+            let tag = self.rockets[i].to_nbt(
+                uuid,
+                self.level.player_uuid,
+                self.persist_raw(id),
+                self.res.items(),
+            );
             (tag, List::Rocket, i)
         } else if let Some(i) = self.orbs.iter().position(|o| o.id == id) {
             let uuid = self.uuid_for(id);
@@ -1382,14 +1499,32 @@ impl Game<'_> {
                 .and_then(|a| a.last_state)
                 .map(|s| self.state_to_nbt(s));
             let raw = self.persist_raw(id);
-            let tag =
-                sunrise_client::entity_nbt::arrow_to_nbt(p, uuid, p.owner_uuid, in_block, raw)
-                    .or_else(|| {
-                        sunrise_client::entity_nbt::fireball_to_nbt(p, uuid, p.owner_uuid, raw)
-                    })
-                    .or_else(|| {
-                        sunrise_client::entity_nbt::throwable_to_nbt(p, uuid, p.owner_uuid, raw)
-                    })?;
+            let tag = sunrise_client::entity_nbt::arrow_to_nbt(
+                p,
+                uuid,
+                p.owner_uuid,
+                in_block,
+                raw,
+                self.res.items(),
+            )
+            .or_else(|| {
+                sunrise_client::entity_nbt::fireball_to_nbt(
+                    p,
+                    uuid,
+                    p.owner_uuid,
+                    raw,
+                    self.res.items(),
+                )
+            })
+            .or_else(|| {
+                sunrise_client::entity_nbt::throwable_to_nbt(
+                    p,
+                    uuid,
+                    p.owner_uuid,
+                    raw,
+                    self.res.items(),
+                )
+            })?;
             (tag, List::Projectile, i)
         };
         super::persist::write_attachments(&mut tag, id, &self.entity_attachments);

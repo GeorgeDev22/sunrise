@@ -83,7 +83,7 @@ fn entity_ray_hits(
 
 impl Game<'_> {
     /// An entity tracked by the remote client but absent from local entity lists.
-    fn native_client_tracked(&self, entity: EntityRef) -> Option<(&str, [f64; 3])> {
+    pub(super) fn native_client_tracked(&self, entity: EntityRef) -> Option<(&str, [f64; 3])> {
         let remote = self.remote.as_ref()?;
         if !remote.logged_in || self.native_lifecycle.epoch() != Some(entity.epoch()) {
             return None;
@@ -187,7 +187,7 @@ impl Game<'_> {
     /// the level it shows, whatever the server calls it, or one the server opened
     /// for viewing (`client_level_key`). None with no world open, or for a
     /// dimension the server hasn't loaded. API 373.
-    pub(super) fn level(&self, dimension: &str) -> Option<LevelRef> {
+    pub(in crate::game) fn level(&self, dimension: &str) -> Option<LevelRef> {
         let epoch = self.native_lifecycle.epoch()?;
         if !self.is_logical_server() {
             return Some(LevelRef::new(epoch, self.client_level_key(dimension)?));
@@ -199,7 +199,7 @@ impl Game<'_> {
     }
     /// The client level in place as a handle: the level this window shows and
     /// ticks. None before login, while reconfiguring, or with no world open.
-    pub(super) fn native_client_level(&self) -> Option<LevelRef> {
+    pub(in crate::game) fn native_client_level(&self) -> Option<LevelRef> {
         let epoch = self.native_lifecycle.epoch()?;
         let remote = self.remote.as_ref().filter(|r| r.has_level())?;
         Some(LevelRef::new(epoch, remote.level_key))
@@ -673,7 +673,7 @@ impl Game<'_> {
         self.set_biome_at(pos, biome)
     }
     /// One residency boundary for state-bearing block writes; position refusal is vanilla.
-    fn native_level_write_position(
+    pub(super) fn native_level_write_position(
         &self,
         level: LevelRef,
         pos: [i32; 3],
@@ -725,9 +725,9 @@ impl Game<'_> {
         Some(self.state_shape_boxes(world, anims, state, pos, kind))
     }
 
-    /// Gameplay's face support in the current or a parked server level, including
-    /// live block entities for dynamic shapes. None for stale or closed levels,
-    /// unloaded blocks, unsupported states or a shape query error.
+    /// The local face support in an open server level or the current client level,
+    /// including shapes published by local block entities. None for unavailable
+    /// levels, unloaded or out-of-height blocks, or a shape query error.
     pub(super) fn level_block_face_sturdy(
         &self,
         level: LevelRef,
@@ -735,41 +735,14 @@ impl Game<'_> {
         face: BlockFace,
         support: mod_api::SupportType,
     ) -> Option<bool> {
-        let state = self.level_block_state(level, pos)?;
-        let direction = block_face_direction(face);
-        let b = self.res.behaviours();
-        let binding = self.res.collision();
-        if !b.has_cached_support(state) || binding.publishes_shapes(state) {
-            use sunrise_client::collisions::SceneCollisions;
-            use sunrise_world::{block_support::SupportType, dynamic_support::DynamicSupport};
-            let world = self.native_level_world(level)?;
-            let mut scene = SceneCollisions {
-                world,
-                binding,
-                subject: None,
-            };
-            let support = match support {
-                mod_api::SupportType::Full => SupportType::Full,
-                mod_api::SupportType::Center => SupportType::Center,
-                mod_api::SupportType::Rigid => SupportType::Rigid,
-                _ => unreachable!("mod_api::SupportType: unhandled variant"),
-            };
-            // A state that may publish takes its block entity's shape, else its declared one.
-            if binding.publishes_shapes(state) {
-                let shape = binding.collision_shape(&mut scene, state, pos).ok()?;
-                return support.is_supporting(&shape, direction).ok();
-            }
-            let dynamic = DynamicSupport::from_state(binding.registry().state(state)?).ok()??;
-            return dynamic
-                .is_face_sturdy(&mut scene, pos, direction, support)
-                .ok();
-        }
-        Some(match support {
-            mod_api::SupportType::Full => b.is_face_sturdy(state, direction),
-            mod_api::SupportType::Center => b.is_face_sturdy_center(state, direction),
-            mod_api::SupportType::Rigid => b.is_face_sturdy_rigid(state, direction),
-            _ => unreachable!("mod_api::SupportType: unhandled variant"),
-        })
+        super::native_world_read::block_face_sturdy(
+            self.native_level_read_world(level)?,
+            self.res.behaviours(),
+            self.res.collision(),
+            pos,
+            face,
+            support,
+        )
     }
 
     /// Clip an empty-context ray against collider or outline shapes, without fluids, in the
@@ -875,9 +848,38 @@ impl Game<'_> {
         match self.native_entity_read_target(entity) {
             Some(target) => self.native_entity_kind_key(target),
             None => {
+                if self.native_lifecycle.epoch() == Some(entity.epoch())
+                    && let Some((_, mob)) = self.mob_in_other_level(entity.id())
+                {
+                    return mod_api::__private::resolved_entity_type_key(&mob.kind.id);
+                }
                 mod_api::__private::resolved_entity_type_key(self.native_client_tracked(entity)?.0)
             }
         }
+    }
+    /// A mob of this game that is resident in a loaded level other than the
+    /// one in place, as a kill credit can name one (`getEntityInAnyDimension`):
+    /// its identity reads (`entity_kind`, `entity_uuid`, `entity_level`)
+    /// answer from there. None on a client or for anything else.
+    pub(super) fn mob_in_other_level(&self, id: u32) -> Option<(super::Dim, &super::Mob)> {
+        use sunrise_client::join_seq::residency::table::EntityLookup;
+        if !self.is_logical_server() {
+            return None;
+        }
+        let EntityLookup::Found {
+            location,
+            value: Target::Mob(_),
+        } = self.server_resident_entity(id)
+        else {
+            return None;
+        };
+        let (dim, parked) = self
+            .levels
+            .parked
+            .iter()
+            .find(|(dim, _)| dim.key() == location.owner.dimension)?;
+        let mob = parked.mobs.get(parked.mobs.locate(location.join)?)?;
+        Some((*dim, mob))
     }
     /// The entity's UUID (`Entity.getUUID`), the one it is saved with; an
     /// entity that has none yet gets it now, as a new vanilla entity does.
@@ -906,6 +908,16 @@ impl Game<'_> {
                 .copied()
                 .map(uuid_from_words);
         }
+        if self.native_lifecycle.epoch() == Some(entity.epoch())
+            && self.mob_in_other_level(entity.id()).is_some()
+        {
+            return self
+                .resident_entities
+                .table
+                .borrow_mut()
+                .resident_uuid(entity.id())
+                .map(uuid_from_words);
+        }
         let words = match self.native_entity_target(entity)? {
             Target::Player => {
                 let dimension = self.current_player_resident_location()?.owner.dimension;
@@ -924,9 +936,15 @@ impl Game<'_> {
         let key = match self.native_entity_read_target(entity) {
             Some(t) if self.is_logical_server() => self.target_level(t).key(),
             Some(_) => self.native_level_key(),
-            None => self
-                .native_client_tracked(entity)
-                .map(|_| self.native_level_key())?,
+            None if self.native_lifecycle.epoch() == Some(entity.epoch()) => {
+                match self.mob_in_other_level(entity.id()) {
+                    Some((dim, _)) => dim.key(),
+                    None => self
+                        .native_client_tracked(entity)
+                        .map(|_| self.native_level_key())?,
+                }
+            }
+            None => return None,
         };
         Some(self.level_ref(entity.epoch(), key))
     }
@@ -1287,8 +1305,25 @@ pub(super) mod tests {
     }
 
     pub(in crate::game) fn with_game(test: impl FnOnce(&mut super::Game<'_>)) {
-        let root = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
-        with_game_at(root, test);
+        with_game_at(fixture_root(), test);
+    }
+
+    /// The root a plain fixture game is built over: the prepared resources, or, when the compiled wasm
+    /// fixture is installed, the content root its mods make. The fixture declares blocks, block entity
+    /// types and Parts of its own (its `part_state` counter), which a loaded game has registered and the
+    /// bare prepared resources lack.
+    pub(in crate::game) fn fixture_root() -> std::path::PathBuf {
+        use mod_api::__private::game::Fields;
+        let base = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
+        let mods = mod_api::__private::mods();
+        if !mods.iter().any(|entry| entry.fields().id == "wasm_fixture") {
+            return base;
+        }
+        crate::game::api_values::install_parts(mods).unwrap();
+        crate::game::mods::content_root(&base, &Default::default())
+            .unwrap()
+            .prepared()
+            .to_owned()
     }
 
     pub(in crate::game) fn with_game_at(
@@ -1317,9 +1352,8 @@ pub(super) mod tests {
     }
 
     pub(in crate::game) fn with_client_game(test: impl FnOnce(&mut super::Game<'_>)) {
-        let root = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
         with_game_role(
-            root,
+            fixture_root(),
             super::super::execution_role::ExecutionRole::Client,
             test,
         );
@@ -1398,6 +1432,7 @@ pub(super) mod tests {
         game.save = std::sync::Arc::new(sunrise_client::save::SaveDir::new(
             saves.path().to_path_buf(),
             sunrise_client::save::LevelShape::OVERWORLD,
+            Some(Default::default()),
         ));
         test(&mut game);
     }
@@ -1557,10 +1592,12 @@ pub(super) mod tests {
             // Default: soils with no part answer as vanilla's plant rule does.
             assert!(survives(game, "minecraft:dirt"));
             assert!(!survives(game, "minecraft:stone"));
-            // A client's copy of the level does not ask the part.
+            // A non-authoritative copy of the level asks the part too (the client side itself is
+            // covered by `client_placement_prediction_asks_placement_and_survival_parts`).
+            game.options.execution_role = crate::game::execution_role::ExecutionRole::Client;
             game.options.dedicated = None;
-            assert!(!survives(game, "minecraft:glass"));
-            assert!(survives(game, "minecraft:grass_block"));
+            assert!(survives(game, "minecraft:glass"));
+            assert!(!survives(game, "minecraft:grass_block"));
         });
     }
 
@@ -2880,7 +2917,7 @@ pub(super) mod tests {
                     g.game_mode = 1;
                     g.abilities.update_for_mode(1);
                     assert!(g.abilities.may_fly && g.abilities.instabuild);
-                    sunrise_client::lan::playerdata::save(g, &root);
+                    sunrise_client::lan::playerdata::save(g, &root, &Default::default());
                 })
                 .unwrap();
             let joined = |game: &mut super::super::Game<'_>, force| {
@@ -3006,6 +3043,7 @@ pub(super) mod tests {
                 &sunrise_protocol::registry::Builtin::default(),
                 &[],
                 &[],
+                Default::default(),
             );
             let config = HubConfig {
                 default_game_mode: 0,

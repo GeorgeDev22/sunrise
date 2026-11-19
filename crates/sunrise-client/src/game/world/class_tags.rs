@@ -62,4 +62,6 @@ pub(super) fn install(items: &mut sunrise_items::items::Items, facts: &BlockFact
         }
     }
     items.block_tags = generated;
+    // The mob code's flags come from this map, and from these states.
+    items.rebuild_block_tag_flags(sunrise_items::items::block_tag_state_names(facts));
 }

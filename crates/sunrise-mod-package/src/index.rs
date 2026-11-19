@@ -34,6 +34,9 @@ pub struct Index {
     pub generated: String,
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// Curated lists of existing mods. Collections have no file or version of their own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collections: Vec<Collection>,
     #[serde(default)]
     pub revoked: Vec<Revoked>,
     /// What [`Index::parse`] left out because it breaks a rule, with the reasons: the rest of
@@ -42,11 +45,11 @@ pub struct Index {
     pub left_out: Vec<LeftOut>,
 }
 
-/// A project, a version or a takedown [`Index::parse`] left out, and why.
+/// A project, version, collection or takedown [`Index::parse`] left out, and why.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LeftOut {
     pub id: String,
-    /// None: the whole project (or the takedown).
+    /// None: the whole project, collection or takedown.
     pub version: Option<String>,
     pub reason: String,
 }
@@ -209,6 +212,9 @@ pub struct Version {
     pub capabilities: Capabilities,
     /// The Minecraft version it is for.
     pub game: String,
+    /// A mod's dependencies, sorted by id. None means the index did not list the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<Vec<Dependency>>,
     /// A modpack's mods, as its manifest lists them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<Requirement>,
@@ -230,6 +236,10 @@ pub struct NativeBinary {
 pub struct NativeBinaryAbsent;
 
 impl Version {
+    fn fits_game(&self, game: &str) -> bool {
+        self.game == game && self.capabilities.unknown().is_empty()
+    }
+
     /// Exact lookup only. Absence lets the caller prepare from source.
     pub fn native_binary(
         &self,
@@ -306,6 +316,18 @@ impl From<Capabilities> for Vec<String> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dependency {
+    pub id: String,
+    /// The manifest's semver requirement, rendered as text.
+    pub version: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
+    /// Absent if it applies to both installations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<Side>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Requirement {
     pub id: String,
     pub version: String,
@@ -371,7 +393,33 @@ impl Index {
                 head.schema
             ));
         }
-        let mut index: Index = serde_json::from_str(text).map_err(|e| format!("mod index: {e}"))?;
+        // Only readers isolate malformed rows. Deserializing an Index directly stays strict.
+        #[derive(Deserialize)]
+        struct ReadIndex {
+            #[serde(flatten)]
+            index: Index,
+            #[serde(default)]
+            collections: Vec<serde_json::Value>,
+        }
+        let ReadIndex {
+            mut index,
+            collections,
+        } = serde_json::from_str(text).map_err(|e| format!("mod index: {e}"))?;
+        for (position, row) in collections.into_iter().enumerate() {
+            let id = row
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("collections[{position}]"));
+            match serde_json::from_value(row) {
+                Ok(collection) => index.collections.push(collection),
+                Err(error) => index.left_out.push(LeftOut {
+                    id,
+                    version: None,
+                    reason: format!("invalid collection: {error}"),
+                }),
+            }
+        }
         index.keep_valid(local_files);
         Ok(index)
     }
@@ -379,7 +427,8 @@ impl Index {
     /// Every rule a reader relies on: unique valid ids, at least one
     /// version each, plain file names with the kind's extension, `https`
     /// URLs, hex hashes, keys and signatures that decode, and each
-    /// modpack's mods present in the index with the same hash.
+    /// modpack's mods present in the index with the same hash. A mod dependency row must be
+    /// well-formed, but resolving it is a separate install decision.
     pub fn check(&self) -> Result<(), String> {
         self.check_with(false)
     }
@@ -404,15 +453,31 @@ impl Index {
         for r in &self.revoked {
             check_revoked(r)?;
         }
+        let mut seen_collections = std::collections::HashSet::new();
+        for collection in &self.collections {
+            if !seen_collections.insert(&collection.id) {
+                return Err(format!(
+                    "collection {}: listed twice; pick distinct ids",
+                    collection.id
+                ));
+            }
+            if let Some(error) = collection
+                .check(|id| self.project(id).map(|p| &p.kind))
+                .into_iter()
+                .next()
+            {
+                return Err(error);
+            }
+        }
         Ok(())
     }
 
     /// What a reader keeps of an index that fails [`Index::check`]: each project, version and
-    /// takedown that fails its own rule is left out with its reason ([`Index::left_out`]), and
+    /// collection or takedown that fails its own rule is left out with its reason ([`Index::left_out`]), and
     /// the rest loads. A modpack version whose mod was left out goes too, and so does a project
     /// left with no version. An id listed twice leaves out every project with that id.
     fn keep_valid(&mut self, local_files: bool) {
-        let mut left_out = Vec::new();
+        let mut left_out = std::mem::take(&mut self.left_out);
         let mut listed: std::collections::HashMap<String, usize> = Default::default();
         for p in &self.projects {
             *listed.entry(p.id.clone()).or_default() += 1;
@@ -470,6 +535,38 @@ impl Index {
             }
             !p.versions.is_empty()
         });
+        let mut collection_counts = std::collections::HashMap::new();
+        for collection in &self.collections {
+            *collection_counts.entry(collection.id.clone()).or_insert(0) += 1;
+        }
+        self.collections.retain(|collection| {
+            let reason = if collection_counts[&collection.id] > 1 {
+                Some(format!(
+                    "collection {}: listed twice; pick distinct ids",
+                    collection.id
+                ))
+            } else if listed.contains_key(&collection.id) {
+                Some(format!(
+                    "collection {}: its id is already a project id: pick another collection id",
+                    collection.id
+                ))
+            } else {
+                collection
+                    .check(|id| self.projects.iter().find(|p| p.id == id).map(|p| &p.kind))
+                    .into_iter()
+                    .next()
+            };
+            if let Some(reason) = reason {
+                left_out.push(LeftOut {
+                    id: collection.id.clone(),
+                    version: None,
+                    reason,
+                });
+                false
+            } else {
+                true
+            }
+        });
         self.revoked.retain(|r| match check_revoked(r) {
             Ok(()) => true,
             Err(reason) => {
@@ -513,14 +610,17 @@ impl Index {
     /// A project's newest version for Minecraft `game` that wasn't taken down and asks for no
     /// capability this build doesn't know.
     pub fn installable<'a>(&self, project: &'a Project, game: &str) -> Option<&'a Version> {
-        project.versions.iter().find(|v| {
-            v.game == game
-                && v.capabilities.unknown().is_empty()
-                && self.revoked(&project.id, &v.file.sha256).is_none()
-        })
+        project
+            .versions
+            .iter()
+            .find(|v| v.fits_game(game) && self.revoked(&project.id, &v.file.sha256).is_none())
     }
     pub fn project(&self, id: &str) -> Option<&Project> {
         self.projects.iter().find(|p| p.id == id)
+    }
+
+    pub fn collection(&self, id: &str) -> Option<&Collection> {
+        self.collections.iter().find(|c| c.id == id)
     }
 
     /// Why the file of `id` with this hash was taken down, if it was.
@@ -572,6 +672,7 @@ fn check_version(p: &Project, v: &Version, local_files: bool) -> Result<(), Stri
     if v.version.trim().is_empty() {
         return Err(at("empty or repeated version".into()));
     }
+    dependencies::check_shape(p, v)?;
     let mut pairs = std::collections::HashSet::new();
     for b in &v.native_binaries {
         if b.build.len() > MAX_NATIVE_BUILD
@@ -791,12 +892,41 @@ pub struct Facts {
     pub capabilities: Vec<Capability>,
     /// The Minecraft version, when the file names one (a modpack does).
     pub game: Option<String>,
+    /// The mod's dependencies, sorted by id.
+    pub dependencies: Vec<Dependency>,
     pub requires: Vec<Requirement>,
+    /// A mod that declares `[wasm]`: its `mod.wasm` runs in the game's sandbox.
+    pub wasm: bool,
+}
+
+/// Whether a package's own `found` version and a registry's `listed` label are one version. A mod's
+/// are the same when both parse to the same semver (`1.2-beta` is `1.2.0-beta`); every other
+/// kind, and a label that does not parse, compares exactly.
+pub(crate) fn same_version(kind: &Kind, found: &str, listed: &str) -> bool {
+    if matches!(kind, Kind::Mod | Kind::NativeMod)
+        && let (Ok(found), Ok(listed)) = (
+            crate::manifest::parse_version(found),
+            crate::manifest::parse_version(listed),
+        )
+    {
+        return found == listed;
+    }
+    found == listed
 }
 
 impl Facts {
     /// Whether the file is the one `version` of `project` describes.
     pub fn matches(&self, project: &Project, version: &Version) -> Result<(), String> {
+        // Schema 1 predates this field, and a new index omits it when empty. There is no
+        // dependency assertion to compare when it is absent; the file's hash still pins it.
+        if let Some(listed) = &version.dependencies
+            && *listed != self.dependencies
+        {
+            return Err(format!(
+                "{} {}: its sunrise-mod.toml dependencies aren't what the index lists: use the reviewed file and rebuild the index",
+                project.id, version.version
+            ));
+        }
         let (mut caps, mut listed) = (
             self.capabilities.clone(),
             version.capabilities.known().to_vec(),
@@ -804,7 +934,10 @@ impl Facts {
         caps.sort();
         listed.sort();
         let differs = self.id.as_ref().is_some_and(|id| *id != project.id)
-            || self.version.as_ref().is_some_and(|v| *v != version.version)
+            || self
+                .version
+                .as_ref()
+                .is_some_and(|v| !same_version(&project.kind, v, &version.version))
             || self.api != version.api
             || self.side != version.side
             || caps != listed
@@ -852,12 +985,15 @@ pub fn inspect(kind: &Kind, path: &Path) -> Result<Facts, String> {
             if package.is_native() {
                 return Err("it has native code: it is a native-mod".into());
             }
+            package.read_runtime(path)?;
             let m = package.manifest;
             crate::Content::read(path, &m)?;
             Ok(Facts {
+                wasm: m.wasm.is_some(),
+                dependencies: manifest_dependencies(&m),
                 capabilities: m.capabilities,
                 id: Some(m.id),
-                version: Some(m.version),
+                version: Some(m.version.to_string()),
                 api: m.api,
                 side: Some(m.side),
                 ..Facts::default()
@@ -914,6 +1050,22 @@ pub fn inspect(kind: &Kind, path: &Path) -> Result<Facts, String> {
         }),
         Kind::Other(name) => Err(format!("this Sunrise can't read a {name} yet")),
     }
+}
+
+fn manifest_dependencies(manifest: &crate::Manifest) -> Vec<Dependency> {
+    manifest
+        .dependencies
+        .iter()
+        .map(|(id, dependency)| {
+            let details = dependency.details();
+            Dependency {
+                id: id.clone(),
+                version: details.version.to_string(),
+                optional: details.optional,
+                side: (details.side != Side::Both).then_some(details.side),
+            }
+        })
+        .collect()
 }
 
 /// A resource pack: a zip with `pack.mcmeta` at its root holding a `pack`
@@ -1030,8 +1182,12 @@ fn names(caps: &[Capability]) -> String {
     format!("[{}]", names.join(", "))
 }
 
+mod collections;
+pub use collections::{Collection, MAX_COLLECTION_MEMBERS, Member};
+mod dependencies;
 pub mod native;
 pub mod page;
 pub mod registry;
+pub mod resolve;
 #[cfg(test)]
 mod tests;

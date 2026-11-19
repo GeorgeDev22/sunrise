@@ -128,7 +128,7 @@ pub(in crate::game) struct CommandExtras {
     /// Entities whose waypoint transmit range changed since they last ticked.
     pub waypoint_dirty: Vec<Target>,
     /// Attribute maps of living entities whose attributes Sunrise does not
-    /// model (an armor stand's, a mob's beyond its modelled three).
+    /// model (an armor stand's, a mob's beyond its own store's, `finalize::Attr`).
     pub attributes: HashMap<Target, sunrise_world::attributes::entity::EntityAttributes>,
     /// The `CommandResultCallback` results of the outermost source, when a
     /// harness records them.
@@ -327,6 +327,20 @@ impl Game<'_> {
                         .ok()
                 })
                 .unwrap_or(0.0);
+        }
+        // A mob's is in its own store, an Invisibility effect's stored
+        // modifier among the others (`Mob::set_effect_modifiers`).
+        if let Target::Mob(id) = t {
+            return self
+                .mobs
+                .iter()
+                .find(|m| m.id == id && !m.removed)
+                .map_or(0.0, |m| {
+                    sunrise_client::mobs::finalize::value(
+                        m,
+                        sunrise_client::mobs::finalize::Attr::WaypointTransmitRange,
+                    )
+                });
         }
         let catalog = self.motion.attributes.clone();
         let Some(key) = catalog.id("minecraft:waypoint_transmit_range") else {
@@ -1371,7 +1385,7 @@ mod waypoint_icon_save_tests {
             &mut level.player_extra,
         );
         // The player's file: `locator_bar_icon` is `{style, color}`.
-        let saved = level.player_tag();
+        let saved = level.player_tag(&Default::default());
         assert_eq!(
             saved.get("locator_bar_icon"),
             Some(&Tag::compound([
@@ -1409,15 +1423,30 @@ mod waypoint_icon_save_tests {
     #[test]
     fn a_player_with_no_icon_saves_no_key_and_a_reset_takes_it_out() {
         let mut level = Level::default();
-        assert!(level.player_tag().get("locator_bar_icon").is_none());
+        assert!(
+            level
+                .player_tag(&Default::default())
+                .get("locator_bar_icon")
+                .is_none()
+        );
         // The default icon on a player with no file writes nothing, not even a file.
         Game::save_waypoint_icon(&Icon::default(), &mut level.player_extra);
         assert!(level.player_extra.is_none());
         Game::save_waypoint_icon(&icon("minecraft:default", Some(1)), &mut level.player_extra);
-        assert!(level.player_tag().get("locator_bar_icon").is_some());
+        assert!(
+            level
+                .player_tag(&Default::default())
+                .get("locator_bar_icon")
+                .is_some()
+        );
         // `/waypoint modify ... reset` leaves the default icon: the key goes.
         Game::save_waypoint_icon(&Icon::default(), &mut level.player_extra);
-        assert!(level.player_tag().get("locator_bar_icon").is_none());
+        assert!(
+            level
+                .player_tag(&Default::default())
+                .get("locator_bar_icon")
+                .is_none()
+        );
     }
 
     #[test]

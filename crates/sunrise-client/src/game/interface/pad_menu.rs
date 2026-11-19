@@ -31,10 +31,10 @@ use sunrise_client::{
     osk::{self, Keyboard},
     screen_narrator::InputType,
     widgets::{self, Kind, Target},
+    window::PointerSample,
 };
 use sunrise_client_input::snap;
 use winit::{
-    dpi::PhysicalPosition,
     event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
     keyboard::KeyCode,
     window::WindowId,
@@ -180,8 +180,8 @@ pub(super) struct MenuCursor {
     shortcut_focus: Option<Rect>,
     /// A pointer event the pad or the keyboard sends is being handled.
     pub(super) synthetic: bool,
-    /// Where the real mouse last moved the pointer (window pixels).
-    real_pointer: Option<PhysicalPosition<f64>>,
+    /// The real mouse's last sample, independent of the keyboard's virtual pointer.
+    real_pointer: Option<PointerSample>,
     /// The screen the keyboard's focus is on (`Game::key_screen`), and the
     /// frame drawn when another one opened: the focus starts again on the
     /// new screen's first drawn frame.
@@ -491,7 +491,7 @@ impl Game<'_> {
                     let (x, y) = Creative::tab_position(t);
                     targets.push(Target {
                         rect: [ox + x, oy + y, 26.0, 32.0],
-                        kind: Kind::Tab(i == self.creative_screen.selected),
+                        kind: Kind::Tab(i == self.creative_screen.selected_index()),
                     });
                 }
             }
@@ -584,16 +584,17 @@ impl Game<'_> {
 
     /// Send the window a pointer move to `at` (GUI pixels), as the mouse would.
     fn pad_pointer_to(&mut self, event_loop: &dyn EventLoopCtl, at: (f32, f32)) {
-        let (Some(window), Some(batch)) = (self.window.as_ref(), self.gui_batch()) else {
+        let (Some(window), Some(projection)) =
+            (self.window.as_ref(), self.renderer_pointer_projection())
+        else {
             return;
         };
         let id = window.id();
         let at = (
-            at.0.clamp(0.0, batch.width - 1.0),
-            at.1.clamp(0.0, batch.height - 1.0),
+            at.0.clamp(0.0, projection.gui.size[0] as f32 - 1.0),
+            at.1.clamp(0.0, projection.gui.size[1] as f32 - 1.0),
         );
-        let position =
-            PhysicalPosition::new(f64::from(at.0 * batch.scale), f64::from(at.1 * batch.scale));
+        let position = projection.window_pointer(at);
         self.pad_synthetic_event(
             event_loop,
             id,
@@ -601,6 +602,7 @@ impl Game<'_> {
                 device_id: DeviceId::dummy(),
                 position,
             },
+            None,
         );
         // Read back what the window made of it, so a real mouse move shows.
         self.pad.menu.pos = Some(self.cursor);
@@ -629,6 +631,7 @@ impl Game<'_> {
                 state,
                 button,
             },
+            None,
         );
     }
 
@@ -640,9 +643,16 @@ impl Game<'_> {
         event_loop: &dyn EventLoopCtl,
         id: WindowId,
         event: WindowEvent,
+        retained_sample: Option<PointerSample>,
     ) {
         let was = std::mem::replace(&mut self.pad.menu.synthetic, true);
-        self.handle_window_event(event_loop, id, event, super::input_trace::InputOrigin::Game);
+        self.handle_window_event_with_sample(
+            event_loop,
+            id,
+            event,
+            super::input_trace::InputOrigin::Game,
+            retained_sample,
+        );
         self.pad.menu.synthetic = was;
     }
 
@@ -719,6 +729,7 @@ impl Game<'_> {
                 delta: MouseScrollDelta::LineDelta(x, y),
                 phase: TouchPhase::Moved,
             },
+            None,
         );
     }
 
@@ -829,26 +840,6 @@ impl Game<'_> {
         // B or Start is Escape, which unbinds (`pad_back`).
         if self.pad_binding() && !matches!(button, Button::East | Button::Start) {
             return Ok(());
-        }
-        // Splitscreen Setup: A picks up the focused player's tile, then left/right (or LB/RB)
-        // cycle where it goes, A drops it, B puts it back (`split_ui`).
-        if !prompt && self.screen == Screen::Options && self.ui.options.page() == Page::SplitSetup {
-            let setup = &mut self.ui.options.split_setup;
-            if setup.pad_button(button) {
-                // Dropped or put back: the focus follows the player to its tile.
-                if let Some(rect) = setup.take_refocus() {
-                    let kind = Kind::Button;
-                    self.pad_focus_on(event_loop, Target { rect, kind });
-                }
-                return Ok(());
-            }
-            if button == Button::South
-                && self.pad_focusing()
-                && let Some(focus) = self.pad.menu.focus
-                && self.ui.options.split_setup.pad_pick_up(focus.center())
-            {
-                return Ok(());
-            }
         }
         // The screen under the keyboard went away (dying with chat open): so does the keyboard.
         if self.pad.menu.osk.is_some() && !self.pad_has_typing_screen() {
@@ -1037,15 +1028,6 @@ impl Game<'_> {
         }
         // A slider's step is a click, which a waiting key row would bind.
         if self.pad_binding() {
-            return;
-        }
-        // Splitscreen Setup with a player held: the stick cycles it as the D-pad does.
-        if !self.prompt_open()
-            && self.screen == Screen::Options
-            && self.ui.options.page() == Page::SplitSetup
-            && self.ui.options.split_setup.holding()
-        {
-            self.ui.options.split_setup.pad_button(button);
             return;
         }
         if self.pad_focus_mode() {
@@ -1448,7 +1430,7 @@ impl Game<'_> {
         if count == 0 {
             return;
         }
-        let selected = self.creative_screen.selected;
+        let selected = self.creative_screen.selected_index();
         let tab = if next {
             (selected + 1) % count
         } else {
@@ -1983,10 +1965,6 @@ impl Game<'_> {
             return;
         }
         self.pad.menu.os_hidden = !show;
-        // Controller menus leave the native pointer to its owning player.
-        if !self.keyboard_mouse {
-            return;
-        }
         if let Some(window) = &self.window {
             window.set_cursor_visible(show && !self.captured);
         }
@@ -2279,15 +2257,25 @@ impl Game<'_> {
     /// The real mouse, before the screen takes it: where it is, and a press
     /// or a scroll hands it the pointer back from the keyboard, at the
     /// place the mouse left it (`setLastInputType(MOUSE)`).
-    pub(super) fn key_focus_mouse(&mut self, event_loop: &dyn EventLoopCtl, event: &WindowEvent) {
+    pub(super) fn key_focus_mouse(
+        &mut self,
+        event_loop: &dyn EventLoopCtl,
+        event: &WindowEvent,
+        sample: Option<PointerSample>,
+    ) {
         if self.pad.menu.synthetic {
             return;
         }
         let takeover = match event {
             // Not while the pad holds the radial menu open: as for raw mouse motion in play
             // (`device_event`), a cursor that moved is a bumped mouse.
-            WindowEvent::CursorMoved { position, .. } => {
-                self.pad.menu.real_pointer != Some(*position) && !self.pad_radial_captures()
+            WindowEvent::CursorMoved { .. } => {
+                self.pad
+                    .menu
+                    .real_pointer
+                    .map(PointerSample::screen_position)
+                    != sample.map(PointerSample::screen_position)
+                    && !self.pad_radial_captures()
             }
             WindowEvent::KeyboardInput { event, .. } => event.state == ElementState::Pressed,
             WindowEvent::MouseInput { state, .. } => *state == ElementState::Pressed,
@@ -2298,9 +2286,7 @@ impl Game<'_> {
             self.pad_yield_input(event_loop);
         }
         match event {
-            WindowEvent::CursorMoved { position, .. } => {
-                self.pad.menu.real_pointer = Some(*position);
-            }
+            WindowEvent::CursorMoved { .. } => self.pad.menu.real_pointer = sample,
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 ..
@@ -2346,14 +2332,15 @@ impl Game<'_> {
         menu.pending = None;
         menu.nudge = None;
         let real = menu.real_pointer;
-        if let (Some(position), Some(id)) = (real, self.window.as_ref().map(|w| w.id())) {
+        if let (Some(sample), Some(id)) = (real, self.window.as_ref().map(|w| w.id())) {
             self.pad_synthetic_event(
                 event_loop,
                 id,
                 WindowEvent::CursorMoved {
                     device_id: DeviceId::dummy(),
-                    position,
+                    position: self.pointer_space([1, 1]).physical_position(sample),
                 },
+                Some(sample),
             );
         }
     }
@@ -2389,28 +2376,9 @@ impl Game<'_> {
 
     // ---- text fields ----
 
-    /// A text field has keyboard focus: chat, a sign, a book being written,
-    /// a search box, the anvil's name, the title screens' and the options'
-    /// fields, the LAN port, a dialog's input, the command box and the edit
-    /// screens of the jigsaw, structure and test blocks.
-    fn pad_typing(&self) -> bool {
-        (self.screen == Screen::Chat && self.title.is_none())
-            || self.sign_edit.is_some()
-            || matches!(self.book, Some(super::books::BookScreen::Edit { .. }))
-            || (self.screen == Screen::Creative && self.creative_screen.tab().search)
-            || self.recipe_search_focused()
-            || self.station_typing()
-            || self.dialog_typing()
-            || self.mod_browser_typing()
-            || matches!(
-                self.screen,
-                Screen::CommandBlock | Screen::BlockEditor | Screen::Social | Screen::DebugOptions
-            )
-    }
-
     /// Whether the screen under the keyboard can still be typed in.
     fn pad_has_typing_screen(&self) -> bool {
-        self.pad_typing()
+        self.text_input_focused()
             || self.title.is_some()
             || matches!(self.screen, Screen::Options | Screen::WorldOptions)
     }

@@ -775,6 +775,7 @@ mod tests {
         let loot = LootData::load(&root, &PackOverlay::NONE, &defaults).unwrap();
         let death = |mob_drops| drops::Death {
             loot: &loot,
+            this_nbt: None,
             damage: None,
             player: None,
             player_killed: false,

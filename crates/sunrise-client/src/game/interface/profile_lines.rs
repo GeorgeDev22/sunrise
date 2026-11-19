@@ -21,7 +21,7 @@ fn tagged(body: Text, color: u32) -> Notice {
         inline_object: Some(InlineObject::Atlas {
             atlas: "minecraft:gui".into(),
             sprite: MARK_SPRITE.into(),
-            fallback: "H".into(),
+            fallback: "*".into(),
         }),
         ..Style::default()
     };
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn every_chat_line_starts_with_the_dim_tag_and_the_mark_sprite() {
         let line = chat(english(|| started(None)));
-        assert_eq!(line.plain(), "[H] Profiling the client and server. [Stop]");
+        assert_eq!(line.plain(), "[*] Profiling the client and server. [Stop]");
         assert_eq!(span(&line, "[").style.color, Some(DARK_GRAY));
         assert_eq!(span(&line, "] ").style.color, Some(DARK_GRAY));
         let Some(InlineObject::Atlas { sprite, .. }) = &span(&line, "\u{fffc}").style.inline_object
@@ -331,9 +331,9 @@ mod tests {
                 chat(started(Some(ProfileSide::Server))),
             )
         });
-        assert_eq!(both.plain(), "[H] Profiling the client and server. [Stop]");
-        assert_eq!(client.plain(), "[H] Profiling the client. [Stop]");
-        assert_eq!(server.plain(), "[H] Profiling the server. [Stop]");
+        assert_eq!(both.plain(), "[*] Profiling the client and server. [Stop]");
+        assert_eq!(client.plain(), "[*] Profiling the client. [Stop]");
+        assert_eq!(server.plain(), "[*] Profiling the server. [Stop]");
         let stop = span(&both, "[Stop]");
         assert_eq!(stop.style.color, Some(GOLD));
         assert_eq!(stop.style.underlined, None);
@@ -354,18 +354,18 @@ mod tests {
         use ProfileSide::{Client, Server};
         assert_eq!(
             line(&[Server, Client], Some(41.6)).plain(),
-            "[H] Profiling the client and server for 42 s. [Stop]"
+            "[*] Profiling the client and server for 42 s. [Stop]"
         );
         assert_eq!(
             line(&[Client], Some(3.0)).plain(),
-            "[H] Profiling the client for 3 s. [Stop]"
+            "[*] Profiling the client for 3 s. [Stop]"
         );
         assert_eq!(
             line(&[Server], Some(3.0)).plain(),
-            "[H] Profiling the server for 3 s. [Stop]"
+            "[*] Profiling the server for 3 s. [Stop]"
         );
         let idle = line(&[], None);
-        assert_eq!(idle.plain(), "[H] Not profiling. [Start]");
+        assert_eq!(idle.plain(), "[*] Not profiling. [Start]");
         assert_eq!(click(&idle, "[Start]"), &run("/profiler start"));
     }
 
@@ -381,7 +381,7 @@ mod tests {
         }));
         assert_eq!(
             line.plain(),
-            "[H] Profile saved (42 s). [Open] [Share] [Folder]"
+            "[*] Profile saved (42 s). [Open] [Share] [Folder]"
         );
         assert_eq!(
             click(&line, "[Open]"),
@@ -406,7 +406,7 @@ mod tests {
         );
         assert!(line.spans.iter().all(|s| s.style.underlined.is_none()));
         let bare = chat(english(|| saved(42.0, &file(), "x", false)));
-        assert_eq!(bare.plain(), "[H] Profile saved (42 s). [Folder]");
+        assert_eq!(bare.plain(), "[*] Profile saved (42 s). [Folder]");
     }
 
     #[test]
@@ -415,7 +415,7 @@ mod tests {
         let line = chat(english(|| shared(url)));
         assert_eq!(
             line.plain(),
-            "[H] Shared: playsunrise.net/perf/c/55bwef5st6 [Copy]"
+            "[*] Shared: playsunrise.net/perf/c/55bwef5st6 [Copy]"
         );
         let link = span(&line, "playsunrise.net/perf/c/55bwef5st6");
         assert_eq!(link.style.color, Some(WHITE));
@@ -439,7 +439,7 @@ mod tests {
         let line = chat(english(|| upload_failed("no network", &file())));
         assert_eq!(
             line.plain(),
-            "[H] Could not share the profile: no network. [Retry]"
+            "[*] Could not share the profile: no network. [Retry]"
         );
         assert_eq!(
             click(&line, "[Retry]"),
@@ -455,15 +455,15 @@ mod tests {
     fn failures_are_red_and_say_what_failed_in_words() {
         let reds = english(|| {
             [
-                (error("boom"), "[H] Profiler: boom"),
-                (not_found("old"), "[H] No saved profile named old."),
+                (error("boom"), "[*] Profiler: boom"),
+                (not_found("old"), "[*] No saved profile named old."),
                 (
                     unavailable(),
-                    "[H] Opening and sharing profiles is not available in this build.",
+                    "[*] Opening and sharing profiles is not available in this build.",
                 ),
                 (
                     open_failed("no browser", &file(), "p"),
-                    "[H] Could not open the profile: no browser. [Folder]",
+                    "[*] Could not open the profile: no browser. [Folder]",
                 ),
             ]
         });
@@ -482,7 +482,7 @@ mod tests {
         }));
         assert_eq!(
             line.plain(),
-            "[H] Profiling the client only: a server profile needs operator level 4"
+            "[*] Profiling the client only: a server profile needs operator level 4"
         );
         assert_eq!(line.spans[3].style.color, Some(YELLOW));
     }
@@ -492,7 +492,7 @@ mod tests {
         let line = chat(english(share_missing));
         assert_eq!(
             line.plain(),
-            "[H] No profile saved in this session yet. [Start]"
+            "[*] No profile saved in this session yet. [Start]"
         );
         assert_eq!(click(&line, "[Start]"), &run("/profiler start"));
         assert_eq!(line.spans[3].style.color, Some(GRAY));

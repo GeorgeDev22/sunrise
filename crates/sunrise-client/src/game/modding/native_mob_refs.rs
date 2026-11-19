@@ -1693,8 +1693,14 @@ mod tests {
                 Some(false)
             );
             // The home area is saved with the mob.
-            let saved =
-                sunrise_client::entity_nbt::mob_to_nbt(&game.mobs[0], [0; 4], None, None, |_| None);
+            let saved = sunrise_client::entity_nbt::mob_to_nbt(
+                &game.mobs[0],
+                [0; 4],
+                None,
+                None,
+                |_| None,
+                &Default::default(),
+            );
             assert_eq!(
                 saved.get("home_pos"),
                 Some(&Tag::IntArray(vec![10, 64, -5]))
@@ -1707,8 +1713,14 @@ mod tests {
             assert_eq!(game.mob_restrict_center(mob), Some([10, 64, -5]));
             assert_eq!(game.mob_restrict_radius(mob), Some(-1));
             assert_eq!(game.mob_is_within_restriction(mob, [20, 64, 0]), Some(true));
-            let saved =
-                sunrise_client::entity_nbt::mob_to_nbt(&game.mobs[0], [0; 4], None, None, |_| None);
+            let saved = sunrise_client::entity_nbt::mob_to_nbt(
+                &game.mobs[0],
+                [0; 4],
+                None,
+                None,
+                |_| None,
+                &Default::default(),
+            );
             assert!(saved.get("home_pos").is_none());
             assert!(saved.get("home_radius").is_none());
             // restrictTo with radius -1 clears while keeping the new center.
@@ -1785,8 +1797,14 @@ mod tests {
             assert!(game.mobs[0].extra.pick_up_loot);
             assert_eq!(game.mob_can_pick_up_loot(mob), Some(true));
             // Saved as LeftHanded / CanPickUpLoot.
-            let saved =
-                sunrise_client::entity_nbt::mob_to_nbt(&game.mobs[0], [0; 4], None, None, |_| None);
+            let saved = sunrise_client::entity_nbt::mob_to_nbt(
+                &game.mobs[0],
+                [0; 4],
+                None,
+                None,
+                |_| None,
+                &Default::default(),
+            );
             assert_eq!(saved.get("LeftHanded"), Some(&Tag::Byte(1)));
             assert_eq!(saved.get("CanPickUpLoot"), Some(&Tag::Byte(1)));
             assert!(game.mob_set_left_handed(mob, false));

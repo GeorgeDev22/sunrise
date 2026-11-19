@@ -8,17 +8,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::Path;
 
-/// Parse an installed mod version, padding omitted minor and patch components.
-/// This is also the comparison used for saved-world mod versions.
-pub fn parse_version(version: &str) -> Result<Version, semver::Error> {
-    let padded = match version.matches('.').count() {
-        0 => format!("{version}.0.0"),
-        1 => format!("{version}.0"),
-        _ => version.to_owned(),
-    };
-    Version::parse(&padded)
-}
-
 #[derive(Debug)]
 pub enum Error {
     Manifest {
@@ -176,7 +165,7 @@ fn parse(owner: &str, value: Option<&toml::Value>) -> Result<Vec<Dependency>, Er
 #[derive(Clone)]
 pub struct Mod<'a> {
     pub id: &'a str,
-    pub version: &'a str,
+    pub version: &'a Version,
     pub has_api: bool,
     /// Code declarations also participate in physical library linking.
     pub code: bool,
@@ -381,8 +370,6 @@ fn resolve_all(
     }
     let mut edges = vec![Vec::new(); mods.len()];
     let mut warnings = Vec::new();
-    // A target's version is parsed only when a logical rule uses it, once per resolution.
-    let mut versions = HashMap::new();
     for (index, item) in mods.iter().enumerate() {
         for dep in item.dependencies {
             let target = ids.get(dep.id.as_str()).copied();
@@ -391,7 +378,7 @@ fn resolve_all(
                 warnings.push(Notice {
                     owner: item.id.into(),
                     target: dep.id.clone(),
-                    version: target.map(|i| mods[i].version.to_owned()),
+                    version: target.map(|i| mods[i].version.to_string()),
                     reason: dep.reason.clone(),
                     url: dep.url.clone(),
                     kind: match action {
@@ -421,24 +408,17 @@ fn resolve_all(
                     note,
                 });
             }
-            if !links {
-                let version = versions
-                    .entry(target)
-                    .or_insert_with(|| parse_version(other.version));
-                let version = version.as_ref().map_err(|error| Error::Manifest {
+            if !links
+                && (crate::manifest::is_unresolved(other.version)
+                    || !dep.requirement.matches(other.version))
+            {
+                return Err(Error::Version {
                     owner: item.id.into(),
                     target: dep.id.clone(),
-                    reason: format!("invalid installed version {:?}: {error}", other.version),
-                })?;
-                if !dep.requirement.matches(version) {
-                    return Err(Error::Version {
-                        owner: item.id.into(),
-                        target: dep.id.clone(),
-                        version: other.version.into(),
-                        requirement: dep.requirement.to_string(),
-                        note,
-                    });
-                }
+                    version: other.version.to_string(),
+                    requirement: dep.requirement.to_string(),
+                    note,
+                });
             }
             use mod_vocab::DependencyOrder;
             if links || dep.order == DependencyOrder::After {
@@ -462,7 +442,7 @@ fn resolve_all(
                 warnings.push(Notice {
                     owner: item.id.into(),
                     target: rule.id.clone(),
-                    version: target.map(|i| mods[i].version.to_owned()),
+                    version: target.map(|i| mods[i].version.to_string()),
                     reason: rule.reason.clone(),
                     url: rule.url.clone(),
                     kind: match action {
@@ -483,29 +463,21 @@ fn resolve_all(
                 continue;
             }
             let other = &mods[target];
-            let version = versions
-                .entry(target)
-                .or_insert_with(|| parse_version(other.version));
-            let version = version.as_ref().map_err(|error| Error::Manifest {
-                owner: item.id.into(),
-                target: rule.id.clone(),
-                reason: format!("invalid installed version {:?}: {error}", other.version),
-            })?;
-            if !rule.requirement.matches(version) {
+            if !rule.requirement.matches(other.version) {
                 continue;
             }
             if kind == RuleKind::Incompatible {
                 return Err(Error::Incompatible {
                     owner: item.id.into(),
                     target: rule.id.clone(),
-                    version: other.version.into(),
+                    version: other.version.to_string(),
                     note: diagnostic_note(rule.reason.as_deref(), rule.url.as_deref()),
                 });
             }
             warnings.push(Notice {
                 owner: item.id.into(),
                 target: rule.id.clone(),
-                version: Some(other.version.into()),
+                version: Some(other.version.to_string()),
                 reason: rule.reason.clone(),
                 url: rule.url.clone(),
                 kind: NoticeKind::Discouraged,
@@ -689,12 +661,30 @@ mod tests {
     fn item<'a>(id: &'a str, version: &'a str, dependencies: &'a [Dependency]) -> Mod<'a> {
         Mod {
             id,
-            version,
+            version: Box::leak(Box::new(crate::manifest::parse_version(version).unwrap())),
             has_api: true,
             code: true,
             dependencies,
         }
     }
+    #[test]
+    fn an_unresolved_version_satisfies_no_requirement_but_a_real_zero_version_does() {
+        for requirement in ["*", "=0.0.0", "<1", "^0.0.0"] {
+            let wanted = deps(&format!("[dependencies]\nbase={{version='{requirement}'}}"));
+            let user = item("user", "1", &wanted);
+            let placeholder = item("base", "0.0.0+unresolved.2-rc", &[]);
+            assert!(
+                matches!(
+                    resolve(&[user.clone(), placeholder]),
+                    Err(Error::Version { .. })
+                ),
+                "{requirement}"
+            );
+            let real = item("base", "0.0.0+nightly", &[]);
+            assert!(resolve(&[user, real]).is_ok(), "{requirement}");
+        }
+    }
+
     #[test]
     fn a_client_only_required_dependency_does_not_refuse_a_dedicated_installation() {
         let manifest = crate::Manifest::parse("id='server'\nname='Server'\nversion='1'\napi='0.2'\ncapabilities=['registries']\n[dependencies]\nclient={version='^1',side='client',order='none',reason='Client integration',url='https://example.test/client'}").unwrap();
@@ -831,7 +821,7 @@ mod tests {
         assert!(matches!(resolve(&mods[..1]), Err(Error::Missing { .. })));
         let incompatible = Mod {
             id: "base",
-            version: "2",
+            version: &Version::new(2, 0, 0),
             has_api: false,
             code: false,
             dependencies: &[],
@@ -849,7 +839,7 @@ mod tests {
                 mods[0].clone(),
                 Mod {
                     id: "base",
-                    version: "1",
+                    version: &Version::new(1, 0, 0),
                     has_api: false,
                     code: false,
                     dependencies: &back
@@ -881,7 +871,7 @@ mod tests {
         let refused = with(&[("broken", "1.5")], &server, &none).unwrap_err();
         assert_eq!(
             refused.to_string(),
-            "user is incompatible with broken 1.5 (Corrupts saves https://example.com/why)"
+            "user is incompatible with broken 1.5.0 (Corrupts saves https://example.com/why)"
         );
         assert!(with(&[("broken", "2.0")], &server, &none).is_ok());
         // A client-only rule holds nothing on a dedicated server.
@@ -893,7 +883,7 @@ mod tests {
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
-            ["user works badly with slow 3"]
+            ["user works badly with slow 3.0.0"]
         );
         // Before a present mod it doesn't depend on; an absent one is ignored.
         let mods = [item("late", "1", &[]), item("user", "1", &[])];
@@ -912,7 +902,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "dependency override: user -> broken only discouraged",
-                "user works badly with broken 1.5 (Corrupts saves https://example.com/why)"
+                "user works badly with broken 1.5.0 (Corrupts saves https://example.com/why)"
             ]
         );
         let drop: Overrides = toml::from_str("[user]\nbroken = 'drop'\n").unwrap();
@@ -994,7 +984,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(
                 error.to_string(),
-                "owner is incompatible with other 1 (Bad interaction https://example.test/why)"
+                "owner is incompatible with other 1.0.0 (Bad interaction https://example.test/why)"
             );
         }
         let mut dependent = manifest("dependent", "[dependencies]\nother='^1'");

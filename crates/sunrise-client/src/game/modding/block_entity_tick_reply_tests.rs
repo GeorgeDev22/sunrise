@@ -72,7 +72,7 @@ pub(in crate::game) fn wasm_mods() -> Vec<mod_api::ModEntry> {
         let manifest = Package::read(&path).unwrap().manifest;
         let info = mod_api::PackageInfo::new(
             manifest.id.clone(),
-            manifest.version.clone(),
+            manifest.version.to_string(),
             mod_api::PackageKind::Code,
             mod_api::Side::Both,
             vec![manifest.id.clone()],
@@ -257,7 +257,9 @@ fn native_and_compiled_wasm_tick_reply_matrix() {
                         } else {
                             assert_eq!(current.revision().changes(), revision.changes());
                         }
-                        assert_eq!(game.world.modified.contains(&(0, 0)), changed || mode == 3);
+                        // Only the ticked entity's own change marks the chunk: mode 3's data-slot write to
+                        // another block entity is silent until its mod notifies (`set_changed`).
+                        assert_eq!(game.world.modified.contains(&(0, 0)), changed);
                         for counter in effects.iter() {
                             assert_eq!(counter.load(Ordering::Relaxed), u32::from(mode == 10));
                         }

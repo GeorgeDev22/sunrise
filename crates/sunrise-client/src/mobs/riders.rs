@@ -213,11 +213,11 @@ fn unscaled_vehicle_attachment(r: &Mob, vehicle_width: f32) -> f64 {
         _ => 0.0,
     }
 }
-/// `Vec3.yRot(-yaw)` of an attachment point.
+/// An attachment point turned with its vehicle: `Vec3.yRot(-yRot * (float)(PI / 180))`, through vanilla's sine
+/// table (`Vec3::rotate_y`).
 fn rotated([x, y, z]: [f64; 3], yaw: f32) -> [f64; 3] {
-    let a = -f64::from(yaw).to_radians();
-    let (sin, cos) = (a.sin(), a.cos());
-    [x * cos + z * sin, y, z * cos - x * sin]
+    let v = Vec3::new(x, y, z).rotate_y(-yaw * sunrise_core::geometry::trig::DEG_TO_RAD);
+    [v.x, v.y, v.z]
 }
 /// `Entity.positionRider`: the vehicle's position plus its rotated passenger
 /// attachment, less the rider's own vehicle attachment.
@@ -896,13 +896,27 @@ mod tests {
 
     #[test]
     fn attachments_turn_with_the_vehicle() {
-        // A ravager's seat sits a sixteenth behind its centre.
+        // A ravager's seat sits a sixteenth behind its centre: vanilla's Vec3.yRot gives these exactly
+        // (HotSpot 25.0.4.1, x86-64).
         let behind = [0.0, 2.2625, -0.0625];
-        let [x, y, z] = rotated(behind, 0.0);
-        assert!(x.abs() < 1e-9 && (z + 0.0625).abs() < 1e-9 && y == 2.2625);
+        let bits = |v: [f64; 3]| v.map(f64::to_bits);
+        assert_eq!(bits(rotated(behind, 0.0)), bits([0.0, 2.2625, -0.0625]));
         // Facing west (yaw 90), behind is to the east.
-        let [x, _, z] = rotated(behind, 90.0);
-        assert!((x - 0.0625).abs() < 1e-9 && z.abs() < 1e-9);
+        assert_eq!(bits(rotated(behind, 90.0)), bits([0.0625, 2.2625, 0.0]));
+        // A point the double-precision turn moved by a few bits.
+        let point = [
+            f64::from_bits(0xbff2_ffd6_a376_26f4),
+            f64::from_bits(0x400f_4e32_6c3a_85f4),
+            f64::from_bits(0xc005_dbf0_485d_806c),
+        ];
+        assert_eq!(
+            bits(rotated(point, f32::from_bits(0x4377_00d0))),
+            [
+                0xc000_68df_242c_bc71,
+                0x400f_4e32_6c3a_85f4,
+                0x4001_4917_8633_8cb8
+            ]
+        );
     }
     fn of(id: u32, species: Species) -> Mob {
         let mut kind = (*crate::mobs::sensor_scan_tests::kind()).clone();

@@ -543,8 +543,7 @@ fn client_setup_reaches_each_listener_once_per_firing() {
     );
 }
 
-/// The process's client start is a client that is not a splitscreen guest: a dedicated
-/// server has no client, and a guest's `run` is another local player of the same process.
+/// Only the client role fires client startup hooks.
 #[test]
 #[ignore = "daily"]
 fn only_the_first_local_client_is_the_client_start() {
@@ -553,11 +552,7 @@ fn only_the_first_local_client_is_the_client_start() {
 
     with_game(|game| {
         game.options.execution_role = ExecutionRole::Client;
-        game.options.split_guest = false;
         assert!(game.options.is_client_start());
-        game.options.split_guest = true;
-        assert!(!game.options.is_client_start());
-        game.options.split_guest = false;
         game.options.execution_role = ExecutionRole::DedicatedServer;
         assert!(!game.options.is_client_start());
     });
@@ -781,7 +776,7 @@ fn resolved_ui_resources_do_not_restore_a_filtered_panorama_face() {
         }
     }
     assert!(base.contains("assets/minecraft/textures/gui/title/background/panorama_1.png"));
-    let gui = crate::game::UiResources::load(&ResourceSource::indexed(files)).unwrap();
+    let gui = crate::game::UiResources::load(&ResourceSource::indexed(files), &scratch.0).unwrap();
     assert_eq!(gui.panorama.texels(), [96, 110, 111, 255].repeat(6));
 }
 

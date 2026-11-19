@@ -609,7 +609,7 @@ impl Palette {
             push(bottom.min(floor - 4), floor - 3, self.deep);
             push(floor - 3, floor, self.under);
             push(floor, top, c.top);
-            column.surface = Some(crate::lod::Surface {
+            column.surface = Some(crate::columns::Surface {
                 height: floor,
                 state: self.under,
                 water: Some((top, c.top)),
@@ -620,7 +620,7 @@ impl Palette {
             push(bottom.min(top - 5), top - 4, self.deep);
             push(top - 4, top - 1, under);
             push(top - 1, top, c.top);
-            column.surface = Some(crate::lod::Surface {
+            column.surface = Some(crate::columns::Surface {
                 height: top,
                 state: c.top,
                 water: None,
@@ -1911,7 +1911,7 @@ mod tests {
             palette(),
         );
         let terrain = ServerTerrain::new(dir.join("chunks"), Some(Arc::new(map)));
-        let real = Column::from_surface(Some(crate::lod::Surface {
+        let real = Column::from_surface(Some(crate::columns::Surface {
             height: 100,
             state: BlockStateId(9),
             water: None,

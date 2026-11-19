@@ -26,6 +26,16 @@ impl GeneralTypesRegistrar for PartRegistrar {
             return Err(Error::Frozen);
         }
         let id = match self.owned_declaration_id(path) {
+            // The key travels in the spawn that introduces a row to a client, which carries
+            // no longer one.
+            Ok(id) if id.len() > sunrise_mod_runtime::MAX_GENERAL_ENTITY_KEY => {
+                self.refused.push(format!(
+                    "mod {} declares general entity type {id}, longer than {} bytes",
+                    self.mod_id,
+                    sunrise_mod_runtime::MAX_GENERAL_ENTITY_KEY
+                ));
+                return Err(Error::InvalidId);
+            }
             Ok(id) => id,
             Err(reason) => {
                 self.refused.push(reason);
@@ -143,6 +153,13 @@ mod tests {
             declare(&mut registrar, "Not An Id", 0.6, 1.7, 8, 3, &[]),
             Err(Error::InvalidId)
         );
+        // A key the spawn that introduces a row could not carry; the longest it can stands.
+        let room = sunrise_mod_runtime::MAX_GENERAL_ENTITY_KEY - "mymod:".len();
+        assert_eq!(
+            declare(&mut registrar, &"l".repeat(room + 1), 0.6, 1.7, 8, 3, &[]),
+            Err(Error::InvalidId)
+        );
+        declare(&mut registrar, &"l".repeat(room), 0.6, 1.7, 8, 3, &[]).unwrap();
         // The same type twice, whatever declared it, is a duplicate.
         assert_eq!(
             declare(&mut registrar, "robot", 0.5, 1.0, 4, 2, &[]),
@@ -163,9 +180,9 @@ mod tests {
             Err(Error::UnknownDependency)
         );
         // Every refusal was reported, and the good declaration stands.
-        assert_eq!(registrar.general_entity_types.len(), 1);
+        assert_eq!(registrar.general_entity_types.len(), 2);
         assert_eq!(registrar.general_entity_types[0].id, "mymod:robot");
-        assert_eq!(registrar.refused.len(), 7);
+        assert_eq!(registrar.refused.len(), 8);
     }
 
     #[test]

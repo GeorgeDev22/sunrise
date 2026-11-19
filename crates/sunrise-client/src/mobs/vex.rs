@@ -400,7 +400,7 @@ mod owner_save_tests {
         summoned.extra.counter2 = EVOKER as i32;
         assert_eq!(owner(&summoned, None), Some(EVOKER), "the evoker's id");
         let uuid_of = |id: u32| (id == EVOKER).then_some(evoker_uuid);
-        let saved = mob_to_nbt(&summoned, [0; 4], None, None, uuid_of);
+        let saved = mob_to_nbt(&summoned, [0; 4], None, None, uuid_of, &Default::default());
         assert_eq!(
             saved.get("owner"),
             Some(&Tag::IntArray(evoker_uuid.to_vec()))
@@ -421,7 +421,7 @@ mod owner_save_tests {
         assert_eq!(owner(&back, None), None, "a level with no UUIDs");
         // A save read again keeps the reference even when nothing in the level
         // answers for it, as `EntityReference` does.
-        let again = mob_to_nbt(&back, [0; 4], None, None, |_| None);
+        let again = mob_to_nbt(&back, [0; 4], None, None, |_| None, &Default::default());
         assert_eq!(
             again.get("owner"),
             Some(&Tag::IntArray(evoker_uuid.to_vec()))
@@ -451,7 +451,14 @@ mod owner_save_tests {
         assert_eq!(loaded.extra.owner, Some([9, 9, 9, 9]));
         loose.extra.owner = None;
         loose.extra.counter2 = 0;
-        let saved = mob_to_nbt(&loose, [0; 4], Some(&stale), None, |_| None);
+        let saved = mob_to_nbt(
+            &loose,
+            [0; 4],
+            Some(&stale),
+            None,
+            |_| None,
+            &Default::default(),
+        );
         assert_eq!(saved.get("owner"), None, "no owner, no key");
     }
     /// `VexCopyOwnerTargetGoal.canUse` runs the owner's target through

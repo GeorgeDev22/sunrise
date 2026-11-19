@@ -17,16 +17,4 @@ impl ItemPickedUpHooks {
         rest.set_count(3).unwrap();
         *event.remaining = Some(rest);
     }
-    pub(super) fn item_picked_up_partial(
-        &self,
-        _: &mut dyn mod_api::ServerHost,
-        event: &mut mod_api::ItemPickedUpPartialEvent<'_>,
-    ) {
-        PICKED_UP_PARTIAL.set(Some((
-            event.player,
-            event.original.count(),
-            event.remaining.as_ref().map(|rest| rest.count()),
-        )));
-        *event.remaining = None;
-    }
 }

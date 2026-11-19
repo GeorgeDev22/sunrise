@@ -147,9 +147,9 @@ impl Columns {
         (x, style::CONTROL_W)
     }
     /// A slider's value for the pointer at `x`: the handle's middle follows it.
-    pub(crate) fn slider_at(&self, x: f32) -> f32 {
+    pub(crate) fn slider_at(&self, x: f32) -> f64 {
         let (tx, tw) = self.track();
-        ((x - tx - 5.0) / (tw - 10.0)).clamp(0.0, 1.0)
+        ((f64::from(x) - f64::from(tx) - 5.0) / (f64::from(tw) - 10.0)).clamp(0.0, 1.0)
     }
     /// A row's whole width at `y`.
     pub(crate) fn row(&self, y: f32) -> [f32; 4] {
@@ -429,9 +429,9 @@ pub(crate) fn name_and_value(label: &str) -> (String, Option<String>) {
 }
 
 /// A slider's position one step on: a step of its own, or a pixel of its `width` wide track.
-pub(crate) fn slider_step(pos: f32, steps: Option<u32>, width: f32, forward: bool) -> f32 {
+pub(crate) fn slider_step(pos: f64, steps: Option<u32>, width: f32, forward: bool) -> f64 {
     if let Some(steps) = steps {
-        let steps = steps as f32;
+        let steps = f64::from(steps);
         let current = (pos * steps).round();
         let next = if forward {
             current + 1.0
@@ -440,7 +440,7 @@ pub(crate) fn slider_step(pos: f32, steps: Option<u32>, width: f32, forward: boo
         };
         (next / steps).clamp(0.0, 1.0)
     } else {
-        let delta = 1.0 / (width - 8.0).max(1.0);
+        let delta = 1.0 / (f64::from(width) - 8.0).max(1.0);
         if forward {
             (pos + delta).min(1.0)
         } else {
@@ -1071,7 +1071,7 @@ pub(crate) enum Value {
     /// A slider: left and right step it (`steps`: its stops, else a pixel of the track), a press
     /// on the track sets it (a controller's focus does the same).
     Slider {
-        position: f32,
+        position: f64,
         steps: Option<u32>,
         text: String,
     },
@@ -1358,7 +1358,7 @@ pub(crate) trait Screen {
         None
     }
     /// A slider row moved to `position`.
-    fn slide(&mut self, _s: &mut Settings, _row: Self::Row, _position: f32) {}
+    fn slide(&mut self, _s: &mut Settings, _row: Self::Row, _position: f64) {}
     /// A slider let go of, or stepped by a key: what its change does now that it is done (a
     /// Sunrise shader pack saves its options once a drag, not on every move).
     fn slider_released(&mut self) -> Vec<Output> {
@@ -2040,7 +2040,7 @@ impl<S: Screen> Shell<S> {
         s: &mut Settings,
         row: &Row<S::Row>,
         back: bool,
-        track: Option<f32>,
+        track: Option<f64>,
         stepped: bool,
     ) -> Vec<Output> {
         if let Some(page) = self.screen.link(row.id) {
@@ -2237,7 +2237,7 @@ impl<S: Screen> Shell<S> {
                 _ => None,
             },
             slider: match row.value {
-                Value::Slider { position, .. } => Some(position),
+                Value::Slider { position, .. } => Some(position as f32),
                 _ => None,
             },
             live: row.live,

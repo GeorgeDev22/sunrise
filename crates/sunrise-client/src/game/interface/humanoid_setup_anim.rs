@@ -6,6 +6,14 @@ impl render::RenderDataSource for Game<'_> {
         self.res.mob_data()
     }
 
+    fn equipment_layers(&self, mob: &Mob) -> Vec<render::Layer> {
+        self.mob_equipment_layers(mob, super::equipment_piece::EquipmentPass::Draw)
+    }
+
+    fn equipment_inventory(&self, mob: &Mob) -> Vec<render::Layer> {
+        self.mob_equipment_layers(mob, super::equipment_piece::EquipmentPass::TextureInventory)
+    }
+
     fn humanoid_setup(&self) -> Option<&dyn anim::HumanoidSetup> {
         mod_api::__private::listened(mod_api::HookId::HumanoidSetupAnim)
             .then_some(self as &dyn anim::HumanoidSetup)

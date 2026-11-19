@@ -485,7 +485,7 @@ impl Game<'_> {
     /// tick). TNT primed by an explosion starts ticking next tick.
     /// One primed TNT's `tick`: it moves, and explodes when its fuse is out.
     /// `i` is its place in the list; the caller has checked it is ticking.
-    /// `entities` are the boxes that stop its move (`Game::item_entity_collisions`).
+    /// `entities` are the boxes that stop its move (`Game::entity_collisions` with `Mover::Passive`).
     pub(super) fn tick_one_tnt(&mut self, i: usize, entities: &[Aabb]) -> Result<()> {
         let t = &mut self.tnts[i];
         let (tops, landed) = t.tick_among(
@@ -799,6 +799,8 @@ impl Game<'_> {
                         living: None,
                         tnt_fuse: Some(fuse),
                         orb_value: None,
+                        painting: None,
+                        item_frame: None,
                     }
                     .into();
                 let light = self.world.light(
@@ -915,7 +917,7 @@ impl Game<'_> {
                 // Primed TNT's box is 0.98 wide.
                 let offset = sunrise_client::mobs::riders::vehicle_attachment(m, 0.98);
                 m.seated(id, offset, tnt_box);
-                m.position = tnt_seat(pos, offset);
+                sunrise_client::mobs::living::teleports::set_pos(m, tnt_seat(pos, offset));
                 m.previous = tnt_seat(prev, offset);
                 m.velocity = Vec3::ZERO;
                 m.fall_distance = 0.0;

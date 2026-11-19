@@ -1,9 +1,44 @@
 #[path = "shared/book_screen.rs"]
 mod book_screen;
+#[cfg(test)]
+#[path = "shared/item_fall_on_tests.rs"]
+mod item_fall_on_tests;
+#[path = "shared/level_helpers.rs"]
+mod level_helpers;
+#[cfg(test)]
+#[path = "shared/particle_count_tests.rs"]
+pub(super) mod particle_count_tests;
+#[cfg(test)]
+use level_helpers::block_entity_for_block;
+#[cfg(test)]
+#[path = "shared/audio_math_tests.rs"]
+mod audio_math_tests;
 #[path = "shared/item_fallthrough.rs"]
 mod item_fallthrough;
+#[cfg(test)]
+#[path = "shared/label_tests.rs"]
+mod label_tests;
 #[path = "shared/loot.rs"]
 mod loot;
+#[cfg(test)]
+#[path = "shared/packet_tests.rs"]
+mod packet_tests;
+#[cfg(test)]
+#[path = "shared/runtime_environment_tests.rs"]
+mod runtime_environment_tests;
+#[cfg(test)]
+#[path = "shared/screen_position_tests.rs"]
+mod screen_position_tests;
+#[cfg(test)]
+#[path = "shared/slot_icon_tests.rs"]
+mod slot_icon_tests;
+#[cfg(test)]
+#[path = "shared/slot_tooltip_tests.rs"]
+mod slot_tooltip_tests;
+#[path = "shared/system_helpers.rs"]
+mod system_helpers;
+#[path = "shared/world_helpers.rs"]
+mod world_helpers;
 
 use super::screen_build::ObservedScreen;
 use crate::game::api_values::{TryIntoApi, TryIntoEngine};
@@ -34,7 +69,7 @@ enum ScreenDecision {
     ModScreen(&'static str),
 }
 
-fn observed_overlay_id(overlays: &[(bool, &'static str)]) -> Option<&'static str> {
+pub(super) fn observed_overlay_id(overlays: &[(bool, &'static str)]) -> Option<&'static str> {
     overlays.iter().find_map(|(open, id)| open.then_some(*id))
 }
 
@@ -77,6 +112,12 @@ impl Game<'_> {
     /// again, a game with no mod listening to either, and a server's or a guest's `Game`
     /// are a plain assignment.
     pub(super) fn set_screen(&mut self, screen: Screen) {
+        self.set_screen_with(screen, |_| {});
+    }
+    /// `set_screen`, with `before` run once the hooks let the change go ahead and
+    /// before it applies: what a screen's own `onClose` does only when it really
+    /// closes (a container screen's close packet).
+    pub(super) fn set_screen_with(&mut self, screen: Screen, before: impl FnOnce(&mut Self)) {
         if self.screen == screen {
             return;
         }
@@ -100,6 +141,7 @@ impl Game<'_> {
         if self.screen == screen && owner.is_none() {
             return;
         }
+        before(self);
         if self.screen == Screen::Options {
             self.ui.options.discard_draw();
         }
@@ -494,7 +536,7 @@ fn shake_pose(shake: Shake) -> glam::Mat4 {
         * glam::Mat4::from_rotation_y(shake.yaw.to_radians())
 }
 
-/// The mod screen open on this client: the block it is for, the key its
+/// The mod screen open on this client: its menu type and block, the key its
 /// slots are under, the window id of its menu, the menu's data slots as
 /// the server sent them, and what the server sent before the menu opened
 /// (`sunrise:menu_extra`), when it did.
@@ -503,7 +545,10 @@ pub(super) struct OpenNativeScreen {
     slot_moves: SlotMoves,
     key: Pos,
     window: i32,
-    block: String,
+    /// The menu's type, which its screen hooks are keyed by.
+    menu: String,
+    /// The mod block whose menu it is; none for a menu opened without one.
+    block: Option<String>,
     screen: mod_api::Screen,
     data: Vec<i32>,
     extra: Option<sunrise_protocol::menu_extra::Message>,
@@ -516,43 +561,59 @@ pub(super) struct OpenNativeScreen {
 /// take a move together from the next.
 #[derive(Default)]
 pub(super) struct SlotMoves {
-    committed: std::cell::RefCell<std::collections::HashMap<usize, [f32; 2]>>,
-    pending: std::cell::RefCell<std::collections::HashMap<usize, [f32; 2]>>,
+    /// Each moved slot's position, or None for a slot a mod hid.
+    committed: std::cell::RefCell<std::collections::HashMap<usize, Option<[f32; 2]>>>,
+    pending: std::cell::RefCell<std::collections::HashMap<usize, Option<[f32; 2]>>>,
     /// How many moves changed a position, for the layout build's cache key.
     count: std::cell::Cell<u32>,
 }
 
 impl SlotMoves {
-    /// Slot `slot`'s position this frame: where the last build committed it,
-    /// else `declared`.
-    fn position(&self, slot: usize, declared: [f32; 2]) -> [f32; 2] {
+    /// Slot `slot`'s position this frame: where the last build committed it
+    /// (None once hidden), else `declared`.
+    fn position(&self, slot: usize, declared: [f32; 2]) -> Option<[f32; 2]> {
         self.committed
             .borrow()
             .get(&slot)
             .copied()
-            .unwrap_or(declared)
+            .unwrap_or(Some(declared))
     }
-    /// Moves slot `slot` of a screen that declared `slots`, from the next
-    /// build. False, changing nothing, for a slot the screen does not show or
-    /// a position that is not finite.
-    fn set(&self, slots: &[Option<[f32; 2]>], slot: u32, x: f32, y: f32) -> bool {
-        let Some((slot, declared)) = usize::try_from(slot)
-            .ok()
-            .and_then(|i| Some((i, slots.get(i).copied().flatten()?)))
-            .filter(|_| x.is_finite() && y.is_finite())
-        else {
-            return false;
-        };
-        let mut pending = self.pending.borrow_mut();
-        let current = pending
-            .get(&slot)
-            .copied()
-            .unwrap_or_else(|| self.position(slot, declared));
-        if current != [x, y] {
-            pending.insert(slot, [x, y]);
+    /// Where slot `slot` of a screen that declared `slots` will be from the
+    /// next build: the last move, pending or committed, else its declaration.
+    fn latest(&self, slots: &[Option<mod_api::ScreenSlot>], slot: usize) -> Option<[f32; 2]> {
+        let declared = slots.get(slot)?.as_ref()?.position;
+        let pending = self.pending.borrow().get(&slot).copied();
+        match pending {
+            Some(pending) => pending,
+            None => self.position(slot, declared),
+        }
+    }
+    /// Moves slot `slot` of a screen that declared `slots` to `pos`, or hides
+    /// it with None, from the next build. A slot the screen hid when it opened
+    /// (the server's menu has no such slot) is never shown. Each refusal
+    /// changes nothing; repeating the slot's current place changes nothing
+    /// either, not even the move count.
+    fn set(
+        &self,
+        slots: &[Option<mod_api::ScreenSlot>],
+        slot: usize,
+        pos: Option<[f32; 2]>,
+    ) -> Result<(), mod_api::ScreenSlotRefusal> {
+        use mod_api::ScreenSlotRefusal;
+        match slots.get(slot) {
+            None => return Err(ScreenSlotRefusal::NoSuchSlot),
+            Some(None) if pos.is_some() => return Err(ScreenSlotRefusal::HiddenAtOpen),
+            Some(None) => return Ok(()),
+            Some(Some(_)) => {}
+        }
+        if pos.is_some_and(|[x, y]| !x.is_finite() || !y.is_finite()) {
+            return Err(ScreenSlotRefusal::BadPosition);
+        }
+        if self.latest(slots, slot) != pos {
+            self.pending.borrow_mut().insert(slot, pos);
             self.count.set(self.count.get().wrapping_add(1));
         }
-        true
+        Ok(())
     }
     /// Makes the pending moves the positions drawing and hit-testing read.
     fn commit(&self) {
@@ -830,10 +891,28 @@ impl Game<'_> {
     }
 
     pub(super) fn settle_title_toasts(&mut self) {
-        let pending = self.title.as_mut().and_then(|title| {
-            title.poll_backup();
-            title.take_pending_toast()
-        });
+        let pending = self
+            .title
+            .as_mut()
+            .and_then(|title| {
+                title.poll_backup();
+                title.take_pending_toast()
+            })
+            .or_else(|| {
+                // The launcher's "Playing offline" can sit behind this window: say it here too, once
+                // the toast slot is free.
+                let reason = self
+                    .options
+                    .offline_reason
+                    .take_if(|_| self.title.as_ref().is_some_and(|title| !title.has_toast()))?;
+                Some(
+                    sunrise_client::toasts::SystemToast::new(
+                        sunrise_client::text::Text::tr("sunrise.title.playing_offline", &[]),
+                        Some(sunrise_client::text::Text::literal(reason)),
+                    )
+                    .with_display_time(sunrise_client::toasts::SystemToast::LONG_DISPLAY_TIME),
+                )
+            });
         if let Some(toast) = pending.and_then(|toast| self.add_system_toast(toast))
             && let Some(title) = self.title.as_mut()
         {
@@ -972,8 +1051,8 @@ impl Game<'_> {
         // left down, right down, left up sends no drag while right is still held.
         self.drag_button = pressed.then_some(button);
     }
-    pub(super) fn screen_mouse_dragged(&self, previous: (f32, f32)) -> ScreenMousePre {
-        if self.pad_synthetic_input() || self.cursor == previous {
+    pub(super) fn screen_mouse_dragged(&self, delta: [f32; 2]) -> ScreenMousePre {
+        if self.pad_synthetic_input() || delta == [0.0; 2] {
             return ScreenMousePre::NotFired;
         }
         let Some(button) = self
@@ -986,7 +1065,6 @@ impl Game<'_> {
             return ScreenMousePre::NotFired;
         };
         let button = super::glfw_button(button);
-        let delta = [self.cursor.0 - previous.0, self.cursor.1 - previous.1];
         let mut canceled = false;
         self.native_screen_mouse_dragged_pre(
             &screen,
@@ -1653,7 +1731,7 @@ pub(super) const BLOCK_CONTACT_HOOKS: sunrise_client::block_contact::Hooks =
                 }
             }
         },
-        fall_on: |dimension, level, c, distance, damage, writes| {
+        fall_on: |dimension, level, c, distance, damage_multiplier, writes| {
             HitLevel(level.reborrow()).native_fall_on(
                 crate::game::native_hooks::fire::FallOnCall {
                     dimension,
@@ -1662,7 +1740,7 @@ pub(super) const BLOCK_CONTACT_HOOKS: sunrise_client::block_contact::Hooks =
                     state: c.state,
                     pos: c.position,
                     distance,
-                    damage,
+                    damage_multiplier,
                     writes,
                 },
             );
@@ -1770,620 +1848,12 @@ pub(super) fn sound_id(id: &str) -> bool {
         && path.chars().all(|c| allowed(c, true))
 }
 
-/// Sets the viewer counts `known` holds for `dim` to `now` and returns the
-/// changes as `(pos, previous, viewers)`, in position order. A container that
-/// is no longer counted goes to 0 and leaves `known`.
-pub(super) fn viewer_changes(
-    known: &mut HashMap<(&'static str, (i32, i32, i32)), u32>,
-    dim: &'static str,
-    mut now: HashMap<(i32, i32, i32), u32>,
-) -> Vec<((i32, i32, i32), u32, u32)> {
-    let mut changes = Vec::new();
-    known.retain(|&(d, pos), previous| {
-        if d != dim {
-            return true;
-        }
-        let viewers = now.remove(&pos).unwrap_or(0);
-        if viewers != *previous {
-            changes.push((pos, *previous, viewers));
-            *previous = viewers;
-        }
-        viewers > 0
-    });
-    for (pos, viewers) in now {
-        known.insert((dim, pos), viewers);
-        changes.push((pos, 0, viewers));
-    }
-    changes.sort_unstable();
-    changes
-}
-
 fn dimension_id(dimension: LevelDimension) -> &'static str {
     match dimension {
         LevelDimension::Overworld => "minecraft:overworld",
         LevelDimension::Nether => "minecraft:the_nether",
         LevelDimension::End => "minecraft:the_end",
         LevelDimension::Custom(key) => key.id(),
-    }
-}
-
-/// Server-level helpers for native mods.
-#[allow(dead_code)]
-impl GameLevel<'_> {
-    /// Play a sound event for nearby players in this server level. The return
-    /// value means queued, not heard. A `minecraft:` event must be registered:
-    /// an unknown one is dropped at dispatch. Another namespace's event (a
-    /// mod's, `mymod:machine_hum`) is sent by name, as vanilla sends a sound
-    /// that isn't in its registry (`Holder.direct`, a variable range): players
-    /// hear it if their resources define it (`assets/mymod/sounds.json`, a
-    /// content mod's).
-    pub(super) fn native_play_sound(
-        &mut self,
-        sound: &str,
-        at: [f64; 3],
-        source: usize,
-        volume: f32,
-        pitch: f32,
-    ) -> bool {
-        if !self.native_authoritative || !mod_sound_ok(sound, at, source, volume, pitch) {
-            return false;
-        }
-        // `Level.playSound` draws `soundSeedGenerator.nextLong` at the call;
-        // without a host nothing can be sent.
-        let Some(seed) = self.sound_seeds.map(|hub| hub.next_sound_seed()) else {
-            return false;
-        };
-        self.native_sounds.push(super::creatures::NativeSound {
-            dimension: dimension_id(self.dimension),
-            sound: sound.to_owned(),
-            at,
-            source: source as i32,
-            volume,
-            pitch,
-            seed,
-            except: None,
-            entity: None,
-        });
-        true
-    }
-
-    /// Queue particles in this authoritative level. A zero count sends one
-    /// directional particle. The return value means accepted, not delivered.
-    /// Block particle types require their block state; item, trail and
-    /// vibration particles are not supported by the current network dispatch.
-    /// `ParticleOptions::named("mymod:spark")` sends a mod's own type
-    ///: Sunrise clients draw it from the sprite
-    /// set in the mod's `assets/<namespace>/particles/<path>.json`, a client
-    /// without that file draws nothing, and vanilla clients aren't sent it.
-    pub(super) fn native_send_particles(
-        &mut self,
-        options: &ParticleOptions,
-        state: Option<BlockStateId>,
-        at: [f64; 3],
-        spread: [f64; 3],
-        speed: f64,
-        count: i32,
-    ) -> bool {
-        let state_ok = |id| self.registry.state(id).is_some();
-        if !self.native_authoritative
-            || !mod_particles_ok(options, state, state_ok, at, spread, speed)
-        {
-            return false;
-        }
-        self.native_particles
-            .push(super::lan_particles::QueuedParticle {
-                dimension: dimension_id(self.dimension),
-                options: options.clone(),
-                state,
-                at,
-                spread,
-                speed: [speed; 3],
-                count,
-                randomization: 0,
-            });
-        true
-    }
-    /// `EntityBlock.newBlockEntity` of block `name`: a declared mod type
-    /// starts with the data `native_block_entity` gives, a mod's sign, else
-    /// Sunrise's own. The one place both whole-block write paths make it.
-    pub(super) fn new_block_entity(&self, name: &str) -> Option<BlockEntity> {
-        let mut nbt = None;
-        if sunrise_client::block_entity_types::type_for(name).is_some() {
-            self.native_block_entity(name, self.registry.default_state(name)?, &mut nbt);
-        }
-        block_entity_for_block(self.registry, self.facts, name, nbt.unwrap_or_default())
-    }
-    /// Creates a declared state-aware block entity from its actual state. No answer
-    /// means no entity; the registered declaration owns its type identity.
-    pub(super) fn new_block_entity_for_state(&self, state: BlockStateId) -> Option<BlockEntity> {
-        let name = &self.registry.state(state)?.name;
-        if self.world.block_entities.stateful_entity(state.0) {
-            let mut nbt = None;
-            self.native_block_entity(name, state, &mut nbt);
-            return block_entity_for_block(self.registry, self.facts, name, nbt?);
-        }
-        self.new_block_entity(name)
-    }
-    /// Replaces the block at `pos` with `state` through `Level.setBlock`, as
-    /// `Game::native_set_block` does for the Host, from a hook that gets the
-    /// level's `ticks`: the old block's block entity is removed and the new
-    /// block's is created in the write (`LevelChunk.setBlockState`), and the
-    /// write's level events stay queued for the caller, in order; a mod block
-    /// entity starts with the data `native_block_entity` gives. True when the block changed; false off an
-    /// authoritative server, for a position that is not loaded or outside the
-    /// build height, an invalid state, or an unchanged state. Never loads a
-    /// chunk.
-    pub(super) fn native_set_block(
-        &mut self,
-        ticks: &mut Ticks,
-        pos: [i32; 3],
-        state: BlockStateId,
-        flags: i32,
-    ) -> bool {
-        if !self.native_authoritative
-            || !self.world.is_loaded_at(pos[0], pos[1], pos[2])
-            || self.registry.state(state).is_none()
-        {
-            return false;
-        }
-        let at = BlockPos::new(pos[0], pos[1], pos[2]);
-        let previous = self.world.block(pos[0], pos[1], pos[2]);
-        let b = self.behaviours;
-        let changed = b.set_block(self, ticks, at, state, flags);
-        let landed = self.world.block(pos[0], pos[1], pos[2]);
-        if !self.world.block_entities.stateful_entity(landed.0)
-            && block_entity_to_create(self.facts, changed, previous, state, landed).is_some()
-            && let Some(entity) = self.new_block_entity_for_state(landed)
-        {
-            put_block_entity(self.world, pos, entity);
-        }
-        changed
-    }
-    /// `Level.removeBlock`: replace a block with its fluid's legacy block.
-    pub(super) fn remove_block_write(
-        &mut self,
-        ticks: &mut Ticks,
-        pos: [i32; 3],
-        moved: bool,
-    ) -> bool {
-        if !self.native_authoritative || !self.world.is_loaded_at(pos[0], pos[1], pos[2]) {
-            return false;
-        }
-        self.behaviours
-            .remove_block(self, ticks, BlockPos::new(pos[0], pos[1], pos[2]), moved)
-    }
-    /// Schedules a tick of `block` (a block name) at `pos` in `delay` game
-    /// ticks, as a falling block's shape update schedules its fall
-    /// (`ScheduledTickAccess.scheduleTick(pos, block, delay)`, normal
-    /// priority); false for an unknown block or a position that isn't
-    /// loaded. A tick of that block already queued there is kept and counts
-    /// as scheduled. `ticks` is the hook's.
-    pub(super) fn native_schedule_block_tick(
-        &self,
-        ticks: &mut Ticks,
-        pos: [i32; 3],
-        block: BlockKey,
-        delay: i32,
-    ) -> bool {
-        let Some(block) = crate::game::api_values::behavior_block(block, self.behaviours) else {
-            return false;
-        };
-        let at = BlockPos::new(pos[0], pos[1], pos[2]);
-        let time = self.game_time();
-        ticks.schedule_block(time, at, block, delay, TickPriority::Normal)
-            != ScheduleResult::MissingChunk
-    }
-    /// Schedules a tick of `fluid` (`minecraft:water`, `minecraft:lava`,
-    /// `minecraft:flowing_water`...) at `pos` in `delay` game ticks, as a
-    /// waterlogged block's shape update schedules its water in 5
-    /// (`ScheduledTickAccess.scheduleTick(pos, fluid, delay)`); false for
-    /// an unknown fluid or a position that isn't loaded. A tick of that
-    /// fluid already queued there is kept and counts as scheduled. `ticks` is
-    /// the hook's.
-    pub(super) fn native_schedule_fluid_tick(
-        &self,
-        ticks: &mut Ticks,
-        pos: [i32; 3],
-        fluid: &str,
-        delay: i32,
-    ) -> bool {
-        let Some(kind) = FluidKind::from_name(fluid) else {
-            return false;
-        };
-        let at = BlockPos::new(pos[0], pos[1], pos[2]);
-        let time = self.game_time();
-        ticks.schedule_fluid(time, at, kind, delay) != ScheduleResult::MissingChunk
-    }
-    /// The state `state` with its property `key` set to `value`, as a mod block
-    /// builds the state it is placed in: `native_state_with_property(cable,
-    /// "facing", "east")` (`BlockState.setValue`). A block's own declared
-    /// properties (`state_properties` in its block file) are set the same way.
-    /// `state` itself when the property already has that value; None when the
-    /// block has no such property, or the property no such value.
-    pub(super) fn native_state_with_property(
-        &self,
-        state: BlockStateId,
-        key: &str,
-        value: &str,
-    ) -> Option<BlockStateId> {
-        with_property(self.registry, state, key, value)
-    }
-    /// The block `state` is a state of (`BlockState.getBlock()`): its name,
-    /// `mymod:cable`. `native_state_for_placement` is asked for every block
-    /// placed and given the block's default state: compare this with your
-    /// block to answer only for it. None for an unknown state.
-    pub(super) fn native_state_block(&self, state: BlockStateId) -> Option<&str> {
-        self.registry.state(state).map(|s| &*s.name)
-    }
-}
-
-/// `EntityBlock.newBlockEntity` of block `name`: a declared mod type starting
-/// with `initial` data, a mod's sign, else Sunrise's own. Shared by the
-/// Host's and a level hook's whole-block writes.
-fn block_entity_for_block(
-    registry: &BlockRegistry,
-    facts: &sunrise_client::blocks::BlockFacts,
-    name: &str,
-    initial: Compound,
-) -> Option<BlockEntity> {
-    if let Some(kind) = sunrise_client::block_entity_types::type_for(name) {
-        return Some(BlockEntity::Mod(Box::new(EngineBlockEntity::new(
-            kind.to_owned(),
-            ModBlockEntityFields {
-                nbt: initial,
-                ..Default::default()
-            },
-        ))));
-    }
-    // Undeclared content blocks retain their template's vanilla behaviour.
-    // `SignBlock.newBlockEntity`: a mod's sign is one by its template's class.
-    if !name.starts_with("minecraft:")
-        && let Some(state) = registry.default_state(name)
-        && let Some(form) = facts.get(state).sign_form()
-    {
-        let text = facts.sign_text(name).map_or_else(Default::default, |d| {
-            sunrise_client::signs::SignText {
-                color: d.color,
-                glowing: d.glowing,
-                ..Default::default()
-            }
-        });
-        return Some(BlockEntity::Sign(sunrise_client::signs::SignData {
-            hanging: form.hanging,
-            front: text.clone(),
-            back: text,
-            ..Default::default()
-        }));
-    }
-    BlockEntity::for_block(name)
-}
-
-/// After a `Level.setBlock` of `state` over `previous`: the block whose block
-/// entity the write creates, when the write changed the block's name and the
-/// new block landed.
-fn block_entity_to_create(
-    facts: &sunrise_client::blocks::BlockFacts,
-    changed: bool,
-    previous: BlockStateId,
-    state: BlockStateId,
-    landed: BlockStateId,
-) -> Option<String> {
-    let new = &facts.get(state).name;
-    (changed && facts.get(previous).name != *new && facts.get(landed).name == *new)
-        .then(|| new.to_string())
-}
-
-/// Stores a new block entity at `pos`, keeping an existing one of the same kind.
-fn put_block_entity(world: &mut sunrise_client::world::World, pos: [i32; 3], entity: BlockEntity) {
-    let key = (pos[0], pos[1], pos[2]);
-    if world
-        .block_entities
-        .get(&key)
-        .is_none_or(|existing| std::mem::discriminant(existing) != std::mem::discriminant(&entity))
-    {
-        world.block_entities.insert(key, entity);
-    }
-}
-
-/// Helpers for native mods, kept as stable as the hook points.
-// Native mods use these; nothing in Sunrise does.
-#[allow(dead_code)]
-impl Game<'_> {
-    /// Sets a block in the current authoritative level through `Level.setBlock`.
-    /// Returns false for another dimension, an invalid state, or no change.
-    /// `flags` selects vanilla's neighbour, shape and client updates. A block
-    /// entity block gets its block entity.
-    pub(super) fn native_set_block(
-        &mut self,
-        dimension: &str,
-        pos: [i32; 3],
-        state: BlockStateId,
-        flags: i32,
-    ) -> bool {
-        if (self.serving.is_none() && self.options.dedicated.is_none())
-            || dimension != self.dim.id()
-            || self.pack.assets.registry.state(state).is_none()
-        {
-            return false;
-        }
-        let changed =
-            self.with_level(|_, level, ticks| level.native_set_block(ticks, pos, state, flags));
-        let _ = self.process_level_events();
-        changed
-    }
-    /// The item entities of the server level `dimension` whose box meets
-    /// the box `min`..`max`, in the level's order: vanilla's
-    /// `Level.getEntitiesOfClass(ItemEntity.class, box, ENTITY_STILL_ALIVE)`, as a
-    /// hopper's `getItemsAtAndAbove` asks for its block and the one above
-    /// (`[x, y, z]`..`[x + 1, y + 2, z + 1]`). Empty for a level not in place
-    /// (as `native_set_block`) and on a client of a server.
-    pub(super) fn native_item_entities(
-        &self,
-        dimension: &str,
-        min: [f64; 3],
-        max: [f64; 3],
-    ) -> Vec<NativeItemEntity> {
-        if (self.serving.is_none() && self.options.dedicated.is_none())
-            || dimension != self.dim.id()
-        {
-            return Vec::new();
-        }
-        self.dropped
-            .iter()
-            .filter(|e| e.stack.count > 0 && box_meets(&e.bounds(), min, max))
-            .map(|e| NativeItemEntity {
-                id: e.id,
-                position: [e.position.x, e.position.y, e.position.z],
-                stack: e.stack.clone(),
-                // The helper exposes an unsigned delay; keep its projection.
-                pickup_delay: e.pickup_delay.clamp(0, i64::from(u32::MAX)) as u32,
-            })
-            .collect()
-    }
-    /// Runs `change` on the mod block entity at `pos` (a generator charging
-    /// the machine beside it) and returns what it returns; none for any
-    /// other block entity, and for the one ticking now, which is out of the
-    /// world. Afterwards, as its `setChanged` would, its chunk is saved next
-    /// time and, when its items changed, comparators read it again.
-    pub(super) fn native_with_mod_block_entity<R>(
-        &mut self,
-        pos: [i32; 3],
-        change: impl FnOnce(&mut EngineBlockEntity) -> R,
-    ) -> Option<R> {
-        let key = (pos[0], pos[1], pos[2]);
-        let Some(BlockEntity::Mod(m)) = self.world.block_entities.get_mut(&key) else {
-            return None;
-        };
-        if m.id().is_empty() {
-            return None;
-        }
-        let items = m.items.clone();
-        let out = change(m);
-        let moved = m.items != items;
-        self.world.modified.insert((key.0 >> 4, key.2 >> 4));
-        if moved {
-            self.container_changed(key);
-        }
-        Some(out)
-    }
-    /// This `Game` is the window's, not a server's.
-    pub(super) fn native_window(&self) -> bool {
-        self.options.execution_role == ExecutionRole::Client
-    }
-    /// `ParticleEngine.countParticles`: every live group. Sunrise keeps vanilla's groups
-    /// apart: ordinary particles, firework starters and elder guardians in the engine,
-    /// and ITEM_PICKUP in `pickups`.
-    pub(super) fn client_particle_count(&self) -> usize {
-        self.particles.group_count() + self.pickups.live.len()
-    }
-    /// `ParticleEngine.clearParticles` over every group Sunrise keeps apart: the engine's
-    /// particles, starters, queue and emitters, the item pickups and the elder guardian
-    /// apparition. Leaving a level and switching levels clear through it too.
-    pub(super) fn clear_client_particles(&mut self) {
-        self.mod_clear_particles.set(false);
-        self.particles.clear();
-        self.pickups.clear();
-    }
-    /// Applies a client mod's `clear_particles` if one is waiting. Called at the start of
-    /// each particle tick, after `RenderFrameEvent.Pre`, and at particle extraction, after
-    /// HUD, screen and entity callbacks. Extraction also discards its geometry if a model
-    /// callback asks to clear while it is being built, even while paused or tick-frozen.
-    pub(super) fn apply_mod_particle_clear(&mut self) {
-        if self.mod_clear_particles.take() {
-            self.clear_client_particles();
-        }
-    }
-    /// Draws one vanilla HUD layer between the mods' hooks: first the mods' layers
-    /// placed below it (`draw_mod_gui_layers`), then `native_gui_layer_pre` (which
-    /// may hide it), the layer, then `native_gui_layer_post`. `None` when a mod hid
-    /// the layer.
-    pub(super) fn gui_layer<R>(
-        &mut self,
-        layer: &str,
-        batch: &mut HudBatch,
-        draw: impl FnOnce(&mut Self, &mut HudBatch) -> R,
-    ) -> Option<R> {
-        self.draw_mod_gui_layers(Some(layer), batch);
-        let mut canceled = false;
-        self.native_gui_layer_pre(layer, batch, &mut canceled);
-        let drawn = (!canceled).then(|| draw(self, batch));
-        self.native_gui_layer_post(layer, batch);
-        drawn
-    }
-    /// `GuiLayerManager.renderInner` for the mods' layers (`native_register_gui_layers`) not
-    /// drawn yet this frame and placed below vanilla layer `until`, or for all that are left
-    /// with `None`, at the HUD's end. Each fires `native_gui_layer_pre` (which may hide it),
-    /// `native_gui_layer_draw`, then `native_gui_layer_post`, as a vanilla layer does. So a
-    /// vanilla layer that is not drawn this frame keeps its place: the mods' layers around it
-    /// draw at the next layer that is. Nothing while the HUD is hidden, and nothing to look up
-    /// when no mod registered a layer.
-    pub(super) fn draw_mod_gui_layers(&mut self, until: Option<&str>, batch: &mut HudBatch) {
-        let order = sunrise_client::gui_layers::order();
-        let Some(next) = self.hud_layer_next.filter(|_| order.has_mod_layers()) else {
-            return;
-        };
-        let end = match until {
-            Some(layer) => match order.position(layer) {
-                Some(at) => at,
-                None => return,
-            },
-            None => order.len(),
-        };
-        for at in next..end {
-            let Some(layer) = order.mod_layer(at) else {
-                continue;
-            };
-            let mut canceled = false;
-            self.native_gui_layer_pre(layer, batch, &mut canceled);
-            if !canceled {
-                self.native_gui_layer_draw(layer, batch);
-            }
-            self.native_gui_layer_post(layer, batch);
-        }
-        // Past `until` itself: it is drawn next, by `gui_layer`.
-        self.hud_layer_next = Some(next.max(end + usize::from(until.is_some())));
-    }
-    /// Whether a box in `corner` shows: F3's debug screen takes both top
-    /// corners (its left and right columns), and a bottom corner while one
-    /// of its charts is drawn there.
-    pub(super) fn native_corner_shown(&self, corner: Corner) -> bool {
-        let charts = self.debug_charts.corners(!self.has_singleplayer_server());
-        !debug_takes(corner, self.debug, charts)
-    }
-    /// A mod's own screen closes (Escape, or `mod_screen_close`).
-    pub(super) fn close_mod_screen(&mut self) {
-        if self.screen == Screen::Mod {
-            self.set_screen(Screen::Playing);
-            if self.screen == Screen::Mod {
-                // `screen_opening` kept it open.
-                return;
-            }
-            self.capture(true);
-        }
-        self.native_mod_screen = None;
-    }
-    /// A data file of the game's resources, content mods' included
-    /// (`data/mymod/machines.json`), when there is one: what a mod's content
-    /// says, read at runtime. Only relative paths of plain names. API 20.
-    pub(super) fn native_data(&self, path: &str) -> Option<Vec<u8>> {
-        let plain = |p: &str| !p.is_empty() && p != "." && p != ".." && !p.contains('\\');
-        if !path.starts_with("data/") || !path.split('/').all(plain) {
-            return None;
-        }
-        fs::read(self.options.resources.join(path)).ok()
-    }
-    pub(super) fn native_block_collision_in(
-        &self,
-        world: &sunrise_client::world::World,
-        pos: [i32; 3],
-    ) -> Vec<[f64; 6]> {
-        self.block_collision_shape_in(world, pos)
-            .boxes()
-            .iter()
-            .map(|bounds| {
-                let min = bounds.min_position();
-                let max = bounds.max_position();
-                [min.x, min.y, min.z, max.x, max.y, max.z]
-            })
-            .collect()
-    }
-    /// The window's width and height in physical pixels, independent of GUI
-    /// scale; none on a server or when no window exists.
-    pub(super) fn native_physical_window_size(&self) -> Option<[u32; 2]> {
-        let size = self.window.as_ref()?.inner_size();
-        Some([size.width, size.height])
-    }
-    /// The areas the game itself draws beside the open screen's window: the
-    /// container build's, or the frame's own arithmetic with no build yet.
-    fn screen_own_exclusion(&self, batch: &HudBatch) -> Vec<[f32; 4]> {
-        if !matches!(self.screen, Screen::Inventory | Screen::Creative) {
-            return Vec::new();
-        }
-        match self.built_container(batch) {
-            Some(layout) => layout.exclusion(),
-            None => self.container_layout(batch).exclusion(),
-        }
-    }
-    /// The player, in a world.
-    pub(super) fn native_player(&self) -> Option<NativePlayer> {
-        let p = self.player.as_ref()?;
-        Some(NativePlayer {
-            x: p.position.x,
-            y: p.position.y,
-            z: p.position.z,
-            yaw: self.yaw,
-            pitch: self.pitch,
-            dimension: self.dim.id(),
-        })
-    }
-    /// The frame counter: frames in the last second, the slowest frame and
-    /// the 1% low of the last 5 seconds, in frames per second.
-    pub(super) fn native_frame_rate(&self) -> (u32, u32, u32) {
-        self.frame_reading()
-    }
-    /// Attack and use clicks in the last second.
-    pub(super) fn native_clicks(&mut self) -> (u32, u32) {
-        self.click_reading()
-    }
-    /// A line in chat from the client.
-    pub(super) fn native_chat(&mut self, text: &str) {
-        let focused = self.screen == Screen::Chat;
-        let line = Text::literal(text);
-        let ticks = self.visual_ticks();
-        let atlas = &self.gui.atlas;
-        self.ui
-            .chat
-            .add(atlas, line, None, ChatSource::Client, ticks, focused);
-    }
-    /// A native mod's own folder: `sunrise-mods/.sunrise-mod-data/<id>/`,
-    /// where the WebAssembly mod of the same id kept its storage, so a
-    /// player's settings carry over. Not created here.
-    pub(super) fn native_data_dir(&self, mod_id: &str) -> PathBuf {
-        Self::mod_data_root().join(mod_id)
-    }
-    pub(super) fn mod_data_root() -> PathBuf {
-        Self::game_dir()
-            .join(mod_list::DIR)
-            .join(".sunrise-mod-data")
-    }
-    /// The game's `config/` folder beside `options.txt`, shared by every mod
-    /// as on Fabric and NeoForge. The same folder on the window, its server
-    /// thread and a LAN host; a dedicated server's is in its own folder,
-    /// beside `server.properties`. Made when missing. Mods reach their own
-    /// files in it through `Host::config_files`.
-    pub(super) fn native_config_dir() -> std::io::Result<PathBuf> {
-        config_dir(&Self::game_dir())
-    }
-    /// Shows these recipes in the panel instead of its items, as many as
-    /// fit a page, under `title` and a back button, with a row of `tabs`
-    /// (each an icon; `tab` is the selected one) between them. At most 256
-    /// recipes and 16 tabs; no recipes shows the items again. The same title
-    /// and tab again keep the page the player turned to.
-    pub(super) fn native_panel_recipes(
-        &mut self,
-        mod_id: &str,
-        title: &str,
-        tabs: Vec<mod_api::Stack>,
-        tab: u32,
-        views: Vec<NativeRecipeView>,
-    ) {
-        let page = RecipePage::new(title, tabs, tab, views);
-        self.panel.show_recipes(mod_id, page);
-    }
-    /// No world is open: a client without a player (the title screen). A
-    /// server's `Game` (the server thread, a dedicated server, a LAN host)
-    /// has no player of its own, and is always in its world.
-    fn outside_world(&self) -> bool {
-        self.player.is_none() && self.options.execution_role.is_client()
-    }
-    /// Every item and recipe the game knows, made once (the same for every
-    /// call); none outside a world. They are the window's own (the content
-    /// mods' and vanilla's), with the server's recipes of the types a mod had
-    /// it send (`native_datapack_sync`) in their place; made again when those
-    /// arrive (`native_recipes_received`).
-    pub(super) fn native_recipes(&mut self) -> Option<Arc<NativeRecipes>> {
-        self.player.as_ref()?;
-        self.made_recipes()
     }
 }
 
@@ -2495,46 +1965,104 @@ impl Game<'_> {
         if !mod_api::__private::listened(mod_api::HookId::EntityPlace) {
             return false;
         }
-        let placement = match companion {
-            None => Placement::Single,
-            Some((at, extra)) => {
-                let (Ok(state), Ok(extra)) = (state.try_into_api(), extra.try_into_api()) else {
-                    return false;
-                };
-                Placement::Multi(Vec::from([
-                    BlockPlacement::new(pos, state),
-                    BlockPlacement::new(at, extra),
-                ]))
-            }
+        self.placement_canceled(self.entity(placer), pos, state, placed_against, companion)
+    }
+
+    fn placement_canceled(
+        &mut self,
+        placer: Option<EntityRef>,
+        pos: BlockPos,
+        state: BlockStateId,
+        placed_against: BlockStateId,
+        extra: impl IntoIterator<Item = (BlockPos, BlockStateId)>,
+    ) -> bool {
+        let mut extra = extra.into_iter();
+        let placement = if let Some(first) = extra.next() {
+            let Some(writes) = std::iter::once((pos, state))
+                .chain(std::iter::once(first))
+                .chain(extra)
+                .map(|(at, state)| Some(BlockPlacement::new(at, state.try_into_api().ok()?)))
+                .collect()
+            else {
+                return false;
+            };
+            Placement::Multi(writes)
+        } else {
+            Placement::Single
         };
-        let placer = self.entity(placer);
         let mut canceled = false;
         self.native_entity_place(placer, pos, state, placed_against, placement, &mut canceled);
         canceled
     }
-    /// Whether a mod canceled the block the player's `ctx` would place
-    /// (`entity_place`): nothing is previewed unless a mod listens.
-    pub(super) fn player_place_canceled(&mut self, ctx: &PlaceContext) -> bool {
-        if !mod_api::__private::listened(mod_api::HookId::EntityPlace) {
-            return false;
-        }
-        let Some(preview) =
-            self.with_level(|b, level, ticks| b.placement_preview(level, ticks, ctx))
+    /// Let `entity_place` veto exactly the decision the world will apply. If the
+    /// callback changed the inputs, do not choose another target behind its back.
+    pub(super) fn place_item_block(
+        &mut self,
+        ctx: &PlaceContext,
+        by_player: bool,
+        stack: &ItemStack,
+    ) -> crate::Result<Option<sunrise_world::level::AppliedPlacement>> {
+        let registry = self.pack.assets.registry;
+        let game_master = ctx.can_use_game_master_blocks;
+        let stack_state =
+            |state| crate::game::block_items::item_block_state(registry, state, stack, game_master);
+        let Some((decision, preview)) =
+            self.with_level(|b, level, ticks| b.decide_placement(level, ticks, ctx, stack_state))
         else {
-            return false;
+            return Ok(None);
         };
-        let against_pos = ctx.placed_against_pos(preview.pos);
-        let against = self
-            .world
-            .block(against_pos.x, against_pos.y, against_pos.z);
-        let (_, entity) = self.native_clicker();
-        self.place_canceled(
-            entity.cast_unsigned(),
-            preview.pos,
-            preview.state,
-            against,
-            preview.companion,
-        )
+        let veto = mod_api::__private::listened(mod_api::HookId::EntityPlace);
+        if veto {
+            let against_pos = decision.placed_against_pos();
+            let block = |game: &Game<'_>, pos: BlockPos| game.world.block(pos.x, pos.y, pos.z);
+            let against = block(self, against_pos);
+            let target_before = block(self, preview.pos);
+            // One proposed state per affected cell. A companion at the pre-clear
+            // position supersedes the intermediate air or water write.
+            let extra = preview.companion.into_iter().chain(
+                preview
+                    .pre_clear
+                    .filter(|(pos, _)| preview.companion.is_none_or(|(at, _)| at != *pos)),
+            );
+            let hand = if by_player {
+                self.held().cloned()
+            } else {
+                None
+            };
+            let placer = by_player
+                .then(|| self.native_clicker().1.cast_unsigned())
+                .and_then(|entity| self.entity(entity));
+            // The block revision and journal epoch cover supporting blocks and
+            // block-entity shapes without tracing ordinary reads.
+            let level = (self.dim, self.world.revision, self.transactions.writes());
+            if self.placement_canceled(placer, preview.pos, preview.state, against, extra)
+                || level != (self.dim, self.world.revision, self.transactions.writes())
+                || block(self, preview.pos) != target_before
+                || block(self, against_pos) != against
+                || (by_player && self.held() != hand.as_ref())
+            {
+                return Ok(None);
+            }
+        }
+        let Some(placed) = self
+            .with_level(|b, level, ticks| b.apply_placement(level, ticks, decision, stack_state))
+        else {
+            return Ok(None);
+        };
+        if placed.matches_candidate {
+            let pos = placed.context.pos;
+            let target = [pos.x, pos.y, pos.z];
+            self.apply_block_item_data(target, placed.state, stack, game_master);
+            self.with_level(|b, level, ticks| b.placement_set_placed_by(level, ticks, &placed));
+            let placer = by_player.then(|| self.native_acting_player()).flatten();
+            self.set_placed_by(target, placer, Some(stack))?;
+            self.block_item_placed(stack, placer, &placed.context);
+            if by_player {
+                self.trigger_block("minecraft:placed_block", target, stack);
+            }
+        }
+        self.with_level(|b, level, ticks| b.report_placement(level, ticks, &placed));
+        Ok(Some(placed))
     }
     /// `MobEvent::PlaceBlock`: a mob sets `state` at `pos` unless a mod
     /// cancels `entity_place`. Enderman attempts use `enderman_place_block`.
@@ -2719,6 +2247,7 @@ impl Game<'_> {
 
     /// Tells the mods of the chunks that came into this level.
     pub(super) fn native_chunks_loaded(&mut self) {
+        self.fire_pending_block_entity_data_loads();
         let loaded = std::mem::take(&mut self.world.loaded_chunks);
         if self.remote.is_some() {
             return;
@@ -2892,6 +2421,7 @@ impl Game<'_> {
                     for list in c.faces.iter_mut().chain([&mut c.inputs, &mut c.outputs]) {
                         list.retain(|&s| s < n);
                     }
+                    c.insert_rules.truncate(n);
                     c.menu = c
                         .menu
                         .filter(|m| mod_menu(m).is_some_and(|(_, size)| size == n));
@@ -2993,44 +2523,6 @@ impl Game<'_> {
         }
         true
     }
-    /// `ContainerOpenersCounter` for the mod containers of the level in place:
-    /// everyone with one open, recounted every tick, so a change is heard
-    /// whichever way an opener left (`native_mod_container_viewers`). The
-    /// openers are the guests (but not a spectator, `BarrelBlockEntity.startOpen`),
-    /// the host's own player, and the copper golems that opened it
-    /// (`chest_openers`).
-    pub(super) fn tick_mod_container_viewers(&mut self) {
-        let mut now: HashMap<(i32, i32, i32), u32> = HashMap::new();
-        let mut open = |game: &Self, pos: (i32, i32, i32), n: u32| {
-            if n > 0 && game.mod_menu_at(pos).is_some() {
-                *now.entry(pos).or_default() += n;
-            }
-        };
-        if let Some(host) = &self.lan {
-            for g in host
-                .hub
-                .guests
-                .iter()
-                .filter(|g| host.hub.here(g) && !g.spectator())
-            {
-                if let Some(m) = &g.menu
-                    && let Slots::Block(pos) = m.slots
-                {
-                    open(self, pos, 1);
-                }
-            }
-        }
-        if let Some(pos) = self.container.filter(|_| !self.spectator()) {
-            open(self, pos, 1);
-        }
-        for (&pos, &(golems, _)) in &self.world.chest_openers {
-            open(self, pos, golems.max(0) as u32);
-        }
-        let dim = self.dim.id();
-        for (pos, previous, viewers) in viewer_changes(&mut self.mod_container_viewers, dim, now) {
-            self.native_mod_container_viewers(dim, [pos.0, pos.1, pos.2], viewers, previous);
-        }
-    }
     /// The menu type of the mod container at `key`, if it has one.
     pub(super) fn mod_menu_at(&self, key: Pos) -> Option<&'static str> {
         let state = self.world.block(key.0, key.1, key.2).0;
@@ -3047,29 +2539,64 @@ impl Game<'_> {
             .as_mut()
             .is_some_and(|s| s.set_data(window, id, value))
     }
-    /// Where the open mod screen puts container slot `slot`: where a mod last
-    /// moved it, else where the screen declared it.
+    /// Where the open mod screen puts container slot `slot` this frame: where
+    /// a mod last moved it, else where the screen declared it; None once a mod
+    /// hid it.
     pub(super) fn native_screen_slot(&self, slot: usize) -> Option<(f32, f32)> {
         let s = self.shown_native_screen()?;
-        let declared = s.screen.slots.get(slot).copied().flatten()?;
-        let [x, y] = s.slot_moves.position(slot, declared);
+        let declared = s.screen.slots.get(slot)?.as_ref()?.position;
+        let [x, y] = s.slot_moves.position(slot, declared)?;
         Some((x, y))
     }
-    /// Moves container slot `slot` of the open mod screen to `x`, `y`
-    /// (relative to the screen's origin) from the next frame. False, changing
-    /// nothing, with no mod screen open, for a slot the screen does not show
-    /// or a position that is not finite.
-    pub(in crate::game) fn set_screen_slot_position(&self, slot: u32, x: f32, y: f32) -> bool {
-        self.shown_native_screen()
-            .is_some_and(|s| s.slot_moves.set(&s.screen.slots, slot, x, y))
+    pub(in crate::game) fn native_screen_slot_icon(&self, slot: usize) -> Option<&str> {
+        self.shown_native_screen()?
+            .screen
+            .slots
+            .get(slot)?
+            .as_ref()?
+            .no_item_icon
+            .as_deref()
     }
-    /// The container slots the open mod screen shows (300.. ids).
+    /// Where the open screen of mod menu type `menu` puts container slot
+    /// `slot` from the next frame: the mod's last move, else the screen's
+    /// declaration; None for a hidden slot, another menu type's screen or none.
+    pub(in crate::game) fn screen_slot(&self, menu: &str, slot: usize) -> Option<[f32; 2]> {
+        let s = self.owned_native_screen(menu)?;
+        s.slot_moves.latest(&s.screen.slots, slot)
+    }
+    /// The open screen of menu type `menu`, when the mod calling (if one is)
+    /// owns it: another mod's part on a shared vanilla type moves no slot of it.
+    fn owned_native_screen(&self, menu: &str) -> Option<&OpenNativeScreen> {
+        let s = self.shown_native_screen().filter(|s| s.menu == menu)?;
+        let owner = || mod_api::__private::menu_screen_owner(&s.menu, s.block.as_deref());
+        mod_api::content::crash::current_native_mod()
+            .is_none_or(|calling| owner() == Some(calling))
+            .then_some(s)
+    }
+    /// Moves container slot `slot` of the open screen of menu type `menu` to `pos`
+    /// (relative to the screen's origin), or hides it with None, from the
+    /// next frame (`SlotMoves::set`).
+    pub(in crate::game) fn set_screen_slot(
+        &self,
+        menu: &str,
+        slot: usize,
+        pos: Option<[f32; 2]>,
+    ) -> Result<(), mod_api::ScreenSlotRefusal> {
+        let s = self
+            .owned_native_screen(menu)
+            .ok_or(mod_api::ScreenSlotRefusal::NoScreen)?;
+        s.slot_moves.set(&s.screen.slots, slot, pos)
+    }
+    /// The container slots the open mod screen shows this frame (300.. ids).
     pub(super) fn native_screen_slots(&self) -> Option<Vec<usize>> {
         let s = self.shown_native_screen()?;
         let shown = s.screen.slots.iter().enumerate();
         Some(
             shown
-                .filter(|(_, p)| p.is_some())
+                .filter(|(i, p)| {
+                    p.as_ref()
+                        .is_some_and(|p| s.slot_moves.position(*i, p.position).is_some())
+                })
                 .map(|(i, _)| 300 + i)
                 .collect(),
         )
@@ -3078,7 +2605,15 @@ impl Game<'_> {
     /// it (`Game::slot_count` asks every frame).
     pub(super) fn native_screen_slot_count(&self) -> Option<usize> {
         let s = self.shown_native_screen()?;
-        Some(s.screen.slots.iter().filter(|p| p.is_some()).count())
+        let shown = s.screen.slots.iter().enumerate();
+        Some(
+            shown
+                .filter(|(i, p)| {
+                    p.as_ref()
+                        .is_some_and(|p| s.slot_moves.position(*i, p.position).is_some())
+                })
+                .count(),
+        )
     }
     /// The first row of the player's inventory on the open mod screen.
     pub(super) fn native_screen_inventory_y(&self) -> Option<f32> {
@@ -3134,18 +2669,35 @@ impl Game<'_> {
                 );
             }
         }
-        self.native_screen_draw(&s.block, &s.data, batch, [ox, oy]);
+        if mod_api::__private::has_scoped_hook(mod_api::HookId::ScreenDraw) {
+            let gui_size = [batch.width as i32, batch.height as i32];
+            let mut draw = crate::game::host::draw::GameDrawContext::new(self, batch);
+            self.native_screen_draw(mod_api::__private::ScreenDrawCall {
+                menu: &s.menu,
+                block: s.block.as_deref(),
+                pos: s.pos(),
+                data: &s.data,
+                origin: [ox, oy],
+                pointer: [self.cursor.0 as i32, self.cursor.1 as i32],
+                gui_size,
+                draw: &mut draw,
+            });
+        }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Background);
         if s.screen.own_labels {
             return true;
         }
         let grey = rgba(64, 64, 64, 255);
         if let Some(title) = self.remote_menu_title() {
-            batch.text_styled(atlas, &title, ox + 8.0, oy + 6.0, grey, false);
+            let [x, y] = s.screen.title_label.unwrap_or([8.0, 6.0]);
+            batch.text_styled(atlas, &title, ox + x, oy + y, grey, false);
         }
         let inventory = self.translate_with_fallback("container.inventory", "Inventory");
-        let label_y = oy + s.screen.inventory_y - 11.0;
-        batch.text(atlas, &inventory, ox + 8.0, label_y, grey, false);
+        let [x, y] = s
+            .screen
+            .inventory_label
+            .unwrap_or([8.0, s.screen.height - 94.0]);
+        batch.text(atlas, &inventory, ox + x, oy + y, grey, false);
         true
     }
     /// Puts back a mod block entity taken out for a call, unless the call
@@ -3193,30 +2745,30 @@ impl Game<'_> {
         self.api_menu_button(&context, &mut taken, carried);
         self.put_back_mod_block_entity(pos, taken, &items);
     }
-    /// The cursor from the open mod screen's top left, with its block and
-    /// data, for its press and tooltip hooks.
-    fn native_screen_at(&self) -> Option<(String, Vec<i32>, [f32; 2])> {
-        let s = self.shown_native_screen()?;
-        let r = self.renderer.as_ref()?;
-        let batch = HudBatch::new(
-            [r.config.width, r.config.height],
-            self.settings.gui_scale_inputs(),
-        );
-        let (ox, oy) = self.inventory_origin(&batch);
-        let at = [self.cursor.0 - ox, self.cursor.1 - oy];
-        Some((s.block.clone(), s.data.clone(), at))
-    }
     /// A press on the open mod screen's own button (`native_screen_click`)
     /// goes to the server as a menu button click (true).
     pub(super) fn native_screen_press(&mut self, right: bool) -> bool {
         if self.inventory_target().0.is_some() {
             return false;
         }
-        let Some((block, data, at)) = self.native_screen_at() else {
+        let (Some(screen), Some(r)) = (self.shown_native_screen(), self.renderer.as_ref()) else {
             return false;
         };
+        let batch = HudBatch::new(
+            [r.config.width, r.config.height],
+            self.settings.gui_scale_inputs(),
+        );
+        let (ox, oy) = self.inventory_origin(&batch);
+        let at = [self.cursor.0 - ox, self.cursor.1 - oy];
         let mut button = None;
-        self.native_screen_click(&block, &data, at, right, &mut button);
+        self.native_screen_click(
+            &screen.menu,
+            screen.block.as_deref(),
+            &screen.data,
+            at,
+            right,
+            &mut button,
+        );
         let Some(button) = button else {
             return false;
         };
@@ -3234,16 +2786,50 @@ impl Game<'_> {
         if slot.is_some_and(|i| self.slot_view(i).is_some()) {
             return;
         }
-        let Some((block, data, at)) = self.native_screen_at() else {
+        let mut lines = Vec::new();
+        self.native_screen_tooltip_lines(batch, slot, &mut lines);
+        self.draw_tooltip_lines(batch, &lines, self.cursor.0, self.cursor.1);
+    }
+    /// The screen-specific line override, shared by filled-slot and empty-space tooltips.
+    /// Item images and component gathering remain on the stack's normal drawing path.
+    pub(super) fn native_screen_tooltip_lines(
+        &self,
+        batch: &HudBatch,
+        slot: Option<usize>,
+        lines: &mut Vec<(sunrise_client::text::Text, u32)>,
+    ) {
+        // Scoped hooks subscribe through Parts, not the global Hooks subscriber table.
+        if !mod_api::__private::has_scoped_hook(mod_api::HookId::ScreenTooltip) {
+            return;
+        }
+        let Some(screen) = self.shown_native_screen() else {
             return;
         };
-        let mut lines = Vec::new();
-        self.native_screen_tooltip(&block, &data, at, &mut lines);
-        let lines: Vec<(sunrise_client::text::Text, u32)> = lines
-            .into_iter()
-            .map(|l| (sunrise_client::text::Text::literal(l), u32::MAX))
-            .collect();
-        self.draw_tooltip_lines(batch, &lines, self.cursor.0, self.cursor.1);
+        let menu_slot = slot.and_then(|slot| {
+            Self::menu_slot_index(self.native_screen_menu()?, slot).map(|slot| slot as u32)
+        });
+        let (ox, oy) = self.inventory_origin(batch);
+        let at = [self.cursor.0 - ox, self.cursor.1 - oy];
+        use crate::game::api_values::{TryIntoApi, TryIntoEngine};
+        // Keep the original tooltip if either conversion fails. A hovered
+        // item's text can fail on every frame, so do not log the refusal here.
+        let Ok(mut snapshot) = lines.try_into_api() else {
+            return;
+        };
+        self.native_screen_tooltip(mod_api::__private::ScreenTooltipCall {
+            menu: &screen.menu,
+            block: screen.block.as_deref(),
+            data: &screen.data,
+            at,
+            slot: menu_slot,
+            origin: [ox, oy],
+            pointer: [self.cursor.0 as i32, self.cursor.1 as i32],
+            gui_size: [batch.width as i32, batch.height as i32],
+            lines: &mut snapshot,
+        });
+        if let Ok(replacement) = snapshot.try_into_engine(&()) {
+            *lines = replacement;
+        }
     }
     /// Options > Mods' rows for loaded code mods, after the content-only rows.
     pub(super) fn list_native_mods(&mut self) {
@@ -3273,7 +2859,7 @@ impl Game<'_> {
                 .insert(m.id.clone(), sunrise_client::mod_list::ModInfo::of(m, None));
             Installed {
                 id: m.id.clone(),
-                title: [m.name.as_str(), " ", m.version.as_str()].concat(),
+                title: format!("{} {}", m.name, m.version),
                 description: m.description.clone(),
                 problem: None,
                 dev: false,
@@ -3464,33 +3050,13 @@ impl Game<'_> {
         self.native_shader_params(partial, &mut params);
         finite_params(params)
     }
-    /// The minimap a native mod shows.
-    pub(super) fn native_minimap_now(&self) -> Option<mod_api::Minimap> {
-        let mut minimap = None;
-        self.native_minimap(&mut minimap);
-        minimap.map(|m| mod_api::Minimap {
-            size: finite(m.size, 16.0, 256.0),
-            blocks_per_pixel: finite(m.blocks_per_pixel, 0.5, 4.0),
-            ..m
-        })
-    }
-}
-
-/// Whether `rgba` is a whole `width` x `height` image that fits a
-/// `slot_width` x `slot_height` atlas slot (a native mod's `mod_image`).
-fn mod_image_fits(width: u32, height: u32, rgba: usize, slot_width: u32, slot_height: u32) -> bool {
-    width > 0
-        && height > 0
-        && width <= slot_width
-        && height <= slot_height
-        && rgba == width as usize * height as usize * 4
 }
 
 /// Whether F3's debug screen, open when `debug`, covers `corner`
 /// (`DebugScreenOverlay.extractRenderState`): its left and right columns
 /// the top corners, and its charts the bottom corners `charts` (bottom left,
 /// bottom right) says they are drawn in.
-fn debug_takes(corner: Corner, debug: bool, charts: [bool; 2]) -> bool {
+pub(super) fn debug_takes(corner: Corner, debug: bool, charts: [bool; 2]) -> bool {
     debug
         && match corner {
             Corner::TopLeft | Corner::TopRight => true,
@@ -3500,7 +3066,7 @@ fn debug_takes(corner: Corner, debug: bool, charts: [bool; 2]) -> bool {
 }
 
 /// A menu of `MOD_MENUS` or a content mod's menu type, by its name.
-fn mod_menu(name: &str) -> Option<(&'static str, usize)> {
+pub(super) fn mod_menu(name: &str) -> Option<(&'static str, usize)> {
     MOD_MENUS
         .into_iter()
         .find(|(menu, _)| *menu == name)
@@ -3538,7 +3104,7 @@ fn property_change(
 }
 
 /// `config/` in the game folder, beside `options.txt`, made when missing.
-fn config_dir(game_dir: &Path) -> std::io::Result<PathBuf> {
+pub(super) fn config_dir(game_dir: &Path) -> std::io::Result<PathBuf> {
     let dir = game_dir.join("config");
     fs::create_dir_all(&dir)?;
     Ok(dir)
@@ -3601,7 +3167,7 @@ fn box_meets(b: &sunrise_core::geometry::Aabb, min: [f64; 3], max: [f64; 3]) -> 
 /// overlay, the title screen, no window or no player; `owner`'s own screen
 /// open): `None` opens it, `Some` answers without changing anything (true:
 /// `mod_id`'s is already open).
-fn mod_screen_opens(
+pub(super) fn mod_screen_opens(
     screen: Screen,
     blocked: bool,
     owner: Option<&str>,
@@ -3675,59 +3241,6 @@ fn packet_view(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn client_packet_view_exposes_the_type_and_custom_payload_only() {
-        use sunrise_protocol::packets::{
-            configuration::{CustomPayload, Ping},
-            play::Clientbound,
-        };
-        let ping = super::client_packet_view(&Clientbound::Ping(Ping { id: 7 }));
-        assert_eq!(ping.id.to_string(), "minecraft:ping");
-        assert_eq!(ping.custom_payload, None);
-
-        let payload = super::client_packet_view(&Clientbound::CustomPayload(CustomPayload {
-            channel: "example:message".into(),
-            data: vec![0, 127, 255],
-        }));
-        assert_eq!(payload.id.to_string(), "minecraft:custom_payload");
-        let payload = payload.custom_payload.unwrap();
-        assert_eq!(payload.channel, "example:message");
-        assert_eq!(payload.data, [0, 127, 255]);
-
-        for id in [-1, i32::MAX] {
-            let unknown = super::client_packet_view(&Clientbound::Unknown(id, vec![9]));
-            assert_eq!(unknown.id.to_string(), "sunrise:unknown");
-            assert_eq!(unknown.custom_payload, None);
-        }
-    }
-
-    #[test]
-    fn serverbound_packet_view_names_the_packets_the_game_sends() {
-        use sunrise_protocol::packets::{
-            configuration::CustomPayload,
-            play::{Serverbound, SetCarriedItem},
-        };
-        let slot = super::serverbound_packet_view(&Serverbound::SetCarriedItem(SetCarriedItem {
-            slot: 3,
-        }));
-        assert_eq!(slot.id.to_string(), "minecraft:set_carried_item");
-        assert_eq!(slot.custom_payload, None);
-
-        let payload = super::serverbound_packet_view(&Serverbound::CustomPayload(CustomPayload {
-            channel: "example:message".into(),
-            data: vec![1, 2],
-        }));
-        assert_eq!(payload.id.to_string(), "minecraft:custom_payload");
-        let payload = payload.custom_payload.unwrap();
-        assert_eq!(
-            (payload.channel.as_str(), payload.data.as_slice()),
-            ("example:message", &[1, 2][..])
-        );
-
-        let unknown = super::serverbound_packet_view(&Serverbound::Unknown(-1, vec![9]));
-        assert_eq!(unknown.id.to_string(), "sunrise:unknown");
-    }
-
     #[test]
     #[ignore = "daily"]
     fn enchantment_registry_returns_records_and_unknown_cost() {
@@ -3920,182 +3433,163 @@ mod tests {
             ),
         ]);
         mod_platform::__private::install(mods.clone());
-        crate::game::api_values::install_parts(&mods).unwrap();
+        // `be_user` attaches a Part to the type `be_test` declares, which names `be_test`
+        // among its dependencies.
+        let package = |id: &str, depends_on: &[&str]| {
+            PackageInfo::new(
+                id.into(),
+                "1".into(),
+                PackageKind::Code,
+                Side::Both,
+                vec![id.into()],
+                depends_on
+                    .iter()
+                    .map(|owner| {
+                        PackageDependency::new(
+                            (*owner).into(),
+                            "*".into(),
+                            DependencyKind::Required,
+                            DependencyOrder::After,
+                            Side::Both,
+                            None,
+                            None,
+                        )
+                    })
+                    .collect(),
+            )
+        };
         let base = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
-        let root = super::super::mods::content_root(&base, &Default::default());
-        if invalid {
-            let error = root.unwrap_err().to_string();
-            assert!(error.contains("be_test:shared"), "{error}");
-            assert!(error.contains("be_test:missing"), "{error}");
-            assert!(!std::path::Path::new(".sunrise-cache").exists());
-            return;
-        }
-        if let Some(id) = unknown {
-            let error = root.unwrap_err().to_string();
-            assert!(error.contains("be_user"), "{error}");
-            assert!(error.contains("unknown block entity type"), "{error}");
-            assert!(error.contains(id), "{error}");
-            assert!(sunrise_client::block_entity_types::current().is_none());
-            return;
-        }
-        assert_eq!(keys.shared.get(), keys.own.get());
-        with_game_at(root.unwrap().prepared().to_path_buf(), |game| {
-            game.options.dedicated = Some(Vec::new());
-            game.world
-                .chunks
-                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
-            let level = game.level(game.dim.id()).unwrap();
-            let stone = game
-                .pack
-                .assets
-                .registry
-                .default_state("minecraft:stone")
-                .unwrap();
-            for (x, block) in [
-                (1, FIRST),
-                (2, SECOND),
-                (3, EMPTY),
-                (4, PLAIN),
-                (5, "minecraft:chest"),
-            ] {
-                let state = game.pack.assets.registry.default_state(block).unwrap();
-                assert_eq!(
-                    game.level_set_block(level, [x, 63, 0], stone, BlockUpdateFlags::NONE),
-                    Ok(true)
-                );
-                assert_eq!(
-                    game.level_set_block(level, [x, 64, 0], state, BlockUpdateFlags::NONE),
-                    Ok(true)
-                );
-                let pos = (x, 64, 0);
-                if block == PLAIN {
-                    // No declared type claims it, and no mod adds it to `minecraft:banner`'s
-                    // valid blocks, so its template creates no entity (`validateBlockState`).
-                    assert!(game.world.block_entities.get(&pos).is_none());
-                    assert!(game.block_entity(level, [x, 64, 0]).is_none());
-                    continue;
+        mod_platform::__private::with_test_package_inventory(
+            vec![package("be_test", &[]), package("be_user", &["be_test"])],
+            || {
+                crate::game::api_values::install_parts(&mods).unwrap();
+                let root = super::super::mods::content_root(&base, &Default::default());
+                if invalid {
+                    let error = root.unwrap_err().to_string();
+                    assert!(error.contains("be_test:shared"), "{error}");
+                    assert!(error.contains("be_test:missing"), "{error}");
+                    // A refused declaration builds no content root. The roots folder's own `.lock`
+                    // is made by every start and never deleted, so it is not a root.
+                    let built: Vec<_> = std::fs::read_dir(".sunrise-cache/mod-content")
+                        .into_iter()
+                        .flatten()
+                        .map(|entry| entry.unwrap().file_name())
+                        .filter(|name| name != ".lock")
+                        .collect();
+                    assert!(built.is_empty(), "{built:?}");
+                    return;
                 }
-                let handle = game.block_entity(level, [x, 64, 0]).unwrap();
-                if block == "minecraft:chest" {
-                    assert_eq!(handle.kind(game).as_ref(), keys.vanilla.get());
-                    let probe = level.capability(game, &PROBE, [x, 64, 0], None).unwrap();
-                    assert_eq!((probe.value(), probe.owner()), (26, "be_user".into()));
-                    continue;
+                if let Some(id) = unknown {
+                    let error = root.unwrap_err().to_string();
+                    assert!(error.contains("be_user"), "{error}");
+                    assert!(error.contains("unknown block entity type"), "{error}");
+                    assert!(error.contains(id), "{error}");
+                    assert!(sunrise_client::block_entity_types::current().is_none());
+                    return;
                 }
-                let Some(BlockEntity::Mod(entity)) = game.world.block_entities.get(&pos) else {
-                    panic!("declared type did not override its banner template");
-                };
-                if block == EMPTY {
-                    assert_eq!(entity.id(), "be_test:empty");
-                    assert!(entity.nbt.is_empty());
-                    continue;
-                }
-                assert_eq!(entity.id(), "be_test:shared");
-                assert_eq!(entity.nbt.get(&"energy".into()), Some(&Tag::Long(6300)));
-                assert_eq!(handle.kind(game).as_ref(), keys.shared.get());
-                let probe = level.capability(game, &PROBE, [x, 64, 0], None).unwrap();
-                assert_eq!((probe.value(), probe.owner()), (6300, "be_user".into()));
-                game.tick_mod_block_entity(pos);
-                let saved = save::block_entity_encode::encode(
-                    pos,
-                    game.world.block_entities.get(&pos).unwrap(),
-                    block,
-                );
-                assert_eq!(saved.get("energy"), Some(&Tag::Long(6301)));
-                let (saved_pos, restored) =
-                    save::decode_block_entity_for_block(&saved, block).unwrap();
-                assert_eq!(saved_pos, pos);
-                assert_eq!(restored.id(), "be_test:shared");
-                assert!(save::decode_block_entity_for_block(&saved, EMPTY).is_none());
-                game.world.block_entities.insert(pos, restored);
-                game.tick_mod_block_entity(pos);
-                let saved = save::block_entity_encode::encode(
-                    pos,
-                    game.world.block_entities.get(&pos).unwrap(),
-                    block,
-                );
-                assert_eq!(saved.get("energy"), Some(&Tag::Long(6302)));
-            }
+                assert_eq!(keys.shared.get(), keys.own.get());
+                with_game_at(root.unwrap().prepared().to_path_buf(), |game| {
+                    game.options.dedicated = Some(Vec::new());
+                    game.world
+                        .chunks
+                        .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                    let level = game.level(game.dim.id()).unwrap();
+                    let stone = game
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:stone")
+                        .unwrap();
+                    for (x, block) in [
+                        (1, FIRST),
+                        (2, SECOND),
+                        (3, EMPTY),
+                        (4, PLAIN),
+                        (5, "minecraft:chest"),
+                    ] {
+                        let state = game.pack.assets.registry.default_state(block).unwrap();
+                        assert_eq!(
+                            game.level_set_block(level, [x, 63, 0], stone, BlockUpdateFlags::NONE),
+                            Ok(true)
+                        );
+                        assert_eq!(
+                            game.level_set_block(level, [x, 64, 0], state, BlockUpdateFlags::NONE),
+                            Ok(true)
+                        );
+                        let pos = (x, 64, 0);
+                        if block == PLAIN {
+                            // No declared type claims it, and no mod adds it to `minecraft:banner`'s
+                            // valid blocks, so its template creates no entity (`validateBlockState`).
+                            assert!(game.world.block_entities.get(&pos).is_none());
+                            assert!(game.block_entity(level, [x, 64, 0]).is_none());
+                            continue;
+                        }
+                        let handle = game.block_entity(level, [x, 64, 0]).unwrap();
+                        if block == "minecraft:chest" {
+                            assert_eq!(handle.kind(game).as_ref(), keys.vanilla.get());
+                            let probe = level.capability(game, &PROBE, [x, 64, 0], None).unwrap();
+                            assert_eq!((probe.value(), probe.owner()), (26, "be_user".into()));
+                            continue;
+                        }
+                        let Some(BlockEntity::Mod(entity)) = game.world.block_entities.get(&pos)
+                        else {
+                            panic!("declared type did not override its banner template");
+                        };
+                        if block == EMPTY {
+                            assert_eq!(entity.id(), "be_test:empty");
+                            assert!(entity.nbt.is_empty());
+                            continue;
+                        }
+                        assert_eq!(entity.id(), "be_test:shared");
+                        assert_eq!(entity.nbt.get(&"energy".into()), Some(&Tag::Long(6300)));
+                        assert_eq!(handle.kind(game).as_ref(), keys.shared.get());
+                        let probe = level.capability(game, &PROBE, [x, 64, 0], None).unwrap();
+                        assert_eq!((probe.value(), probe.owner()), (6300, "be_user".into()));
+                        game.tick_mod_block_entity(pos);
+                        let saved = save::block_entity_encode::encode(
+                            pos,
+                            game.world.block_entities.get(&pos).unwrap(),
+                            block,
+                            &Default::default(),
+                        );
+                        assert_eq!(saved.get("energy"), Some(&Tag::Long(6301)));
+                        let (saved_pos, restored) =
+                            save::decode_block_entity_for_block(&saved, block).unwrap();
+                        assert_eq!(saved_pos, pos);
+                        assert_eq!(restored.id(), "be_test:shared");
+                        assert!(save::decode_block_entity_for_block(&saved, EMPTY).is_none());
+                        game.world.block_entities.insert(pos, restored);
+                        game.tick_mod_block_entity(pos);
+                        let saved = save::block_entity_encode::encode(
+                            pos,
+                            game.world.block_entities.get(&pos).unwrap(),
+                            block,
+                            &Default::default(),
+                        );
+                        assert_eq!(saved.get("energy"), Some(&Tag::Long(6302)));
+                    }
 
-            // A level hook's `LevelWriteHost::set_block` fires the same hook in its write.
-            let first = game.pack.assets.registry.default_state(FIRST).unwrap();
-            use crate::game::api_values::TryIntoApi;
-            let written = game.with_level(|_, level, ticks| {
-                LevelWriteHost::set_block(
-                    &mut super::super::mod_api_host::LevelTicks::new(level, ticks),
-                    [5, 64, 0],
-                    first.try_into_api().unwrap(),
-                    BlockUpdateFlags::NONE,
-                )
-            });
-            assert!(written);
-            let Some(BlockEntity::Mod(entity)) = game.world.block_entities.get(&(5, 64, 0)) else {
-                panic!("a level write did not create the declared block entity");
-            };
-            assert_eq!(entity.id(), "be_test:shared");
-            assert_eq!(entity.nbt.get(&"energy".into()), Some(&Tag::Long(6300)));
-        });
-    }
-
-    #[test]
-    #[ignore = "daily"]
-    fn client_host_reads_current_pause_state() {
-        use super::super::native_entity_refs::tests::with_game;
-        use crate::game::execution_role::ExecutionRole;
-
-        with_game(|game| {
-            game.options.execution_role = ExecutionRole::Client;
-            game.pause = false;
-            assert!(!mod_api::prelude::ClientViewClientHost::is_paused(game));
-            game.pause = true;
-            assert!(mod_api::prelude::ClientViewClientHost::is_paused(game));
-        });
-    }
-
-    #[test]
-    #[ignore = "daily"]
-    fn client_host_reads_playing_and_key_mappings() {
-        use super::super::Screen;
-        use super::super::native_entity_refs::tests::with_game;
-        use crate::game::execution_role::ExecutionRole;
-
-        use winit::keyboard::KeyCode;
-
-        with_game(|game| {
-            game.options.execution_role = ExecutionRole::Client;
-            game.screen = Screen::Playing;
-            assert!(mod_api::prelude::ClientInputClientHost::playing(game));
-            game.screen = Screen::Chat;
-            assert!(!mod_api::prelude::ClientInputClientHost::playing(game));
-
-            // Vanilla's default bindings: forward is W, attack the left mouse button.
-            let forward = mod_api::prelude::ClientInputClientHost::mapping(game, "key.forward")
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                (forward.down, forward.label),
-                (false, mod_api::Text::literal("W"))
-            );
-            game.keys.insert(KeyCode::KeyW);
-            assert!(
-                mod_api::prelude::ClientInputClientHost::mapping(game, "key.forward")
-                    .unwrap()
-                    .unwrap()
-                    .down
-            );
-            let attack = mod_api::prelude::ClientInputClientHost::mapping(game, "key.attack")
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                attack.label,
-                mod_api::Text::translate("key.mouse.left", Vec::new())
-            );
-            assert!(
-                mod_api::prelude::ClientInputClientHost::mapping(game, "key.mymod.boost")
-                    .unwrap()
-                    .is_none()
-            );
-        });
+                    // A level hook's `LevelWriteHost::set_block` fires the same hook in its write.
+                    let first = game.pack.assets.registry.default_state(FIRST).unwrap();
+                    use crate::game::api_values::TryIntoApi;
+                    let written = game.with_level(|_, level, ticks| {
+                        LevelWriteHost::set_block(
+                            &mut super::super::mod_api_host::LevelTicks::new(level, ticks),
+                            [5, 64, 0],
+                            first.try_into_api().unwrap(),
+                            BlockUpdateFlags::NONE,
+                        )
+                    });
+                    assert!(written);
+                    let Some(BlockEntity::Mod(entity)) = game.world.block_entities.get(&(5, 64, 0))
+                    else {
+                        panic!("a level write did not create the declared block entity");
+                    };
+                    assert_eq!(entity.id(), "be_test:shared");
+                    assert_eq!(entity.nbt.get(&"energy".into()), Some(&Tag::Long(6300)));
+                });
+            },
+        );
     }
 
     #[test]
@@ -4135,33 +3629,14 @@ mod tests {
             assert_eq!(machine.data, [7]);
             assert_ne!(machine.revision(), made);
             assert!(game.world.modified.contains(&(0, 0)));
-            let saved = block_entity_encode::encode(pos, entity, "minecraft:stone");
+            let saved =
+                block_entity_encode::encode(pos, entity, "minecraft:stone", &Default::default());
             let (saved_pos, loaded) = decode_block_entity(&saved).unwrap();
             assert_eq!(saved_pos, pos);
             assert_eq!(loaded.id(), "test:machine");
         });
     }
 
-    #[test]
-    fn hand_pose_rejects_invalid_components() {
-        let identity = super::hand_pose_matrix([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(identity, glam::Mat4::IDENTITY);
-        assert_eq!(
-            super::hand_pose_matrix([
-                f32::NAN,
-                17.0,
-                f32::INFINITY,
-                3601.0,
-                -3601.0,
-                f32::NAN,
-                0.0
-            ]),
-            identity
-        );
-        let point = super::hand_pose_matrix([1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 2.0])
-            .transform_point3(glam::Vec3::X);
-        assert_eq!(point, glam::Vec3::new(3.0, 2.0, 3.0));
-    }
     #[test]
     fn observed_overlay_prefers_first_open_screen() {
         assert_eq!(
@@ -4479,35 +3954,6 @@ mod tests {
         assert_eq!(game.screen_hovered_item(), None);
     }
 
-    /// A mod's own screen opens only over the world, never over another
-    /// screen, an overlay (the title screen, a book, loading, no window) or
-    /// another mod's; opening it again is a no-op.
-    #[test]
-    fn a_mod_screen_opens_only_over_the_world() {
-        use super::{Screen, mod_screen_opens};
-        assert_eq!(mod_screen_opens(Screen::Playing, false, None, "a"), None);
-        assert_eq!(
-            mod_screen_opens(Screen::Playing, true, None, "a"),
-            Some(false)
-        );
-        for other in [
-            Screen::Paused,
-            Screen::Inventory,
-            Screen::Chat,
-            Screen::Options,
-        ] {
-            assert_eq!(mod_screen_opens(other, false, None, "a"), Some(false));
-        }
-        assert_eq!(
-            mod_screen_opens(Screen::Mod, false, Some("a"), "a"),
-            Some(true)
-        );
-        assert_eq!(
-            mod_screen_opens(Screen::Mod, false, Some("b"), "a"),
-            Some(false)
-        );
-    }
-
     /// The characters a `ScreenEvent.CharacterTyped.Pre` sees are the
     /// printable ones of a text: a cancelled one leaves that text and a
     /// control character (a key, not text) is never offered a hook.
@@ -4565,95 +4011,6 @@ mod tests {
             ),
             (glam::DVec3::new(1.0, 5.0, 3.0), 10.0, 20.0)
         );
-    }
-
-    /// A shake is scaled by Distortion Effects, bounded on each axis, and a
-    /// value that isn't finite is none.
-    #[test]
-    fn a_shake_is_scaled_and_bounded() {
-        use super::{Shake, bounded_shake, shake_pose};
-        let shake = Shake {
-            pitch: 4.0,
-            yaw: -30.0,
-            roll: f32::NAN,
-            offset: [0.2, 2.0, f32::INFINITY],
-        };
-        assert_eq!(
-            bounded_shake(shake, 1.0),
-            Shake {
-                pitch: 4.0,
-                yaw: -10.0,
-                roll: 0.0,
-                offset: [0.2, 0.5, 0.0],
-            }
-        );
-        assert_eq!(bounded_shake(shake, 0.5).pitch, 2.0);
-        assert_eq!(bounded_shake(shake, 0.0), Shake::default());
-        assert_eq!(shake_pose(Shake::default()), glam::Mat4::IDENTITY);
-    }
-
-    /// A mod's shader values that aren't finite read as 0.
-    #[test]
-    fn shader_params_that_arent_finite_read_as_zero() {
-        let mut params = [[1.0; 4]; 8];
-        params[0] = [f32::NAN, 2.0, f32::INFINITY, -3.0];
-        let out = super::finite_params(params);
-        assert_eq!(out[0], [0.0, 2.0, 0.0, -3.0]);
-        assert_eq!(out[7], [1.0; 4]);
-    }
-
-    /// A client mod's sound needs a namespaced event, finite values and a
-    /// start a minute away at most.
-    #[test]
-    fn a_local_sound_is_checked() {
-        use super::local_sound_ok;
-        use mod_api::{SoundPlay, SoundSource};
-        let at = |id| SoundPlay::at(id, SoundSource::Hostile, [0.5, 64.0, 0.5]);
-        assert!(local_sound_ok(
-            &at("ironfall:boom_far").with_volume(8.0),
-            140
-        ));
-        assert!(local_sound_ok(&at("minecraft:entity.generic.explode"), 0));
-        assert!(local_sound_ok(
-            &SoundPlay::ui("minecraft:ui.button.click"),
-            1200
-        ));
-        assert!(!local_sound_ok(&at("boom"), 0));
-        assert!(!local_sound_ok(&at("ironfall:"), 0));
-        assert!(!local_sound_ok(&at("Ironfall:Boom"), 0));
-        let nowhere = SoundPlay::at("ironfall:boom", SoundSource::Hostile, [f64::NAN, 0.0, 0.0]);
-        assert!(!local_sound_ok(&nowhere, 0));
-        assert!(!local_sound_ok(&at("ironfall:boom").with_volume(-1.0), 0));
-        assert!(!local_sound_ok(
-            &at("ironfall:boom").with_pitch(f32::NAN),
-            0
-        ));
-        assert!(!local_sound_ok(&at("ironfall:boom").looping(-1), 0));
-        assert!(!local_sound_ok(&at("ironfall:boom"), 1201));
-    }
-
-    /// `native_play_sound` takes vanilla's and mods' sound ids, nothing else.
-    #[test]
-    fn sound_ids_are_identifiers() {
-        for id in [
-            "minecraft:block.note_block.harp",
-            "mymod:machine/hum",
-            "my_mod.x-1:a",
-        ] {
-            assert!(super::sound_id(id), "{id}");
-        }
-        for id in [
-            "",
-            "hum",
-            ":hum",
-            "mymod:",
-            "MyMod:hum",
-            "mymod:Hum",
-            "my/mod:hum",
-            "a:b c",
-        ] {
-            assert!(!super::sound_id(id), "{id}");
-        }
     }
 
     /// A mod's property write: none for a key or value the block lacks, the
@@ -4744,7 +4101,8 @@ mod tests {
             layout_revision: 0,
             key: (0, 0, 0),
             window: 4,
-            block: "gtmod:machine".into(),
+            menu: "gtmod:menu".into(),
+            block: Some("gtmod:machine".into()),
             screen: mod_api::Screen::default(),
             data: Vec::new(),
             extra: None,
@@ -4759,31 +4117,60 @@ mod tests {
     /// repeat of the effective position, declared or moved, keeps the layout).
     #[test]
     fn slot_moves_refuse_what_the_screen_does_not_show() {
-        let declared = [Some([8.0, 18.0]), None, Some([26.0, 18.0])];
+        let declared = [
+            Some(mod_api::ScreenSlot {
+                position: [8.0, 18.0],
+                ..Default::default()
+            }),
+            None,
+            Some(mod_api::ScreenSlot {
+                position: [26.0, 18.0],
+                ..Default::default()
+            }),
+        ];
+        use mod_api::ScreenSlotRefusal::*;
         let moves = super::SlotMoves::default();
-        assert!(moves.set(&declared, 0, 8.0, 18.0));
+        // The current place again changes nothing, not even the count.
+        assert_eq!(moves.set(&declared, 0, Some([8.0, 18.0])), Ok(()));
         assert_eq!(moves.count.get(), 0);
-        assert!(moves.set(&declared, 2, 100.5, -4.0));
+        assert_eq!(moves.set(&declared, 2, Some([100.5, -4.0])), Ok(()));
         assert_eq!(moves.count.get(), 1);
-        // Pending until the build commits it.
-        assert_eq!(moves.position(2, [26.0, 18.0]), [26.0, 18.0]);
+        // Pending until the build commits it; the read-back sees it at once.
+        assert_eq!(moves.position(2, [26.0, 18.0]), Some([26.0, 18.0]));
+        assert_eq!(moves.latest(&declared, 2), Some([100.5, -4.0]));
         moves.commit();
-        assert_eq!(moves.position(2, [26.0, 18.0]), [100.5, -4.0]);
-        assert_eq!(moves.position(0, [8.0, 18.0]), [8.0, 18.0]);
-        for (slot, x, y) in [
-            (1, 0.0, 0.0),
-            (3, 0.0, 0.0),
-            (u32::MAX, 0.0, 0.0),
-            (0, f32::NAN, 0.0),
-            (0, 0.0, f32::INFINITY),
+        assert_eq!(moves.position(2, [26.0, 18.0]), Some([100.5, -4.0]));
+        assert_eq!(moves.position(0, [8.0, 18.0]), Some([8.0, 18.0]));
+        // Refusals change nothing.
+        for (slot, pos, refusal) in [
+            (1, Some([0.0, 0.0]), HiddenAtOpen),
+            (3, Some([0.0, 0.0]), NoSuchSlot),
+            (usize::MAX, None, NoSuchSlot),
+            (0, Some([f32::NAN, 0.0]), BadPosition),
+            (0, Some([0.0, f32::INFINITY]), BadPosition),
         ] {
-            assert!(!moves.set(&declared, slot, x, y), "{slot} {x} {y}");
+            assert_eq!(
+                moves.set(&declared, slot, pos),
+                Err(refusal),
+                "{slot} {pos:?}"
+            );
         }
-        assert_eq!(moves.position(0, [8.0, 18.0]), [8.0, 18.0]);
-        assert!(moves.set(&declared, 2, 100.5, -4.0));
         assert_eq!(moves.count.get(), 1);
-        assert!(moves.set(&declared, 2, 100.5, -3.0));
+        assert_eq!(moves.position(0, [8.0, 18.0]), Some([8.0, 18.0]));
+        // Hiding a slot hidden at open is already so.
+        assert_eq!(moves.set(&declared, 1, None), Ok(()));
+        assert_eq!(moves.count.get(), 1);
+        // Hidden, then shown again where the mod puts it.
+        assert_eq!(moves.set(&declared, 2, None), Ok(()));
         assert_eq!(moves.count.get(), 2);
+        assert_eq!(moves.set(&declared, 2, None), Ok(()));
+        assert_eq!(moves.count.get(), 2);
+        moves.commit();
+        assert_eq!(moves.position(2, [26.0, 18.0]), None);
+        assert_eq!(moves.set(&declared, 2, Some([26.0, 18.0])), Ok(()));
+        moves.commit();
+        assert_eq!(moves.position(2, [26.0, 18.0]), Some([26.0, 18.0]));
+        assert_eq!(moves.count.get(), 3);
     }
 
     #[test]
@@ -4798,27 +4185,6 @@ mod tests {
             assert!(!line.contains("cfg"), "a cfg in the breathing hook: {line}");
             for mac in ["!(", "![", "! {", "!{"] {
                 assert!(!line.contains(mac), "a macro in the breathing hook: {line}");
-            }
-        }
-    }
-
-    #[test]
-    fn native_loot_kinds_stay_hookable() {
-        let source = include_str!("../../../../sunrise-world/src/loot.rs").replace("\r\n", "\n");
-        for hook in [
-            "pub fn native_invoke_loot_function(",
-            "pub fn native_invoke_loot_condition(",
-        ] {
-            let at = source
-                .find(hook)
-                .unwrap_or_else(|| panic!("{hook} not found"));
-            let start = source[..at].rfind("///").unwrap();
-            let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
-            for line in body.lines() {
-                assert!(!line.contains("cfg"), "a cfg in a loot hook point: {line}");
-                for mac in ["!(", "![", "! {", "!{"] {
-                    assert!(!line.contains(mac), "a macro in a loot hook point: {line}");
-                }
             }
         }
     }
@@ -4962,862 +4328,5 @@ mod tests {
             hurt_server_args(Hurting::Entity(6, "minecraft:item", arrow), &NO_ATTACK),
             (6, "minecraft:item", arrow)
         );
-    }
-
-    /// A mod container opens a slot grid or a furnace's menu, by its slot
-    /// count; no menu with rules of its own (a brewing stand's, a crafter's).
-    #[test]
-    fn mod_menus_are_slot_grids_and_furnaces() {
-        use super::mod_menu;
-        assert_eq!(mod_menu("minecraft:hopper"), Some(("minecraft:hopper", 5)));
-        assert_eq!(mod_menu("minecraft:generic_9x3").map(|m| m.1), Some(27));
-        assert_eq!(mod_menu("minecraft:furnace").map(|m| m.1), Some(3));
-        assert_eq!(mod_menu("minecraft:brewing_stand"), None);
-        assert_eq!(mod_menu("hopper"), None);
-    }
-
-    /// The config folder is `config/` beside `options.txt`, made when
-    /// missing.
-    #[test]
-    fn config_dir_is_config_in_the_game_folder() {
-        use super::config_dir;
-        let root = std::env::temp_dir().join(format!("sunrise-config-dir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(!root.join("config").exists());
-        let dir = config_dir(&root).unwrap();
-        assert_eq!(dir, root.join("config"));
-        assert!(dir.is_dir());
-        assert_eq!(config_dir(&root).unwrap(), dir);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Vanilla's F3 draws a column in each top corner (`extractLines`, left
-    /// and right aligned), and its charts along the bottom.
-    #[test]
-    fn the_debug_screen_takes_both_top_corners_and_its_charts_corners() {
-        use super::{Corner, debug_takes};
-        for corner in Corner::ALL {
-            assert!(!debug_takes(corner, false, [true, true]), "{corner:?}");
-        }
-        assert!(debug_takes(Corner::TopLeft, true, [false, false]));
-        assert!(debug_takes(Corner::TopRight, true, [false, false]));
-        assert!(!debug_takes(Corner::BottomLeft, true, [false, false]));
-        assert!(!debug_takes(Corner::BottomRight, true, [false, false]));
-        assert!(debug_takes(Corner::BottomLeft, true, [true, false]));
-        assert!(!debug_takes(Corner::BottomRight, true, [true, false]));
-        assert!(debug_takes(Corner::BottomRight, true, [false, true]));
-    }
-
-    /// An image is taken whole, and only when it fits its slot.
-    #[test]
-    fn a_mod_image_is_taken_whole_and_only_when_it_fits() {
-        use super::mod_image_fits;
-        assert!(mod_image_fits(4, 2, 32, 1024, 1024));
-        assert!(mod_image_fits(1024, 1024, 1024 * 1024 * 4, 1024, 1024));
-        assert!(!mod_image_fits(0, 2, 0, 1024, 1024));
-        assert!(!mod_image_fits(4, 2, 31, 1024, 1024));
-        assert!(!mod_image_fits(4, 2, 33, 1024, 1024));
-        assert!(!mod_image_fits(2048, 1, 2048 * 4, 1024, 1024));
-    }
-}
-
-#[cfg(test)]
-mod item_fall_on_tests {
-    use super::*;
-    use mod_api::{BlockPart, FallOnEvent, Hooks, LevelRandomHost, ModEntry, Registrar};
-    use mod_platform::testing::with_mods;
-    use std::sync::{Arc, Mutex};
-
-    /// What the part on stone heard of a landing: entity, kind, block, fall and damage. It
-    /// asks for the block to be destroyed.
-    #[derive(Clone, Default)]
-    struct Lands(Arc<Mutex<Vec<(i32, String, BlockPos, f64, f32)>>>);
-    #[mod_api::sunrise_part]
-    impl BlockPart for Lands {
-        fn fall_on(&self, _: &mut dyn LevelRandomHost, event: &mut FallOnEvent<'_>) {
-            self.0.lock().unwrap().push((
-                event.entity,
-                event.kind.to_owned(),
-                event.pos,
-                event.distance,
-                event.damage,
-            ));
-            event.request(mod_api::LandingWrite::DestroyBlock { drop: false });
-        }
-    }
-    struct Mod(Lands);
-    #[mod_api::__subscriptions]
-    impl Hooks for Mod {
-        fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
-            let block_key = r.block_key("minecraft:stone");
-            r.block_part(block_key, self.0.clone());
-        }
-    }
-
-    static LOAN_VALUE: mod_api::AttachmentType<i32> = mod_api::AttachmentType {
-        namespace: "loan_test",
-        name: "progress",
-        default: || 0,
-        codec: None,
-        copy_on_death: false,
-        sync: false,
-    };
-
-    use mod_api::RandomSource as _;
-    use sunrise_core::random::RandomSource as _;
-
-    struct LoanPart(std::sync::Arc<()>);
-    #[mod_api::sunrise_part]
-    impl BlockPart for LoanPart {
-        fn fall_on(&self, host: &mut dyn LevelRandomHost, event: &mut FallOnEvent<'_>) {
-            let mut random = host.random().expect("authoritative landing random");
-            assert_eq!(random.next_int(), 1553932502);
-            assert!(host.set_random(random));
-            LOAN_VALUE
-                .set(host.attachments(), mod_api::Holder::Level, 73)
-                .unwrap();
-            event.request(mod_api::LandingWrite::DestroyBlock { drop: false });
-            std::panic::panic_any(self.0.clone());
-        }
-    }
-    struct LoanMod(std::sync::Arc<()>);
-    #[mod_api::__subscriptions]
-    impl Hooks for LoanMod {
-        fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
-            let key = r.block_key("minecraft:stone");
-            r.block_part(key, LoanPart(self.0.clone()));
-        }
-    }
-
-    /// Only the inner production loan is exercised: the outer dropped-item pass
-    /// is deliberately not claimed to survive this unwind.
-    #[test]
-    #[ignore = "daily"]
-    fn item_fall_on_returns_progressed_level_loan_after_part_panic() {
-        let payload = std::sync::Arc::new(());
-        let mods: mod_api::Mods = vec![ModEntry::new(
-            "loan_test",
-            Box::new(LoanMod(payload.clone())),
-        )]
-        .into();
-        crate::game::api_values::install_parts(&mods).unwrap();
-        let _ = sunrise_client::block_contact::HOOKS.set(BLOCK_CONTACT_HOOKS);
-        with_mods(mods, || {
-            let mut loaded = 0;
-            for dimension in [crate::game::Dim::Overworld, crate::game::Dim::Nether] {
-                let scratch = std::env::temp_dir()
-                    .join(format!("item-loan-{}-{dimension:?}", std::process::id()));
-                super::super::native_entity_refs::tests::with_game(|game| {
-                    game.world_root = scratch.clone();
-                    game.enter_level(dimension).unwrap();
-                    loaded += 1;
-                    let stone = game
-                        .pack
-                        .assets
-                        .registry
-                        .default_state("minecraft:stone")
-                        .unwrap();
-                    game.world
-                        .chunks
-                        .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
-                    let pos = BlockPos::new(1, 64, 1);
-                    game.world.set(pos.x, pos.y, pos.z, stone).unwrap();
-                    *game.world.random = sunrise_core::random::LegacyRandom::new(12345);
-                    LOAN_VALUE
-                        .set(&mut game.world.attachments, mod_api::Holder::Level, 11)
-                        .unwrap();
-                    game.world.attachment_syncs.insert(mod_api::Holder::Level);
-                    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        sunrise_client::block_contact::in_level(
-                            sunrise_client::parallel::TickThread::mint(),
-                            Some(game.dim.id()),
-                            || {
-                                game.item_fall_on(42, pos, 5.0);
-                            },
-                        );
-                    }))
-                    .expect_err("actual Part must panic");
-                    assert!(std::sync::Arc::ptr_eq(
-                        &payload,
-                        caught.downcast_ref::<std::sync::Arc<()>>().unwrap()
-                    ));
-                    assert_eq!(
-                        game.world.random.next_int(),
-                        -2090749135,
-                        "continue the progressed stream"
-                    );
-                    assert_eq!(
-                        LOAN_VALUE
-                            .get(&mut game.world.attachments, mod_api::Holder::Level)
-                            .unwrap(),
-                        73
-                    );
-                    assert!(
-                        game.world
-                            .attachment_syncs
-                            .contains(&mod_api::Holder::Level)
-                    );
-                    game.drain_entity_inside();
-                    assert_eq!(
-                        game.world.block(pos.x, pos.y, pos.z),
-                        stone,
-                        "aborted landing writes were not queued"
-                    );
-                });
-                let _ = std::fs::remove_dir_all(scratch);
-            }
-            assert_eq!(loaded, 2, "both resource fixtures ran");
-        });
-    }
-
-    /// A dropped item that falls onto a block with a `fall_on` part is told to it once, as
-    /// `minecraft:item`, with the whole fall and no damage; the write the part asks for lands
-    /// after the items' batch; and an item resting there lands no more.
-    #[test]
-    #[ignore = "daily"]
-    fn a_dropped_item_lands_on_a_fall_on_part() {
-        let heard = Lands::default();
-        let mods: mod_api::Mods = vec![ModEntry::new("lands", Box::new(Mod(heard.clone())))].into();
-        crate::game::api_values::install_parts(&mods).unwrap();
-        let _ = sunrise_client::block_contact::HOOKS.set(BLOCK_CONTACT_HOOKS);
-        with_mods(mods, || {
-            super::super::native_entity_refs::tests::with_game(|game| {
-                game.options.dedicated = Some(Vec::new());
-                let state = |name| game.pack.assets.registry.default_state(name).unwrap();
-                let (stone, air) = (state("minecraft:stone"), state("minecraft:air"));
-                for x in -1..=1 {
-                    for z in -1..=1 {
-                        let mut chunk = sunrise_client::chunk::Chunk::empty(x, z);
-                        chunk.lit = true;
-                        game.world.chunks.insert((x, z), std::sync::Arc::new(chunk));
-                    }
-                }
-                game.world.set(1, 64, 1, stone).unwrap();
-                let level = game.level(game.dim.id()).unwrap();
-                let stack = ItemStack::new("minecraft:apple", 1);
-                let item = game
-                    .level_spawn_item(level, 1.5, 70.0, 1.5, stack, 10)
-                    .unwrap();
-                if let Some(i) = game.dropped.iter_mut().find(|i| i.id == item.id()) {
-                    i.velocity = sunrise_core::geometry::Vec3::ZERO;
-                }
-                // The part's write destroys the stone after the batch; it is put back at once,
-                // so the item rests on it again and must not be heard landing twice.
-                let mut destructions = 0;
-                for _ in 0..80 {
-                    game.ticked_entities_through = u32::MAX;
-                    sunrise_client::block_contact::in_level(
-                        sunrise_client::parallel::TickThread::mint(),
-                        Some(game.dim.id()),
-                        || {
-                            game.tick_items();
-                        },
-                    );
-                    if game.world.block(1, 64, 1) == air {
-                        destructions += 1;
-                        game.world.set(1, 64, 1, stone).unwrap();
-                        let heard = heard.0.lock().unwrap();
-                        assert_eq!(heard.len(), 1, "the write landed after the batch");
-                    }
-                }
-                assert_eq!(destructions, 1, "one observed landing-write destruction");
-                let heard = heard.0.lock().unwrap().clone();
-                assert_eq!(heard.len(), 1, "one landing: {heard:?}");
-                let (entity, kind, pos, distance, damage) = &heard[0];
-                assert_eq!(*entity, item.id() as i32);
-                assert_eq!(kind, "minecraft:item");
-                assert_eq!(*pos, BlockPos::new(1, 64, 1));
-                // From rest at y 70 onto the stone's top at 65.
-                assert!((distance - 5.0).abs() < 1e-3, "fell {distance}");
-                assert_eq!(*damage, 0.0);
-            });
-        });
-    }
-}
-
-#[cfg(test)]
-pub(super) mod particle_count_tests {
-    use super::super::pickups::{Collector, Taken};
-    use mod_api::ClientHost;
-    use std::time::Duration;
-    use sunrise_client::entities::ExperienceOrb;
-    use sunrise_client::particles::{FireworkExplosion, ParticleOptions, ParticleType};
-    use sunrise_core::geometry::Vec3;
-
-    fn orb(at: Vec3) -> ExperienceOrb {
-        ExperienceOrb {
-            attachment_lifetime: Default::default(),
-            fall_distance: 0.0,
-            rotation: [0.0, 0.0],
-            join: Default::default(),
-            no_gravity: false,
-            id: 1,
-            position: at,
-            previous: at,
-            velocity: Vec3::ZERO,
-            value: 1,
-            age: 0,
-            on_ground: false,
-            count: 1,
-            fire_ticks: 0,
-            ticks: 0,
-            health: 5,
-            air: 300,
-            following: None,
-        }
-    }
-
-    /// Fills every particle group Sunrise keeps apart: three flames, a multi-burst firework
-    /// starter (`NO_RENDER`), an item pickup (`ITEM_PICKUP`) and the elder guardian
-    /// apparition (`ELDER_GUARDIANS`), each live after one particle tick.
-    pub(in crate::game) fn fill(game: &mut super::Game<'_>) {
-        let at = game.particles.camera;
-        for _ in 0..3 {
-            game.particles
-                .add(&ParticleOptions::simple(ParticleType::Flame), at, [0.0; 3]);
-        }
-        let bursts = vec![FireworkExplosion::default(); 4];
-        game.particles.fireworks(at, [0.0; 3], bursts, at, true);
-        let v = Vec3::new(at[0], at[1], at[2]);
-        game.add_pickup_toward(Taken::Orb(Box::new(orb(v))), Collector::Player, at);
-        game.particles.elder_guardian();
-        game.tick_particles();
-    }
-
-    /// `particle_count` and `clear_particles` through the client host. The count covers every
-    /// live group. A clear reads 0 at once and empties every group, its queue and emitters
-    /// before the next frame is drawn, with no tick in between (a paused or frozen game),
-    /// or at the next particle tick. A server answers 0 and refuses the clear.
-    #[test]
-    #[ignore = "daily"]
-    fn a_client_mod_counts_and_clears_particles() {
-        super::super::native_entity_refs::tests::with_game(|game| {
-            game.options.execution_role = super::ExecutionRole::Client;
-            let host: &dyn ClientHost = game;
-            assert_eq!(host.particle_count(), 0);
-            fill(game);
-            assert_eq!(game.pickups.live.len(), 1, "the pickup is live");
-            let engine = game.particles.group_count();
-            assert_eq!(engine, 5, "three flames, one starter and one guardian");
-            let host: &dyn ClientHost = game;
-            assert_eq!(host.particle_count() as usize, engine + 1);
-            // A clear asked between frames: it reads 0 at once, and the next frame clears
-            // every group without a particle tick.
-            game.particles.tracking_emitter(
-                ParticleOptions::simple(ParticleType::Crit),
-                sunrise_client::particles::TrackingTarget::Entity(0),
-                sunrise_client::particles::TrackingBody {
-                    feet: [0.0; 3],
-                    width: 1.0,
-                    height: 1.0,
-                },
-            );
-            assert!(host_clear(game));
-            let host: &dyn ClientHost = game;
-            assert_eq!(host.particle_count(), 0);
-            game.extras_frame(Duration::ZERO);
-            assert_eq!(game.particles.group_count(), 0);
-            assert!(game.pickups.live.is_empty());
-            assert!(game.particles.elder_guardians().is_empty());
-            // The emitter and the queue went too: a tick brings nothing back.
-            game.tick_particles();
-            assert_eq!(game.client_particle_count(), 0);
-            // A clear asked before a particle tick lands at that tick.
-            fill(game);
-            assert!(host_clear(game));
-            game.tick_particles();
-            assert_eq!(game.particles.group_count(), 0);
-            assert!(game.pickups.live.is_empty());
-            let host: &dyn ClientHost = game;
-            assert_eq!(host.particle_count(), 0);
-            game.options.execution_role = super::ExecutionRole::IntegratedServer;
-            let host: &dyn ClientHost = game;
-            assert!(!host.clear_particles());
-            assert_eq!(host.particle_count(), 0);
-        });
-    }
-
-    struct ClearInGui;
-    #[mod_api::__subscriptions]
-    impl mod_api::Hooks for ClearInGui {
-        fn render_gui_pre(
-            &self,
-            host: &dyn ClientHost,
-            _: &mut mod_api::RenderGuiPreEvent,
-        ) -> mod_api::Flow {
-            assert!(host.clear_particles());
-            mod_api::Flow::Continue
-        }
-    }
-
-    #[test]
-    #[ignore = "daily"]
-    fn late_gui_clear_prevents_same_frame_particle_geometry_without_a_tick() {
-        let mods: mod_api::Mods =
-            vec![mod_api::ModEntry::new("clear_gui", Box::new(ClearInGui))].into();
-        mod_platform::testing::with_mods(mods, || {
-            super::super::native_entity_refs::tests::with_client_game(|game| {
-                game.options.execution_role = super::ExecutionRole::Client;
-                fill(game);
-                game.extras_frame(Duration::ZERO);
-                let camera = glam::DVec3::from_array(game.particles.camera);
-                let mut before = Vec::new();
-                game.client_particle_geometry(camera, 0.0, 70.0, &mut before);
-                assert!(
-                    !before.is_empty(),
-                    "live guardian, pickup and ordinary particles draw"
-                );
-                game.native_render_gui_pre(&mut false);
-                assert_eq!(mod_api::prelude::EffectsClientHost::particle_count(game), 0);
-                let (mut after, _, _, _) = game.entity_geometry(camera, 0.0, None, Vec::new());
-                game.client_particle_geometry(camera, 0.0, 70.0, &mut after);
-                assert!(
-                    after.is_empty(),
-                    "no stale pickup, guardian or ordinary quads"
-                );
-                assert_eq!(game.client_particle_count(), 0);
-                game.tick_particles();
-                assert_eq!(game.client_particle_count(), 0);
-            });
-        });
-    }
-
-    struct ClearInModel(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-    #[mod_api::__subscriptions]
-    impl mod_api::Hooks for ClearInModel {
-        fn item_model_property(
-            &self,
-            host: &dyn ClientHost,
-            _: &mut mod_api::ItemModelPropertyEvent<'_>,
-        ) {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            assert!(host.clear_particles());
-        }
-    }
-
-    #[test]
-    #[ignore = "daily"]
-    fn a_model_callback_clear_discards_particle_geometry_already_extracted() {
-        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
-            "clear_model",
-            Box::new(ClearInModel(calls.clone())),
-        )]
-        .into();
-        mod_platform::testing::with_mods(mods, || {
-            super::super::native_entity_refs::tests::with_client_game(|game| {
-                game.options.execution_role = super::ExecutionRole::Client;
-                fill(game);
-                let camera = glam::DVec3::from_array(game.particles.camera);
-                let mut out = Vec::new();
-                game.client_particle_geometry(camera, 0.0, 70.0, &mut out);
-                let previous = out.len();
-                assert!(previous > 0);
-                let positions: Vec<_> = out.iter().map(|v| v.pos).collect();
-                let motion = game.entity_motion.borrow().clone();
-                // An actual picked-up item resolves a conditional model while the
-                // preceding ordinary-particle pass has already produced geometry.
-                std::sync::Arc::get_mut(&mut game.pack.item_renderer)
-                    .unwrap()
-                    .models
-                    .definitions
-                    .insert(
-                        "minecraft:stick".into(),
-                        sunrise_assets::item_model::ClientItem::from_json(
-                            r#"{"model":{
-                        "type":"minecraft:condition", "property":"test:clear",
-                        "on_true":{"type":"minecraft:model","model":"minecraft:item/stick"},
-                        "on_false":{"type":"minecraft:model","model":"minecraft:item/stick"}
-                    }}"#,
-                        )
-                        .unwrap(),
-                    );
-                let at = game.particles.camera;
-                game.spawn_item(
-                    sunrise_client::items::ItemStack::new("minecraft:stick", 1),
-                    at,
-                    [0.0; 3],
-                    0,
-                );
-                let item = game.dropped.pop().unwrap();
-                game.add_pickup_toward(Taken::Item(Box::new(item)), Collector::Player, at);
-                game.tick_particles();
-                game.client_particle_geometry(camera, 0.0, 70.0, &mut out);
-                assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-                assert_eq!(out.iter().map(|v| v.pos).collect::<Vec<_>>(), positions);
-                assert_eq!(&game.entity_motion.borrow()[..motion.len()], &motion);
-                assert_eq!(game.client_particle_count(), 0);
-                game.tick_particles();
-                assert_eq!(game.client_particle_count(), 0);
-            });
-        });
-    }
-
-    #[derive(Clone, Copy, PartialEq)]
-    enum ClearAt {
-        Never,
-        Gui,
-        Model,
-        FogColor,
-        Fog,
-    }
-
-    struct FrameMod {
-        at: std::sync::Arc<std::sync::Mutex<ClearAt>>,
-        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    }
-    impl FrameMod {
-        fn clear(&self, at: ClearAt, host: &dyn ClientHost) {
-            if *self.at.lock().unwrap() == at {
-                assert!(host.clear_particles());
-                self.calls
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-    }
-    #[mod_api::__subscriptions]
-    impl mod_api::Hooks for FrameMod {
-        fn visuals(&self, _: &dyn ClientHost, event: &mut mod_api::VisualsEvent<'_>) {
-            event.lights.push(mod_api::ColoredLight::new(
-                [0.5, 65.5, 5.5],
-                0x0000ff,
-                4.0,
-                1.0,
-            ));
-        }
-        fn render_gui_pre(
-            &self,
-            host: &dyn ClientHost,
-            _: &mut mod_api::RenderGuiPreEvent,
-        ) -> mod_api::Flow {
-            self.clear(ClearAt::Gui, host);
-            mod_api::Flow::Continue
-        }
-        fn item_model_property(
-            &self,
-            host: &dyn ClientHost,
-            _: &mut mod_api::ItemModelPropertyEvent<'_>,
-        ) {
-            self.clear(ClearAt::Model, host);
-        }
-        fn compute_fog_color(
-            &self,
-            host: &dyn ClientHost,
-            _: &mut mod_api::ComputeFogColorEvent<'_>,
-        ) {
-            self.clear(ClearAt::FogColor, host);
-        }
-        fn render_fog(&self, host: &dyn ClientHost, _: &mut mod_api::RenderFogEvent<'_>) {
-            self.clear(ClearAt::Fog, host);
-        }
-    }
-
-    // A real renderer supplies the native pack's rules and the GPU skinning path.
-    // The test consumer inspects the exact Frame passed to Renderer::render, without
-    // comparing pixels or bypassing any GUI, model, hand, fog or extraction callbacks.
-    fn with_frame_scene(
-        test: impl FnOnce(
-            &mut super::Game<'_>,
-            &std::sync::Mutex<ClearAt>,
-            &std::sync::atomic::AtomicUsize,
-        ),
-    ) {
-        let at = std::sync::Arc::new(std::sync::Mutex::new(ClearAt::Never));
-        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
-            "frame_clear",
-            Box::new(FrameMod {
-                at: at.clone(),
-                calls: calls.clone(),
-            }),
-        )]
-        .into();
-        mod_platform::testing::with_mods(mods, || {
-            super::super::native_entity_refs::tests::with_client_game(|game| {
-                let _event_loop = frame_scene(game);
-                test(game, &at, &calls);
-            });
-        });
-    }
-
-    /// A real offscreen renderer and a world for it to draw; the event loop that returns
-    /// holds the window.
-    pub(in crate::game) fn frame_scene(
-        game: &mut super::Game<'_>,
-    ) -> winit::event_loop::EventLoop<()> {
-        let mut builder = winit::event_loop::EventLoop::builder();
-        #[cfg(target_os = "linux")]
-        {
-            use winit::platform::x11::EventLoopBuilderExtX11;
-            builder.with_x11().with_any_thread(true);
-        }
-        let event_loop = builder.build().unwrap();
-        #[allow(deprecated)]
-        let window = std::sync::Arc::new(
-            event_loop
-                .create_window(
-                    winit::window::Window::default_attributes()
-                        .with_visible(false)
-                        .with_inner_size(winit::dpi::PhysicalSize::new(320, 240)),
-                )
-                .unwrap(),
-        );
-        game.options.offscreen = true;
-        game.renderer = Some(game.new_renderer(window).unwrap());
-        game.title = None;
-        game.settings.extras.dynamic_lights = true;
-        game.settings.sunrise.particle_culling = sunrise_client::graphics::ParticleCullingMode::Off;
-        let mut chunk = sunrise_client::chunk::Chunk::empty(0, 0);
-        chunk.lit = true;
-        game.world.chunks.insert((0, 0), std::sync::Arc::new(chunk));
-        let mut player =
-            sunrise_client::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap();
-        player.position = Vec3::new(0.5, 64.0, 0.5);
-        game.previous_position = player.position;
-        game.player = Some(player);
-        game.particles.camera = [0.5, 65.5, 1.5];
-        // Ordinary (non-particle) entity geometry and an unrelated item light.
-        game.spawn_item(
-            sunrise_client::items::ItemStack::new("minecraft:torch", 1),
-            [0.5, 65.0, 4.5],
-            [0.0; 3],
-            0,
-        );
-        // Only the picked-up stick resolves this custom property. The torch's
-        // ordinary model must survive the clear unchanged.
-        std::sync::Arc::get_mut(&mut game.pack.item_renderer)
-            .unwrap()
-            .models
-            .definitions
-            .insert(
-                "minecraft:stick".into(),
-                sunrise_assets::item_model::ClientItem::from_json(
-                    r#"{"model":{
-                "type":"minecraft:condition", "property":"test:clear",
-                "on_true":{"type":"minecraft:model","model":"minecraft:item/stick"},
-                "on_false":{"type":"minecraft:model","model":"minecraft:item/stick"}
-            }}"#,
-                )
-                .unwrap(),
-            );
-        event_loop
-    }
-
-    fn add_frame_particles(game: &mut super::Game<'_>) {
-        fill(game);
-        for _ in 0..20 {
-            game.particles.add(
-                &ParticleOptions::simple(ParticleType::Flame),
-                game.particles.camera,
-                [0.0; 3],
-            );
-        }
-        game.spawn_item(
-            sunrise_client::items::ItemStack::new("minecraft:stick", 1),
-            game.particles.camera,
-            [0.0; 3],
-            0,
-        );
-        let item = game.dropped.pop().unwrap();
-        game.add_pickup_toward(
-            Taken::Item(Box::new(item)),
-            Collector::Player,
-            game.particles.camera,
-        );
-        game.tick_particles();
-    }
-
-    #[derive(Debug, PartialEq)]
-    struct FrameGeometry {
-        entities: Vec<u8>,
-        glowing: Vec<u8>,
-        gpu: (usize, usize, u32),
-        motion: Vec<(u32, u64)>,
-        spans: Vec<sunrise_client_render::render_geometry::EntitySpan>,
-        gpu_spans: Vec<sunrise_client_render::render_geometry::EntitySpan>,
-        outlines: (usize, u32),
-    }
-    fn frame_geometry(frame: &super::super::Frame<'_>) -> FrameGeometry {
-        FrameGeometry {
-            entities: bytemuck::cast_slice(frame.entities).to_vec(),
-            glowing: bytemuck::cast_slice(frame.glowing).to_vec(),
-            gpu: frame.skin.map_or((0, 0, 0), |skin| skin.mark()),
-            motion: frame.entity_motion.to_vec(),
-            spans: frame.entity_spans.to_vec(),
-            gpu_spans: frame.skin.map_or_else(Vec::new, |skin| skin.spans.clone()),
-            outlines: frame.skin.map_or((0, 0), |skin| {
-                (skin.outline_jobs.len(), skin.outline_vertices)
-            }),
-        }
-    }
-
-    #[test]
-    #[ignore = "daily"]
-    fn fog_clear_reaches_the_complete_frame_consumer() {
-        let name = "game::native_hooks::particle_count_tests::fog_clear_reaches_the_complete_frame_consumer";
-        if super::super::native_entity_refs::tests::run_fresh_cases(
-            name,
-            "SUNRISE_PARTICLE_FOG_CHILD",
-            &["color", "fog"],
-        ) {
-            return;
-        }
-        let clear_at = if std::env::var("SUNRISE_PARTICLE_FOG_CHILD").unwrap() == "color" {
-            ClearAt::FogColor
-        } else {
-            ClearAt::Fog
-        };
-        with_frame_scene(|game, at, calls| {
-            let mut baseline = None;
-            game.render_with(|_, frame| {
-                baseline = Some(frame_geometry(frame));
-                Ok(true)
-            })
-            .unwrap();
-            let baseline = baseline.unwrap();
-            assert!(
-                !baseline.entities.is_empty() || baseline.gpu.2 > 0,
-                "ordinary entity must actually draw"
-            );
-            add_frame_particles(game);
-            let mut consumed = false;
-            game.render_with(|_, frame| {
-                consumed = true;
-                assert_ne!(
-                    frame_geometry(frame),
-                    baseline,
-                    "live particles reach the consumer"
-                );
-                Ok(true)
-            })
-            .unwrap();
-            assert!(consumed);
-            *at.lock().unwrap() = clear_at;
-            game.render_with(|_, frame| {
-                assert_eq!(
-                    calls.load(std::sync::atomic::Ordering::Relaxed),
-                    1,
-                    "fog hook ran in this frame"
-                );
-                assert_eq!(
-                    frame_geometry(frame),
-                    baseline,
-                    "no stale particles, ordinary entities retained"
-                );
-                Ok(true)
-            })
-            .unwrap();
-            assert_eq!(game.client_particle_count(), 0);
-            game.tick_particles();
-            assert_eq!(game.client_particle_count(), 0);
-        });
-    }
-
-    #[test]
-    #[ignore = "daily"]
-    fn late_clear_removes_native_particle_lights_at_the_frame_consumer() {
-        let name = "game::native_hooks::particle_count_tests::late_clear_removes_native_particle_lights_at_the_frame_consumer";
-        if super::super::native_entity_refs::tests::run_fresh_cases(
-            name,
-            "SUNRISE_PARTICLE_LIGHT_CHILD",
-            &["gui", "model"],
-        ) {
-            return;
-        }
-        let clear_at = if std::env::var("SUNRISE_PARTICLE_LIGHT_CHILD").unwrap() == "gui" {
-            ClearAt::Gui
-        } else {
-            ClearAt::Model
-        };
-        with_frame_scene(|game, at, calls| {
-            let manifest = br#"schema = 1
-id = "particle_frame"
-name = "Particle Frame"
-version = "1.0.0"
-api = "0.1"
-[material]
-file = "material.wgsl"
-[[particle_lights]]
-particles = ["flame"]
-color = [1.0, 0.0, 0.0]
-reach = 4.0
-[[lights]]
-blocks = ["minecraft:torch"]
-color = [0.0, 1.0, 0.0]
-"#;
-            let pack = sunrise_shader_api::Pack::from_files(std::collections::BTreeMap::from([
-                (sunrise_shader_api::MANIFEST.into(), manifest.to_vec()),
-                ("material.wgsl".into(), b"fn material(input: MaterialInput) -> Surface { return Surface(input.albedo); }".to_vec()),
-            ])).unwrap();
-            let report = sunrise_shader_api::check(&pack).unwrap();
-            game.renderer
-                .as_mut()
-                .unwrap()
-                .set_native_shader_pack(Some((
-                    report,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Default::default(),
-                )))
-                .unwrap();
-            let mut baseline = None;
-            game.render_with(|_, frame| {
-                assert_eq!(frame.colored_lights.len(), 2, "item and mod light");
-                assert!(
-                    frame
-                        .colored_lights
-                        .iter()
-                        .any(|l| l[1] == [0.0, 1.0, 0.0, 1.0])
-                );
-                assert!(
-                    frame
-                        .colored_lights
-                        .iter()
-                        .any(|l| l[1] == [0.0, 0.0, 1.0, 1.0])
-                );
-                baseline = Some((frame_geometry(frame), frame.colored_lights.to_vec()));
-                Ok(true)
-            })
-            .unwrap();
-            let baseline = baseline.unwrap();
-            add_frame_particles(game);
-            game.render_with(|_, frame| {
-                assert_eq!(
-                    frame.colored_lights.len(),
-                    sunrise_client::dynamic_light::MAX
-                );
-                assert!(
-                    frame
-                        .colored_lights
-                        .iter()
-                        .all(|l| l[1] == [1.0, 0.0, 0.0, 1.0]),
-                    "nearby flames displace unrelated lights before clearing"
-                );
-                Ok(true)
-            })
-            .unwrap();
-            *at.lock().unwrap() = clear_at;
-            game.render_with(|_, frame| {
-                assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-                assert_eq!(
-                    frame.colored_lights, baseline.1,
-                    "cleared flames contribute no light; item/mod lights restored"
-                );
-                assert_eq!(
-                    frame_geometry(frame),
-                    baseline.0,
-                    "particle tail rolls back, ordinary torch stays"
-                );
-                Ok(true)
-            })
-            .unwrap();
-            assert_eq!(game.client_particle_count(), 0);
-        });
-    }
-
-    fn host_clear(game: &super::Game<'_>) -> bool {
-        let host: &dyn ClientHost = game;
-        host.clear_particles()
     }
 }

@@ -1,6 +1,6 @@
 # Writing the modding book
 
-The modding book (`docs/modding`, whose canonical Pages URL is <https://sunrise-org.github.io/sunrise/>, deployed by `modding-book-pages` while `MODDING_BOOK_PAGES` is `on`) is the manual for mod
+The modding book (`docs/modding`, published at <https://playsunrise.net/docs/modding>: `src/<path>.md` is served at `/docs/modding/<path>`, and `introduction.md` at `/docs/modding` itself) is the manual for mod
 authors: it describes what the game does on main, nothing else. Designs, proposals, plans, trackers and coverage
 ledgers live in [`docs/design/`](design/) (mod API designs in [`docs/design/mod-api/`](design/mod-api/)), and
 notes for people working on Sunrise itself in [`docs/mod-api/`](mod-api/). The book build refuses a page whose

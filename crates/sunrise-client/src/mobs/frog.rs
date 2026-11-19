@@ -1430,7 +1430,7 @@ mod tests {
         };
         let mut m = frog();
         set_pregnant(&mut m, true);
-        let saved = mob_to_nbt(&m, [1, 2, 3, 4], None, None, |_| None);
+        let saved = mob_to_nbt(&m, [1, 2, 3, 4], None, None, |_| None, &Default::default());
         assert_eq!(
             memory(&saved),
             Some(Tag::compound([(
@@ -1445,7 +1445,14 @@ mod tests {
         // A frog that laid its spawn saves no memory, even over a compound
         // that still names one.
         set_pregnant(&mut m, false);
-        let saved = mob_to_nbt(&m, [1, 2, 3, 4], Some(&saved), None, |_| None);
+        let saved = mob_to_nbt(
+            &m,
+            [1, 2, 3, 4],
+            Some(&saved),
+            None,
+            |_| None,
+            &Default::default(),
+        );
         assert_eq!(memory(&saved), None, "a laid frog saves no pregnancy");
         let back = mob_from_nbt(&saved, &types, 3, None).unwrap();
         assert!(!is_pregnant(&back), "and does not come back pregnant");

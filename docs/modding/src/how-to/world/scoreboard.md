@@ -60,9 +60,32 @@ of the transaction happens, and not at all in a transaction that writes none.
 `scores()` lists in the board's own order. Vanilla's order is a hash map's, so do not rely on
 one.
 
+## Teams
+
+`host.team(name)`, `host.teams()` and `host.add_team(name)` give `TeamRef` handles, and
+`host.holder_team(holder)` finds the team a holder is on. As an objective's, a team's handle holds
+an identity the board gave the team, so a removed team's handle stays stale after the same name is
+added again. A team name is any string; only a taken one is refused (`TeamError::NameTaken`).
+
+The handle reads and writes every option `/team modify` does: display name, prefix and suffix
+(`Text`; one nested deeper than 512 component nodes is refused before any change), color
+(`TeamColor`), friendly fire, seeing friendly invisibles, name tag visibility, death message
+visibility (`TeamVisibility`) and collision rule (`CollisionRule`).
+
+`join(holder)` puts a holder on the team, taking it off the team it was on first, so a holder is
+on one team at most, as `/team join`. `leave(holder)` takes it off this team, and answers `false`
+when it was not on it. A holder is a `ScoreHolder`, resolved as for scores: a `Player` and that
+player's `Entity` are one member, and a `Name` joins whether or not that player is online. A
+holder that is not on the server is `TeamError::UnknownHolder`, not a stale handle. `members()`
+lists in the team's own order, which vanilla leaves unspecified.
+
+Writes are the board's, so they are synced, saved and rolled back by an abort exactly as an
+objective's are.
+
 ## On a client
 
 `ClientHost::client_scoreboard()` is what this client has been sent: the objectives shown in a
-display slot, with their slots and scores, as plain values. A client has no handles and
+display slot, with their slots and scores, and every team, as plain values. The server does not
+send a team's death message visibility, so a client has none to read. A client has no handles and
 cannot write. A text the API cannot hold (nested deeper than 512 component nodes) refuses the
 whole snapshot with `TextFormError::TooDeep`; nothing is flattened or skipped.

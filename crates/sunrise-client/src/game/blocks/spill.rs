@@ -4,194 +4,111 @@
 //! moment vanilla draws them. The item entities they make are added to the
 //! world as soon as the behaviour returns, within the same tick.
 use super::api_values::{TryIntoApi, TryIntoEngine};
-use super::{Game, GameLevel, Screen, storage::is_shulker_box};
+use super::{Game, GameLevel, Screen};
 use mod_api::EntityRef;
 use std::collections::HashMap;
 use sunrise_client::{
     block_entity_item, block_entity_nbt,
-    containers::{Banner, BlockEntity},
+    containers::BlockEntity,
     furnace::FurnaceCooking,
-    item_data,
     items::{BlockLootRoll, ItemStack},
-    save,
 };
 use sunrise_core::position::BlockPos;
 use sunrise_core::random::RandomSource;
 use {
-    sunrise_core::nbt::{Compound, JavaString, Tag},
+    sunrise_core::nbt::Tag,
     sunrise_world::{
         level::{LevelEvent, removal, removal::PreRemove},
         registry::BlockStateId,
     },
 };
 
-/// What a broken block's entity gives its own dropped item (`copy_components`
-/// in the block loot tables): a shulker box's contents, a banner's layers, a
-/// container's custom name.
+/// Sources retained before removal; the table alone decides which components copy.
 #[derive(Default)]
 pub(super) struct Pending {
-    pub(super) shulker: HashMap<[i32; 3], Vec<(u8, ItemStack)>>,
-    pub(super) banner: HashMap<[i32; 3], Banner>,
-    /// The block's item and the custom name.
-    pub(super) names: HashMap<[i32; 3], (String, Tag)>,
-    /// A decorated pot's sherds (back, left, right, front).
+    sources: HashMap<[i32; 3], std::sync::Arc<sunrise_world::loot::copy::BlockSource>>,
+    /// A decorated pot's sherds for its dynamic drop, not component-copy policy.
     pub(super) pot: HashMap<[i32; 3], [Option<ItemStack>; 4]>,
-    /// A head's profile, note block sound and name, or a hive's bees: the
-    /// dropped item and the component patch it takes.
-    pub(super) copied: HashMap<[i32; 3], (String, Compound)>,
 }
+
+pub(super) fn source_snapshot(
+    mut saved: Tag,
+    name: Option<Tag>,
+    lock: Option<&Tag>,
+) -> sunrise_world::loot::copy::BlockSource {
+    if let Tag::Compound(fields) = &mut saved {
+        if let Some(name) = name {
+            fields.insert("CustomName".into(), name);
+        }
+        if let Some(lock) = lock {
+            fields.insert("lock".into(), lock.clone());
+        }
+    }
+    let nbt = block_entity_nbt::canonical(&saved).unwrap_or(saved);
+    let components = block_entity_item::collected_components(&nbt);
+    sunrise_world::loot::copy::BlockSource { nbt, components }
+}
+
+pub(super) fn world_source(
+    world: &sunrise_client::world::World,
+    pos: [i32; 3],
+    block: &str,
+    encode: impl FnOnce((i32, i32, i32), &BlockEntity, &str) -> Tag,
+) -> Option<std::sync::Arc<sunrise_world::loot::copy::BlockSource>> {
+    let key = (pos[0], pos[1], pos[2]);
+    let saved = match world.block_entities.get(&key) {
+        Some(entity) => encode(key, entity, block),
+        None => saved_entity(world, pos).or_else(|| {
+            // Sparse storage can omit an empty block entity, but its type's
+            // implicit components still belong to the loot source. Use the
+            // factory's entity identity, which need not match the block's id.
+            sunrise_client::block_entity_types::type_for(block)
+                .or_else(|| sunrise_client::lan::chunks::block_entity_type(block))
+                .map(|kind| {
+                    Tag::compound([
+                        ("id", Tag::String(kind.into())),
+                        ("x", Tag::Int(pos[0])),
+                        ("y", Tag::Int(pos[1])),
+                        ("z", Tag::Int(pos[2])),
+                    ])
+                })
+        })?,
+    };
+    Some(std::sync::Arc::new(source_snapshot(
+        saved,
+        world.block_names.get(&key).cloned(),
+        world.block_lock(key),
+    )))
+}
+
 impl Pending {
-    /// `record` for the block entity at `pos` while it is still in `world`:
-    /// its custom name and lock come from there.
+    pub(super) fn source(
+        &self,
+        pos: [i32; 3],
+    ) -> Option<std::sync::Arc<sunrise_world::loot::copy::BlockSource>> {
+        self.sources.get(&pos).cloned()
+    }
     pub(super) fn record_from(
         &mut self,
         world: &sunrise_client::world::World,
         pos: [i32; 3],
-        entity: &BlockEntity,
-        block: &str,
+        saved: Tag,
     ) {
         let key = (pos[0], pos[1], pos[2]);
         let name = world.block_names.get(&key).cloned();
-        self.record(pos, entity, block, name, world.block_lock(key));
+        self.record_source(pos, source_snapshot(saved, name, world.block_lock(key)));
     }
-    /// Remember what the block entity at `pos` copies into its own drop.
-    /// Name and lock live outside the model: snapshot the actual lock before
-    /// removal forgets its source. Only the supported shulker copy policy takes it.
-    pub(super) fn record(
+    pub(super) fn record_saved(&mut self, pos: [i32; 3], tag: &sunrise_core::nbt::Tag) {
+        self.record_source(pos, source_snapshot(tag.clone(), None, None));
+    }
+    pub(super) fn record_source(
         &mut self,
         pos: [i32; 3],
-        entity: &BlockEntity,
-        block: &str,
-        name: Option<Tag>,
-        lock: Option<&Tag>,
+        source: sunrise_world::loot::copy::BlockSource,
     ) {
-        if let BlockEntity::Banner(banner) = entity {
-            self.banner.insert(pos, banner.clone());
-            return;
-        }
-        // The vanilla crafter loot table does not copy the block entity's name.
-        if let Some(name) = name
-            && !matches!(entity, BlockEntity::Crafter(_))
-        {
-            self.names.insert(pos, (block.to_owned(), name));
-        }
-        // `copy_components` from the block entity: the head tables copy the
-        // profile (player heads), note block sound and name, the hive tables
-        // the bees, and shulker tables the actual external lock. This is the
-        // supported vanilla class policy, not a selected-table include filter.
-        let include: &[&str] = match entity {
-            BlockEntity::Chest(_) if is_shulker_box(block) => &["minecraft:lock"],
-            BlockEntity::Skull(_) if block.starts_with("minecraft:player_") => &[
-                "minecraft:profile",
-                "minecraft:note_block_sound",
-                "minecraft:custom_name",
-            ],
-            BlockEntity::Skull(_) => &["minecraft:custom_name"],
-            BlockEntity::Beehive(_) => &["minecraft:bees"],
-            // The statue loot tables copy the custom name of the golem it was.
-            BlockEntity::CopperGolemStatue(_) => &["minecraft:custom_name"],
-            _ => &[],
-        };
-        if !include.is_empty() {
-            let mut saved =
-                save::block_entity_encode::encode((pos[0], pos[1], pos[2]), entity, block);
-            if is_shulker_box(block)
-                && let (Some(lock), Tag::Compound(tag)) = (lock, &mut saved)
-            {
-                tag.insert("lock".into(), lock.clone());
-            }
-            let mut patch = block_entity_nbt::canonical(&saved)
-                .map(|saved| block_entity_item::pick(&saved))
-                .unwrap_or_default();
-            patch.retain(|k, _| include.contains(&k.to_string_lossy().as_str()));
-            if !patch.is_empty() {
-                // `Blocks.wallVariant`: a wall head drops the standing item.
-                let item = block.replacen("_wall_", "_", 1);
-                self.copied.insert(pos, (item, patch));
-            }
-        }
-        if is_shulker_box(block)
-            && let BlockEntity::Chest(items) = entity
-        {
-            let kept = items
-                .iter()
-                .enumerate()
-                .filter_map(|(i, s)| Some((i as u8, s.clone()?)))
-                .collect();
-            self.shulker.insert(pos, kept);
-        }
-    }
-    /// Copy what was remembered for `pos` into a drop of the block.
-    pub(super) fn attach(&mut self, pos: [i32; 3], stack: &mut ItemStack) {
-        if is_shulker_box(&stack.item)
-            && let Some(contents) = self.shulker.remove(&pos)
-            && !contents.is_empty()
-        {
-            stack.data_mut().container = contents;
-        }
-        if self
-            .names
-            .get(&pos)
-            .is_some_and(|(item, _)| **item == *stack.item)
-            && let Some((_, name)) = self.names.remove(&pos)
-        {
-            stack.data_mut().custom_name = Some(name);
-        }
-        if self
-            .copied
-            .get(&pos)
-            .is_some_and(|(item, _)| **item == *stack.item)
-            && let Some((_, copied)) = self.copied.remove(&pos)
-        {
-            let mut patch = match item_data::encode_components(stack) {
-                Some(Tag::Compound(c)) => c,
-                _ => Default::default(),
-            };
-            patch.extend(copied);
-            (stack.damage, stack.extra) = item_data::decode_components(Some(&Tag::Compound(patch)));
-        }
-        if &*stack.item == "minecraft:decorated_pot" {
-            // The pot's block entity always copies its decorations, empty or not.
-            let sides = self.pot.remove(&pos).unwrap_or_default();
-            stack.data_mut().pot_decorations = Some(Box::new(sides));
-        }
-        if stack.item.ends_with("_banner")
-            && let Some(Banner {
-                layers,
-                name,
-                components,
-            }) = self.banner.remove(&pos)
-        {
-            let mut patch = match item_data::encode_components(stack) {
-                Some(Tag::Compound(c)) => c,
-                _ => Default::default(),
-            };
-            // The remaining components in the banner loot table's copy_components.
-            for key in [
-                "minecraft:item_name",
-                "minecraft:rarity",
-                "minecraft:tooltip_display",
-            ] {
-                if let Some(value) = components.get(&JavaString::from(key)) {
-                    patch.insert(key.into(), value.clone());
-                }
-            }
-            patch.insert(
-                "minecraft:banner_patterns".into(),
-                sunrise_client::banner::layers_to_nbt(&layers),
-            );
-            if let Some(name) = name {
-                patch.insert(
-                    "minecraft:custom_name".into(),
-                    Tag::String(name.as_str().into()),
-                );
-            }
-            (stack.damage, stack.extra) = item_data::decode_components(Some(&Tag::Compound(patch)));
-        }
-    }
-    /// Remember a decorated pot's sherds from its saved block entity.
-    pub(super) fn record_saved(&mut self, pos: [i32; 3], tag: &sunrise_core::nbt::Tag) {
-        use sunrise_core::nbt::Tag;
+        let source = std::sync::Arc::new(source);
+        self.sources.insert(pos, source.clone());
+        let tag = &source.nbt;
         if tag.get("id") != Some(&Tag::String("minecraft:decorated_pot".into())) {
             return;
         }
@@ -226,10 +143,7 @@ impl Pending {
     }
     pub(super) fn clear(&mut self, pos: [i32; 3]) {
         self.pot.remove(&pos);
-        self.shulker.remove(&pos);
-        self.banner.remove(&pos);
-        self.names.remove(&pos);
-        self.copied.remove(&pos);
+        self.sources.remove(&pos);
     }
 }
 
@@ -545,9 +459,16 @@ pub(super) fn put_saved_entity(
     }
 }
 
+#[derive(Default)]
+pub(in crate::game) struct RemovalOutputs {
+    pub keep_contents: bool,
+    pub drops: Vec<Option<ItemStack>>,
+    pub spawns: Vec<(ItemStack, [f64; 3])>,
+    pub experience: Vec<(u32, [f64; 3])>,
+}
+
 impl GameLevel<'_> {
-    fn pop_resource(&mut self, pos: [i32; 3], mut stack: ItemStack) {
-        self.pending.attach(pos, &mut stack);
+    fn pop_resource(&mut self, pos: [i32; 3], stack: ItemStack) {
         let at = pop_position(&mut self.world.random, pos);
         // `Block.popResource` draws its three offsets, then its private
         // overload reads `GameRules.BLOCK_DROPS` and pops nothing while it is
@@ -624,9 +545,8 @@ impl GameLevel<'_> {
         let at = [pos.x, pos.y, pos.z];
         self.unpack_loot(super::container_loot::LootTarget::Block(key), None);
         if let Some(entity) = self.world.block_entities.get(&key) {
-            let entity = entity.clone();
-            let block = self.facts.get(state).name.clone();
-            self.pending.record_from(self.world, at, &entity, &block);
+            let saved = self.encode_live_block_entity(key, entity, &self.facts.get(state).name);
+            self.pending.record_from(self.world, at, saved);
         } else if let Some(tag) = saved_entity(self.world, [pos.x, pos.y, pos.z]) {
             self.pending.record_saved(at, &tag);
         }
@@ -649,7 +569,7 @@ impl GameLevel<'_> {
         let entity = self
             .drop_entity
             .filter(|_| self.drop_breaker_at == Some(pos));
-        let drops = self.roll_block_loot(pos, state, entity, roll);
+        let drops = self.roll_block_loot(pos, state, entity, roll, None);
         let dropped = self.block_dropped(pos, state, None, tool.as_ref(), drops, None);
         for item in dropped.items {
             if let Some(kept) = self.drop_into.as_mut().filter(|_| machine) {
@@ -689,14 +609,9 @@ impl GameLevel<'_> {
         let at = [pos.x, pos.y, pos.z];
         let mut copied = Pending::default();
         if let Some(block_entity) = self.world.block_entities.get(&key) {
-            let name = self.world.block_names.get(&key).cloned();
-            copied.record(
-                at,
-                block_entity,
-                &self.facts.get(state).name,
-                name,
-                self.world.block_lock(key),
-            );
+            let saved =
+                self.encode_live_block_entity(key, block_entity, &self.facts.get(state).name);
+            copied.record_from(self.world, at, saved);
         } else if let Some(tag) = saved_entity(self.world, at) {
             copied.record_saved(at, &tag);
         }
@@ -707,11 +622,9 @@ impl GameLevel<'_> {
             breaker: entity.is_some(),
             ..Default::default()
         };
-        let mut drops = self.roll_block_loot(pos, state, entity, roll);
+        let source = copied.source(at);
+        let mut drops = self.roll_block_loot(pos, state, entity, roll, source.as_deref());
         drops.retain(|stack| &*stack.item != "minecraft:air" && stack.count > 0);
-        for stack in &mut drops {
-            copied.attach(at, stack);
-        }
         drops
     }
     /// What `Block.dropResources` does with the loot it rolled for the block
@@ -766,8 +679,7 @@ impl GameLevel<'_> {
         )
     }
     /// Build item entities only after vanilla has finished merging stacks.
-    pub(super) fn block_drop_item(&mut self, at: [i32; 3], mut stack: ItemStack) -> BlockItemDrop {
-        self.pending.attach(at, &mut stack);
+    pub(super) fn block_drop_item(&mut self, at: [i32; 3], stack: ItemStack) -> BlockItemDrop {
         let position = pop_position(&mut self.world.random, at);
         let random = prepare_item_random(None);
         BlockItemDrop {
@@ -874,7 +786,7 @@ impl GameLevel<'_> {
         // attachments, stay until `put`), as vanilla's override runs on `this`.
         // One out for its own tick or menu button, which an empty id stands in
         // for, isn't here to answer: its part isn't asked.
-        let mut part_drops = Vec::new();
+        let mut outputs = RemovalOutputs::default();
         if side_effects
             && matches!(
                 self.world.block_entities.get(&key),
@@ -882,7 +794,7 @@ impl GameLevel<'_> {
             )
             && let Some((lease, BlockEntity::Mod(entity))) = self.world.block_entities.take(&key)
         {
-            self.api_pre_remove_side_effects(pos, old, &entity, &mut part_drops);
+            outputs = self.api_pre_remove_side_effects(pos, old, &entity);
             self.world
                 .block_entities
                 .put(lease, BlockEntity::Mod(entity));
@@ -910,7 +822,7 @@ impl GameLevel<'_> {
             match kind {
                 PreRemove::Contents { slots, furnace } => {
                     let items = entity.as_ref().map_or(&[][..], BlockEntity::slots);
-                    for slot in 0..slots {
+                    for slot in 0..if outputs.keep_contents { 0 } else { slots } {
                         let stack = items.get(slot).cloned().flatten();
                         self.drop_item_stack(pos, stack);
                     }
@@ -953,13 +865,7 @@ impl GameLevel<'_> {
                             neighbour_updates += 1;
                         }
                         let at = removal::jukebox_pop_position(&mut self.world.random, pos);
-                        self.spill.spawns.push(Spawn {
-                            random: None,
-                            stack: record,
-                            pos: at,
-                            motion: None,
-                            delay: 10,
-                        });
+                        self.spawn_removal_item(record, at);
                         neighbour_updates += 1;
                     }
                 }
@@ -978,13 +884,7 @@ impl GameLevel<'_> {
                         && let Some(BlockEntity::Lectern(l)) = &entity
                         && let Some(book) = l.book.clone()
                     {
-                        self.spill.spawns.push(Spawn {
-                            random: None,
-                            stack: book,
-                            pos: removal::lectern_book_position(pos, step),
-                            motion: None,
-                            delay: 10,
-                        });
+                        self.spawn_removal_item(book, removal::lectern_book_position(pos, step));
                     }
                 }
                 PreRemove::ShulkerBox
@@ -993,8 +893,14 @@ impl GameLevel<'_> {
                 | PreRemove::Beacon
                 | PreRemove::Nothing => {}
             }
-            for stack in part_drops {
-                self.drop_item_stack(pos, Some(stack));
+            for stack in outputs.drops {
+                self.drop_item_stack(pos, stack);
+            }
+            for (stack, at) in outputs.spawns {
+                self.spawn_removal_item(stack, at);
+            }
+            for (amount, at) in outputs.experience {
+                self.award_orbs(at, amount);
             }
         }
         // BlockEntity.setRemoved: a jukebox always reports its song stopping,
@@ -1004,6 +910,7 @@ impl GameLevel<'_> {
             PreRemove::Beacon => self.events.push(LevelEvent::Sound {
                 pos,
                 sound: "minecraft:block.beacon.deactivate".into(),
+                source: None,
                 volume: 1.0,
                 pitch: 1.0,
             }),
@@ -1013,6 +920,16 @@ impl GameLevel<'_> {
             self.spill.removed.push(([pos.x, pos.y, pos.z], entity));
         }
         neighbour_updates
+    }
+    /// ItemEntity(level, x, y, z, stack), followed by setDefaultPickUpDelay.
+    fn spawn_removal_item(&mut self, stack: ItemStack, pos: [f64; 3]) {
+        self.spill.spawns.push(Spawn {
+            random: None,
+            stack,
+            pos,
+            motion: None,
+            delay: 10,
+        });
     }
     /// The jukebox's `JUKEBOX_STOP_PLAY` game event and level event 1011.
     fn jukebox_stopped(&mut self, pos: BlockPos, state: BlockStateId) {
@@ -1073,6 +990,7 @@ impl GameLevel<'_> {
                     &mut self.world.random,
                     self.rand_sequences,
                     self.seed,
+                    self.items,
                     sunrise_world::loot::ContainerLootContext::default(),
                 );
                 let mut items = vec![None; slots];
@@ -1129,18 +1047,32 @@ impl Game<'_> {
         entity: Option<u32>,
         roll: BlockLootRoll<'_>,
     ) -> Vec<ItemStack> {
-        if mod_api::__private::listened(mod_api::HookId::EnchantedBlockLoot) {
-            let at = BlockPos::new(pos[0], pos[1], pos[2]);
-            let entity = self.loot_entity_ref(entity);
-            return self.with_level(|_, level, _| level.roll_block_loot(at, state, entity, roll));
-        }
-        world_items!(self).block_drops(
-            self.pack.assets.registry,
-            state,
-            roll,
-            &mut self.world.random,
-            Some((&mut self.rand_sequences, self.level.seed)),
-        )
+        let source = self.pending.source(pos).or_else(|| {
+            self.pack.assets.registry.state(state).and_then(|block| {
+                world_source(&self.world, pos, &block.name, |key, entity, block| {
+                    self.encode_live_block_entity(key, entity, block, world_items!(self))
+                })
+            })
+        });
+        let storage = self.score.storage.snapshot();
+        sunrise_world::loot::copy::with_storage(storage, || {
+            sunrise_world::loot::copy::with_block_source(source.as_deref(), || {
+                if mod_api::__private::listened(mod_api::HookId::EnchantedBlockLoot) {
+                    let at = BlockPos::new(pos[0], pos[1], pos[2]);
+                    let entity = self.loot_entity_ref(entity);
+                    return self.with_level(|_, level, _| {
+                        level.roll_block_loot(at, state, entity, roll, source.as_deref())
+                    });
+                }
+                world_items!(self).block_drops(
+                    self.pack.assets.registry,
+                    state,
+                    roll,
+                    &mut self.world.random,
+                    Some((&mut self.rand_sequences, self.level.seed)),
+                )
+            })
+        })
     }
     /// The handle of `LootContextParams.THIS_ENTITY`, by its id.
     pub(in crate::game) fn loot_entity_ref(&self, id: Option<u32>) -> Option<EntityRef> {
@@ -1215,6 +1147,172 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RemovalMod(u8);
+    struct RemovalPart(u8, mod_api::ItemKey);
+    #[mod_api::sunrise_part]
+    impl mod_api::BlockPart for RemovalPart {}
+    #[mod_api::sunrise_part]
+    impl mod_api::BlockEntityPart for RemovalPart {
+        fn pre_remove_side_effects(
+            &self,
+            _: &mut dyn mod_api::LevelRandomHost,
+            event: &mut mod_api::PreRemoveSideEffectsEvent<'_>,
+        ) {
+            match self.0 {
+                1 => event.keep_contents = true,
+                2 => {
+                    let key = self.1;
+                    event.spawns.push((
+                        mod_api::ItemStack::new(key, 1).unwrap(),
+                        [1.25, 65.75, -2.5],
+                    ));
+                }
+                3 => event.experience.push((10, [1.25, 65.75, -2.5])),
+                4 => {
+                    event.drops.push(None);
+                    let key = self.1;
+                    event
+                        .drops
+                        .push(Some(mod_api::ItemStack::new(key, 1).unwrap()));
+                }
+                _ => {}
+            }
+        }
+    }
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for RemovalMod {
+        fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+            let kind = r.block_entity_type("machine").blocks(&[]).build();
+            let diamond = r.item_key("minecraft:diamond");
+            r.block_entity_part(&kind, RemovalPart(self.0, diamond))
+                .unwrap();
+        }
+    }
+    fn removal_outputs(
+        mode: u8,
+        check: impl FnOnce(&mut GameLevel<'_>, &mut sunrise_core::random::LevelRandom),
+    ) {
+        use std::sync::Arc;
+        use sunrise_client::containers::{ModBlockEntity, ModBlockEntityFields, ModContainer};
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+            "removal",
+            Box::new(RemovalMod(mode)),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            crate::game::native_entity_refs::tests::with_game(|game| {
+                game.options.dedicated = Some(Vec::new());
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
+                let state = game
+                    .pack
+                    .assets
+                    .registry
+                    .default_state("minecraft:stone")
+                    .unwrap();
+                let mut entity =
+                    ModBlockEntity::new("removal:machine".into(), ModBlockEntityFields::default());
+                if mode == 1 {
+                    entity.items = vec![Some(ItemStack::new("minecraft:diamond", 1))];
+                    game.world.block_entities.set_mod_containers(
+                        [(
+                            state.0,
+                            Arc::new(ModContainer {
+                                slots: 1,
+                                ..Default::default()
+                            }),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    );
+                }
+                game.world
+                    .block_entities
+                    .insert((1, 64, 2), BlockEntity::Mod(Box::new(entity)));
+                game.with_level(|_, level, _| {
+                    let mut reference = level.world.random.clone();
+                    level.remove_entity(BlockPos::new(1, 64, 2), state, true);
+                    check(level, &mut reference);
+                });
+            });
+        });
+    }
+    #[test]
+    #[ignore = "daily"]
+    fn removal_keep_contents_suppresses_slot_scatter() {
+        removal_outputs(1, |level, reference| {
+            assert!(level.spill.spawns.is_empty());
+            assert_eq!(level.world.random.next_int(), reference.next_int());
+        });
+    }
+    #[test]
+    #[ignore = "daily"]
+    fn removal_spawn_has_exact_position_and_default_delay() {
+        removal_outputs(2, |level, _| {
+            assert_eq!(level.spill.spawns.len(), 1);
+            let spawn = &level.spill.spawns[0];
+            assert_eq!(spawn.pos, [1.25, 65.75, -2.5]);
+            assert_eq!(spawn.delay, 10);
+            assert_eq!(&*spawn.stack.item, "minecraft:diamond");
+            assert_eq!(spawn.stack.count, 1);
+            assert!(spawn.motion.is_none());
+        });
+    }
+    #[test]
+    #[ignore = "daily"]
+    fn removal_experience_awards_positioned_orbs() {
+        removal_outputs(3, |level, reference| {
+            assert_eq!(
+                level
+                    .spill
+                    .orbs
+                    .iter()
+                    .map(|(_, value, _)| *value)
+                    .collect::<Vec<_>>(),
+                [7, 3]
+            );
+            for (at, _, merge) in &level.spill.orbs {
+                assert_eq!(*at, [1.25, 65.75, -2.5]);
+                assert_eq!(*merge, reference.next_int_bound(40).unwrap());
+            }
+            assert_eq!(level.world.random.next_int(), reference.next_int());
+        });
+    }
+    #[test]
+    #[ignore = "daily"]
+    fn removal_empty_slot_draws_three_doubles_without_spawning() {
+        removal_outputs(4, |level, reference| {
+            // Containers.dropItemStack draws x, y, z before its isEmpty loop.
+            for _ in 0..3 {
+                reference.next_double();
+            }
+            // The filled slot follows the empty one, using its own three draws.
+            let at = [
+                1.125 + reference.next_double() * 0.75,
+                64.0 + reference.next_double() * 0.75,
+                2.125 + reference.next_double() * 0.75,
+            ];
+            reference.next_int_bound(21).unwrap();
+            for _ in 0..6 {
+                reference.next_double();
+            }
+            assert_eq!(level.spill.spawns.len(), 1);
+            assert_eq!(level.spill.spawns[0].pos, at);
+            assert_eq!(level.spill.spawns[0].stack.count, 1);
+            assert_eq!(level.world.random.next_int(), reference.next_int());
+        });
+    }
+    #[test]
+    #[ignore = "daily"]
+    fn removal_unanswered_part_leaves_random_untouched() {
+        removal_outputs(0, |level, reference| {
+            assert!(level.spill.spawns.is_empty());
+            assert!(level.spill.orbs.is_empty());
+            assert_eq!(level.world.random.next_int(), reference.next_int());
+        });
+    }
 
     /// Listens to `block_drops`: takes any break of dirt, adds 2 points to the rest.
     struct DropsMod;
@@ -1482,27 +1580,91 @@ mod tests {
     }
 
     #[test]
+    fn tool_source_keeps_the_full_patch_and_distinguishes_stored_enchantments() {
+        let potion = Tag::compound([("potion", Tag::String("minecraft:healing".into()))]);
+        let stored = Tag::compound([("minecraft:sharpness", Tag::Int(13))]);
+        let patch = Tag::compound([
+            ("minecraft:potion_contents", potion.clone()),
+            ("minecraft:stored_enchantments", stored.clone()),
+            ("!minecraft:unbreakable", Tag::Compound(Default::default())),
+        ]);
+        let (damage, extra) = item_data::decode_components(Some(&patch));
+        let tool = ItemStack {
+            item: std::sync::Arc::from("minecraft:enchanted_book"),
+            count: 1,
+            damage,
+            extra,
+        };
+        let snapshot = crate::game::creatures::to_loot(&tool);
+        assert!(snapshot.enchantments.is_empty());
+        let prototype = [
+            (
+                "minecraft:unbreakable".into(),
+                Tag::Compound(Default::default()),
+            ),
+            (
+                "minecraft:enchantments".into(),
+                Tag::Compound(Default::default()),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            sunrise_world::loot::copy::stack_components(&snapshot, Some(&prototype)),
+            [
+                ("minecraft:potion_contents".into(), potion),
+                ("minecraft:stored_enchantments".into(), stored),
+                (
+                    "minecraft:enchantments".into(),
+                    Tag::Compound(Default::default())
+                )
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    #[test]
     fn ominous_banner_survives_placement_save_and_drop() {
         let original = raider::ominous_banner();
-        let Tag::Compound(components) = item_data::encode_components(&original).unwrap() else {
+        let Tag::Compound(components) = item_data::component_snapshot(&original).unwrap() else {
             panic!("banner components");
         };
         for block in ["minecraft:white_banner", "minecraft:white_wall_banner"] {
             let pos = (1, 64, 2);
             let fresh = BlockEntity::for_block(block).unwrap();
-            let fresh = save::block_entity_encode::encode(pos, &fresh, block);
+            let fresh = save::block_entity_encode::encode(pos, &fresh, block, &Default::default());
             let placed = block_entity_item::place(&fresh, &components, false);
             let (_, placed) = save::decode_block_entity(&placed).unwrap();
-            let saved = save::block_entity_encode::encode(pos, &placed, block);
+            let saved = save::block_entity_encode::encode(pos, &placed, block, &Default::default());
             let (_, loaded) = save::decode_block_entity(&saved).unwrap();
             let BlockEntity::Banner(banner) = &loaded else {
                 panic!("placed banner");
             };
             assert_eq!(banner.layers.len(), item_data::OMINOUS_LAYERS.len());
             let mut pending = Pending::default();
-            pending.record([pos.0, pos.1, pos.2], &loaded, block, None, None);
-            let mut dropped = ItemStack::new("minecraft:white_banner", 1);
-            pending.attach([pos.0, pos.1, pos.2], &mut dropped);
+            pending.record_saved([pos.0, pos.1, pos.2], &saved);
+            let mut items = sunrise_client::items::Items::for_tests(Default::default());
+            items.set_loot_tables(std::sync::Arc::new([(
+                "test:banner".to_owned(),
+                serde_json::json!({"type":"minecraft:empty","pools":[{"rolls":1,"entries":[{
+                    "type":"minecraft:item","name":"minecraft:white_banner",
+                    "modifier":{"type":"minecraft:copy_components","source":"block_entity",
+                        "include":["minecraft:banner_patterns","minecraft:custom_name",
+                            "minecraft:item_name","minecraft:rarity","minecraft:tooltip_display"]}
+                }]}]}),
+            )].into_iter().collect()));
+            let source = pending.source([pos.0, pos.1, pos.2]);
+            let dropped = sunrise_world::loot::copy::with_block_source(source.as_deref(), || {
+                items
+                    .loot_table(
+                        "test:banner",
+                        false,
+                        None,
+                        &mut sunrise_core::random::LegacyRandom::new(0),
+                    )
+                    .remove(0)
+            });
             assert!(dropped.data().unwrap().ominous_banner);
             assert!(sunrise_client::banner::tooltip_layers(&dropped).is_empty());
             assert_eq!(
@@ -1514,7 +1676,7 @@ mod tests {
                 "uncommon"
             );
             assert_eq!(
-                item_data::encode_components(&dropped),
+                item_data::component_snapshot(&dropped),
                 Some(Tag::Compound(components.clone()))
             );
         }

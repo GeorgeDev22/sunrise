@@ -106,7 +106,6 @@ pub fn start<G>(
     } = startup;
     runtime_environment::capture(&launch);
     sunrise_threads::configure_allocator();
-    sunrise_chat_filter::install();
     sunrise_look::give();
     // OptiFine's and Polytone's pack formats (platform, docs/layers.md), before any pack loads.
     sunrise_client::pack_formats::install();
@@ -124,7 +123,10 @@ pub fn start<G>(
     // The text crates ship (`sunrise_hooks::lang`), loaded with the game's own languages.
     sunrise_client::lang::install_crate_files(sunrise_hooks::lang::engine::all());
     sunrise_client::spans::startup::init(std::time::Instant::now());
-    logging::set_game_home(launch.context.home.clone());
+    logging::set_game_home(
+        launch.context.home.clone(),
+        launch.cache_home().to_path_buf(),
+    );
     // The dedicated server logs in its own folder, as vanilla's does; the game in its home.
     let (home, side, thread) = if launch
         .rest
@@ -153,6 +155,7 @@ pub fn start<G>(
     // Mod loading emits refusals; both client and dedicated logs must exist first.
     let (_ids, _loaded_code) = load(&native, &launch);
     crash::install(home.clone(), side);
+    let _ = sunrise_world::loot::types::install(crate::game::loot_types::capture);
     if sunrise_world::native_load_hooks::install(
         sunrise_world::native_load_hooks::NativeLoadHooks {
             item_ability_default: sunrise_items::item_abilities::vanilla_can_perform,
@@ -175,12 +178,6 @@ pub fn start<G>(
                 let reader = sunrise_client_render::api_context::LoadReader(context);
                 let context = reader.context();
                 mod_api::dispatch_modify_default_components(&context, item, components);
-            },
-            loot_function: |kind, data, ctx, stack, tags| {
-                crate::game::api_values::dispatch_loot_function(kind, data, ctx, stack, tags);
-            },
-            loot_condition: |kind, data, ctx, holds, tags| {
-                crate::game::api_values::dispatch_loot_condition(kind, data, ctx, holds, tags);
             },
         },
     )
@@ -327,13 +324,13 @@ pub(crate) fn install_client_hooks() {
             let context = reader.context();
             mod_api::dispatch_living_fall(&context, entity, kind, distance, multiplier, cancel);
         },
-        living_jump: |context, entity, kind| {
+        living_jump: |context, entity, kind, velocity| {
             if !mod_api::__private::listened(mod_api::HookId::LivingJump) {
                 return;
             }
             let reader = sunrise_client_render::api_context::LoopReader(context);
             let context = reader.context();
-            mod_api::dispatch_living_jump(&context, entity, kind);
+            mod_api::dispatch_living_jump(&context, entity, kind, velocity);
         },
         living_jump_power: |context, entity, kind, power| {
             if !mod_api::__private::listened(mod_api::HookId::LivingJumpPower) {
@@ -373,6 +370,10 @@ pub(crate) fn install_client_hooks() {
         friction: |context, entity, kind, pos, state, friction| {
             crate::game::native_surface::friction(context, entity, kind, pos, state, friction);
         },
+        collision_shape: |context, pos, state, query, shape| {
+            crate::game::native_collision_shape::collision_shape(context, pos, state, query, shape);
+        },
+        collision_shape_refused: crate::game::native_collision_shape::refused,
         player_stays_on_ground_surface: |context, entity, staying| {
             if !mod_api::__private::listened(mod_api::HookId::PlayerStaysOnGroundSurface) {
                 return;

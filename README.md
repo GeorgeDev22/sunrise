@@ -64,7 +64,7 @@ Everything below is in the current release.
 
 ## Download
 
-Get **the Sunrise launcher** from [playsunrise.net/download](https://playsunrise.net/download), or from the newest `launcher@` release on [GitHub](https://github.com/sunrise-org/sunrise/releases?q=launcher&expanded=true):
+Get **the Sunrise launcher** from [playsunrise.net/download](https://playsunrise.net/download), or from GitHub: it has its own repository, [sunrise-org/sunrise-launcher](https://github.com/sunrise-org/sunrise-launcher), whose releases are also published here as `launcher@` releases ([1.0.0](https://github.com/sunrise-org/sunrise/releases?q=launcher&expanded=true) came from here):
 
 | Platform | File | Needs |
 | --- | --- | --- |
@@ -76,15 +76,15 @@ Get **the Sunrise launcher** from [playsunrise.net/download](https://playsunrise
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/media/readme/launcher-home.webp" alt="The launcher's Home page: the Sunrise instance, Play, the version picker, the friend invite field, screenshots and the patch log"></td>
-    <td width="50%"><img src="docs/media/readme/launcher-mods.webp" alt="The launcher's Mods page: Sunrise's mod registry with Zoom selected, and tabs for modpacks, resource packs, shader packs and data packs"></td>
+    <td width="50%"><img src="docs/media/readme/launcher-home.webp" alt="The launcher's Home page on the Dawn theme: the Sunrise instance with its icon, Sign in to play, the friend invite field and the instance's tabs"></td>
+    <td width="50%"><img src="docs/media/readme/launcher-versions.webp" alt="The launcher's Versions page: the installed Nightly, marked latest and in use, with its notes"></td>
   </tr>
 </table>
 
 ## Mods and shader packs
 
 - **Content mods** (`.smod`): blocks, items, recipes, loot, models and textures, with no code.
-- **Native mods** (`.hnmod`): Rust that the launcher compiles into the game for you, with nothing to install.
+- **Native mods** (also `.smod`, whose manifest has a `[native]` table): Rust that the launcher compiles into the game for you, with nothing to install.
 - **Java mods** (Fabric, NeoForge, Forge) don't run: Sunrise has no Java. The launcher carries over the data and assets inside their jars, and imports modpacks (`.mrpack`, CurseForge zips, Prism instances) the same way ([modpacks](https://playsunrise.net/docs/modpacks)).
 - **Shader packs**: Iris/OptiFine-format packs (`shaders/` folders) and Sunrise's own WGSL packs, under Video Settings → Shader Packs ([pack format](docs/shaders.md)).
 

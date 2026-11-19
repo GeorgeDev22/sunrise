@@ -311,14 +311,12 @@ mod tests {
           (@custom "dylink.0" "\01\04\00\00\00\00")
           (import "env" "memory" (memory 1))
           (import "env" "__indirect_function_table" (table 1 funcref))
-          (import "sunrise" "host" (func $host (param i32 i32 i32 i32 i32) (result i32)))
-          (import "sunrise" "host_reply" (func (param i32)))
+          {imports}
           (global $original (mut i64) (i64.const 0))
           (global $called (mut i32) (i32.const 0))
-          (func (export "sunrise_layout") (result i64) i64.const {layout})
           (func (export "sunrise_in") (param i32) (result i32) i32.const 512)
           {data}
-          (func (export "sunrise_hook") (param i32) (result i64)
+          (func (export "sunrise_hook") (param i64) (result i64)
             global.get $called
             if
               i32.const 4096 global.get $original i64.store
@@ -335,7 +333,7 @@ mod tests {
             i32.const 28672 i32.const 512 i32.const 16 memory.copy
             i32.const 28688 i32.const 532 i32.const 528 i32.load i32.add i32.load8_u i32.store8
             i32.const 28689 global.get $original i64.store
-            i64.const {reply}))"#, layout=*mod_api::wire::LAYOUT, len=marker.bytes().len(), reply=(28672u64 << 32) | 25)).unwrap();
+            i64.const {reply}))"#, imports=sunrise_mod_wasm::fixture::wat_imports(), len=marker.bytes().len(), reply=(28672u64 << 32) | 25)).unwrap();
         let module = sunrise_mod_wasm::fixture::module(&bytes).unwrap();
         module.player_clone(host, event);
         assert_eq!(player.experience(host).unwrap().level, 42);
@@ -350,6 +348,11 @@ mod tests {
 
     #[mod_api::__subscriptions]
     impl Hooks for Listener {
+        fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+            r.register_attachment_type("clone:unsaved", false).unwrap();
+            r.register_attachment_type("clone:retained", false).unwrap();
+            r.register_attachment_type("clone:saved", false).unwrap();
+        }
         fn player_clone(&self, host: &mut dyn ServerHost, event: &mut PlayerCloneEvent<'_>) {
             assert_eq!(event.was_death, self.death);
             let original = event.original;
@@ -367,7 +370,14 @@ mod tests {
                 name: "missing",
                 ..VALUE
             };
-            assert_eq!(original.attachment(host, &MISSING), Ok(0));
+            // Never declared, so refused by name (#1448), not read as its default.
+            assert_eq!(
+                original.attachment(host, &MISSING),
+                Err(mod_api::AttachmentError::Undeclared {
+                    package_id: "clone".into(),
+                    attachment_id: "clone:missing".into(),
+                })
+            );
             assert_eq!(original.attachment(host, &VALUE), Ok(73));
             assert_eq!(original.attachment(host, &RETAINED), Ok(17));
             // The saved import reads the raw codec-backed entry, before native reads decode it.

@@ -13,6 +13,7 @@ Use biome content, region declarations and level handles to control biome genera
 | Change a biome | `LevelRef::set_biome`, one 4x4x4 cell, as `/fillbiome` does | Server |
 | Run bone meal at a position | `LevelRef::bone_meal` | Server |
 | Place a feature (a tree, a patch, an ore vein) | `LevelRef::place_feature`, as `/place feature` does ([placing a template](placing-a-template.md#placing-a-feature)) | Server |
+| Add a feature type of my own (my tree's shape) | `Registrar::register_feature_type`, named by a configured feature's `"type"` ([feature types](feature-types.md)) | Both |
 | Tint foliage, grass or water by biome | The `register_color_resolvers` hook for new colour resolvers, and the `biome_colors` hook to change a biome's own colours | Client |
 
 Code and file modifiers support features, spawns, spawn costs, carvers, climate and effects. They apply additions,

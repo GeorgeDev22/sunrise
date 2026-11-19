@@ -30,17 +30,13 @@ impl Game<'_> {
     pub(in crate::game) fn hover_name(&self, stack: &ItemStack) -> String {
         sunrise_client::stations::hover_name(&self.pack.names, stack)
     }
-    /// The creative search tab's stacks in order (`getSearchTabDisplayItems`).
-    pub(in crate::game) fn creative_search_items(&self) -> Vec<ItemStack> {
-        self.creative_screen.search_items().to_vec()
-    }
     /// Whether enchantment `id` can go on `item` (`Enchantment.isSupportedItem`).
     pub(in crate::game) fn enchantment_supports(&self, id: &str, item: mod_api::ItemKey) -> bool {
         let Some(item) = mod_api::__private::item_key_id(item) else {
             return false;
         };
-        self.stations()
-            .enchantments
-            .can_enchant(self.items(), id, item)
+        self.stations().enchantments.get(id).is_some_and(|e| {
+            sunrise_items::enchant::Enchantments::item_in(self.items(), &e.supported, item)
+        })
     }
 }

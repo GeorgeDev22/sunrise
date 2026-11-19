@@ -93,11 +93,11 @@ FriendlyByteBuf.writeWithCodec	skip:java		DataFixer codec plumbing; Sunrise has 
 FriendlyByteBuf.readLenientJsonWithCodec	skip:java		codec plumbing for lenient JSON
 FriendlyByteBuf.writeJsonWithCodec	skip:java		codec plumbing for JSON
 FriendlyByteBuf.readWithCount	skip:java		count loop; the List codec does it
-FriendlyByteBuf.writeEnumSet	port	crates/sunrise-protocol/src/packets/play.rs::PlayerInfoUpdate::write	action flags as one byte (8 actions fit)
-FriendlyByteBuf.readEnumSet	port	crates/sunrise-protocol/src/packets/play.rs::PlayerInfoUpdate::read	action flags as one byte (8 actions fit)
+FriendlyByteBuf.writeEnumSet	port	crates/sunrise-protocol/src/packets/play/players.rs::PlayerInfoUpdate::write	action flags as one byte (8 actions fit)
+FriendlyByteBuf.readEnumSet	port	crates/sunrise-protocol/src/packets/play/players.rs::PlayerInfoUpdate::read	action flags as one byte (8 actions fit)
 FriendlyByteBuf.writeOptional	port	crates/sunrise-protocol/src/buf.rs::Opt::write	boolean flag, then the value
-FriendlyByteBuf.writeEither	port	crates/sunrise-protocol/src/packets/play.rs::TrackedWaypoint::write	gap: minor: only the waypoint identifier; no generic Either codec
-FriendlyByteBuf.readEither	port	crates/sunrise-protocol/src/packets/play.rs::TrackedWaypoint::read	gap: minor: only the waypoint identifier; no generic Either codec
+FriendlyByteBuf.writeEither	port	crates/sunrise-protocol/src/packets/play/waypoints.rs::TrackedWaypoint::write	gap: minor: only the waypoint identifier; no generic Either codec
+FriendlyByteBuf.readEither	port	crates/sunrise-protocol/src/packets/play/waypoints.rs::TrackedWaypoint::read	gap: minor: only the waypoint identifier; no generic Either codec
 FriendlyByteBuf.readNullable	port	crates/sunrise-protocol/src/buf.rs::Opt::read	boolean flag, then the value
 FriendlyByteBuf.writeNullable	port	crates/sunrise-protocol/src/buf.rs::Opt::write	boolean flag, then the value
 FriendlyByteBuf.readByteArray	port	crates/sunrise-protocol/src/buf.rs::Reader::byte_array	VarInt length, then bytes
@@ -120,8 +120,8 @@ FriendlyByteBuf.readUUID	port	crates/sunrise-protocol/src/buf.rs::Reader::uuid	t
 FriendlyByteBuf.writeNbt	port	crates/sunrise-protocol/src/buf.rs::Writer::nbt	null is written as End
 FriendlyByteBuf.readNbt	port	crates/sunrise-protocol/src/buf.rs::Reader::nbt	gap: minor: accepts any root tag; no compound-only check
 FriendlyByteBuf.writeUtf	port	crates/sunrise-protocol/src/buf.rs::Writer::string	gap: minor: no max-length check on write
-FriendlyByteBuf.readFixedBitSet	port	crates/sunrise-protocol/src/packets/play.rs::Fixed3::read	gap: minor: only the 3-byte set LastSeenUpdate uses; the action set reads a flag byte
-FriendlyByteBuf.writeFixedBitSet	port	crates/sunrise-protocol/src/packets/play.rs::Fixed3::write	gap: minor: only the 3-byte set LastSeenUpdate uses
+FriendlyByteBuf.readFixedBitSet	port	crates/sunrise-protocol/src/packets/play/players.rs::Fixed3::read	gap: minor: only the 3-byte set LastSeenUpdate uses; the action set reads a flag byte
+FriendlyByteBuf.writeFixedBitSet	port	crates/sunrise-protocol/src/packets/play/players.rs::Fixed3::write	gap: minor: only the 3-byte set LastSeenUpdate uses
 FriendlyByteBuf.writeContainerId	port	crates/sunrise-protocol/src/buf.rs::Writer::varint	container id as a VarInt
 FriendlyByteBuf.ensureWritable	skip:java		Netty buffer capacity
 FriendlyByteBuf.getBytes	skip:java		Netty buffer accessor

@@ -14136,41 +14136,16 @@ def check_death_credit(host, guest, out):
 
 CHECKS += ['death-credit']
 CHECK_FNS['death-credit'] = check_death_credit
-def set_legacy_rules(game, on):
-    """The PvP page's "1.8 combat in worlds you host" switch, as a player flips it."""
-    game('options', page='pvp')
-    # The switch sits at the end of the page: wheel down over the list until it stops moving, so the row is
-    # whole inside the list (a click on a row half under the list's edge lands outside it, as in vanilla).
-    switch = None
-    for _ in range(60):
-        ui = game.raw('ui')
-        found = next((w for w in ui['widgets']
-                      if w.get('label', '').startswith('1.8 combat in worlds you host')), None)
-        if found and switch and found['bounds'] == switch['bounds']:
-            break
-        switch = found
-        width, height = ui['gui_size']
-        game.raw('scroll-at', f'{width / 2:.1f}', f'{height / 2:.1f}', -3)
-    assert switch, 'the PvP page has no "1.8 combat in worlds you host" switch'
-    if switch['label'].endswith('On') != on:
-        game('click', id=switch['id'])
-        now = next(w for w in game.raw('ui')['widgets'] if w.get('id') == switch['id'])
-        assert now['label'].endswith('On') == on, f'the click did not flip the switch: {now}'
-    game('close')
-    game.wait(5)
 
 
-def check_legacy_pvp(host, guest, out):
-    """The host's legacy combat rules (crates/sunrise-client/src/legacy_combat.rs) on a guest's diamond axe hits:
+def check_attack_charge(host, guest, out):
+    """26.3's attack charge on a guest's diamond axe hits, resolved by the host:
     one at full charge, and one right after a hotbar swap and back, which empties the charge on the server
     (Player.tick resets attackStrengthTicker when the main hand's item changes). The stick is held a few ticks:
     the client sends a slot change from its next tick (MultiPlayerGameMode.tick), so a swap and back within one
     tick sends nothing, as vanilla's.
 
-    1.8.9, EntityPlayer.attackTargetEntityWithCurrentItem: the hit deals the attack damage attribute, which is
-    EntityPlayer.applyEntityAttributes' base 1 plus the axe's weapon modifier (ItemAxe's 3.0F +
-    Item.ToolMaterial.EMERALD.getDamageVsEntity() 3.0F): 7, and 7 again after the swap, as nothing charges.
-    26.3, Player.attack: 9 at full charge, and the swapped hit is scaled by getAttackStrengthScale down to
+    Player.attack: 9 at full charge, and the swapped hit is scaled by getAttackStrengthScale down to
     9 * (0.2 + scale^2 * 0.8)."""
     if dead(guest):
         guest.raw('respawn')
@@ -14203,24 +14178,19 @@ def check_legacy_pvp(host, guest, out):
         guest.wait(10)
         return before - health()
 
-    hits = {}
     try:
-        for name, rules in (('modern', False), ('legacy', True)):
-            set_legacy_rules(host, rules)
-            hits[name] = (dealt(False), dealt(True))
-            guest.shot(out, f'legacy-pvp-{name}')
+        full, swapped = dealt(False), dealt(True)
+        guest.shot(out, 'attack-charge')
     finally:
-        set_legacy_rules(host, False)
         host('command', command='attribute @s minecraft:knockback_resistance base set 0')
         host('command', command='gamerule natural_health_regeneration true')
-    assert hits['legacy'] == (7.0, 7.0), f'1.8.9 rules: 7, charged or not: {hits}'
-    full, swapped = hits['modern']
-    assert full == 9.0 and swapped < 9.0, f'26.3 rules: 9 charged, less right after a swap: {hits}'
-    return hits
+    # 9 * (0.2 + scale^2 * 0.8) is at least 1.8: a hit that never landed deals 0 and fails here.
+    assert full == 9.0 and 1.8 <= swapped < 9.0, f'9 charged, 1.8 to 9 right after a swap: {full}, {swapped}'
+    return full, swapped
 
 
-CHECKS += ['legacy-pvp']
-CHECK_FNS['legacy-pvp'] = check_legacy_pvp
+CHECKS += ['attack-charge']
+CHECK_FNS['attack-charge'] = check_attack_charge
 
 def check_ride_seats(host, guest, out):
     """RideCommand.mount forces the ride (startRiding(vehicle, true, true)), so an item display, an

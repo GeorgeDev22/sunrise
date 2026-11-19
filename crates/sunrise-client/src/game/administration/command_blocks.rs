@@ -8,6 +8,7 @@ use sunrise_client::{
     command_block::{self, CommandBlock, Mode},
     containers::BlockEntity,
     hud::{HudBatch, rgba},
+    items::ItemStack,
     screen_draw::Measure,
     text::Text,
     ui::{self, EditBox},
@@ -396,9 +397,15 @@ impl Game<'_> {
     }
 
     /// `CommandBlock.setPlacedBy`: unless the item carried block entity data
-    /// (`defaults` false), output tracking follows `send_command_feedback` and
+    /// output tracking follows `send_command_feedback` and
     /// the block's own automatic flag; then the block takes the signal around it.
-    pub(super) fn command_block_placed(&mut self, pos: Pos, defaults: bool) {
+    pub(super) fn command_block_placed(&mut self, pos: Pos, stack: Option<&ItemStack>) {
+        let defaults = !stack.is_some_and(|stack| {
+            stack.carries_component(
+                self.items().get(&stack.item),
+                sunrise_client::block_entity_item::BLOCK_ENTITY_DATA,
+            )
+        });
         let feedback = self
             .ui
             .rules
@@ -406,6 +413,8 @@ impl Game<'_> {
         let Some(name) = self.block_state_at(pos).map(|s| s.name.as_str()) else {
             return;
         };
+        let saved = |c: &CommandBlock| (c.track_output, c.auto, c.powered, c.condition_met);
+        let before = self.command_block(pos).map(saved);
         let auto = command_block::automatic_block(name);
         if defaults && let Some(c) = command_block_mut(&mut self.world, pos) {
             c.track_output = feedback;
@@ -421,6 +430,9 @@ impl Game<'_> {
             && !command_block::automatic_block(name)
         {
             self.schedule_command_block(pos);
+        }
+        if self.command_block(pos).map(saved) != before {
+            self.world.modified.insert((pos.0 >> 4, pos.2 >> 4));
         }
     }
 

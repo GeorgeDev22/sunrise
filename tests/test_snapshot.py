@@ -109,7 +109,7 @@ class NightlyBuildSnapshotTests(unittest.TestCase):
                         optional.add(row["name"])
                 macs = {"macos", "macos-x64"} if repo == "sunrise-org/sunrise" else ({"macos-x64"} if kind == "snapshot" else set())
                 self.assertEqual(optional, {"windows-arm64", "linux-musl"} | macs)
-        self.assertEqual(game["jobs"]["linux-smoke"]["needs"], ["runner-configuration", "legs"])
+        self.assertEqual(game["jobs"]["linux-smoke"]["needs"], "legs")
         # A reusable workflow that ends failed or cancelled (an optional leg) passes back no outputs: signing and
         # publishing follow the legs job's build-complete marker, read by an ordinary job.
         self.assertNotIn("outputs", game["on"]["workflow_call"])
@@ -133,7 +133,7 @@ class NightlyBuildSnapshotTests(unittest.TestCase):
             (root / "tools/ci/sign_release.sh").write_text(
                 'for file in "${@:2}"; do test -f "$file" || exit 9; done\nprintf "%s\\n" "$@" > signed\n')
             for name in ("sunrise-linux-x86_64.tar.gz", "sunrise-windows-x64.zip", "sunrise-macos-arm64.zip",
-                         "sunrise-server-linux-x86_64.tar.gz", "sunrise-source.tar.gz"):
+                         "sunrise-server-linux-x86_64.tar.gz", "sunrise-source.tar.gz", "sunrise-release.json"):
                 (root / "dist" / name).touch()
             for kind, code in (("snapshot", 0), ("nightly", 1)):
                 result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", sign], cwd=root,

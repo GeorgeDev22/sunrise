@@ -369,6 +369,7 @@ mod tests {
             thundering: false,
             level: sunrise_core::LevelKey::OVERWORLD,
             block_tags: &items.block_tags,
+            block_tag_flags: items.block_tag_flags.bits(),
             landing: &motion.landing,
             biomes: &biomes,
             mob_griefing: true,

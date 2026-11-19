@@ -312,9 +312,13 @@ impl Game<'_> {
         let i = host.hub.imported_arrival(uuid, id)?;
         let g = host.hub.guests.take_for_save(i);
         let written =
-            sunrise_client::lan::playerdata::save_now(&g, &self.world_root).and_then(|()| {
-                self.write_arrival_records(self.lan.as_ref().expect("server host is present"), &g)
-            });
+            sunrise_client::lan::playerdata::save_now(&g, &self.world_root, self.res.items())
+                .and_then(|()| {
+                    self.write_arrival_records(
+                        self.lan.as_ref().expect("server host is present"),
+                        &g,
+                    )
+                });
         let name = g.name.clone();
         let host = self.lan.as_mut().expect("server host is present");
         host.hub.guests.insert(i, g);

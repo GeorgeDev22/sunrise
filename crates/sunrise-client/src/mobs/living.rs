@@ -4,6 +4,7 @@
 //! damage, fire and the walk animation.
 use super::{Mob, MobEvent, MobWorld};
 use crate::health::DamageLevel;
+use crate::items::BlockTagFlags;
 use crate::{blocks::Fluid, collisions::SceneCollisions};
 use sunrise_core::{
     geometry::{Aabb, Vec3, trig},
@@ -708,29 +709,34 @@ impl Mob {
             return Vec::new();
         }
         let area = area.inflate(Vec3::new(1.0e-7, 1.0e-7, 1.0e-7));
-        let mover = self.species();
-        let blocks = |s: &&super::Seen| {
-            s.id != self.id
-                && s.blocks_mob(mover)
-                && s.bounds.intersects(area)
-                && !self.passenger_of_same_vehicle(s.id, s.vehicle)
-        };
+        let mut boxes = Vec::new();
+        let solids = crate::entity_solids::Solids::new(
+            crate::entity_solids::Mover::Mob {
+                id: self.id,
+                happy_ghast: self.species() == super::Species::HappyGhast,
+                mount: self.extra.mount,
+            },
+            Some(area),
+        );
         match w.others_solid {
-            Some(slots) => slots
-                .iter()
-                .map(|&i| &w.others[i as usize])
-                .filter(blocks)
-                .map(|s| s.bounds)
-                .collect(),
-            None => w.others.iter().filter(blocks).map(|s| s.bounds).collect(),
+            Some(slots) => {
+                for &i in slots {
+                    let c = w.others[i as usize].solid_candidate();
+                    if solids.accepts(&c, || None) {
+                        boxes.push(c.bounds);
+                    }
+                }
+            }
+            None => {
+                for s in w.others.iter().filter(|s| s.may_block_mobs()) {
+                    let c = s.solid_candidate();
+                    if solids.accepts(&c, || None) {
+                        boxes.push(c.bounds);
+                    }
+                }
+            }
         }
-    }
-    /// `Entity.isPassengerOfSameVehicle` toward the entity `id` riding
-    /// `vehicle`: one rides the other, or both ride the same one.
-    fn passenger_of_same_vehicle(&self, id: u32, vehicle: Option<u32>) -> bool {
-        self.extra.mount == Some(id)
-            || vehicle == Some(self.id)
-            || (self.extra.mount.is_some() && vehicle == self.extra.mount)
+        boxes
     }
     pub fn do_move(
         &mut self,
@@ -979,8 +985,7 @@ impl Mob {
     fn landing_dust(&self, w: &MobWorld, events: &mut Vec<MobEvent>) {
         let pos = self.block_on_legacy(w);
         let state = w.world.block(pos[0], pos[1], pos[2]);
-        let Some(count) = landing_dust_count(self.fall_distance, self.kind.safe_fall_distance)
-        else {
+        let Some(count) = landing_dust_count(self.fall_distance, self.safe_fall_distance()) else {
             return;
         };
         if w.facts.is_air(state) {
@@ -1059,7 +1064,7 @@ impl Mob {
         let on = self.supported_on_pos(w, supporting, 1.0e-5);
         let state = w.world.block(on[0], on[1], on[2]);
         let climbable = w.facts.get(state).name.as_ref() == "minecraft:powder_snow"
-            || w.has_tag("minecraft:climbable", &w.facts.get(state).name);
+            || w.state_flag(state, BlockTagFlags::CLIMBABLE);
         let steps = &mut self.ai.steps;
         steps.move_dist += if climbable { full } else { horizontal };
         steps.fly_dist += full;
@@ -1299,9 +1304,9 @@ impl Mob {
         level: &mut DamageLevel<'_>,
         contact: Option<(&MobWorld, [i32; 3])>,
         distance: f64,
-        damage: f32,
-    ) -> f32 {
-        contact.map_or(damage, |(w, p)| {
+        multiplier: f32,
+    ) -> (f64, f32) {
+        contact.map_or((distance, multiplier), |(w, p)| {
             crate::block_contact::fall(
                 level,
                 crate::block_contact::Contact {
@@ -1311,7 +1316,7 @@ impl Mob {
                     position: sunrise_core::position::BlockPos::new(p[0], p[1], p[2]),
                 },
                 distance,
-                damage,
+                multiplier,
             )
         })
     }
@@ -1337,6 +1342,12 @@ impl Mob {
             None,
             super::DamageKind::Fall,
         );
+    }
+    /// `getAttributeValue(SAFE_FALL_DISTANCE)`, which `calculateFallPower`
+    /// takes off a fall: Jump Boost's stored modifier among the attribute's
+    /// ([`Mob::set_effect_modifiers`]).
+    fn safe_fall_distance(&self) -> f64 {
+        super::finalize::value(self, super::finalize::Attr::SafeFallDistance)
     }
     /// True when the fall hurt (`causeFallDamage`'s result).
     pub(super) fn cause_fall_damage_at(
@@ -1400,7 +1411,8 @@ impl Mob {
             self.mod_block_fall(level, contact, landed, 0.0);
             return false;
         }
-        let power = distance + 1.0e-6 - self.kind.safe_fall_distance;
+        let (distance, modifier) = self.mod_block_fall(level, contact, distance, modifier);
+        let power = distance + 1.0e-6 - self.safe_fall_distance();
         let mut damage = (power * f64::from(modifier) * self.kind.fall_damage_multiplier).floor();
         // Frog.calculateFallDamage: five points less than the base damage;
         // Goat.calculateFallDamage: ten, so a long jump down a ledge is safe.
@@ -1409,7 +1421,7 @@ impl Mob {
             super::Species::Goat => damage -= 10.0,
             _ => {}
         }
-        let damage = f64::from(self.mod_block_fall(level, contact, landed, damage as f32));
+
         // LivingEntity.causeFallDamage lets the riders fall first.
         if !horse {
             self.fall_to_passengers(distance, modifier, events);
@@ -1924,7 +1936,6 @@ impl Mob {
         self.needs_sync = true;
         if self.species() == super::Species::Rabbit {
             super::rabbit::jump(self, w);
-            crate::motion::native_living_jump(w.loop_context, self.id, &self.kind.id);
             return;
         }
         if matches!(
@@ -1932,7 +1943,7 @@ impl Mob {
             super::Species::Slime | super::Species::MagmaCube | super::Species::SulfurCube
         ) {
             super::cube::jump(self, w);
-            crate::motion::native_living_jump(w.loop_context, self.id, &self.kind.id);
+            self.living_jumped(w.loop_context);
             return;
         }
         let power = self.jump_power(w);
@@ -1944,6 +1955,9 @@ impl Mob {
                 self.velocity.x += f64::from(-trig::sin(angle)) * 0.2;
                 self.velocity.z += f64::from(trig::cos(angle)) * 0.2;
             }
+            // LivingEntity.jumpFromGround ends with NeoForge's LivingJumpEvent, before the
+            // sniffer's own push below.
+            self.living_jumped(w.loop_context);
         }
         // Sniffer.jumpFromGround: a hop the move control asked for, taken from
         // nearly standing still, carries a tenth of a block forward.
@@ -1953,7 +1967,11 @@ impl Mob {
         {
             self.move_relative(0.1, Vec3::new(0.0, 0.0, 1.0));
         }
-        crate::motion::native_living_jump(w.loop_context, self.id, &self.kind.id);
+    }
+    /// The `living_jump` hook for this mob, with its motion after the jump.
+    pub fn living_jumped(&self, context: &LoopContext) {
+        let v = self.velocity;
+        crate::motion::native_living_jump(context, self.id, &self.kind.id, [v.x, v.y, v.z]);
     }
     /// `LivingEntity.getJumpPower`: the jump power with a multiplier of 1.0.
     pub fn jump_power(&self, w: &MobWorld) -> f32 {
@@ -2647,6 +2665,7 @@ mod tests {
                 thundering: false,
                 level: sunrise_core::LevelKey::OVERWORLD,
                 block_tags: &items.block_tags,
+                block_tag_flags: items.block_tag_flags.bits(),
                 landing: &motion.landing,
                 biomes: &biomes,
                 universal_anger: false,
@@ -2778,6 +2797,7 @@ mod tests {
                 thundering: false,
                 level: sunrise_core::LevelKey::OVERWORLD,
                 block_tags: &items.block_tags,
+                block_tag_flags: items.block_tag_flags.bits(),
                 landing: &motion.landing,
                 biomes: &biomes,
                 universal_anger: false,
@@ -2910,6 +2930,7 @@ mod tests {
             thundering: false,
             level: sunrise_core::LevelKey::OVERWORLD,
             block_tags: &items.block_tags,
+            block_tag_flags: items.block_tag_flags.bits(),
             landing: &motion.landing,
             biomes: &biomes,
             universal_anger: false,
@@ -3051,6 +3072,7 @@ mod tests {
                 thundering: false,
                 level: sunrise_core::LevelKey::OVERWORLD,
                 block_tags: &items.block_tags,
+                block_tag_flags: items.block_tag_flags.bits(),
                 landing: &motion.landing,
                 biomes: &biomes,
                 universal_anger: false,
@@ -3278,6 +3300,49 @@ mod tests {
         assert_eq!(landing_dust_count(60.0, 3.0), Some(375));
         // A mob that takes no fall damage still has a safe distance of its own.
         assert_eq!(landing_dust_count(7.0, 10.0), None);
+    }
+    /// #1988: both of `checkFallDamage`'s reads of the fall power take the
+    /// safe fall distance attribute, a given Jump Boost's stored modifier
+    /// included. A zombie landing on stone after 4.5 blocks takes 1 damage
+    /// and throws up `150 * (0.2F + 1 / 15)` = 40 grains; with Jump Boost II
+    /// (3 + 2 = 5) it takes none and throws up nothing.
+    #[test]
+    #[ignore = "daily"]
+    fn a_jump_boosted_zombies_landing_reads_its_safe_fall_distance() {
+        let build = |world: &mut crate::world::World,
+                     registry: &sunrise_world::registry::BlockRegistry| {
+            world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(crate::chunk::Chunk::empty(0, 0)),
+            );
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            world.set(4, 63, 4, stone).unwrap();
+        };
+        let ran = crate::mobs::world::with_built_test_world(&[], build, |w, types| {
+            let kind = std::sync::Arc::new(types.types["minecraft:zombie"].clone());
+            let land = |boosted: bool| {
+                let mut m = Mob::new(1, kind.clone(), Vec3::new(4.5, 64.0, 4.5), 0.0);
+                if boosted {
+                    m.add_effect("minecraft:jump_boost", -1, 1);
+                }
+                m.on_ground = true;
+                m.fall_distance = 4.5;
+                let mut test_level = crate::health::TestLevel::new(0);
+                let mut events = Vec::new();
+                m.check_fall_damage(w, &mut test_level.level(), Vec3::ZERO, &mut events);
+                let dust: Vec<i32> = events
+                    .iter()
+                    .filter_map(|e| match e {
+                        MobEvent::LandingDust { count, .. } => Some(*count),
+                        _ => None,
+                    })
+                    .collect();
+                (m.health, dust)
+            };
+            assert_eq!(land(false), (19.0, vec![40]));
+            assert_eq!(land(true), (20.0, vec![]));
+        });
+        assert!(ran, "the vanilla test resources must be available");
     }
     /// Over the block it lands on the dust starts at the mob; straddling
     /// into another column it is pulled to that block's near edge.
@@ -3783,6 +3848,42 @@ mod tests {
             );
         });
         assert!(ran, "built test world ran");
+    }
+
+    /// `LivingEntity.jumpFromGround` ends with NeoForge's `LivingJumpEvent`: `living_jump`
+    /// hears a cow's jump once, with the motion the jump left it. The rabbit's and the sniffer's
+    /// overrides call it first, so their own forward push from standing comes after the event.
+    #[test]
+    #[ignore = "daily"]
+    fn a_mob_jump_fires_living_jump_once_with_its_velocity() {
+        use crate::native_client_hooks::test_hooks::{install, jumps, record_jumps};
+        install();
+        let _recording = record_jumps();
+        let ran = crate::mobs::world::with_test_world(&[], |w, types| {
+            let mob = |id, kind: &str| {
+                let kind = std::sync::Arc::new(types.types[kind].clone());
+                Mob::new(id, kind, Vec3::new(0.5, 1.0, 0.5), 0.0)
+            };
+            let mut cow = mob(7, "minecraft:cow");
+            cow.jump_from_ground(w);
+            assert_eq!(jumps(), [(7, [0.0, f64::from(0.42_f32), 0.0])]);
+            for (id, kind) in [(8, "minecraft:rabbit"), (9, "minecraft:sniffer")] {
+                let mut m = mob(id, kind);
+                m.ai.mov.speed_modifier = 1.0;
+                m.jump_from_ground(w);
+                let heard = jumps();
+                assert_eq!(heard.len(), 1, "{kind}");
+                let (entity, [x, y, z]) = heard[0];
+                assert_eq!(
+                    (entity, x, z),
+                    (id, 0.0, 0.0),
+                    "{kind} heard before its push"
+                );
+                assert!(y > 0.0, "{kind} jumped");
+                assert!(m.velocity.z > 0.0, "{kind} pushed forward after the event");
+            }
+        });
+        assert!(ran, "test world ran");
     }
 
     /// `LivingEntity.getFlyingSpeed`: a horse its player steers (saddled, ridden) moves

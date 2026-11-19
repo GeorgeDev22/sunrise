@@ -73,7 +73,6 @@ pub(in crate::game) fn reload() {
 
 /// Once per frame of the view `view` (its game's address), before it is drawn: the answers of
 /// stacks no view's last frame drew are dropped, so what is kept is bounded by what is on screen.
-/// Splitscreen's views draw one after another, each keeping what it drew.
 pub(in crate::game) fn begin_frame(view: usize) {
     answers().begin_frame(view);
 }
@@ -528,7 +527,7 @@ mod tests {
         assert_eq!(count(draw(pan, &stacks[1])), 2);
         assert_eq!(asked.get(), 103);
         assert_eq!(answers.lock().unwrap().kept.len(), 2);
-        // Splitscreen: two views draw one after another, each its own stack, and neither's is
+        // When two views draw in turn, neither view's stack is
         // dropped by the other's frame.
         for _frame in 0..10 {
             answers.lock().unwrap().begin_frame(VIEW);

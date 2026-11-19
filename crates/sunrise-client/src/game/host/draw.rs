@@ -61,6 +61,10 @@ impl DrawContext for GameDrawContext<'_, '_> {
         self.game
             .native_text(&mut *self.surface, text, at, argb, shadow)
     }
+    fn text_scaled(&mut self, text: &str, at: [f32; 2], scale: f32, argb: u32, shadow: bool) {
+        self.game
+            .native_text_scaled(&mut *self.surface, text, at, scale, argb, shadow)
+    }
     fn item_stack(&mut self, stack: &ItemStack, at: [f32; 2], size: f32) -> bool {
         let Ok(stack) = crate::game::api_values::stack_value(stack) else {
             return false;
@@ -765,6 +769,32 @@ mod tests {
     /// A label of 400 characters in a 120-pixel box, with the game's own font: every line fits,
     /// the lines are as many as the text's own width needs, the drawn glyphs cover exactly the
     /// height the layout answered, and every answer doubles with `scale`.
+    #[test]
+    #[ignore = "daily"]
+    fn scaled_text_is_the_text_scaled_about_its_corner() {
+        crate::game::native_entity_refs::tests::with_client_game(|game| {
+            let at = [10.0, 20.0];
+            let mut plain = crate::hud::HudBatch::scratch([320, 240]);
+            GameDrawContext::new(game, &mut plain).text("Jump", at, 0xFFFF_FFFF, true);
+            let mut scaled = crate::hud::HudBatch::scratch([320, 240]);
+            GameDrawContext::new(game, &mut scaled).text_scaled("Jump", at, 0.5, 0xFFFF_FFFF, true);
+            assert!(!plain.vertices.is_empty(), "the text draws glyphs");
+            assert_eq!(plain.vertices.len(), scaled.vertices.len());
+            for (p, s) in plain.vertices.iter().zip(&scaled.vertices) {
+                let half = [
+                    at[0] + (p.pos[0] - at[0]) * 0.5,
+                    at[1] + (p.pos[1] - at[1]) * 0.5,
+                ];
+                assert_eq!(s.pos, half, "every corner halfway to `at`");
+                assert_eq!(
+                    (s.uv, s.color),
+                    (p.uv, p.color),
+                    "the same glyphs and colours"
+                );
+            }
+        });
+    }
+
     #[test]
     #[ignore = "daily"]
     fn a_wrapped_label_measures_and_draws_its_own_height() {

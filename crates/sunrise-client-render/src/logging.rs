@@ -32,12 +32,12 @@ pub fn data_dir() -> PathBuf {
     sunrise_mod_package::selection::data_dir_with(|key| std::env::var_os(key))
 }
 
-/// `--home DIR`, set once at start; it wins over `SUNRISE_HOME`.
-static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// The resolved game and overlay cache homes, set once at startup.
+static HOME: std::sync::OnceLock<(PathBuf, PathBuf)> = std::sync::OnceLock::new();
 
-/// Makes `game_home` return `home` for the rest of the run (`--home`).
-pub fn set_game_home(home: PathBuf) {
-    let _ = HOME.set(home);
+/// Records the game home and the base folder for the content overlay cache.
+pub fn set_game_home(home: PathBuf, cache_home: PathBuf) {
+    let _ = HOME.set((home, cache_home));
 }
 
 /// `--player-dir DIR` (#4952), set once at start: one player's own files, when several games
@@ -90,15 +90,29 @@ fn shared_dir_of(
 }
 
 /// Where the launcher runs the game and keeps its saves: `--home`, else `SUNRISE_HOME`, else
-/// `sunrise` in the platform data folder (launcher/src/backend.rs `game_home`).
+/// `sunrise` in the platform data folder (https://github.com/sunrise-org/sunrise-launcher/blob/main/src/backend.rs `game_home`).
 pub fn game_home() -> PathBuf {
-    if let Some(home) = HOME.get() {
+    if let Some((home, _)) = HOME.get() {
         return home.clone();
     }
     match std::env::var_os("SUNRISE_HOME").filter(|h| !h.is_empty()) {
         Some(h) => PathBuf::from(h),
         None => data_dir().join("sunrise"),
     }
+}
+
+/// The content overlay's `.sunrise-cache`: in the private home when `--home` or
+/// `SUNRISE_HOME` names one, else in the game folder. Without startup (e.g. in tests),
+/// use a named `SUNRISE_HOME` or the working directory.
+pub fn cache_dir() -> PathBuf {
+    if let Some((_, cache_home)) = HOME.get() {
+        return cache_home.join(".sunrise-cache");
+    }
+    match std::env::var_os("SUNRISE_HOME").filter(|home| !home.is_empty()) {
+        Some(home) => PathBuf::from(home),
+        None => std::env::current_dir().unwrap_or_default(),
+    }
+    .join(".sunrise-cache")
 }
 
 /// `logs/` and `crash-reports/` of a game folder.
@@ -459,9 +473,25 @@ fn ours(target: &str) -> bool {
     target.starts_with("sunrise")
 }
 
+/// Crates logged from ERROR only, their warnings being known noise. `calloop` 0.13, winit 0.30's
+/// Wayland event loop, warns once per key press: smithay-client-toolkit re-registers the key
+/// repeat timer on each press and the removed timer's last event still arrives ("Received an
+/// event for non-existence source"). Neither crate has a release without it.
+const ERRORS_ONLY: &[&str] = &["calloop"];
+
 impl log::Log for Logger {
     fn enabled(&self, meta: &log::Metadata) -> bool {
-        meta.level() <= log::Level::Info
+        let target = meta.target();
+        let floor = if ERRORS_ONLY.iter().any(|name| {
+            target
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+        }) {
+            log::Level::Error
+        } else {
+            log::Level::Info
+        };
+        meta.level() <= floor
     }
 
     fn log(&self, record: &log::Record) {
@@ -760,6 +790,9 @@ mod tests {
             ("wgpu_core::device", log::Level::Error, "device lost"),
             ("meridian_core::map", log::Level::Debug, "debug detail"),
             ("meridian_core::map", log::Level::Trace, "trace detail"),
+            ("calloop::loop_logic", log::Level::Warn, "calloop noise"),
+            ("calloop::loop_logic", log::Level::Error, "calloop failed"),
+            ("calloopish", log::Level::Warn, "another crate"),
         ] {
             logger.log(
                 &log::Record::builder()
@@ -782,6 +815,12 @@ mod tests {
         assert!(text.contains("[wgpu_core::device] device lost"), "{text}");
         assert!(!text.contains("debug detail"));
         assert!(!text.contains("trace detail"));
+        assert!(!text.contains("calloop noise"), "{text}");
+        assert!(
+            text.contains("[calloop::loop_logic] calloop failed"),
+            "{text}"
+        );
+        assert!(text.contains("[calloopish] another crate"), "{text}");
     }
 
     #[test]
@@ -824,9 +863,9 @@ mod tests {
         let (game, player) = (Path::new("/games/shared"), Path::new("/games/players/alex"));
         // options.txt moved to the player's folder: the enabled mods stay the game folder's.
         assert_eq!(shared_dir_of(Some(player), player, || game.into()), game);
-        // No --player-dir, or a splitscreen profile's own folder: beside options.txt as before.
+        // With or without --player-dir: beside options.txt.
         assert_eq!(shared_dir_of(None, game, || unreachable!()), game);
-        let profile = Path::new("/games/shared/splitscreen/profiles/P2");
+        let profile = Path::new("/games/shared/profiles/local");
         assert_eq!(
             shared_dir_of(Some(player), profile, || unreachable!()),
             profile

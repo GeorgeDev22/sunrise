@@ -90,6 +90,26 @@ impl Hooks for Watcher {
     }
 }
 
+/// The second mod's watcher. A part type attaches to a block once (`insert_part` refuses the same
+/// type from two mods), so it is a type of its own that behaves as [`Watcher`] does.
+#[derive(Clone)]
+struct SecondWatcher(Watcher);
+
+#[mod_api::sunrise_part]
+impl BlockPart for SecondWatcher {
+    fn contents_changed(&self, host: &mut dyn ServerHost, event: &mut ContentsChangedEvent) {
+        self.0.contents_changed(host, event);
+    }
+}
+
+#[mod_api::__subscriptions]
+impl Hooks for SecondWatcher {
+    fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+        let chest = r.block_key("minecraft:chest");
+        r.block_part(chest, self.clone());
+    }
+}
+
 fn with_watches(name: &str, test: impl FnOnce(&mut Game<'_>, LevelRef, Watcher)) {
     if run_fresh_cases(name, "SUNRISE_CONTENTS_WATCH_CHILD", &["game"]) {
         return;
@@ -105,7 +125,7 @@ fn with_watches(name: &str, test: impl FnOnce(&mut Game<'_>, LevelRef, Watcher))
     };
     let mods: Mods = vec![
         ModEntry::new("watch_a", Box::new(a.clone())),
-        ModEntry::new("watch_b", Box::new(b)),
+        ModEntry::new("watch_b", Box::new(SecondWatcher(b))),
     ]
     .into();
     mod_platform::__private::install(mods.clone());

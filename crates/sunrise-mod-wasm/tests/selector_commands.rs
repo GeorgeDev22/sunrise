@@ -22,7 +22,7 @@ fn real_wasm_command_listener_receives_ordered_selector_handles() {
         manifest.inject.clear();
         let info = PackageInfo::new(
             manifest.id.clone(),
-            manifest.version.clone(),
+            manifest.version.to_string(),
             PackageKind::Code,
             Side::Both,
             vec![manifest.id.clone()],
@@ -79,6 +79,11 @@ fn real_wasm_command_listener_receives_ordered_selector_handles() {
                 CommandArgumentValue::Id(Identifier::parse("minecraft:zombie").unwrap()),
             ),
         ];
+        // The fixture guest declares a general entity type in `register`, which only the registration
+        // phase accepts. The scope follows `initialize`: the phase lives in the backend it installs.
+        mod_api::__private::initialize().unwrap();
+        let _registration =
+            mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::Registration);
         mod_api::testing::with_mods(loaded.mods.into(), || {
             mod_api::__private::mark_game_thread();
             let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);

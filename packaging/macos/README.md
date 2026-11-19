@@ -1,6 +1,8 @@
-# The macOS launcher: Sunrise.app in a .dmg
+# macOS packaging
 
-`package.sh BINARY VERSION OUTDIR` (run by `.github/workflows/launcher.yml` on macOS) makes:
+The launcher's own packaging (`package.sh`, `Info.plist`, the .dmg background) moved with the launcher to [sunrise-org/sunrise-launcher](https://github.com/sunrise-org/sunrise-launcher); the sections below describe it and the signing and notarization this folder's `keychain.sh` and `notarize.sh` still do for the game's macOS builds.
+
+`package.sh BINARY VERSION OUTDIR` (in sunrise-launcher's release workflow, on macOS) makes:
 
 - `Sunrise.app`: `Contents/MacOS/sunrise-launcher`, `Contents/Info.plist` (this folder's, bundle
   id `dev.sunrise.launcher`, macOS 11 or later), `Contents/Resources/sunrise.icns`
@@ -39,8 +41,8 @@ Releases are signed with Ludovic's **Developer ID** ("Developer ID Application: 
   launcher updates itself from and the .dmg both hold it stapled; then the .dmg is signed,
   notarized and stapled. The script ends with what Gatekeeper says of each, which must read
   `accepted` and `source=Notarized Developer ID`.
-- the game (`.github/workflows/release.yml`): `sunrise-client`, `sunrise-ctl` and
-  `sunrise-prepare` are signed right after they are built (so the checks and the 1500-frame smoke
+- the game (`.github/workflows/game-build.yml`): `sunrise-client`, `sunrise-ctl`, `sunrise-perf`,
+  `sunrise-prepare` and `sunrise-server` are signed right after they are built (so the checks and the 1500-frame smoke
   run use them as players will), and the zip is notarized. Programs outside a bundle can't hold a
   ticket: Gatekeeper asks Apple online the first time each one runs.
 
@@ -87,7 +89,7 @@ Signing by hand, as the workflow does:
 export MACOS_SIGN_IDENTITY="Developer ID Application: Ludovic Marie (YYJU63HSD4)"
 export MACOS_SIGN_KEYCHAIN=~/Library/Keychains/sunrise-signing.keychain-db MACOS_NOTARY_PROFILE=sunrise-notary
 packaging/macos/keychain.sh unlock
-packaging/macos/package.sh target/release/sunrise-launcher 0.0.0 out
+packaging/macos/package.sh target/release/sunrise-launcher 0.0.0 out   # run in sunrise-launcher, which holds package.sh
 packaging/macos/keychain.sh lock
 ```
 

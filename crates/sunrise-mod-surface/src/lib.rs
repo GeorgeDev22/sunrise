@@ -1,4 +1,4 @@
-//! `surface.json`: the stable surface of one game build, what an API-only mod can name.
+//! `surface.json`: the stable mod API of one game build, with optional engine records for CI and audits.
 //!
 //! The generator (`sunrise-stage surface`) writes it from the declarations the build parses;
 //! nothing in it is kept by hand. This crate holds its record types, their contract hashes, the
@@ -30,6 +30,9 @@
 //! | Part kind | `part:<kind>` |
 //! | capability | `capability:<key>` (`registries`, `sunrise:fluids`) |
 //! | behaviour | `behaviour:<name>` (`add_to_merging`) |
+//! | injection point | `point:<target>` |
+//! | published loop | `loop:<name>` |
+//! | listed internal | `internal:<kind>:<path>` (with ` [<cfg>]` for a guarded row) |
 //!
 //! # Hashes
 //!
@@ -118,6 +121,14 @@ pub struct Surface {
     /// list, so adding it kept the schema number.
     #[serde(default)]
     pub behaviours: Vec<Behaviour>,
+    /// Reserved-namespace tags that packages may extend, declared beside engine readers.
+    /// Older readers ignore this additive collection without a schema change.
+    #[serde(default)]
+    pub extension_tags: Vec<ExtensionTag>,
+    /// Injection points, native loops and listed internals for CI and local audits. Omitted
+    /// from SDK exports and not inferred by the API source-use scanner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_items: Vec<EngineItem>,
 }
 
 /// Why a document was refused.
@@ -147,7 +158,7 @@ impl std::error::Error for ReadError {}
 /// of the contract's compact JSON (fields in declaration order, absent optional fields left out).
 pub fn contract_hash<T: Serialize>(contract: &T) -> String {
     let text = serde_json::to_string(contract).expect("contracts serialize");
-    shape::digest(&text)
+    mod_call::digest(&text)
 }
 
 /// The identifier a mod writes for an id: the last path segment, or the field or variant name.
@@ -185,7 +196,7 @@ macro_rules! sealed {
 }
 
 sealed!(
-    Method(MethodContract) { wasm_reason },
+    Method(MethodContract) { wasm_reason, call },
     Function(FunctionContract) { wasm_reason, paths },
     Macro(MacroContract) { paths },
     Field(FieldContract) {},
@@ -262,6 +273,7 @@ impl Hook {
             doc: doc.into(),
             engine,
             counterparts,
+            call: None,
             contract,
             fields,
         }
@@ -295,7 +307,7 @@ pub fn fields_hash_of<'a>(fields: impl IntoIterator<Item = (&'a str, &'a str)>) 
         .map(|(name, ty)| format!("{name}: {ty}\n"))
         .collect();
     lines.sort();
-    shape::digest(&lines.concat())
+    mod_call::digest(&lines.concat())
 }
 
 impl Trait {
@@ -465,6 +477,8 @@ impl Surface {
             parts,
             capabilities,
             behaviours: Vec::new(),
+            extension_tags: Vec::new(),
+            engine_items: Vec::new(),
         };
         surface.hash = surface.document_hash();
         surface
@@ -478,7 +492,24 @@ impl Surface {
         self
     }
 
-    /// Every record and member record as (id, hash), in no promised order.
+    /// Add the declared extension tags and update the document hash.
+    pub fn with_extension_tags(mut self, mut tags: Vec<ExtensionTag>) -> Self {
+        tags.sort_by(|a, b| (&a.registry, &a.id).cmp(&(&b.registry, &b.id)));
+        self.extension_tags = tags;
+        self.hash = self.document_hash();
+        self
+    }
+
+    /// Add the ordered engine catalog records and update the document hash.
+    pub fn with_engine_items(mut self, mut items: Vec<EngineItem>) -> Self {
+        items.sort_by(|a, b| a.id.cmp(&b.id));
+        self.engine_items = items;
+        self.hash = self.document_hash();
+        self
+    }
+
+    /// Every named API record and member record as (id, hash), in no promised order.
+    /// Engine items and extension tags are not API source uses.
     pub fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
         let hooks = self.hooks.iter().flat_map(|r| {
             std::iter::once((r.id.as_str(), r.hash.as_str()))
@@ -523,9 +554,30 @@ impl Surface {
             .chain(behaviours)
     }
 
+    fn entries_with_engine(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries().chain(
+            self.engine_items
+                .iter()
+                .map(|r| (r.id.as_str(), r.hash.as_str())),
+        )
+    }
+
     /// The SHA-256 (first 128 bits, hex) of `<id> <hash>\n` for every entry, in byte order of id.
     pub fn document_hash(&self) -> String {
-        let mut entries: Vec<(&str, &str)> = self.entries().collect();
+        let tags: Vec<_> = self
+            .extension_tags
+            .iter()
+            .map(|tag| {
+                (
+                    format!("extension_tag:{}/{}", tag.registry, tag.id),
+                    contract_hash(&(&tag.registry, &tag.id)),
+                )
+            })
+            .collect();
+        let mut entries: Vec<(&str, &str)> = self
+            .entries_with_engine()
+            .chain(tags.iter().map(|(id, hash)| (id.as_str(), hash.as_str())))
+            .collect();
         entries.sort_unstable();
         let mut text = String::new();
         for (id, hash) in entries {
@@ -534,7 +586,7 @@ impl Surface {
             text.push_str(hash);
             text.push('\n');
         }
-        shape::digest(&text)
+        mod_call::digest(&text)
     }
 
     /// The identifiers a mod's source may contain for each id: its [`leaf`], and a capability
@@ -665,9 +717,18 @@ impl Surface {
         let surface: Self =
             serde_json::from_slice(bytes).map_err(|e| ReadError::Json(e.to_string()))?;
         let mut seen = BTreeSet::new();
-        for (id, _) in surface.entries() {
+        for (id, _) in surface.entries_with_engine() {
             if !seen.insert(id) {
                 return Err(ReadError::DuplicateId(id.to_owned()));
+            }
+        }
+        let mut tags = BTreeSet::new();
+        for tag in &surface.extension_tags {
+            if !tags.insert((&tag.registry, &tag.id)) {
+                return Err(ReadError::DuplicateId(format!(
+                    "extension_tag:{}/{}",
+                    tag.registry, tag.id
+                )));
             }
         }
         Ok(surface)

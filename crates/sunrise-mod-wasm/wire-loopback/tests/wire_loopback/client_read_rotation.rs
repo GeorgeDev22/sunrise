@@ -18,7 +18,7 @@ impl ItemsClientHost for Client {
             _ => String::new(),
         }
     }
-    fn creative_search_items(&self) -> Vec<ItemStack> {
+    fn creative_search_items(&mut self) -> Vec<ItemStack> {
         let item = REGISTERED_ITEM.get().unwrap();
         vec![
             ItemStack::new(item, 1).unwrap(),

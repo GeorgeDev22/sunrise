@@ -1076,7 +1076,7 @@ mod tests {
     }
 
     /// A 1280x720 window (and 854x480, and a quarter of a 1708x960 one), GUI scale 4 on
-    /// 1280x720, a small view and a wide splitscreen half.
+    /// 1280x720, a small view and a wide short view.
     const VIEWS: [(f32, f32); 4] = [
         (427.0, 240.0),
         (320.0, 180.0),

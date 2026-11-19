@@ -65,6 +65,7 @@ fn hub_answered(uuids: &[u128], answer: Answer) -> (Hub, Vec<Receiver<Out>>) {
         &sunrise_protocol::registry::Builtin::default(),
         &[],
         &[],
+        Default::default(),
     );
     let hub_config = HubConfig {
         default_game_mode: 0,

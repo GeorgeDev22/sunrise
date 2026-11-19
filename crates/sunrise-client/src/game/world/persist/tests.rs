@@ -331,12 +331,23 @@ fn comparator_and_hopper_live_state_survives_chunk_reload() {
         .block_entities
         .insert(barrel, BlockEntity::Chest(vec![None; 27]));
     let batch = game.with_entities(game.world.chunks.values());
-    let encoded = save::encode(&batch[0], game.pack.assets.registry, world_biomes!(game));
+    let encoded = save::encode(
+        &batch[0],
+        game.pack.assets.registry,
+        world_biomes!(game),
+        &Default::default(),
+    );
     // Streaming removes the resident chunk before preparing its save.
     let resident = game.world.chunks.remove(&(0, 0)).unwrap();
     let unloaded = game.with_entities([&resident]);
     assert_eq!(
-        save::encode(&unloaded[0], game.pack.assets.registry, world_biomes!(game)).tag,
+        save::encode(
+            &unloaded[0],
+            game.pack.assets.registry,
+            world_biomes!(game),
+            game.res.items()
+        )
+        .tag,
         encoded.tag
     );
     game.world.chunks.insert((0, 0), resident);
@@ -464,6 +475,7 @@ fn deferred_zombie_finalization_keeps_unknown_profession_through_save_and_cure()
             None,
             Some(game.pack.assets.registry),
             |_| None,
+            &Default::default(),
         );
         let restored = entity_nbt::mob_from_nbt(
             &saved,
@@ -580,7 +592,8 @@ fn entity_attachment_boundary_does_not_alias_equal_uuid_passengers() {
     let child_id = root_id;
     let mut data = Attachments::default();
     key.set(&mut data, Holder::Level, 29).unwrap();
-    let maps = [(12, data)].into();
+    let mut maps = crate::game::native_colliders::EntityMaps::default();
+    maps.insert(12, data);
     let mut root = Tag::compound([
         ("UUID", Tag::IntArray(root_id.to_vec())),
         (

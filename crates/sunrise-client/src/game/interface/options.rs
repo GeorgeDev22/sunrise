@@ -96,10 +96,6 @@ impl Game<'_> {
     /// This player's `options.txt`: in the game folder, or in `--player-dir` when several
     /// players share one (`logging::set_player_dir`).
     pub(super) fn options_path() -> std::path::PathBuf {
-        // Splitscreen's second player has its own options (`split::options_path`).
-        if let Some(path) = super::split::options_path() {
-            return path;
-        }
         sunrise_client::logging::player_dir().join("options.txt")
     }
     /// The game folder (the working directory): what its players share, saves, packs, mods.
@@ -117,6 +113,32 @@ impl Game<'_> {
             .map_or([1280, 720], |r| [r.config.width, r.config.height]);
         let b = HudBatch::new(size, self.settings.gui_scale_inputs());
         (b.width, b.height)
+    }
+    /// Close the options screens (`OptionsScreen.onClose`) back to where they
+    /// were opened: the recipe book's settings, World Options, the title or
+    /// the pause menu.
+    pub(super) fn leave_options(&mut self) {
+        let to_game = self.options_from_title;
+        let back = if let Some(screen) = self.panel.recipes_settings_return.take() {
+            screen
+        } else if std::mem::take(&mut self.options_to_world_options) {
+            Screen::WorldOptions
+        } else if self.options_from_title {
+            Screen::Playing
+        } else {
+            Screen::Paused
+        };
+        self.set_screen(back);
+        // Vanilla grabs only on `setScreen(null)`: back on the title, which
+        // is still shown, the pointer stays free (#1999). The startup handoff
+        // can enter a world while its options are open, and closing them then
+        // returns to that world, as `capture_loaded_world` grabs.
+        if to_game && self.title.is_none() {
+            self.capture(true);
+        }
+        self.dragging = false;
+        // Closed from calibration (sunrise-ctl, a lost window): out of it.
+        self.show_calibration((0.0, 0.0));
     }
     /// Open the options screens (OptionsScreen) from the title or pause menu.
     pub(super) fn open_options(&mut self, from_title: bool) {
@@ -201,16 +223,9 @@ impl Game<'_> {
             .draw_overlays(batch, &self.gui.atlas, self.cursor);
         self.show_calibration((batch.width, batch.height));
     }
-    /// Whose controller settings these are and what this game sees (`controller_ui`): the
-    /// player's badge in splitscreen with its name, and its own controller.
     fn controller_settings_context(&self) -> sunrise_client::controller_ui::Context {
-        let name = self.options.player_name();
-        let player = match &self.split_hud.badge {
-            Some(badge) if *badge != name => format!("{badge} · {name}"),
-            _ => name,
-        };
         sunrise_client::controller_ui::Context {
-            player,
+            player: self.options.player_name(),
             device: self.pad.device_or_virtual(),
             detected: detected_controller_style(self.pad.device.as_ref(), self.pad.style),
             glyphs: self.ui.options.pad_glyphs,
@@ -402,23 +417,7 @@ impl Game<'_> {
                 Event::Close if self.ui.options.resource_error.is_some() => {}
                 Event::Close => {
                     self.settings.save(&Self::options_path());
-                    let to_game = self.options_from_title;
-                    let back = if let Some(screen) = self.panel.recipes_settings_return.take() {
-                        screen
-                    } else if std::mem::take(&mut self.options_to_world_options) {
-                        Screen::WorldOptions
-                    } else if self.options_from_title {
-                        Screen::Playing
-                    } else {
-                        Screen::Paused
-                    };
-                    self.set_screen(back);
-                    if to_game {
-                        self.capture(true);
-                    }
-                    self.dragging = false;
-                    // Closed from calibration (sunrise-ctl, a lost window): out of it.
-                    self.show_calibration((0.0, 0.0));
+                    self.leave_options();
                 }
                 Event::Language(code) => {
                     self.load_language(&code);
@@ -553,10 +552,6 @@ impl Game<'_> {
     /// window to change, so applying settings never undoes a fullscreen
     /// the compositor set up.
     fn apply_fullscreen(&mut self) {
-        // A splitscreen guest draws in a window it shares: its option never changes the window.
-        if self.options.split_guest {
-            return;
-        }
         if let Some(w) = self.window.clone() {
             let monitor = w.current_monitor().or_else(|| w.primary_monitor());
             if let Some(modes) = self
@@ -574,12 +569,8 @@ impl Game<'_> {
                 .fullscreen_resolution
                 .as_deref()
                 .and_then(sunrise_client::window::VideoMode::read);
-            let leaving = !wanted && w.fullscreen().is_some();
             self.fullscreen
                 .apply(&w, wanted, exclusive, preferred, in_video_screen);
-            if leaving {
-                windowed_again(&w);
-            }
         }
     }
     /// Settings that Sunrise applies beyond render distance, volume and GUI scale.
@@ -602,7 +593,7 @@ impl Game<'_> {
         self.hold_fullbright();
         let s = &self.settings;
         if let Some(r) = self.renderer.as_mut() {
-            r.gamma = s.gamma;
+            r.gamma = s.gamma as f32;
             r.improved_transparency = s.improved_transparency;
             r.set_present_mode(s.vsync, s.sunrise.present_mode);
             r.animated_textures = s.sunrise.animated_textures;
@@ -639,12 +630,9 @@ impl Game<'_> {
                 &Self::options_path().with_file_name(sunrise_client::graphics::HDR_MARKER),
             );
         }
-        let mut volumes = s.volumes;
+        let mut volumes = s.volumes.map(|gain| gain as f32);
         volumes[0] = 1.0;
-        // Splitscreen: the speakers are P1's, and so are their volumes.
-        if !self.options.split_guest {
-            sunrise_client::settings::set_source_volumes(volumes);
-        }
+        sunrise_client::settings::set_source_volumes(volumes);
         super::narrator::sync(s);
         let chat = s.chat_options();
         let rescale = {
@@ -666,13 +654,6 @@ impl Game<'_> {
         // The GUI scale is part of the screen's size (`Screen.resize`): a
         // change remakes its build before this frame draws it.
         self.build_screen();
-        // 3D skin layers: a skin's slabs are built when it is resolved, so a
-        // change here rebuilds the players already on screen (the Options
-        // screen keeps resolving them every frame; this covers the console
-        // and a setting restored from options.txt at start).
-        if self.title.is_none() {
-            self.update_remote_skins();
-        }
     }
     pub(super) fn resize_state_of(&self, size: winit::dpi::PhysicalSize<u32>) -> ResizeState {
         let viewport = self
@@ -714,9 +695,6 @@ impl Game<'_> {
             return;
         }
         let Some(w) = &self.window else { return };
-        if self.options.split_guest {
-            return;
-        }
         if let Some(now) = self.fullscreen.observe(w.fullscreen().is_some())
             && self.settings.fullscreen != now
         {
@@ -727,25 +705,6 @@ impl Game<'_> {
     }
     /// F11 (key.fullscreen): Window.toggleFullScreen, remembered in options.txt.
     pub(super) fn toggle_fullscreen(&mut self) {
-        // Splitscreen: another player's F11 toggles the window it plays in, kept out of its
-        // options (a profile that saved it would turn the next window fullscreen on joining).
-        if self.options.split_guest {
-            // Window 1 is P1's: its fullscreen follows P1's option, not a guest's key.
-            if self.options.split_in_main_window {
-                return;
-            }
-            if let Some(w) = &self.window {
-                let on = w.fullscreen().is_none();
-                if on {
-                    let borderless = sunrise_client::window::borderless_fullscreen(w);
-                    sunrise_client::window::enter_fullscreen(w, borderless);
-                } else {
-                    w.set_fullscreen(None);
-                    windowed_again(w);
-                }
-            }
-            return;
-        }
         self.settings.fullscreen = !self.settings.fullscreen;
         self.settings.save(&Self::options_path());
         self.apply_ui_settings();
@@ -798,7 +757,7 @@ impl Game<'_> {
     /// below 260 frames per second, sleeping then spin-waiting until the
     /// frame's slot ends (not in scripted frame-count runs).
     pub(super) fn limit_frame(&mut self) {
-        if self.options.frames.is_some() || self.options.paced_by_split {
+        if self.options.frames.is_some() {
             return;
         }
         let limit = self.framerate_limit();
@@ -846,31 +805,6 @@ fn detected_controller_style(
     device.map_or(fallback, |d| {
         sunrise_client::gamepad::GlyphStyle::of_device(d.vendor, d.product)
     })
-}
-
-/// Out of fullscreen, a window that splitscreen opened to fill a monitor (no border, the
-/// monitor's size) is a window again: its border back and, still covering the monitor, the game's
-/// first size (854 x 480) in the middle of it, to be moved and sized.
-fn windowed_again(w: &winit::window::Window) {
-    // Only those: an ordinary window has its border, and its own size comes back by itself.
-    if w.is_decorated() {
-        return;
-    }
-    w.set_decorations(true);
-    let Some(m) = w.current_monitor() else {
-        return;
-    };
-    let (size, screen) = (w.inner_size(), m.size());
-    if size.width >= screen.width && size.height >= screen.height {
-        let scale = m.scale_factor();
-        let small = winit::dpi::LogicalSize::new(854.0, 480.0).to_physical::<u32>(scale);
-        let _ = w.request_inner_size(small);
-        let at = m.position();
-        w.set_outer_position(winit::dpi::PhysicalPosition::new(
-            at.x + (screen.width.saturating_sub(small.width) / 2) as i32,
-            at.y + (screen.height.saturating_sub(small.height) / 2) as i32,
-        ));
-    }
 }
 
 #[cfg(test)]
@@ -1012,7 +946,7 @@ mod fullbright_tests {
     fn fullbright_is_held_only_on_another_servers_world() {
         // The title screen, with no connection.
         assert!(!fullbright_held(None, false));
-        // Single player and a LAN host play their own save; so does a splitscreen seat in P1's.
+        // Single player and a LAN host play their own save.
         assert!(!fullbright_held(Some(true), false));
         // A multiplayer server, or another player's world opened to LAN.
         assert!(fullbright_held(Some(false), false));

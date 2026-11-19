@@ -42,6 +42,11 @@ impl Game<'_> {
             self.draw_item_model(batch, stack, x, y);
             let text = capped.then(|| format!("\u{a7}e{}", stack.count));
             self.draw_item_decorations(batch, stack, x, y, text);
+        } else if let Some(icon) = slot
+            .checked_sub(300)
+            .and_then(|slot| self.native_screen_slot_icon(slot))
+        {
+            batch.sprite_scaled(&self.gui.atlas, icon, x, y, 16.0, 16.0, 0xFFFF_FFFF);
         }
     }
     /// `extractCarriedItem`: the carried stack at the cursor, showing what a

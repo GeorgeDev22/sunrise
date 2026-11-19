@@ -144,8 +144,9 @@ pub enum Screen {
     Disconnected {
         /// The server's or a mod's reason, rendered in the player's language when drawn.
         reason: Text,
-        /// Auto-reconnect's next attempt, until it is cancelled.
-        retry: Option<crate::reconnect::Retry>,
+        /// What the screen says about connecting again, while something asks to
+        /// (`sunrise_hooks::Hooks::retry`) and the player hasn't cancelled.
+        retry: Option<String>,
         /// Wrapped reason lines, set by the last draw; the buttons sit below them.
         lines: std::cell::Cell<usize>,
     },
@@ -317,15 +318,7 @@ fn ping_all(servers: &[ServerEntry], pings: &Pings, icons: &Icons, file: &Path) 
                             }
                         }
                         // OnlineServerEntry: SUCCESSFUL only for this game's protocol.
-                        let joinable = protocol == i64::from(sunrise_protocol::PROTOCOL_VERSION)
-                            || (crate::net::older_servers_enabled()
-                                && i32::try_from(protocol)
-                                    .ok()
-                                    .and_then(
-                                        sunrise_protocol::adapter::ServerVersion::from_protocol,
-                                    )
-                                    .is_some());
-                        if joinable {
+                        if protocol == i64::from(sunrise_protocol::PROTOCOL_VERSION) {
                             Ping::Ok {
                                 motd,
                                 players,
@@ -1418,9 +1411,8 @@ impl Screen {
                 for (i, line) in wrapped.iter().enumerate() {
                     centered(batch, line, l.message + i as f32 * 9.0, u32::MAX);
                 }
-                if let Some(r) = retry {
-                    let text = r.text(std::time::Instant::now());
-                    centered(batch, &text, l.retry, rgba(170, 170, 170, 255));
+                if let Some(line) = retry {
+                    centered(batch, line, l.retry, rgba(170, 170, 170, 255));
                 }
             }
         }
@@ -1911,16 +1903,6 @@ impl Screen {
             relay: crate::net::friends_relay_setting().unwrap_or_default(),
             focus: 0,
         }
-    }
-    /// Auto-reconnect's attempt, once its countdown is over.
-    pub fn due_retry(&mut self) -> Option<crate::reconnect::Retry> {
-        let Self::Disconnected { retry, .. } = self else {
-            return None;
-        };
-        if !retry.as_ref()?.due(std::time::Instant::now()) {
-            return None;
-        }
-        retry.take()
     }
     /// `ServerSelectionList.updateNetworkServers`' narration: for each LAN
     /// world found since the last call whose row is in the list's view,

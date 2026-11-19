@@ -148,7 +148,6 @@ impl Hooks for Quiet {}
 fn server_services_forward_commands_messages_and_player_identity() {
     let mut server = FakeHost::new();
     server.commands.known("list");
-    server.messages.blocked("blocked");
     server.join(7, 42);
     server.players.acting = Some(7);
     let host: &mut dyn ServerHost = &mut server;
@@ -162,7 +161,6 @@ fn server_services_forward_commands_messages_and_player_identity() {
     host.messages()
         .broadcast(Text::literal("everyone"))
         .unwrap();
-    assert_eq!(host.messages().text_allowed("blocked"), Some(false));
     let player = host.players().acting_player().unwrap();
     assert_eq!(host.players().server_players(), [player]);
     assert_eq!((player.uuid(), player.entity().id()), (7, 42));

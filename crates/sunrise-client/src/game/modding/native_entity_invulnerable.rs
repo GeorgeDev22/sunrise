@@ -47,7 +47,7 @@ impl Game<'_> {
             _ => None,
         }
     }
-    fn native_player_body_mut(
+    pub(super) fn native_player_body_mut(
         &mut self,
         t: Target,
     ) -> Option<&mut sunrise_client::motion::PlayerMotion> {
@@ -310,7 +310,10 @@ impl Game<'_> {
         mob: &sunrise_client::mobs::Mob,
         damage_type: &str,
     ) -> bool {
-        let source = Damage::of(Self::damage_kind(&self.motion.health.damage, damage_type));
+        let source = Damage::of(Self::damage_kind(
+            &self.health_resources.damage,
+            damage_type,
+        ));
         let vanilla = mob.refuses_damage(&source);
         sunrise_client::health::query_invulnerability(
             &self.world,
@@ -796,8 +799,14 @@ mod tests {
             ));
             game.mobs[0].invulnerable_flag = true;
             game.mobs[0].invulnerable_time = 9;
-            let tag =
-                sunrise_client::entity_nbt::mob_to_nbt(&game.mobs[0], [0; 4], None, None, |_| None);
+            let tag = sunrise_client::entity_nbt::mob_to_nbt(
+                &game.mobs[0],
+                [0; 4],
+                None,
+                None,
+                |_| None,
+                &Default::default(),
+            );
             let back =
                 sunrise_client::entity_nbt::mob_from_nbt(&tag, game.res.mob_types(), 30, None)
                     .unwrap();

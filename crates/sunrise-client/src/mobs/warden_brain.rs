@@ -1545,7 +1545,14 @@ mod warden_owned_memory_tests {
                     ]),
                 );
                 for source in [None, Some(&raw), Some(&stale)] {
-                    let saved = mob_to_nbt(&m, [29, 0, 0, 1], source, None, |_| None);
+                    let saved = mob_to_nbt(
+                        &m,
+                        [29, 0, 0, 1],
+                        source,
+                        None,
+                        |_| None,
+                        &Default::default(),
+                    );
                     assert_saved(&saved, expected);
                     if source.is_some() {
                         assert_eq!(saved.get("audit:keep"), Some(&Tag::Int(42)));
@@ -1569,7 +1576,14 @@ mod warden_owned_memory_tests {
         mem.is_emerging.clear();
         mem.dig_cooldown.set_ttl((), 7);
         mem.sniff_cooldown.set_ttl((), 17);
-        let saved = mob_to_nbt(&m, [29, 0, 0, 1], Some(&raw), None, |_| None);
+        let saved = mob_to_nbt(
+            &m,
+            [29, 0, 0, 1],
+            Some(&raw),
+            None,
+            |_| None,
+            &Default::default(),
+        );
         assert_saved(&saved, [None, Some(7)]);
         assert_eq!(
             saved.get("Brain").and_then(|b| b.get("audit:brain")),
@@ -1601,7 +1615,14 @@ mod warden_owned_memory_tests {
         mem.is_emerging.set(());
         mem.dig_cooldown.clear();
         assert_saved(
-            &mob_to_nbt(&m, [29, 0, 0, 1], Some(&raw), None, |_| None),
+            &mob_to_nbt(
+                &m,
+                [29, 0, 0, 1],
+                Some(&raw),
+                None,
+                |_| None,
+                &Default::default(),
+            ),
             [Some(i64::MAX), None],
         );
     }
@@ -1641,7 +1662,7 @@ mod warden_owned_memory_tests {
                     };
                     assert_eq!(slot_state(&m), expected, "actual tick={tick},NoAI={no_ai}");
                     assert_saved(
-                        &mob_to_nbt(&m, [29, 0, 0, 1], None, None, |_| None),
+                        &mob_to_nbt(&m, [29, 0, 0, 1], None, None, |_| None, &Default::default()),
                         expected,
                     );
                     assert_eq!(m.health, 500.0);

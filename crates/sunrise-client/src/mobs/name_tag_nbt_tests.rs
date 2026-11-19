@@ -73,7 +73,7 @@ fn a_named_mobs_custom_name_saves_its_whole_component() {
     m.custom_name = Some("Bob".into());
     m.custom_name_text = Some(name_text(&styled));
 
-    let saved = mob_to_nbt(&m, [0; 4], None, None, |_| None);
+    let saved = mob_to_nbt(&m, [0; 4], None, None, |_| None, &Default::default());
     let saved_name = saved.get("CustomName").expect("CustomName is saved");
     // `/data get entity @e[type=minecraft:cow,limit=1] CustomName` keeps the
     // colour the tag gave it.
@@ -95,12 +95,19 @@ fn a_named_mobs_custom_name_saves_its_whole_component() {
     // A name with no style is the plain string `ComponentSerialization`
     // collapses it to.
     m.custom_name_text = None;
-    let plain = mob_to_nbt(&m, [0; 4], None, None, |_| None);
+    let plain = mob_to_nbt(&m, [0; 4], None, None, |_| None, &Default::default());
     assert_eq!(plain.get("CustomName"), Some(&Tag::String("Bob".into())));
 
     // Renaming "Bob" with a red "Bob" tag changes the style, not the text.
     m.custom_name_text = Some(name_text(&styled));
-    let restyled = mob_to_nbt(&m, [0; 4], Some(&plain), None, |_| None);
+    let restyled = mob_to_nbt(
+        &m,
+        [0; 4],
+        Some(&plain),
+        None,
+        |_| None,
+        &Default::default(),
+    );
     assert_eq!(
         name_text(restyled.get("CustomName").expect("CustomName is saved")),
         name_text(&styled),

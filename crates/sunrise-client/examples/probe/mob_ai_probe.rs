@@ -1242,6 +1242,7 @@ pub fn main() -> sunrise_client::Result<()> {
                     thundering: s.thunder,
                     level: sunrise_core::LevelKey::OVERWORLD,
                     block_tags: &items.block_tags,
+                    block_tag_flags: items.block_tag_flags.bits(),
                     landing: &motion.landing,
                     biomes: &biomes,
                     mob_griefing: true,
@@ -1558,6 +1559,7 @@ pub fn main() -> sunrise_client::Result<()> {
                         None,
                         None,
                         |_| None,
+                        &Default::default(),
                     );
                     let flower = sunrise_client::mobs::bee::get(&mobs[i]).and_then(|b| b.flower);
                     let mut honey = Vec::new();

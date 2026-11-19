@@ -238,7 +238,7 @@ impl Game<'_> {
     /// `Entity.positionRider` for every mob passenger: in its boat, then on
     /// its mob. A server's client places them itself too, as the server sends
     /// no passenger's position.
-    pub(super) fn position_riders(&mut self) {
+    pub(in crate::game) fn position_riders(&mut self) {
         let blocked = self.mobs_below_off_level();
         // Every vehicle's riders in one pass over the mobs, not one pass per
         // boat, minecart and primed TNT. Seating moves the riders but changes
@@ -313,7 +313,10 @@ impl Game<'_> {
                     // EntityType.TEXT_DISPLAY's box is a point at the seat.
                     let seat = Vec3::new(at.x, at.y, at.z);
                     m.seated(v, offset, Aabb::new(seat, seat));
-                    m.position = Vec3::new(at.x, at.y - offset, at.z);
+                    sunrise_client::mobs::living::teleports::set_pos(
+                        m,
+                        Vec3::new(at.x, at.y - offset, at.z),
+                    );
                     m.previous = Vec3::new(before.x, before.y - offset, before.z);
                     m.velocity = Vec3::ZERO;
                     m.fall_distance = 0.0;
@@ -403,7 +406,10 @@ impl Game<'_> {
                 let m = &mut self.mobs[i];
                 let offset = riders::vehicle_attachment(m, vehicle_width);
                 m.seated(v, offset, vehicle_box);
-                m.position = riders::seat(attach, offset, pos, yaw);
+                sunrise_client::mobs::living::teleports::set_pos(
+                    m,
+                    riders::seat(attach, offset, pos, yaw),
+                );
                 m.previous = riders::seat(attach, offset, prev, prev_yaw);
                 m.velocity = Vec3::ZERO;
                 m.fall_distance = 0.0;
@@ -1344,20 +1350,18 @@ mod nested_vehicle_discard_tests {
     impl mod_api::Hooks for CancelPassengerTick {
         fn entity_tick_listened(
             &self,
-            _: &mut dyn mod_api::ServerHost,
+            _: mod_api::HostSide<'_>,
             event: &mut mod_api::EntityTickListenedEvent,
         ) {
             event.listened = true;
         }
         fn entity_tick_pre(
             &self,
-            _: &mut dyn mod_api::ServerHost,
+            _: mod_api::HostSide<'_>,
             event: &mut mod_api::EntityTickPreEvent<'_>,
-        ) -> mod_api::Flow {
-            if event.entity == 72 && self.0.load(Ordering::Relaxed) {
-                mod_api::Flow::Cancel
-            } else {
-                mod_api::Flow::Continue
+        ) {
+            if event.entities.contains(&72) && self.0.load(Ordering::Relaxed) {
+                event.canceled.push(72);
             }
         }
     }
@@ -1656,23 +1660,12 @@ mod nested_vehicle_discard_tests {
         sync: false,
     };
 
-    fn bind_vehicle_test_attachment(game: &mut Game<'_>, cart: bool) {
+    fn set_vehicle_test_attachment(game: &mut Game<'_>) {
+        // The real store path binds the resident owner's registration. Rebinding
+        // it manually would replace that lifetime before removal is exercised.
         VEHICLE_VALUE
             .set(game, mod_api::Holder::Entity(71), 37)
             .unwrap();
-        let entity = game.entity(71).unwrap();
-        let index = game.attachment_indexes[&game.dim].clone();
-        let holder = mod_api::AttachmentHolder::Entity(entity);
-        let values = game.entity_attachments.get_mut(&71).unwrap();
-        if cart {
-            game.carts.update(0, |owner| {
-                owner.attachment_lifetime.bind(values, &index, holder)
-            });
-        } else {
-            game.boats.update(0, |owner| {
-                owner.attachment_lifetime.bind(values, &index, holder)
-            });
-        }
     }
 
     fn assert_vehicle_queries_hidden(host: &mut dyn mod_api::ServerHost, kind: &str) {
@@ -1816,7 +1809,7 @@ mod nested_vehicle_discard_tests {
                         game.carts
                             .update(0, |cart| cart.kind = super::super::minecarts::CartKind::Tnt);
                     }
-                    bind_vehicle_test_attachment(game, cart);
+                    set_vehicle_test_attachment(game);
                     let vehicle = game.entity(71).unwrap();
                     let uuid = [160, 0, 0, 71];
                     let holder = sunrise_client::save::uuid_text(uuid);
@@ -2084,7 +2077,7 @@ mod nested_vehicle_discard_tests {
                     game.native_level_opened(super::super::Dim::Overworld);
                     game.build_registries();
                     game.set_allow_commands(true);
-                    bind_vehicle_test_attachment(game, cart);
+                    set_vehicle_test_attachment(game);
                     assert_eq!(
                         game.attachment_query("vehicle_boundary", "value")
                             .unwrap()
@@ -2135,7 +2128,7 @@ mod nested_vehicle_discard_tests {
                     let kind = if cart { "minecart" } else { "oak_boat" };
                     let command = format!("execute if entity @e[type=minecraft:{kind}]");
                     assert!(game.run_command(&command));
-                    bind_vehicle_test_attachment(game, cart);
+                    set_vehicle_test_attachment(game);
                     let batch = game.attachment_query("vehicle_boundary", "value").unwrap();
                     assert_eq!(batch.query(&VEHICLE_VALUE).unwrap().iter().count(), 1);
                     let vehicle = game.entity(71).unwrap();

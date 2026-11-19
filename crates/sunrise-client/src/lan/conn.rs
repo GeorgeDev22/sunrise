@@ -6,12 +6,12 @@
 //! network threads ([`io_pool`]): they forward decoded packets to the game
 //! thread, frame, compress and encrypt what the game queues, and keep the
 //! keep-alive schedule on their own so a long tick never times a client out.
+mod configuration_tasks;
 mod payloads;
 use super::config_payloads::ConfigIo;
 use super::{
     Body, Joined, NetEvent, Out, Shared,
     data::{CORE_PACK, SyncData},
-    forwarding,
     io_pool::{self, Session as _},
 };
 use crate::raw_payloads::{Side, Transport};
@@ -767,23 +767,15 @@ fn serve_connection(
     let e = |e: sunrise_protocol::Error| e.to_string();
     c.reader.set_read_timeout(Some(LOGIN_TIMEOUT)).map_err(e)?;
     let (id, payload) = c.recv().map_err(e)?;
-    // Proxy forwarding carries data after the host (for example Floodgate's).
-    let forwarding = shared.config.forwarding_secret.is_some()
-        && shared.config.online.is_none()
-        && !c.is_memory();
-    let intention = if forwarding {
-        handshake::decode_intention(id, &payload, handshake::PROXY_HOST_LIMIT).map_err(e)?
-    } else {
-        match handshake::Serverbound::decode(id, &payload).map_err(e)? {
-            handshake::Serverbound::Intention(i) => i,
-            _ => return Err("expected a handshake".into()),
-        }
+    let intention = match handshake::Serverbound::decode(id, &payload).map_err(e)? {
+        handshake::Serverbound::Intention(i) => i,
+        _ => return Err("expected a handshake".into()),
     };
     match intention.intent {
         // ServerHandshakePacketListenerImpl: a server that does not reply
         // to status requests closes the connection.
         handshake::STATUS if !shared.enable_status() => Ok(()),
-        handshake::STATUS => serve_status(&mut c, &shared, intention.protocol),
+        handshake::STATUS => serve_status(&mut c, &shared),
         handshake::TRANSFER if !shared.accepts_transfers() => {
             login_disconnect(
                 &mut c,
@@ -792,9 +784,7 @@ fn serve_connection(
             Ok(())
         }
         handshake::LOGIN | handshake::TRANSFER => {
-            if let Some(version) = older_client(&shared, intention.protocol) {
-                c.serve_older(version);
-            } else if intention.protocol != PROTOCOL_VERSION {
+            if intention.protocol != PROTOCOL_VERSION {
                 let key = if intention.protocol < 754 {
                     "multiplayer.disconnect.outdated_client"
                 } else {
@@ -816,22 +806,7 @@ fn serve_connection(
     }
 }
 
-/// The older release a client's handshake states, when this server lets it join
-/// (`sunrise-accept-older-clients`): 26.2 down to 1.20.5. The client-direction adapter
-/// also knows older releases whose server-direction layouts are not implemented.
-fn older_client(
-    shared: &Shared,
-    protocol: i32,
-) -> Option<sunrise_protocol::adapter::ServerVersion> {
-    use sunrise_protocol::adapter::ServerVersion;
-    let version = ServerVersion::from_protocol(protocol)?;
-    (shared.config.accept_older_clients
-        && version.at_most(ServerVersion::V26_2)
-        && !version.at_most(ServerVersion::V1_20_3))
-    .then_some(version)
-}
-
-fn serve_status(c: &mut Connection, shared: &Shared, protocol: i32) -> Result<(), String> {
+fn serve_status(c: &mut Connection, shared: &Shared) -> Result<(), String> {
     let e = |e: sunrise_protocol::Error| e.to_string();
     let mut requested = false;
     loop {
@@ -841,11 +816,7 @@ fn serve_status(c: &mut Connection, shared: &Shared, protocol: i32) -> Result<()
             status::Serverbound::StatusRequest(_) if requested => return Ok(()),
             status::Serverbound::StatusRequest(_) => {
                 requested = true;
-                // A client this server lets join is told its own protocol, so its list shows it joinable.
-                let json = match older_client(shared, protocol) {
-                    Some(_) => shared.status_json_for(protocol),
-                    None => shared.status_json(),
-                };
+                let json = shared.status_json();
                 c.send(
                     &status::Clientbound::StatusResponse(status::StatusResponse { json }).encode(),
                 )
@@ -1026,75 +997,32 @@ fn serve_login(
         );
         return Ok(());
     }
-    let (mut name, mut address) = (hello.name.clone(), address);
-    let user_of = |name: &str, address| {
-        shared
-            .config
-            .log
-            .as_ref()
-            .map(|log| user_name(name, address, log))
-            .unwrap_or_default()
-    };
-    let mut user = user_of(&name, address);
+    let mut name = hello.name.clone();
+    let user = shared
+        .config
+        .log
+        .as_ref()
+        .map(|log| user_name(&name, address, log))
+        .unwrap_or_default();
     // handleHello: online mode authenticates first; offline mode, and the
     // integrated server's own player through memory, derive the profile
-    // from the name. Behind a Velocity proxy (forwarding.secret) the proxy has
-    // authenticated the player and the profile is the one it forwards.
+    // from the name.
     let online = shared.config.online.as_ref().filter(|_| !c.is_memory());
-    let forwarding = shared
-        .config
-        .forwarding_secret
-        .as_deref()
-        .filter(|_| online.is_none() && !c.is_memory());
     // `ServerLoginPacketListenerImpl.handleHello`: the integrated server's own player
     // (the name matches `getSingleplayerProfile`) logs in as that profile — the account's
-    // UUID — never as an offline profile made from the name. Every other memory player
-    // (a splitscreen seat) stays offline; a LAN guest could not own the name in online
-    // mode, and this keeps an offline host's name from being taken over a memory room.
+    // UUID — never as an offline profile made from the name. Other memory logins stay offline.
+    // TCP does not get this shortcut; the integrated server reserves the owner's identity.
     let singleplayer = shared
         .config
         .singleplayer_profile
         .as_ref()
         .filter(|(owner_name, _)| c.is_memory() && hello.name.eq_ignore_ascii_case(owner_name))
         .map(|(owner_name, uuid)| (owner_name.clone(), *uuid));
-    let (uuid, properties) = match (online, forwarding) {
-        (Some(online), _) => {
-            match authenticate(&mut c, shared, online, &hello.name, address, &user) {
-                Ok(Ok(profile)) => profile,
-                Ok(Err(refused)) => {
-                    lost(shared, &user, &refused);
-                    return Ok(());
-                }
-                Err(err) => {
-                    lost(shared, &user, "Disconnected");
-                    return Err(err);
-                }
-            }
-        }
-        (None, Some(secret)) => match forward(&mut c, secret) {
-            Ok(Ok(forwarded)) => {
-                (name, address) = (
-                    forwarded.name,
-                    std::net::SocketAddr::new(forwarded.address, address.port()),
-                );
-                user = user_of(&name, address);
-                (forwarded.uuid, forwarded.properties)
-            }
-            Ok(Err(reason)) => {
-                let text = "This server is behind a proxy: join through the proxy.";
-                let json = format!("{{\"text\":\"{text}\"}}");
-                let _ = c.send(
-                    &login::Clientbound::Disconnect(login::Disconnect { reason_json: json })
-                        .encode(),
-                );
-                if let Some(log) = &shared.config.log {
-                    (log.write)(
-                        "Server thread",
-                        "WARN",
-                        &format!("Refused {user}: {reason}"),
-                    );
-                }
-                lost(shared, &user, text);
+    let (uuid, properties) = match online {
+        Some(online) => match authenticate(&mut c, shared, online, &hello.name, address, &user) {
+            Ok(Ok(profile)) => profile,
+            Ok(Err(refused)) => {
+                lost(shared, &user, &refused);
                 return Ok(());
             }
             Err(err) => {
@@ -1102,7 +1030,7 @@ fn serve_login(
                 return Err(err);
             }
         },
-        (None, None) => match singleplayer {
+        None => match singleplayer {
             Some((owner_name, owner_uuid)) => {
                 name = owner_name;
                 let properties = shared
@@ -1163,36 +1091,6 @@ fn serve_login(
             lost(shared, &profile, "Disconnected");
             Err(err)
         }
-    }
-}
-
-/// Asks the proxy for the player's forwarded information (login plugin channel `velocity:player_info`) and
-/// checks it against the shared secret. The outer error is the connection failing; the inner one is a refusal
-/// (the client isn't a proxy, or signed with another secret), with the reason for the log.
-fn forward(
-    c: &mut Connection,
-    secret: &[u8],
-) -> Result<Result<forwarding::Forwarded, String>, String> {
-    const TRANSACTION: i32 = 1;
-    let e = |e: sunrise_protocol::Error| e.to_string();
-    c.send(
-        &login::Clientbound::CustomQuery(login::CustomQuery {
-            transaction: TRANSACTION,
-            channel: forwarding::CHANNEL.into(),
-            data: forwarding::request(),
-        })
-        .encode(),
-    )
-    .map_err(e)?;
-    let (id, payload) = c.recv().map_err(e)?;
-    match login::Serverbound::decode(id, &payload).map_err(e)? {
-        login::Serverbound::CustomQueryAnswer(answer) if answer.transaction == TRANSACTION => {
-            Ok(match answer.payload {
-                Some(data) => forwarding::verify(secret, &data),
-                None => Err("the client didn't answer the forwarding request".into()),
-            })
-        }
-        _ => Err("unexpected packet during login".into()),
     }
 }
 
@@ -1295,9 +1193,15 @@ fn login_and_configure(
     let mut payload_negotiation = sunrise_protocol::payload_negotiation::Negotiation::new(
         payload_transport.local.manifest.clone(),
     );
-    // Query must precede known packs even for empty installations: a client
-    // answers it before its pack reply, so the barrier cannot overtake its Offer.
-    send_payload_control(c, sunrise_protocol::payload_negotiation::Control::Query)?;
+    // Only a mod's declaration opens negotiation before the client is known, as
+    // the client does: with the engine's alone a vanilla client is sent nothing
+    // vanilla's server would not send it. A Sunrise client is asked once it names
+    // itself, and answers before the barrier at its known-packs reply.
+    if payload_transport.local.has_mod_declarations()
+        && let Some(control) = payload_negotiation.initial()
+    {
+        send_payload_control(c, control)?;
+    }
     // Sunrise clients announce their list after recognizing our brand, before
     // answering known packs. That reply orders the announcement without a ping.
     let server_mods = sunrise_protocol::mod_list::local();
@@ -1335,8 +1239,9 @@ fn login_and_configure(
                     .string(32767)
                     .unwrap_or(brand);
                 if brand == "sunrise" {
-                    // The query was already sent before known packs.
-                    let _ = payload_negotiation.require_protocol();
+                    if let Some(control) = payload_negotiation.require_protocol() {
+                        send_payload_control(c, control)?;
+                    }
                     send(
                         c,
                         cfg::Clientbound::CustomPayload(cfg::CustomPayload {
@@ -1370,6 +1275,18 @@ fn login_and_configure(
                 datapack_offer = Some(p.data);
             }
             cfg::Serverbound::SelectKnownPacks(p) => {
+                // A Sunrise client's Offer answers this server's Query (sent on its
+                // brand) or Offer (sent on its own Query), both after the known
+                // packs, so its pack reply may come first: a ping orders the Offer
+                // before the pong.
+                if brand == "sunrise" && payload_negotiation.accepted().is_none() {
+                    await_payload_answer(
+                        c,
+                        &payload_transport,
+                        &mut payload_negotiation,
+                        &mut info,
+                    )?;
+                }
                 let admission = payload_negotiation
                     .finish_without_offer()
                     .map_err(|e| e.to_string())
@@ -1387,24 +1304,6 @@ fn login_and_configure(
             _ => {}
         }
     };
-    // An older client's packet ids are translated, not yet what is inside them (#10404): the registry data,
-    // tags and play packets would reach it in 26.3's ids and layouts, so it is turned away before them.
-    if let Some(version) = c.older_client()
-        && !shared.config.older_clients_play
-    {
-        let text = super::OLDER_CLIENTS_UNFINISHED;
-        let reason = sunrise_core::nbt::Tag::String(sunrise_core::nbt::JavaString::from(text));
-        let _ = send(c, cfg::Clientbound::Disconnect(cfg::Disconnect { reason }));
-        if let Some(log) = &shared.config.log {
-            let line = format!(
-                "Disconnecting {name}: its client is on protocol {} ({text})",
-                version.protocol()
-            );
-            (log.write)("Server thread", "INFO", &line);
-        }
-        lost(shared, &format!("{name} ({})", uuid_string(uuid)), text);
-        return Ok(None);
-    }
     // A Sunrise client hears that this server runs its mods' quiet commands
     // (sunrise_protocol::quiet); a vanilla one is told nothing.
     if brand == "sunrise" {
@@ -1570,6 +1469,15 @@ fn login_and_configure(
         lost(shared, &format!("{name} ({})", uuid_string(uuid)), &text);
         return Ok(None);
     }
+    configuration_tasks::configure(
+        c,
+        shared,
+        uuid,
+        name,
+        &mut info,
+        &payload_transport,
+        &mut payload_negotiation,
+    )?;
     if let Some(epoch) = payload_transport.epoch()
         && !epoch.wait_main()
     {
@@ -1621,6 +1529,38 @@ fn send_payload_control(
         .encode(),
     )
     .map_err(|e| e.to_string())
+}
+
+/// The configuration ping that orders a Sunrise client's payload Offer before
+/// its pong (the content identity check pings with 0 later).
+const PAYLOAD_ANSWER_PING: i32 = 1;
+
+/// Read on until the client's Offer froze the negotiation, or its pong came: a client
+/// reads in order, so an answer to what it was sent on `sunrise:payloads` comes before
+/// the pong, and a pong without one is a client that does not negotiate. A pong after
+/// the Offer is read later with the configuration's other packets.
+fn await_payload_answer(
+    c: &mut ConfigIo<'_>,
+    transport: &Transport,
+    negotiation: &mut sunrise_protocol::payload_negotiation::Negotiation,
+    info: &mut ClientInformation,
+) -> Result<(), String> {
+    c.send(
+        &cfg::Clientbound::Ping(cfg::Ping {
+            id: PAYLOAD_ANSWER_PING,
+        })
+        .encode(),
+    )
+    .map_err(|e| e.to_string())?;
+    while negotiation.accepted().is_none() {
+        let (id, payload) = c.recv().map_err(|e| e.to_string())?;
+        match receive_configuration(c, id, &payload, transport, negotiation)? {
+            Some(cfg::Serverbound::Pong(p)) if p.id == PAYLOAD_ANSWER_PING => break,
+            Some(cfg::Serverbound::ClientInformation(i)) => *info = i,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 fn payload_disconnect(c: &mut ConfigIo<'_>, error: String) -> String {
     let reason = sunrise_core::nbt::Tag::String(error.as_str().into());
@@ -1684,6 +1624,11 @@ fn mod_mismatch(difference: &sunrise_protocol::mod_list::Difference) -> crate::t
                 .append("\n")
                 .append(translated(key, &[Text::literal(names.join("\n"))]));
         }
+    }
+    for id in &difference.runtime {
+        text = text
+            .append("\n")
+            .append(translated("sunrise.mods.runtime", &[Text::literal(id)]));
     }
     for changed in &difference.changed {
         text = text.append("\n").append(translated(
@@ -2398,11 +2343,6 @@ pub(super) fn frame_body(
     body: &[u8],
     out: &mut Vec<u8>,
 ) -> sunrise_protocol::Result<()> {
-    // Renumbered first for a client of an older release; one with no such packet gets nothing.
-    let Some(body) = writer.for_client(body)? else {
-        return Ok(());
-    };
-    let body = &body[..];
     match writer.framing() {
         sunrise_protocol::connection::Framing::Network(Some(t))
             if body.len() >= t.max(SHARED_FRAME_MIN) =>
@@ -2539,6 +2479,7 @@ mod tests {
                 server: "3.0".into(),
                 client: "2.9".into(),
             }],
+            runtime: vec!["baked".into()],
         };
         let reason = crate::lan::data::component_nbt(&mod_mismatch(&difference).component());
         let french = crate::lang::Language::load(&[], "fr_fr");
@@ -2548,25 +2489,30 @@ mod tests {
         assert!(text.contains("extra 2.0"));
         let vanilla = sunrise_protocol::text::plain(&reason, &Default::default());
         assert!(vanilla.starts_with("Your mods don't match"));
+        assert!(vanilla.contains("baked") && vanilla.contains("runtime files"));
         for name in &difference.missing {
             assert!(text.contains(name));
             assert!(vanilla.contains(name));
         }
     }
 
-    /// Having tables for Sunrise to join an old server does not make the reverse direction supported.
+    /// ServerHandshakePacketListenerImpl.beginLogin: a client of another protocol is told it is outdated
+    /// (below 754) or incompatible, as vanilla tells it.
     #[test]
-    fn nbt_item_clients_are_refused_even_when_older_clients_are_enabled() {
+    fn clients_of_another_protocol_are_refused_as_vanilla_refuses_them() {
         let config = crate::lan::NetConfig {
             announce: false,
             listen: false,
-            accept_older_clients: true,
-            ..crate::lan::NetConfig::loopback(0, "Older clients".into(), 8)
+            ..crate::lan::NetConfig::loopback(0, "Other protocols".into(), 8)
         };
         let lan =
             crate::lan::Lan::start_with(Arc::new(crate::lan::data::SyncData::empty()), config)
                 .unwrap();
-        for protocol in [764, 765] {
+        for (protocol, key) in [
+            (753, "multiplayer.disconnect.outdated_client"),
+            (764, "multiplayer.disconnect.incompatible"),
+            (776, "multiplayer.disconnect.incompatible"),
+        ] {
             let mut c = Connection::local(lan.connect_local().unwrap());
             c.send(
                 &handshake::Serverbound::Intention(handshake::Intention {
@@ -2591,12 +2537,10 @@ mod tests {
             let login::Clientbound::Disconnect(reason) =
                 login::Clientbound::decode(id, &payload).unwrap()
             else {
-                panic!("protocol {protocol} was allowed into the reverse adapter")
+                panic!("protocol {protocol} was let in")
             };
             assert!(
-                reason
-                    .reason_json
-                    .contains("multiplayer.disconnect.incompatible"),
+                reason.reason_json.contains(key),
                 "protocol {protocol}: {}",
                 reason.reason_json
             );
@@ -2604,7 +2548,7 @@ mod tests {
     }
 
     /// Logs in through `c` and answers the `LoginFinished` profile.
-    fn login_profile(c: &mut Connection, name: &str) -> login::GameProfile {
+    pub(super) fn login_profile(c: &mut Connection, name: &str) -> login::GameProfile {
         c.send(
             &handshake::Serverbound::Intention(handshake::Intention {
                 protocol: sunrise_protocol::PROTOCOL_VERSION,
@@ -2731,6 +2675,7 @@ mod tests {
                     id: "shared_extra".into(),
                     version: "2.0".into(),
                     side: Side::Both,
+                    runtime: None,
                 }]),
             })
             .encode(),
@@ -2772,9 +2717,14 @@ mod tests {
 
     #[test]
     fn sunrise_client_raw_protocol_admission_at_known_packs() {
-        for mode in [0, 1, 2] {
+        // 0: never answers on `sunrise:payloads` (it answers pings); 1: a wrong revision;
+        // 2: answers the server's Query after its known-packs reply, as the Sunrise client
+        // may; 3: holds its known-packs reply until it answered the Query, as sunrise-bots
+        // does (its Offer is in before the barrier: no ping).
+        for mode in [0, 1, 2, 3] {
             let wrong_version = mode == 1;
-            let compatible = mode == 2;
+            let compatible = mode >= 2;
+            let holds_packs = mode == 3;
             let config = crate::lan::NetConfig {
                 announce: false,
                 listen: false,
@@ -2810,6 +2760,12 @@ mod tests {
                 )
                 .unwrap();
             }
+            // The server asks once it reads the brand, after its known-packs request: mode 2
+            // answers that request first, so its Offer comes after its pack reply, and only
+            // the server's ping orders it before the barrier.
+            let mut packs_asked = false;
+            let mut held_packs = None;
+            let mut pings = Vec::new();
             loop {
                 let (id, payload) = c.recv().unwrap();
                 match cfg::Clientbound::decode(id, &payload).unwrap() {
@@ -2819,6 +2775,7 @@ mod tests {
                     {
                         use sunrise_protocol::payload_negotiation::{CHANNEL, Control, Manifest};
                         if Control::decode(&p.data).unwrap() == Control::Query {
+                            assert!(packs_asked, "the Query came before known packs");
                             c.send(
                                 &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
                                     channel: CHANNEL.into(),
@@ -2827,13 +2784,27 @@ mod tests {
                                 .encode(),
                             )
                             .unwrap();
+                            if let Some(packs) = held_packs.take() {
+                                c.send(&cfg::Serverbound::SelectKnownPacks(packs).encode())
+                                    .unwrap();
+                            }
                         }
                     }
                     cfg::Clientbound::SelectKnownPacks(p) => {
-                        let _ = c.send(&cfg::Serverbound::SelectKnownPacks(p).encode());
+                        packs_asked = true;
+                        if holds_packs {
+                            held_packs = Some(p);
+                        } else {
+                            let _ = c.send(&cfg::Serverbound::SelectKnownPacks(p).encode());
+                        }
+                    }
+                    cfg::Clientbound::Ping(p) => {
+                        pings.push(p.id);
+                        let _ = c.send(&cfg::Serverbound::Pong(p).encode());
                     }
                     cfg::Clientbound::Disconnect(d) => {
                         assert!(!compatible, "compatible empty Sunrise peer refused");
+                        assert_eq!(pings, if wrong_version { vec![] } else { vec![1] });
                         let text = sunrise_protocol::text::plain(&d.reason, &Default::default());
                         assert!(text.contains(if wrong_version {
                             "protocol version"
@@ -2844,6 +2815,8 @@ mod tests {
                     }
                     cfg::Clientbound::FinishConfiguration(_) => {
                         assert!(compatible, "old Sunrise client admitted");
+                        assert!(held_packs.is_none(), "admitted before its pack reply");
+                        assert_eq!(pings, if holds_packs { vec![] } else { vec![1] });
                         c.send(
                             &cfg::Serverbound::FinishConfiguration(
                                 sunrise_protocol::packets::Empty,
@@ -2979,11 +2952,17 @@ mod tests {
             .encode(),
         )
         .unwrap();
+        // Vanilla's server sends a vanilla client its brand and no ping in configuration
+        // (ServerConfigurationPacketListenerImpl.startConfiguration): neither the mod list nor
+        // `sunrise:payloads`, even with the engine's declarations in this server's manifest.
+        let mut sent = Vec::new();
         loop {
             let (id, payload) = c.recv().unwrap();
             match cfg::Clientbound::decode(id, &payload).unwrap() {
-                cfg::Clientbound::CustomPayload(p) => {
-                    assert_ne!(p.channel, sunrise_protocol::mod_list::CHANNEL);
+                cfg::Clientbound::CustomPayload(p) => sent.push(p.channel),
+                cfg::Clientbound::Ping(p) => {
+                    sent.push(format!("ping {}", p.id));
+                    c.send(&cfg::Serverbound::Pong(p).encode()).unwrap();
                 }
                 cfg::Clientbound::SelectKnownPacks(p) => {
                     c.send(&cfg::Serverbound::SelectKnownPacks(p).encode())
@@ -3001,6 +2980,7 @@ mod tests {
                 _ => {}
             }
         }
+        assert_eq!(sent, ["minecraft:brand"]);
     }
 
     #[test]
@@ -3030,7 +3010,8 @@ mod tests {
         )
         .unwrap();
         let mut malformed = mod_list::encode(&[]);
-        malformed.push(0); // Trailing bytes: the list is refused whole, not read as empty.
+        // The extra byte encodes an empty runtime-digest section, which is refused.
+        malformed.push(0);
         c.send(
             &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
                 channel: mod_list::CHANNEL.into(),
@@ -3050,7 +3031,7 @@ mod tests {
                 cfg::Clientbound::Disconnect(d) => {
                     let text = sunrise_protocol::text::plain(&d.reason, &Default::default());
                     assert!(text.contains("couldn't be read"));
-                    assert!(text.contains("trailing bytes"));
+                    assert!(text.contains("runtime digests"));
                     break;
                 }
                 cfg::Clientbound::FinishConfiguration(_) => panic!("malformed list was accepted"),

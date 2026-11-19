@@ -69,6 +69,7 @@ impl Hooks for Mod {
             mod_api::MathProfile::CorrectlyRounded => 2.0,
             mod_api::MathProfile::Aarch64Fma => 3.0,
             mod_api::MathProfile::StrictMath => 4.0,
+            mod_api::MathProfile::HotSpotX86_64 => 5.0,
             _ => panic!("fixture does not support the new math profile"),
         };
     }
@@ -272,7 +273,7 @@ impl Hooks for Mod {
 
     fn entity_tick_listened(
         &self,
-        _: &mut dyn mod_api::ServerHost,
+        _: mod_api::HostSide<'_>,
         event: &mut mod_api::EntityTickListenedEvent,
     ) {
         event.listened = true;
@@ -280,18 +281,18 @@ impl Hooks for Mod {
 
     fn entity_tick_pre(
         &self,
-        _: &mut dyn mod_api::ServerHost,
-        _: &mut mod_api::EntityTickPreEvent<'_>,
-    ) -> mod_api::Flow {
+        _: mod_api::HostSide<'_>,
+        event: &mut mod_api::EntityTickPreEvent<'_>,
+    ) {
         ENTITY_PRE_CALLS.fetch_add(1, Ordering::Relaxed);
-        mod_api::Flow::Continue
+        for (&entity, &kind) in event.entities.iter().zip(event.kinds) {
+            if kind == "minecraft:tnt" {
+                event.canceled.push(entity);
+            }
+        }
     }
 
-    fn entity_tick_post(
-        &self,
-        _: &mut dyn mod_api::ServerHost,
-        _: &mut mod_api::EntityTickPostEvent<'_>,
-    ) {
+    fn entity_tick_post(&self, _: mod_api::HostSide<'_>, _: &mut mod_api::EntityTickPostEvent<'_>) {
         ENTITY_POST_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -321,12 +322,32 @@ impl Hooks for Mod {
         mod_api::Flow::Continue
     }
 
+    fn mob_split(
+        &self,
+        host: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::MobSplitEvent<'_>,
+    ) -> mod_api::Flow {
+        pending_children::mob_split(host, event)
+    }
+
+    fn baby_entity_spawn(
+        &self,
+        host: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::BabyEntitySpawnEvent<'_>,
+    ) -> mod_api::Flow {
+        pending_children::baby_entity_spawn(host, event)
+    }
+
     fn blocks(&self, _: &mod_api::RegistrationContext, event: &mut mod_api::BlocksEvent<'_>) {
         part_state::blocks(event);
     }
 
     fn register(&self, registrar: &mut dyn mod_api::Registrar, cx: &mod_api::RegistrationContext) {
+        block_path_type::register(registrar, cx);
         block_state_notice::register(registrar, cx);
+        #[cfg(target_arch = "wasm32")]
+        collision_shape::register(registrar, cx);
+        export_marks::register(registrar, cx);
         runtime_environment::register(cx);
         capability_registration::register(registrar, cx);
         game_payload::register(registrar);
@@ -341,6 +362,8 @@ impl Hooks for Mod {
         // provider through the nested handle (tests/fixture/src/suggestion_provider.rs).
         registrar.register_command_argument("warps", suggestion_provider::WarpsArgument);
         registrar.register_custom_stat("steps").unwrap();
+        // Its tick Pre cancels primed TNT, so it hears each one alone.
+        registrar.entity_tick_each("minecraft:tnt");
         if cx.mods().get("wasm_storage_attempt_observer").is_some() {
             storage_attempts::register(registrar);
         }
@@ -381,6 +404,11 @@ impl Hooks for Mod {
             .blocks(&[])
             .build();
         registrar.block_entity_part(&reads, CounterReads).unwrap();
+        let looped = registrar
+            .block_entity_type("counter_loop")
+            .blocks(&[])
+            .build();
+        registrar.block_entity_part(&looped, CounterLoop).unwrap();
     }
 }
 
@@ -392,6 +420,8 @@ pub fn on_tick(_: mod_api::HostSide<'_>, args: &mut mod_points::TickArgs) {
 
 pub struct Counter;
 pub struct CounterReads;
+/// A tick that calls the host a thousand times: the guest-to-host cost of the boundary.
+pub struct CounterLoop;
 
 #[mod_api::sunrise_part]
 impl mod_api::BlockPart for CounterReads {}
@@ -410,6 +440,28 @@ impl mod_api::BlockEntityPart for CounterReads {
             .nbt
             .insert("counter".into(), mod_api::Tag::Int(17));
         event.entity.data = vec![if first == second { 24 } else { 25 }];
+        event.entity.items.clear();
+    }
+}
+
+#[mod_api::sunrise_part]
+impl mod_api::BlockPart for CounterLoop {}
+
+#[mod_api::sunrise_part]
+impl mod_api::BlockEntityPart for CounterLoop {
+    fn block_entity_tick(
+        &self,
+        host: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::BlockEntityTickEvent<'_>,
+    ) {
+        let loaded = (0..1000)
+            .filter(|_| host.is_loaded(std::hint::black_box("wasm_fixture")))
+            .count();
+        event
+            .entity
+            .nbt
+            .insert("counter".into(), mod_api::Tag::Int(17));
+        event.entity.data = vec![if loaded == 1000 { 26 } else { 27 }];
         event.entity.items.clear();
     }
 }

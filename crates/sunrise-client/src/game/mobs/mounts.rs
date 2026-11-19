@@ -14,9 +14,10 @@ use sunrise_client::{
     sprint::Keys,
 };
 use sunrise_core::{
-    geometry::{Aabb, Vec3, VoxelShape, trig},
+    geometry::{Aabb, Vec3, VoxelShape},
     random::RandomSource,
 };
+use sunrise_world::living_air::escape_vector;
 
 pub(super) fn steering_item(species: Species, main: Option<&str>, offhand: Option<&str>) -> bool {
     let item = match species {
@@ -1236,20 +1237,6 @@ fn animal_dismount_location(
         None,
     )
 }
-/// `Entity.getCollisionHorizontalEscapeVector`: out of the vehicle's box
-/// along `yaw`, to the edge of the square it spans.
-fn escape_vector(vehicle_width: f64, passenger_width: f64, yaw: f32) -> Vec3 {
-    // 1.0E-5F: a float literal widened to double.
-    let distance = (vehicle_width + passenger_width + f64::from(1.0e-5_f32)) / 2.0;
-    let radians = f64::from(yaw * 0.017_453_292);
-    let (sin, cos) = (-trig::sin(radians), trig::cos(radians));
-    let max = f64::from(sin.abs().max(cos.abs()));
-    Vec3::new(
-        f64::from(sin) * distance / max,
-        0.0,
-        f64::from(cos) * distance / max,
-    )
-}
 /// `Strider.getDismountLocationForPassenger`: the columns along the rider's
 /// facing and 22.5 and 45 degrees either side of it, each from the top of
 /// the strider's box down to half a block below its feet. The first block
@@ -2115,16 +2102,6 @@ mod tests {
                 "{kind} posted a mob equip event: {equip_events:?}"
             );
         }
-    }
-
-    #[test]
-    fn the_escape_vector_reaches_the_edge_of_the_square() {
-        let edge = (0.9 + 0.6 + f64::from(1.0e-5_f32)) / 2.0;
-        let v = escape_vector(0.9, 0.6, 0.0);
-        assert!((v.z - edge).abs() < 1.0e-6 && v.x.abs() < 1.0e-6);
-        // Facing west of south: the corner of the square.
-        let v = escape_vector(0.9, 0.6, 45.0);
-        assert!((v.x + edge).abs() < 1.0e-3 && (v.z - edge).abs() < 1.0e-3);
     }
 
     /// `CamelHusk.interact` sets `PersistenceRequired` before it hands the click

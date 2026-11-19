@@ -24,7 +24,7 @@ fn compiled_guest_strict_math_matches_literal_jdk_vectors() {
         manifest.inject.clear();
         let info = mod_api::PackageInfo::new(
             manifest.id.clone(),
-            manifest.version.clone(),
+            manifest.version.to_string(),
             mod_api::PackageKind::Code,
             mod_api::Side::Both,
             vec![manifest.id.clone()],
@@ -39,6 +39,14 @@ fn compiled_guest_strict_math_matches_literal_jdk_vectors() {
         );
         assert!(loaded.refused.is_empty(), "{:?}", loaded.refused);
         loaded.initialize(&[info]).unwrap();
+        // `with_mods` runs every mod's registration, and the fixture's guest declares a general entity
+        // type there: that is accepted only in the registration phase, as in the game. A refused
+        // declaration traps the guest and stops its group, which then answers no later call.
+        // The phase lives in the game backend that `initialize` installs: a scope opened before it
+        // would write a fallback the guest's registrar never reads.
+        mod_api::__private::initialize().unwrap();
+        let _registration =
+            mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::Registration);
         mod_api::testing::with_mods(loaded.mods.into(), || {
             let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
             // A distinct fixture request keeps the host-profile probe independent.

@@ -114,7 +114,7 @@ fn compiled_guest_runs_in_actual_game_roots_on_guest_stack() {
     let manifest = Package::read(path).unwrap().manifest;
     let info = mod_api::PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         mod_api::PackageKind::Code,
         mod_api::Side::Both,
         vec![manifest.id.clone()],

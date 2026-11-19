@@ -39,7 +39,6 @@ sunrise-client-render radial_overlay::tests::every_action_has_an_icon_and_every_
 sunrise-client-render skins::tests::a_failed_download_is_retried_after_the_wait lib daily network
 sunrise-client-render skins::tests::http_get_reads_2xx_bodies lib daily network
 sunrise-client-render skins::tests::profiles_resolve_through_the_services lib daily network
-sunrise-client-render split_ui::tests::locale_switch_and_pack_overrides_keep_the_same_draft lib daily child-process
 sunrise-client-render streaming::cover_tests::the_buckets_answer_as_the_scan lib daily slow
 sunrise-client-render streaming::cover_tests::the_grid_answers_as_the_scan lib daily slow
 sunrise-client-render sunrise_shader::sunrise_fan::tests::angular_sector_matches_all_triangle_search test:it daily slow

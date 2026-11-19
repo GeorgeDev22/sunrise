@@ -57,6 +57,7 @@ fn record_tag(type_key: &str, uuid: [i32; 4], payload: &[u8], riders: Vec<Tag>) 
         position: [0.5, 64.0, 0.5],
         velocity: [0.0; 3],
         rotation: [0.0, 90.0],
+        owner: None,
         uuid,
         envelope: GeneralTypeEnvelope {
             type_key: type_key.to_owned(),

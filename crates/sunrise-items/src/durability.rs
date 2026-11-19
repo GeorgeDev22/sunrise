@@ -35,7 +35,7 @@ pub fn stack_max_damage(items: &Items, stack: &ItemStack) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::item_data::{command_components, decode_components, encode_components_with_items};
+    use crate::item_data::{command_components, decode_components, encode_components};
     use crate::item_nbt::{item_from_nbt, item_to_nbt};
     use std::fs;
     use sunrise_core::nbt::Tag;
@@ -67,7 +67,7 @@ mod tests {
         (stick.damage, stick.extra) = decode_components(Some(&durable));
         assert_eq!(stack_max_damage(&items, &stick), 20);
         assert_eq!(items.mining_damage_capacity(&stick), 20);
-        let restored = item_from_nbt(&item_to_nbt(&stick)).unwrap();
+        let restored = item_from_nbt(&item_to_nbt(&stick, &Default::default())).unwrap();
         assert_eq!(
             stack_max_damage(&items, &restored),
             20,
@@ -90,11 +90,11 @@ mod tests {
         // items explicit zero equals its prototypes DAMAGE and is dropped (`fromPatch`).
         let zero = command_components("[max_damage=20,damage=0]").unwrap();
         (stick.damage, stick.extra) = decode_components(Some(&zero));
-        let saved = encode_components_with_items(&stick, &items).unwrap();
+        let saved = encode_components(&stick, &items).unwrap();
         assert_eq!(saved.get("minecraft:damage"), Some(&Tag::Int(0)));
         let mut pickaxe = ItemStack::new("minecraft:diamond_pickaxe", 1);
         (pickaxe.damage, pickaxe.extra) = decode_components(Some(&zero));
-        let saved = encode_components_with_items(&pickaxe, &items).unwrap();
+        let saved = encode_components(&pickaxe, &items).unwrap();
         assert_eq!(saved.get("minecraft:damage"), None);
         assert_eq!(saved.get("minecraft:max_damage"), Some(&Tag::Int(20)));
         assert_eq!(stack_max_damage(&items, &pickaxe), 20);

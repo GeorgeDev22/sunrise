@@ -11,10 +11,10 @@ use std::{collections::HashMap, sync::Arc};
 pub(in crate::game) struct NativeCommands {
     /// Each root's traversal level.
     pub(super) levels: HashMap<String, u8>,
-    /// The mods' tree, without Sunrise's moderation commands.
+    /// The mods' tree.
     pub(super) tree: Value,
     pub(super) arguments: CommandArguments,
-    /// The usages the mods registered, for the hub's tree with the moderation commands.
+    /// The usages the mods registered, for the hub's tree.
     usages: Vec<mod_api::Command>,
 }
 
@@ -74,9 +74,8 @@ impl Game<'_> {
         self.restore_native_commands();
     }
 
-    /// Gives the hub the session's mod commands, with Sunrise's moderation commands, when it
-    /// lacks them; first asks the mods again when one asked (`native_refresh_commands`), and then
-    /// sends every player their tree.
+    /// Gives the hub the session's mod commands when it lacks them; first asks the mods again
+    /// when one asked (`native_refresh_commands`), and then sends every player their tree.
     pub(in crate::game) fn register_native_commands(&mut self) {
         let refresh = std::mem::take(&mut self.native_commands.refresh);
         let Some(host) = self.lan.as_ref() else {
@@ -91,16 +90,8 @@ impl Game<'_> {
         else {
             return;
         };
-        // Sunrise's own moderation commands go in the same tree, so operators' clients complete
-        // them instead of showing them as unknown; the game still runs them itself
-        // (`run_guest_command`). A mod's command of the same name wins.
-        let extras = super::super::tempban::moderation_commands(
-            host.hub.chat_filter_on(),
-            self.server_lists.is_some(),
-        );
-        let usages = [commands.usages.as_slice(), &extras].concat();
         let (tree, _, _) = command_tree(
-            &usages,
+            &commands.usages,
             |name| host.hub.vanilla_command(name),
             &commands.arguments,
         );

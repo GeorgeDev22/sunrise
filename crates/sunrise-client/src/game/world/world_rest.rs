@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn load_world_rest(
     resource_root: &sunrise_assets::resource_source::ResourceRoot,
+    conditions: &sunrise_world::conditions::LoadConditions,
     resources: &Resources,
     assets: &Assets,
     behaviour_json: &serde_json::Value,
@@ -28,10 +29,8 @@ pub(super) fn load_world_rest(
         .files
         .into_iter()
         .collect::<Vec<_>>();
-    let inventory = sunrise_mod_package::enabled::EnabledMods::read(root)?;
-    let conditions = sunrise_world::conditions::LoadConditions::new(inventory.server_ids());
     let overlay = &sunrise_world::loot::PackOverlay {
-        conditions: &conditions,
+        conditions,
         files: &files,
     };
     progress.set(6);
@@ -126,10 +125,16 @@ pub(super) fn load_world_rest(
             catalog,
             mod_api::__private::entity_attribute_modifications(),
         );
+        // The types mods name to `entity_tick_each` hear their ticks one entity at a time
+        // (game/modding/native_ticks.rs): marked once here, so a tick reads a flag.
+        let each = mod_api::__private::entity_tick_each();
         let mob_types: HashMap<_, _> = types
             .types
             .into_iter()
-            .map(|(k, v)| (k, Arc::new(v)))
+            .map(|(k, mut v)| {
+                v.flags.tick_alone = each.is_some_and(|each| each.names(&v.id));
+                (k, Arc::new(v))
+            })
             .collect();
         let mut mob_data = sunrise_client::mobs::MobData::load(resource_root, facts);
         // #847: the mods' spawn rules (`RegisterSpawnPlacementsEvent`) take
@@ -278,6 +283,7 @@ pub(super) fn load_world_rest(
             }),
         )
     };
+    // World staging checks conditions after the selected packs have supplied their winners.
     let (items, recipes, stations) = items?;
     let (animate, fog) = animate?;
     let (mob_types, mob_data) = mobs?;
@@ -295,7 +301,7 @@ pub(super) fn load_world_rest(
     progress.set(8);
     Ok(WorldRest {
         stations,
-        items,
+        items: Arc::new(items),
         recipes,
         transformers,
         providers,

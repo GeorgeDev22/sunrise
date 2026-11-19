@@ -107,24 +107,6 @@ fn a_keyboard_release_keeps_the_sneak_the_pad_went_on_to_hold() {
 
 #[test]
 #[ignore = "daily"]
-fn keyboard_handoff_keeps_what_the_pad_holds() {
-    playing(|game| {
-        game.mapped_key(KeyCode::KeyW, true, false, KeyCode::KeyW, Source::Keyboard)
-            .unwrap();
-        pad_press(game, Button::South, "key.jump");
-        assert!(game.keys.held(Action::Jump) && game.keys.held(Action::Forward));
-        // Splitscreen: keyboard and mouse move to another player.
-        game.release_keyboard_mouse();
-        assert!(!game.keys.held(Action::Forward), "the keyboard's walk ends");
-        assert!(
-            game.keys.held(Action::Jump),
-            "the pad still holds jump; only the keyboard and mouse left"
-        );
-    });
-}
-
-#[test]
-#[ignore = "daily"]
 fn pad_smooth_camera_binding_toggles_the_cinematic_camera() {
     playing(|game| {
         game.settings
@@ -193,9 +175,68 @@ fn readers_of_the_movement_keys_see_the_stick() {
             !game.mapping("key.jump").unwrap().unwrap().down,
             "the stick holds only the movement keys"
         );
+        // Forward is inside the eight-direction sector, left outside it. A direct
+        // write on forward must not reclassify what remains of the stick.
+        with_player(game);
+        game.pad.state.left = [-0.34, 0.93];
+        let before = game.sample_movement_keys(game.pad_move());
+        assert!(game.mapping_state("key.forward").unwrap().0);
+        assert!(!game.mapping_state("key.left").unwrap().0);
+        assert!(before.forward);
+        let [left, forward] = before.direction();
+        assert!(left > 0.3 && forward > 0.8);
+        game.set_mapping_down("key.forward", false).unwrap();
+        let after = game.sample_movement_keys(game.pad_move());
+        assert!(!game.mapping_state("key.forward").unwrap().0);
+        assert!(!game.mapping_state("key.left").unwrap().0);
+        assert!(!after.forward);
+        assert_eq!(after.left, before.left);
+        assert_eq!(after.direction(), [left, 0.0]);
+
+        game.pad.state.left = [-0.85, 0.0];
+        let [left, _] = game.pad_move().unwrap();
+        game.set_mapping_down("key.forward", true).unwrap();
+        let after = game.sample_movement_keys(game.pad_move());
+        assert!(game.mapping_state("key.forward").unwrap().0);
+        assert!(after.forward);
+        assert_eq!(after.direction(), [left, 1.0]);
+
+        // A tilt below the digital threshold is new analog input and still
+        // takes over. A changed left component does not take over forward.
+        game.pad.state.left = [0.0, 0.0];
+        let before = game.pad_move();
+        game.set_mapping_down("key.forward", false).unwrap();
+        game.pad.state.left = [-0.4, 0.0];
+        game.resume_stick_mappings(before);
+        assert_eq!(game.keys.override_for(&KeyCode::KeyW), Some(false));
+        game.pad.state.left = [0.0, 0.0];
+        let before = game.pad_move();
+        game.pad.state.left = [0.0, game.settings.controller.move_deadzone + 0.01];
+        game.resume_stick_mappings(before);
+        let after = game.sample_movement_keys(game.pad_move());
+        assert!(!after.forward);
+        assert!(after.direction()[1] > 0.0);
+
         // A screen takes the stick away.
         game.screen = Screen::Paused;
         assert!(!game.mapping("key.forward").unwrap().unwrap().down);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn mapping_state_reads_what_mapping_reads_and_follows_the_binding() {
+    playing(|game| {
+        game.focused = true;
+        let (down, bound) = game.mapping_state("key.forward").unwrap();
+        assert!(!down);
+        game.pad.state.left = [-0.7, 0.7];
+        let held = game.mapping_state("key.forward").unwrap();
+        assert_eq!(held, (true, bound), "holding it leaves the binding's hash");
+        assert_eq!(held.0, game.mapping("key.forward").unwrap().unwrap().down);
+        game.settings.keys.set("key.forward", "key.keyboard.up");
+        assert_ne!(game.mapping_state("key.forward").unwrap().1, bound);
+        assert_eq!(game.mapping_state("key.not_a_mapping"), None);
     });
 }
 
@@ -210,7 +251,10 @@ fn pad_number_actions_select_the_hotbar_as_their_keys_do() {
         // This tests the one-shot number action, not all actions sharing D-pad up
         // (the default chat binding would open a screen before the number action).
         game.pad_action("key.hotbar.3", true).unwrap();
-        assert_eq!(game.hotbar_presses.entries(), [2]);
+        assert_eq!(
+            game.hotbar_presses.map(|c| c.count()),
+            [0, 0, 1, 0, 0, 0, 0, 0, 0]
+        );
     });
 }
 
@@ -269,6 +313,31 @@ fn the_mouse_letting_go_leaves_what_the_pad_holds_and_back() {
         game.mouse_mapping(MouseButton::Right, false, Source::Keyboard)
             .unwrap();
         assert!(!game.right);
+
+        // Rebinding a physical mouse button to an ordinary key goes through
+        // the keyboard source path, not the default attack/use path above.
+        with_player(game);
+        let binding = "key.mouse.left";
+        game.settings.keys.set("key.forward", binding);
+        for mouse_releases_first in [true, false] {
+            game.mapped_mouse_event(MouseButton::Left, binding, true)
+                .unwrap();
+            game.pad_action("key.forward", true).unwrap();
+            game.set_mapping_down("key.forward", false).unwrap();
+            assert!(!game.keys.held(Action::Forward));
+            for mouse_releases in [mouse_releases_first, !mouse_releases_first] {
+                if mouse_releases {
+                    game.mapped_mouse_event(MouseButton::Left, binding, false)
+                        .unwrap();
+                } else {
+                    game.pad_action("key.forward", false).unwrap();
+                }
+                assert_eq!(
+                    game.keys.held(Action::Forward),
+                    mouse_releases == mouse_releases_first
+                );
+            }
+        }
     });
 }
 
@@ -284,15 +353,5 @@ fn a_release_from_a_screen_can_not_strand_the_pads_attack() {
         assert!(game.left);
         pad_release(game, Button::RightTrigger);
         assert!(!game.left, "nothing is physically held");
-    });
-}
-
-#[test]
-#[ignore = "daily"]
-fn keyboard_handoff_keeps_the_attack_the_pad_holds() {
-    playing(|game| {
-        pad_press(game, Button::RightTrigger, "key.attack");
-        game.release_keyboard_mouse();
-        assert!(game.left);
     });
 }

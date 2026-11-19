@@ -164,6 +164,26 @@ fn read(root: &FileRoot, file: &ConfigPath) -> Result<Vec<u8>, ConfigFileError> 
     Ok(bytes)
 }
 
+/// Neither the implicit bulk root nor a config mod folder can be a file.
+fn refuse_root_folder(root: &FileRoot, file: &ConfigPath) -> Result<(), ConfigFileError> {
+    if file.as_str().is_empty()
+        || (!root.bulk && Some(file.as_str()) == mod_api::content::crash::current_native_mod())
+    {
+        return Err(ConfigFileError::NotAFile);
+    }
+    Ok(())
+}
+
+/// What is at `name` in `directory`, without following a link; None where nothing is.
+fn file_meta(directory: &Dir, name: &str) -> Result<Option<Metadata>, ConfigFileError> {
+    match directory.symlink_metadata(name) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(ConfigFileError::Symlink),
+        Ok(meta) => Ok(Some(meta)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io(e)),
+    }
+}
+
 /// Whether `name` is the temporary file of a write, `<name>.<pid>-<n>.tmp`.
 fn is_write_temp(name: &str) -> bool {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
@@ -181,19 +201,11 @@ fn write(root: &FileRoot, file: &ConfigPath, bytes: &[u8]) -> Result<(), ConfigF
     if bytes.len() as u64 > root.cap() {
         return Err(ConfigFileError::TooLarge);
     }
-    // Neither the implicit bulk root nor a config mod folder can be a file.
-    if file.as_str().is_empty()
-        || (!root.bulk && Some(file.as_str()) == mod_api::content::crash::current_native_mod())
-    {
-        return Err(ConfigFileError::NotAFile);
-    }
+    refuse_root_folder(root, file)?;
     let (directory, name) = resolve(root, file, true)?;
-    match directory.symlink_metadata(&name) {
-        Ok(meta) if meta.file_type().is_symlink() => return Err(ConfigFileError::Symlink),
-        Ok(meta) if !meta.is_file() => return Err(ConfigFileError::NotAFile),
-        Ok(_) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(io(e)),
+    match file_meta(&directory, &name)? {
+        Some(meta) if !meta.is_file() => return Err(ConfigFileError::NotAFile),
+        _ => {}
     }
     let temp = format!(
         "{name}.{}-{}.tmp",
@@ -213,6 +225,23 @@ fn write(root: &FileRoot, file: &ConfigPath, bytes: &[u8]) -> Result<(), ConfigF
         let _ = directory.remove_file(&temp);
     }
     written.map_err(io)
+}
+
+fn remove(root: &FileRoot, file: &ConfigPath) -> Result<bool, ConfigFileError> {
+    refuse_root_folder(root, file)?;
+    let (directory, name) = match resolve(root, file, false) {
+        Err(ConfigFileError::NotFound) => return Ok(false),
+        resolved => resolved?,
+    };
+    match file_meta(&directory, &name)? {
+        None => Ok(false),
+        Some(meta) if !meta.is_file() => Err(ConfigFileError::NotAFile),
+        Some(_) => match directory.remove_file(&name) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(io(e)),
+        },
+    }
 }
 
 fn list(
@@ -319,6 +348,9 @@ macro_rules! files {
             fn stat(&self, path: &ConfigPath) -> Result<Option<ConfigStat>, ConfigFileError> {
                 stat(&$root(self)?, path)
             }
+            fn remove(&self, file: &ConfigPath) -> Result<bool, ConfigFileError> {
+                remove(&$root(self)?, file)
+            }
         }
     };
 }
@@ -398,6 +430,38 @@ mod tests {
             assert_eq!(read(root, &path("fd/gone")), Err(ConfigFileError::NotFound));
         });
         assert_eq!(fs::read(root.path.join("fd/state.json")).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn a_mod_removes_only_its_own_files() {
+        let root = Root::new("remove");
+        let root = &root.0;
+        as_mod("b", || write(root, &path("b.json"), b"b's").unwrap());
+        as_mod("fd", || {
+            write(root, &path("fd/old.bin"), b"x").unwrap();
+            write(root, &path("fd/new.bin"), b"y").unwrap();
+            assert_eq!(remove(root, &path("fd/old.bin")), Ok(true));
+            let names: Vec<_> = list(root, &path("fd"), None, 1024)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            assert_eq!(names, ["new.bin"]);
+            assert_eq!(remove(root, &path("fd/old.bin")), Ok(false));
+            assert_eq!(remove(root, &path("fd/absent/a.bin")), Ok(false));
+            assert_eq!(remove(root, &path("fd")), Err(ConfigFileError::NotAFile));
+            fs::create_dir(root.path.join("fd/folder")).unwrap();
+            assert_eq!(
+                remove(root, &path("fd/folder")),
+                Err(ConfigFileError::NotAFile)
+            );
+            assert_eq!(
+                remove(root, &path("b.json")),
+                Err(ConfigFileError::NotOwned)
+            );
+        });
+        assert!(root.path.join("fd/folder").is_dir());
+        assert_eq!(fs::read(root.path.join("b.json")).unwrap(), b"b's");
     }
 
     #[test]
@@ -553,8 +617,16 @@ mod tests {
                 list(&root.0, &path("fd"), None, 1024),
                 Err(ConfigFileError::Symlink)
             );
+            for linked in ["fd/passwd", "fd.json"] {
+                assert_eq!(
+                    remove(&root.0, &path(linked)),
+                    Err(ConfigFileError::Symlink)
+                );
+            }
         });
         assert!(!outside.0.path.join("new").exists());
+        assert!(outside.0.path.join("passwd").exists());
+        assert!(root.0.path.join("fd.json").is_symlink());
     }
 
     #[test]
@@ -862,7 +934,7 @@ mod tests {
                 manifest.inject.clear();
                 let info = mod_api::PackageInfo::new(
                     manifest.id.clone(),
-                    manifest.version.clone(),
+                    manifest.version.to_string(),
                     mod_api::PackageKind::Code,
                     mod_api::Side::Both,
                     vec![manifest.id.clone()],

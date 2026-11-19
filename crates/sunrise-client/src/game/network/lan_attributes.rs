@@ -6,7 +6,6 @@ use super::Game;
 use std::sync::Arc;
 use sunrise_client::items::ItemStack;
 use sunrise_client::{
-    effects,
     items::Items,
     lan::attributes::{add_modifier, instance, operation_named, syncable},
     mobs::{
@@ -78,7 +77,7 @@ pub(super) fn mob_knockback_resistance(m: &Mob) -> f64 {
     finalize::value_with(
         m,
         Attr::KnockbackResistance,
-        gear.map_or(&[], |g| &g.modifiers),
+        gear.map_or(&[][..], |g| &g.modifiers).iter().copied(),
     )
 }
 
@@ -134,9 +133,11 @@ impl Game<'_> {
     /// A mob's synced instances: the live attribute map's (#941) — what
     /// finalizeSpawn set, `/attribute` changed, the save loaded and every
     /// worn or held stack granted, its base and each modifier exactly once,
-    /// as the map holds them — plus movement speed (its first `aiStep` reads
-    /// it, `LivingEntity.removeFrost`, and no stack granted one), the baby
-    /// speed modifier and its effects' modifiers, which no map holds.
+    /// as the map holds them, the stored effect modifiers among them
+    /// (`Mob::set_effect_modifiers`: a mob has no instance of the attributes
+    /// of the other effects, Haste's and Luck's) — plus movement speed (its
+    /// first `aiStep` reads it, `LivingEntity.removeFrost`, and no stack
+    /// granted one) and the baby speed modifier, which no map holds.
     pub(super) fn mob_attributes(
         &self,
         m: &Mob,
@@ -206,10 +207,15 @@ impl Game<'_> {
         {
             instance(out, a, m.extra.vector[0]).base = m.extra.vector[0];
         }
+        // The baby modifier goes before the effects' stored ones: `setBaby`
+        // runs at spawn and the effects come later, so that is the
+        // instance's insertion order in the common case (a loaded baby runs
+        // `setBaby` after its saved modifiers, which the store cannot tell
+        // apart).
         if let (Some((a, base)), Some((amount, Op::AddMultipliedBase))) =
             (speed, finalize::transient(m, Attr::MovementSpeed))
         {
-            add_modifier(
+            add_before_effects(
                 out,
                 a,
                 base,
@@ -220,7 +226,9 @@ impl Game<'_> {
                 },
             );
         }
-        // LivingEntity.setSprinting: SPEED_MODIFIER_SPRINTING (a dashing cat or ocelot).
+        // LivingEntity.setSprinting: SPEED_MODIFIER_SPRINTING (a dashing cat or
+        // ocelot), removed and added again each time it starts, so it comes
+        // after an effect given before the dash.
         if let (true, Some((a, base))) = (m.extra.sprinting, speed) {
             add_modifier(
                 out,
@@ -230,35 +238,6 @@ impl Game<'_> {
                     id: "minecraft:sprinting".into(),
                     amount: f64::from(0.3f32),
                     operation: 2,
-                },
-            );
-        }
-        let base = |name: &str| {
-            Attr::ALL
-                .into_iter()
-                .find(|a| name.strip_prefix("minecraft:") == Some(a.name()))
-                .map(|a| finalize::base_value(m, a))
-        };
-        // LivingEntity.onEffectAdded: MobEffect.addAttributeModifiers.
-        for effect in &m.extra.effects {
-            let (effect, amplifier) = (effect.id, effect.amplifier);
-            let Some((attribute, id, amount, op)) =
-                effects::effect_modifier(effect.trim_start_matches("minecraft:"))
-            else {
-                continue;
-            };
-            let Some(a) = self.synced_attribute(kind, attribute) else {
-                continue;
-            };
-            let start = base(attribute).unwrap_or_else(|| self.attribute_default(kind, attribute));
-            add_modifier(
-                out,
-                a,
-                start,
-                AttributeModifier {
-                    id: id.to_owned(),
-                    amount: amount * f64::from(amplifier + 1),
-                    operation: operation_named(op),
                 },
             );
         }
@@ -356,3 +335,28 @@ mod tests {
         assert!(!slot_in_group("mainhand", "offhand"));
     }
 }
+
+/// [`add_modifier`] placed before the instance's first effect modifier
+/// (`minecraft:effect.<name>`, stored when the effect was added).
+fn add_before_effects(
+    out: &mut Vec<AttributeSnapshot>,
+    attribute: i32,
+    base: f64,
+    modifier: AttributeModifier,
+) {
+    let snapshot = instance(out, attribute, base);
+    if let Some(m) = snapshot.modifiers.iter_mut().find(|m| m.id == modifier.id) {
+        *m = modifier;
+        return;
+    }
+    let at = snapshot
+        .modifiers
+        .iter()
+        .position(|m| m.id.starts_with("minecraft:effect."))
+        .unwrap_or(snapshot.modifiers.len());
+    snapshot.modifiers.insert(at, modifier);
+}
+
+#[cfg(test)]
+#[path = "lan_attributes/effect_modifier_tests.rs"]
+mod effect_modifier_tests;

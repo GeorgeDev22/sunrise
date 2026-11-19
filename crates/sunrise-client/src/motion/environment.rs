@@ -41,6 +41,8 @@ impl MotionWorld<'_, '_, '_> {
     pub(super) fn tick_remaining_fire(&mut self) -> Result<()> {
         if self.player.spectator {
             self.player.fire_ticks = 0;
+        } else if self.player.mod_fire_immune {
+            self.player.fire_ticks = self.player.fire_ticks.min(0);
         }
         if self.player.invulnerable && self.player.fire_ticks > 1 {
             self.player.fire_ticks = 1;
@@ -58,87 +60,94 @@ impl MotionWorld<'_, '_, '_> {
     }
     /// `LivingEntity.baseTick`'s air supply and drowning, then lava.
     pub fn tick_environment_damage(&mut self) -> Result<()> {
-        let eye = BlockPos::containing(self.player.position.add_vector(Vec3::new(
-            0.0,
-            f64::from(self.player.dimensions.eye_height),
-            0.0,
-        )));
-        let bubble_column = self
-            .assets
-            .registry
-            .state(self.block(eye))
-            .is_some_and(|state| state.name == "minecraft:bubble_column");
-        let submerged = self.player.is_eye_in_fluid(WATER) && !bubble_column;
-        let drowns = submerged
-            && !self.player.status.water_breathing
-            && !self.player.status.breath_of_the_nautilus
-            && !self.player.invulnerable
-            && !self.player.spectator;
-        let vanilla = if drowns {
-            // decreaseAirSupply's getAttribute: the instance exists from now
-            // on, even unmodified.
-            let key = self.player.attributes.key("minecraft:oxygen_bonus");
-            self.player
-                .attributes
-                .get_instance(key)
-                .map_err(|e| format!("oxygen bonus: {e:?}"))?;
-            let oxygen = self
-                .player
-                .attribute("minecraft:oxygen_bonus")?
-                .max(f64::from(self.player.respiration));
-            let sparing = oxygen > 0.0 && self.scene.random.next_double() >= 1.0 / (oxygen + 1.0);
-            Breath {
-                can_breathe: false,
-                consume: i32::from(!sparing),
-                refill: 0,
-            }
-        } else {
-            // The nautilus' breath keeps a submerged player's air as it is.
-            let held = submerged
-                && self.player.status.breath_of_the_nautilus
-                && !self.player.status.water_breathing;
-            Breath {
-                can_breathe: true,
-                consume: 1,
-                refill: if held { 0 } else { 4 },
-            }
-        };
-        // LivingBreatheEvent, on the server's copy of the player only.
-        let breath = if self.player.client_side {
-            vanilla
-        } else {
-            breathe(
+        // Air is synced entity data: only the server runs LivingEntity's air block.
+        if !self.player.client_side {
+            let eye = BlockPos::containing(self.player.position.add_vector(Vec3::new(
+                0.0,
+                f64::from(self.player.dimensions.eye_height),
+                0.0,
+            )));
+            let bubble_column = self
+                .assets
+                .registry
+                .state(self.block(eye))
+                .is_some_and(|state| state.name == "minecraft:bubble_column");
+            let submerged = self.player.is_eye_in_fluid(WATER) && !bubble_column;
+            let drowns = submerged
+                && !self.player.status.water_breathing
+                && !self.player.status.breath_of_the_nautilus
+                && !self.player.invulnerable
+                && !self.player.spectator;
+            let vanilla = if drowns {
+                // decreaseAirSupply's getAttribute: the instance exists from now
+                // on, even unmodified.
+                let key = self.player.attributes.key("minecraft:oxygen_bonus");
+                self.player
+                    .attributes
+                    .get_instance(key)
+                    .map_err(|e| format!("oxygen bonus: {e:?}"))?;
+                let oxygen = self
+                    .player
+                    .attribute("minecraft:oxygen_bonus")?
+                    .max(f64::from(self.player.respiration));
+                let sparing =
+                    oxygen > 0.0 && self.scene.random.next_double() >= 1.0 / (oxygen + 1.0);
+                Breath {
+                    can_breathe: false,
+                    consume: i32::from(!sparing),
+                    refill: 0,
+                }
+            } else {
+                // The nautilus' breath keeps a submerged player's air as it is.
+                let held = submerged
+                    && self.player.status.breath_of_the_nautilus
+                    && !self.player.status.water_breathing;
+                Breath {
+                    can_breathe: true,
+                    consume: 1,
+                    refill: if held { 0 } else { 4 },
+                }
+            };
+            // LivingBreatheEvent, on the server's copy of the player only.
+            let breath = breathe(
                 self.loop_context,
                 self.player.entity_id as u32,
                 "minecraft:player",
                 vanilla,
-            )
-        };
-        // LivingDrownEvent, likewise. A player's getMaxAirSupply is Entity's 300.
-        if let Some(drowning) = drown(
-            self.loop_context,
-            self.player.entity_id as u32,
-            "minecraft:player",
-            &mut self.player.air,
-            300,
-            breath,
-            !self.player.client_side,
-        ) {
-            self.player
-                .events
-                .push(MotionEvent::Drown(drowning.bubbles));
-            if let Some(damage) = drowning.damage {
-                self.player.events.push(MotionEvent::Health(
-                    crate::health::HealthEvent::DrownDamage(damage),
-                ));
-                self.environment_hurt("minecraft:drown", damage)?;
+            );
+            // LivingDrownEvent, likewise. A player's getMaxAirSupply is Entity's 300.
+            if let Some(drowning) = drown(
+                self.loop_context,
+                self.player.entity_id as u32,
+                "minecraft:player",
+                &mut self.player.air,
+                300,
+                breath,
+                true,
+            ) {
+                self.player
+                    .events
+                    .push(MotionEvent::Drown(drowning.bubbles));
+                if let Some(damage) = drowning.damage {
+                    self.player.events.push(MotionEvent::Health(
+                        crate::health::HealthEvent::DrownDamage(damage),
+                    ));
+                    self.environment_hurt("minecraft:drown", damage)?;
+                }
             }
         }
         if self.player.is_in_lava() {
-            self.player.ignite_for_ticks(300)?;
-            self.environment_hurt("minecraft:lava", 4.0)?;
+            self.lava_ignite_and_hurt()?;
         }
         Ok(())
+    }
+    /// `Entity.lavaIgnite` and `Entity.lavaHurt`: both check `fireImmune`.
+    pub(super) fn lava_ignite_and_hurt(&mut self) -> Result<()> {
+        if self.player.mod_fire_immune {
+            return Ok(());
+        }
+        self.player.ignite_for_ticks(300)?;
+        self.environment_hurt("minecraft:lava", 4.0)
     }
     /// What a server's `LivingEntity.baseTick` adds for a player it hosts:
     /// the void (`Entity.checkBelowWorld`, 4 a tick, which creative players
@@ -179,7 +188,7 @@ impl MotionWorld<'_, '_, '_> {
         let damage = fire_contact(self.scene, self.assets.registry, self.player.bounds());
         if damage > 0.0 {
             self.player.ticks_frozen = 0;
-            if !self.player.fluids.was_touching_water {
+            if !self.player.mod_fire_immune && !self.player.fluids.was_touching_water {
                 let multiplier = self.player.attribute("minecraft:burning_time")?;
                 let ticks = ignite_contact(
                     self.player.fire_ticks,

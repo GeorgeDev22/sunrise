@@ -39,23 +39,6 @@ impl Game<'_> {
         }
     }
 
-    /// `AbstractContainerMenu.removed`: what a closing player held on the
-    /// cursor goes back into their inventory (`placeItemBackInInventory`,
-    /// dropped only if it doesn't fit), and their client's cursor empties
-    /// with the inventory it is sent.
-    pub(in crate::game) fn guest_carried_back(&mut self, gi: usize) {
-        let carried = self
-            .lan
-            .as_mut()
-            .and_then(|host| host.hub.guests.update(gi, |g| g.carried.take()));
-        if let Some(c) = carried {
-            self.lan_place_back(gi, vec![c]);
-            if let Some(host) = self.lan.as_mut() {
-                host.hub.send_inventory(gi);
-            }
-        }
-    }
-
     pub(in crate::game) fn drop_guest_items(&mut self, gi: usize, stacks: Vec<ItemStack>) {
         let Some(host) = self.lan.as_ref() else {
             return;

@@ -1,6 +1,6 @@
 //! Bursts of key presses and clicks on a server's client: a player's act on the next tick in the
 //! order they came, and a mod's loop of `click_mapping` acts 64 entries of each queue a tick, oldest
-//! first, with nothing dropped below the queue's maximum.
+//! first, and one click of each number key, with nothing dropped below the queue's maximum.
 use super::*;
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
@@ -17,12 +17,13 @@ fn counts(packets: &[String]) -> [usize; 3] {
 }
 
 /// A player's burst between two ticks, keys and buttons: the number key selects at the tick's
-/// pick, the click punches, then the drop keys and the swap act in the order pressed, the first
-/// drop telling the server of the new slot (`ensureHasSentCarriedItem`). One press of each a tick
-/// for twenty ticks acts once a tick, on its own tick.
+/// pick, then `handleKeybinds` swaps before it drops, whatever the press order, and both before
+/// the click's punch; the first drop tells the server of the new slot
+/// (`ensureHasSentCarriedItem`), the swap doesn't. One press of each a tick for twenty ticks acts
+/// once a tick, on its own tick, the drop before the punch.
 #[test]
 #[ignore = "daily"]
-fn a_players_burst_acts_on_the_next_tick_in_the_order_pressed() {
+fn a_players_burst_acts_on_the_next_tick_in_handle_keybinds_order() {
     with_pressing_game(|game, packets, _| {
         game.set_mode_id(1);
         game.forced_hit = None;
@@ -42,11 +43,11 @@ fn a_players_burst_acts_on_the_next_tick_in_the_order_pressed() {
         assert_eq!(
             sent(packets),
             [
-                "minecraft:punch",
+                "minecraft:player_action",
                 "minecraft:set_carried_item",
                 "minecraft:player_action",
                 "minecraft:player_action",
-                "minecraft:player_action"
+                "minecraft:punch"
             ]
         );
         assert_eq!(game.selected, 1);
@@ -58,15 +59,16 @@ fn a_players_burst_acts_on_the_next_tick_in_the_order_pressed() {
             game.remote_handle_input();
             assert_eq!(
                 sent(packets),
-                ["minecraft:punch", "minecraft:player_action"]
+                ["minecraft:player_action", "minecraft:punch"]
             );
         }
     });
 }
 
-/// A mod's loop queues 150 attack clicks, 150 drops and 70 number keys before a tick: each tick
-/// acts on 64 of each queue, oldest first, until all have acted. The number keys select the slot
-/// of the last press each tick takes, and the tick's first drop tells the server of it.
+/// A mod's loop queues 150 attack clicks, 150 drops and five number keys before a tick: each tick
+/// acts on 64 of each queue, oldest first, until all have acted. Each tick takes one click of each
+/// number key, key 1 first (`keyHotbarSlots[i].consumeClick`), so 7, 7, 4, 4, 4 select slot 7 for
+/// two ticks, then 4; the tick's first drop tells the server of a new slot.
 #[test]
 #[ignore = "daily"]
 fn a_mods_burst_acts_64_entries_of_each_queue_a_tick() {
@@ -78,13 +80,8 @@ fn a_mods_burst_acts_64_entries_of_each_queue_a_tick() {
             assert_eq!(game.click_mapping("key.attack"), Ok(()));
             assert_eq!(game.click_mapping("key.drop"), Ok(()));
         }
-        for press in 0..70 {
-            let key = if press < 64 {
-                "key.hotbar.4"
-            } else {
-                "key.hotbar.7"
-            };
-            assert_eq!(game.click_mapping(key), Ok(()));
+        for key in ["7", "7", "4", "4", "4"] {
+            assert_eq!(game.click_mapping(&format!("key.hotbar.{key}")), Ok(()));
         }
         let mut ticks = Vec::new();
         let mut selected = Vec::new();
@@ -93,14 +90,15 @@ fn a_mods_burst_acts_64_entries_of_each_queue_a_tick() {
             ticks.push(counts(&sent(packets)));
             selected.push(game.selected);
         }
-        assert_eq!(ticks, [[64, 64, 1], [64, 64, 1], [22, 22, 0], [0, 0, 0]]);
-        assert_eq!(selected, [3, 6, 6, 6]);
+        assert_eq!(ticks, [[64, 64, 1], [64, 64, 0], [22, 22, 1], [0, 0, 0]]);
+        assert_eq!(selected, [6, 6, 3, 3]);
         assert_eq!(triggered.lock().unwrap().len(), 150);
     });
 }
 
 /// A queue holds 1024 entries at most: a mod's 1100th drop, attack click or number key is refused
-/// and the call returns as usual; the 1024 queued act over the next ticks.
+/// and the call returns as usual; the 1024 queued act over the next ticks, a number key's one a
+/// tick.
 #[test]
 #[ignore = "daily"]
 fn a_full_queue_refuses_the_entry_and_the_call_returns() {
@@ -117,7 +115,7 @@ fn a_full_queue_refuses_the_entry_and_the_call_returns() {
             game.remote.as_ref().unwrap().pending_keys.entries().len(),
             1024
         );
-        assert_eq!(game.hotbar_presses.entries().len(), 1024);
+        assert_eq!(game.hotbar_presses[1].count(), 1024);
         let mut acted = [0; 3];
         for _ in 0..17 {
             game.remote_handle_input();
@@ -127,6 +125,6 @@ fn a_full_queue_refuses_the_entry_and_the_call_returns() {
         }
         acted[2] = triggered.lock().unwrap().len();
         assert_eq!(acted, [1024, 1024, 1024]);
-        assert!(game.hotbar_presses.entries().is_empty());
+        assert_eq!(game.hotbar_presses[1].count(), 1024 - 17);
     });
 }

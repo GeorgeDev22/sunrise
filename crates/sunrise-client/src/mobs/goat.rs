@@ -652,7 +652,7 @@ mod long_jump_save_tests {
         let mut m = goat();
         assert_eq!(crate::mobs::frog::jump_cooldown(&m), None);
         crate::mobs::frog::set_jump_cooldown(&mut m, Some(57));
-        let saved = mob_to_nbt(&m, [1, 2, 3, 4], None, None, |_| None);
+        let saved = mob_to_nbt(&m, [1, 2, 3, 4], None, None, |_| None, &Default::default());
         assert_eq!(
             saved
                 .get("Brain")
@@ -669,7 +669,14 @@ mod long_jump_save_tests {
             "the reloaded cooldown"
         );
         // No cooldown writes no memory, even over a compound that names one.
-        let saved = mob_to_nbt(&goat(), [1, 2, 3, 4], Some(&saved), None, |_| None);
+        let saved = mob_to_nbt(
+            &goat(),
+            [1, 2, 3, 4],
+            Some(&saved),
+            None,
+            |_| None,
+            &Default::default(),
+        );
         assert_eq!(
             saved
                 .get("Brain")

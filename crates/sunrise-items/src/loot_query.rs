@@ -88,13 +88,14 @@ impl<R: RandomSource> LootContext<'_, R> {
     /// the tool it has, and a seed from the roll's random. The entity, the
     /// damage, the player and the biome belong to the main loot engine's
     /// rolls; they are None here (docs/modding/src/how-to/native-mods.md).
+    #[cfg(test)]
     pub(super) fn native_loot_context(
         &self,
         random: &mut R,
     ) -> sunrise_world::loot::LootContext<'_> {
         self.roll_facts(random.next_long())
     }
-    fn roll_facts(&self, seed: i64) -> sunrise_world::loot::LootContext<'_> {
+    pub(super) fn roll_facts(&self, seed: i64) -> sunrise_world::loot::LootContext<'_> {
         sunrise_world::loot::LootContext {
             queried_table_id: self.query.id(),
             queried_stack: self.query.queried_stack.clone(),

@@ -3,6 +3,7 @@
 //! click event an action makes of them (`Action.createAction`).
 use crate::text::Text;
 use serde_json::{Value, json};
+use std::num::NonZeroUsize;
 use sunrise_core::nbt::Tag;
 
 /// `CommonDialogData` and the type's own fields.
@@ -30,11 +31,11 @@ pub enum Kind {
     MultiAction {
         actions: Vec<Button>,
         exit: Option<Button>,
-        columns: i32,
+        columns: NonZeroUsize,
     },
     ServerLinks {
         exit: Option<Button>,
-        columns: i32,
+        columns: NonZeroUsize,
         button_width: i32,
     },
     /// `DialogListDialog`: its dialogs as sent (ids, a tag or inline dialogs),
@@ -43,7 +44,7 @@ pub enum Kind {
         dialogs: Tag,
         entries: Vec<Button>,
         exit: Option<Button>,
-        columns: i32,
+        columns: NonZeroUsize,
         button_width: i32,
     },
 }
@@ -564,48 +565,127 @@ impl Body {
     }
 }
 
+/// Read top-level scalars in their original format. JSON numbers and booleans can
+/// otherwise become indistinguishable after conversion to NBT.
+enum Scalars<'a> {
+    Json(&'a Value),
+    Nbt(&'a Tag),
+}
+
+impl Scalars<'_> {
+    fn field<T>(
+        &self,
+        key: &'static str,
+        default: T,
+        json: impl FnOnce(&Value) -> Option<T>,
+        nbt: impl FnOnce(&Tag) -> Option<T>,
+    ) -> Result<T, &'static str> {
+        match self {
+            Self::Json(value) => value.get(key).map(json),
+            Self::Nbt(value) => value.get(key).map(nbt),
+        }
+        .unwrap_or(Some(default))
+        .ok_or(key)
+    }
+
+    fn integer(&self, key: &'static str, default: i32, max: i32) -> Result<i32, &'static str> {
+        let bounded = |value: f64| {
+            ((1.0..=f64::from(max)).contains(&value) && value.fract() == 0.0)
+                .then_some(value as i32)
+        };
+        self.field(
+            key,
+            default,
+            |v| v.as_f64().and_then(bounded),
+            |v| number(Some(v)).and_then(bounded),
+        )
+    }
+}
+
 impl Dialog {
-    /// `Dialog.DIRECT_CODEC`; `None` for a type or field it can't read
-    /// (vanilla fails the whole packet then).
+    /// `Dialog.DIRECT_CODEC`; refuse invalid network or in-process dialog payloads
+    /// before any of their values reach the screen.
     pub fn parse(t: &Tag) -> Option<Self> {
-        let button = |key: &str| t.get(key).and_then(Button::parse);
-        let kind = match path(&string(t.get("type"))?) {
+        Self::decode(t, Scalars::Nbt(t)).ok()
+    }
+
+    /// Use the same dialog decoder at pack admission, preserving JSON scalar types.
+    pub(crate) fn decode_pack(t: &Tag, value: &Value) -> Result<Self, &'static str> {
+        Self::decode(t, Scalars::Json(value))
+    }
+
+    fn decode(t: &Tag, scalars: Scalars<'_>) -> Result<Self, &'static str> {
+        let flag = |key| {
+            scalars.field(key, true, Value::as_bool, |v| {
+                number(Some(v)).map(|n| n != 0.0)
+            })
+        };
+        let pause = flag("pause")?;
+        let after = |value: &str| match value {
+            "close" => Some(AfterAction::Close),
+            "none" => Some(AfterAction::None),
+            "wait_for_response" => Some(AfterAction::WaitForResponse),
+            _ => None,
+        };
+        let after_action = scalars.field(
+            "after_action",
+            AfterAction::Close,
+            |v| v.as_str().and_then(after),
+            |v| string(Some(v)).as_deref().and_then(after),
+        )?;
+        if pause && after_action == AfterAction::None {
+            return Err("after_action: cannot be none when pause is true");
+        }
+        let columns = || {
+            let n = scalars.integer("columns", 2, i32::MAX)?;
+            usize::try_from(n)
+                .ok()
+                .and_then(NonZeroUsize::new)
+                .ok_or("columns")
+        };
+        let button = |key| t.get(key).and_then(Button::parse);
+        let kind = match path(&string(t.get("type")).ok_or("type")?) {
             "notice" => Kind::Notice(match t.get("action") {
-                Some(b) => Button::parse(b)?,
+                Some(b) => Button::parse(b).ok_or("action")?,
                 None => Button::ok(),
             }),
             "confirmation" => Kind::Confirmation {
-                yes: button("yes")?,
-                no: button("no")?,
+                yes: button("yes").ok_or("yes")?,
+                no: button("no").ok_or("no")?,
             },
             "multi_action" => Kind::MultiAction {
                 actions: list(t.get("actions"))
                     .iter()
                     .map(Button::parse)
                     .collect::<Option<Vec<_>>>()
-                    .filter(|a| !a.is_empty())?,
+                    .filter(|a| !a.is_empty())
+                    .ok_or("actions")?,
                 exit: button("exit_action"),
-                columns: int(t, "columns", 2),
+                columns: columns()?,
             },
             "server_links" => Kind::ServerLinks {
                 exit: button("exit_action"),
-                columns: int(t, "columns", 2),
-                button_width: int(t, "button_width", 150),
+                columns: columns()?,
+                button_width: scalars.integer("button_width", 150, 1024)?,
             },
             "dialog_list" => Kind::DialogList {
-                dialogs: t.get("dialogs")?.clone(),
+                dialogs: t.get("dialogs").ok_or("dialogs")?.clone(),
                 entries: Vec::new(),
                 exit: button("exit_action"),
-                columns: int(t, "columns", 2),
-                button_width: int(t, "button_width", 150),
+                columns: columns()?,
+                button_width: scalars.integer("button_width", 150, 1024)?,
             },
-            _ => return None,
+            _ => return Err("type"),
         };
         // DialogBody.COMPACT_LIST_CODEC: one body, or a list of them.
         // A body or input it cannot read fails the whole dialog.
         let body = match t.get("body") {
-            Some(Tag::List(items)) => items.iter().map(Body::parse).collect::<Option<_>>()?,
-            Some(one) => vec![Body::parse(one)?],
+            Some(Tag::List(items)) => items
+                .iter()
+                .map(Body::parse)
+                .collect::<Option<_>>()
+                .ok_or("body")?,
+            Some(one) => vec![Body::parse(one).ok_or("body")?],
             None => Vec::new(),
         };
         let inputs = list(t.get("inputs"))
@@ -616,18 +696,15 @@ impl Dialog {
                     control: Control::parse(i)?,
                 })
             })
-            .collect::<Option<_>>()?;
-        Some(Self {
+            .collect::<Option<_>>()
+            .ok_or("inputs")?;
+        Ok(Self {
             kind,
-            title: text(t.get("title")?),
+            title: text(t.get("title").ok_or("title")?),
             external_title: t.get("external_title").map(text),
-            can_close_with_escape: boolean(t, "can_close_with_escape", true),
-            pause: boolean(t, "pause", true),
-            after_action: match string(t.get("after_action")).as_deref() {
-                Some("none") => AfterAction::None,
-                Some("wait_for_response") => AfterAction::WaitForResponse,
-                _ => AfterAction::Close,
-            },
+            can_close_with_escape: flag("can_close_with_escape")?,
+            pause,
+            after_action,
             body,
             inputs,
         })
@@ -825,7 +902,7 @@ mod tests {
         else {
             panic!("{:?}", d.kind)
         };
-        assert_eq!((actions.len(), exit.is_none(), *columns), (2, true, 2));
+        assert_eq!((actions.len(), exit.is_none(), columns.get()), (2, true, 2));
         assert_eq!(actions[0].width, 150);
         assert!(d.on_cancel().is_none());
         let [

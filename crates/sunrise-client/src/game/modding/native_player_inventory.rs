@@ -50,10 +50,7 @@ impl Game<'_> {
         &self,
         player: PlayerRef,
     ) -> Option<Vec<(u32, ItemStack)>> {
-        if self.remote.is_some() {
-            return None;
-        }
-        Some(match self.player_handle_read(player)? {
+        Some(match self.player_read_both(player)? {
             PlayerRead::Acting { .. } => {
                 numbered(&self.inventory, &self.armor, &self.offhand, &self.equipment)
             }

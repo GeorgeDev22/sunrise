@@ -1,8 +1,12 @@
 //! Load-owned declarations and resolved mappings for registration-slot keys.
+#[cfg(test)]
+#[path = "menu_registry_tests.rs"]
+mod menu_registry_tests;
 use crate::{
     BlockEntityTypeKey, BlockKey, DimensionKey, EffectKey, EnchantmentKey, EntityTypeKey, FluidKey,
     ItemKey, MenuKey,
 };
+use std::sync::Arc;
 
 impl BlockKey {
     #[cfg(any(not(target_arch = "wasm32"), test))]
@@ -69,8 +73,8 @@ pub fn resolve_items<'a>(
 }
 
 fn resolved_block_keys()
--> &'static std::sync::OnceLock<sunrise_mod_runtime::block_definitions::Blocks> {
-    static EMPTY: std::sync::OnceLock<sunrise_mod_runtime::block_definitions::Blocks> =
+-> &'static std::sync::OnceLock<Arc<sunrise_mod_runtime::block_definitions::Blocks>> {
+    static EMPTY: std::sync::OnceLock<Arc<sunrise_mod_runtime::block_definitions::Blocks>> =
         std::sync::OnceLock::new();
     crate::parts::installed().map_or(&EMPTY, |installed| &installed.resolved_blocks)
 }
@@ -80,6 +84,33 @@ fn block_names() -> &'static sunrise_mod_runtime::registry_keys::Names {
         .get()
         .map(|blocks| &blocks.names)
         .unwrap_or(&crate::parts::requested_keys().blocks)
+}
+
+/// Retain one copy of equal definitions across test installations.
+///
+/// A test installs the same declarations for every game it builds, and each install keeps its
+/// own resolved table for the life of the process. Sharing is by full equality of the resolved
+/// payload, never by hash alone. A production process installs once, so it keeps its own.
+#[cfg(any(test, feature = "testing"))]
+fn share_blocks(
+    blocks: sunrise_mod_runtime::block_definitions::Blocks,
+) -> Arc<sunrise_mod_runtime::block_definitions::Blocks> {
+    #[cfg(any(test, feature = "testing"))]
+    static SHARED: std::sync::Mutex<Vec<Arc<sunrise_mod_runtime::block_definitions::Blocks>>> =
+        std::sync::Mutex::new(Vec::new());
+    let mut shared = SHARED.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(equal) = shared.iter().find(|shared| ***shared == blocks) {
+        return equal.clone();
+    }
+    let blocks = Arc::new(blocks);
+    shared.push(blocks.clone());
+    blocks
+}
+#[cfg(not(any(test, feature = "testing")))]
+fn share_blocks(
+    blocks: sunrise_mod_runtime::block_definitions::Blocks,
+) -> Arc<sunrise_mod_runtime::block_definitions::Blocks> {
+    Arc::new(blocks)
 }
 
 /// Publish completed identities and immutable definitions together before constructing mesh tables.
@@ -97,7 +128,7 @@ pub fn resolve_block_keys<'a>(
             format!("mod {mod_id} requested unknown block {id}")
         })?;
     let blocks = sunrise_mod_runtime::block_definitions::Blocks::prepare(names, definition)?;
-    let _ = resolved_block_keys().set(blocks);
+    let _ = resolved_block_keys().set(share_blocks(blocks));
     Ok(())
 }
 
@@ -108,7 +139,7 @@ pub fn block_key(id: &str) -> Option<BlockKey> {
 
 /// Borrow the immutable definitions published with completed block identities.
 pub fn block_definitions() -> Option<&'static sunrise_mod_runtime::block_definitions::Blocks> {
-    resolved_block_keys().get()
+    resolved_block_keys().get().map(|blocks| &**blocks)
 }
 
 /// Find an item in the completed registry without allocating at a hook boundary.
@@ -128,9 +159,12 @@ pub(crate) fn resolved_entity_types()
         std::sync::OnceLock::new();
     crate::parts::installed().map_or(&EMPTY, |installed| &installed.resolved_entity_types)
 }
-pub(crate) static MENUS: std::sync::LazyLock<
-    std::sync::RwLock<Option<sunrise_mod_runtime::registry_keys::Names>>,
-> = std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
+pub(crate) fn resolved_menus()
+-> &'static std::sync::RwLock<Option<sunrise_mod_runtime::registry_keys::Names>> {
+    static EMPTY: std::sync::RwLock<Option<sunrise_mod_runtime::registry_keys::Names>> =
+        std::sync::RwLock::new(None);
+    crate::parts::installed().map_or(&EMPTY, |installed| &installed.resolved_menus)
+}
 pub(crate) static ENCHANTMENTS: std::sync::LazyLock<
     std::sync::RwLock<Option<sunrise_mod_runtime::registry_keys::Names>>,
 > = std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
@@ -201,7 +235,7 @@ pub fn resolve_entity_types<'a>(ids: impl IntoIterator<Item = &'a str>) -> Resul
 
 /// Complete the built-in menu registry in `ids`' registration order.
 pub fn resolve_menus<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<(), Vec<String>> {
-    resolve_ordered(&MENUS, ids, "menu")
+    resolve_ordered(resolved_menus(), ids, "menu")
 }
 
 /// Complete the data-loaded enchantment registry in `ids`' registry order.
@@ -261,7 +295,7 @@ pub fn entity_type_keys() -> Vec<EntityTypeKey> {
 
 /// Every built-in menu key in registry order.
 pub fn menu_keys() -> Vec<MenuKey> {
-    ordered_keys(&MENUS, MenuKey)
+    ordered_keys(resolved_menus(), MenuKey)
 }
 
 /// Every loaded enchantment key in registry order.
@@ -288,7 +322,7 @@ impl MenuKey {
     /// Validate an incoming slot against the built-in registry, not a world's mapping.
     #[cfg(any(not(target_arch = "wasm32"), test))]
     pub(crate) fn from_slot(slot: u32) -> Result<Self, &'static str> {
-        ordered_slot_is_live(&MENUS, slot)
+        ordered_slot_is_live(resolved_menus(), slot)
             .then_some(Self(slot))
             .ok_or("unknown MenuKey slot")
     }
@@ -304,6 +338,11 @@ impl EnchantmentKey {
     }
 }
 
+/// The canonical load-owned name of a resolved entity type, without allocating.
+pub fn entity_type_name(key: EntityTypeKey) -> Option<&'static str> {
+    resolved_entity_types().get()?.id(key.0)
+}
+
 /// The canonical name of a built-in entity-type key, for diagnostics.
 pub fn entity_type_key_id(key: EntityTypeKey) -> Option<String> {
     crate::parts::registration_name(crate::parts::RegistrationKeyKind::EntityType, key.0)
@@ -312,7 +351,7 @@ pub fn entity_type_key_id(key: EntityTypeKey) -> Option<String> {
 
 /// The canonical name of a built-in menu key, for diagnostics.
 pub fn menu_key_id(key: MenuKey) -> Option<String> {
-    ordered_id(&MENUS, key.0)
+    ordered_id(resolved_menus(), key.0)
 }
 
 /// The canonical name of a loaded enchantment key, for diagnostics.
@@ -551,6 +590,7 @@ pub fn effect_index(key: EffectKey) -> Option<usize> {
         .indices
         .get(key.0 as usize)
         .copied()
+        .flatten()
 }
 
 /// Canonical diagnostic name, unavailable until the process effect registry is resolved.

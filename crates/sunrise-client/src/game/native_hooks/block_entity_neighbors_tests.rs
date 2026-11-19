@@ -52,6 +52,7 @@ fn installed_block_entity_neighbor_parts_dispatch_through_game() {
             game.save = Arc::new(sunrise_client::save::SaveDir::new(
                 directory.path().to_path_buf(),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.options.dedicated = Some(Vec::new());
             game.world

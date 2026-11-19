@@ -179,6 +179,7 @@ impl Game<'_> {
                 (pos.x, pos.y, pos.z),
                 entity,
                 block,
+                self.res.items(),
             );
             if let Tag::Compound(fields) = &mut carried {
                 fields.insert(

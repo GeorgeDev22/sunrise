@@ -18,14 +18,11 @@ impl log::Log for Log {
     fn log(&self, record: &log::Record<'_>) {
         let line = record.args().to_string();
         if line.contains("wasm mod fixture stopped its group") {
-            eprintln!(
-                "probe, not in game: wasm mod fixture trapped: {}",
-                if line.contains("stack") {
-                    "guest stack overflow"
-                } else {
-                    "other fault"
-                }
-            );
+            if line.contains("stack") {
+                eprintln!("probe, not in game: wasm mod fixture trapped: guest stack overflow");
+            } else {
+                eprintln!("probe, not in game: wasm mod fixture trapped: other fault: {line}");
+            }
         } else {
             eprintln!("{line}");
         }
@@ -53,16 +50,16 @@ fn module(reply: &Writer, depth: i32) -> sunrise_mod_wasm::WasmMod {
         (@custom "dylink.0" "\01\04\00\00\00\00")
         (import "env" "memory" (memory 1))
         (import "env" "__indirect_function_table" (table 1 funcref))
-        (func (export "sunrise_layout") (result i64) i64.const {})
+        {log}
         (func (export "sunrise_in") (param i32) (result i32) i32.const 512)
         (func $recurse (param i32) (result i32)
             local.get 0 i32.eqz if (result i32) i32.const 0 else
             local.get 0 i32.const 1 i32.sub call $recurse i32.const 1 i32.add end)
-        (func (export "sunrise_hook") (param i32) (result i64)
+        (func (export "sunrise_hook") (param i64) (result i64)
             i32.const {depth} call $recurse i32.const 60000 i32.ne if unreachable end
-            {stores} i64.const {}))"#,
-        *mod_api::wire::LAYOUT,
-        (2048u64 << 32) | reply.bytes().len() as u64
+            {stores} i64.const {reply}))"#,
+        log = sunrise_mod_wasm::fixture::log_import(),
+        reply = (2048u64 << 32) | reply.bytes().len() as u64
     ))
     .unwrap();
     sunrise_mod_wasm::fixture::module(&bytes).unwrap()
@@ -111,7 +108,11 @@ fn proof() {
         world_partial_tick: 0.25,
         partial_tick: 0.5,
     };
-    client.render_frame_pre(&mut host, &mut render);
+    // Depth, not time, is under test: a busy runner can take past a hook's 100 ms epoch deadline
+    // over 60000 frames, which trapped as "other fault" instead of answering (2026-11-16).
+    sunrise_mod_wasm::copy_probe::with_load_budget(|| {
+        client.render_frame_pre(&mut host, &mut render)
+    });
     assert_eq!(render.elapsed, Duration::from_secs(60000));
     assert_eq!(
         (render.world_partial_tick, render.partial_tick),
@@ -135,7 +136,7 @@ fn proof() {
             world_running: true,
         },
     };
-    server.server_tick(&mut host, &mut tick);
+    sunrise_mod_wasm::copy_probe::with_load_budget(|| server.server_tick(&mut host, &mut tick));
     assert!(matches!(
         tick.phase,
         mod_api::ServerTickPhase::ServerTickEnd {

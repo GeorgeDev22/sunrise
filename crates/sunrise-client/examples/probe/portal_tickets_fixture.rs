@@ -66,7 +66,11 @@ pub fn main() {
         let file = root.join("data/minecraft/chunk_tickets.dat");
         write_dat(&file, Tag::compound([("data", data)])).unwrap();
         // How the game opens a level (`world_loading::make_streaming`, `open_level`).
-        let save = SaveDir::new(root.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(
+            root.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         let mut forced = save.load_forced_chunks();
         let mut tickets = ChunkTickets::with_saved_portal(save.load_portal_tickets());
         let level = (&save, file.as_path());

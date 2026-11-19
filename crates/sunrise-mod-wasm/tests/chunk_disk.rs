@@ -46,7 +46,7 @@ fn wasm() -> Mods {
     let manifest = Package::read(path).unwrap().manifest;
     let info = PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         PackageKind::Code,
         Side::Both,
         vec![manifest.id.clone()],
@@ -84,6 +84,11 @@ fn native_and_wasm_execute_identical_job_and_fail_closed_on_trap() {
     crate::test_stack::on_guest_stack(|| {
         let _ = log::set_logger(&Stderr);
         log::set_max_level(log::LevelFilter::Warn);
+        // The fixture guest declares a general entity type in `register`, which only the registration
+        // phase accepts. The scope follows `initialize`: the phase lives in the backend it installs.
+        mod_api::__private::initialize().unwrap();
+        let _registration =
+            mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::Registration);
         for (mods, trap_reason) in [
             (
                 vec![ModEntry::new("wasm_fixture", Box::new(Native))].into(),

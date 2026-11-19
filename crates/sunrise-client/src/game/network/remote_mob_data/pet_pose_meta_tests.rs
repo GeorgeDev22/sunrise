@@ -39,6 +39,7 @@ fn meta_hub() -> sunrise_client::lan::hub::Hub {
         &Builtin::default(),
         &[],
         &[],
+        Default::default(),
     );
     let hub_config = hub::HubConfig {
         default_game_mode: 0,

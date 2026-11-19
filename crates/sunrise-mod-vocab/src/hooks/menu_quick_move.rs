@@ -11,7 +11,7 @@ pub trait Hooks {
     /// `stack` is a copy of what the slot holds; take what you move out of
     /// it (put it in `entity.items`, or in another block through its
     /// `ITEMS` capability) and set `handled`: the slot then holds what is
-    /// left of `stack` (whatever you wrote to that slot of `entity.items`),
+    /// left of `stack` (`None` empties it, overriding that slot of `entity.items`),
     /// the game's routing is skipped, and the player's client gets the menu
     /// again. Left unhandled, `entity.items` goes back to what it held and
     /// the game moves the stack as for any container; a later mod sees what
@@ -43,7 +43,7 @@ pub trait Hooks {
         key = "entity",
         neoforge = "none (a Java menu overrides AbstractContainerMenu.quickMoveStack; no event)",
         cancellable = true,
-        version = 2
+        version = 3
     )]
     fn menu_quick_move();
 }

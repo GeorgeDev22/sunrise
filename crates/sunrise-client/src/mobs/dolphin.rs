@@ -264,7 +264,7 @@ impl Goal for Jump {
             // Mth.rotLerp(0.2, xRot, 0).
             m.head_pitch += 0.2 * super::living::wrap(0.0 - m.head_pitch);
         } else if v.length() > f64::from(1.0e-5f32) {
-            let horizontal = v.x.hypot(v.z);
+            let horizontal = sunrise_core::geometry::length(v.x, v.z);
             m.head_pitch = ((-v.y).atan2(horizontal) * f64::from(180.0f32)
                 / f64::from(std::f32::consts::PI)) as f32;
         }

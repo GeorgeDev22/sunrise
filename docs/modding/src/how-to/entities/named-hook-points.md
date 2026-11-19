@@ -48,7 +48,8 @@ See the [generated API reference](../../reference/api.md) and the hook's
 `entity_move` runs on the server before one physical `Entity.move` invocation,
 including its no-physics and stuck-multiplier handling. This hook receives the
 loop context, not a `Host`: it decides only the movement delta. `MoveCause`
-distinguishes self movement, player packets, pistons, shulker boxes and shulkers;
+distinguishes self movement, player packets, pistons, shulker boxes, shulkers and a
+moving collider carrying a body (`Carried`, version 2 of the hook);
 boats and minecarts use self movement.
 
 A replacement must have finite components, each within ±64 blocks. Invalid
@@ -91,6 +92,22 @@ stale teleport decision. A consumed stack the API can't carry, such as a saved i
 whose id isn't registered, isn't heard: the listeners aren't called and the teleport
 goes on as vanilla's.
 
+## Fishing medium
+
+`fishing_medium` lets a mod say that a bobber outside water floats and fishes where it is: lava,
+the void under an island, a cloud. The first mod in order to answer decides; later mods are not
+asked. The answer is a `FishingMedium` whose `surface` is the world Y the bobber floats at. The
+bobber is in the medium in the block of `surface` or below (its y under `floor(surface) + 1`),
+so a surface of -64.0 holds y -63.5 but not y -62.5, and negative heights work the same as
+positive ones. A `surface` that is not finite is no medium.
+
+On the server the answer also carries a `loot_table` and `lure_ticks`. The catch rolls the named
+table, and the wait for a fish is `min + nextInt(max - min + 1)` less the rod's Lure, with `min`
+raised to at least 1 and `max` to at least `min`. A table id that is malformed or names no table
+the server has rolls vanilla's `minecraft:gameplay/fishing`, with one warning naming the mod and
+the id. A client reads only the `surface`: it draws the bobber floating and ignores the table and
+the wait.
+
 #### Item use lifecycle (native and wasm)
 
 `living_entity_use_item_tick` runs after the may-still-use check. Its `duration`
@@ -110,3 +127,17 @@ notifies the server.
 The neighbouring events differ: canceling Start prevents the use beginning,
 but duration zero does begin it. Canceling Stop skips only release-using, not
 clearing the use. Finish is not cancellable; its result stack can be replaced.
+
+## Player size and pose fit
+
+`entity_size` resolves dimensions through a read-only `Host` on both native and wasm.
+Before player motion, standing, crouching and swimming candidates are resolved;
+an unchanged current-pose answer is reused. The fit test and pose application share
+the resolved answer. Answer using the event's pose, not the entity's current pose:
+a candidate need not become the actual pose. With subscribers, candidate resolution
+dispatches 2–3 times per player tick; keep the listener cheap.
+
+Cached answers are keyed by pose and vanilla dimensions. A scale change after
+resolution or a replay with another key uses vanilla for that fit decision until
+the next pre-motion resolution. Uncached fall-flying, sleeping and spin-attack
+candidates also use vanilla dimensions.

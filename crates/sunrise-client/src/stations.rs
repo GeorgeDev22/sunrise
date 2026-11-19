@@ -39,7 +39,7 @@ impl StationData {
         defaults: &sunrise_world::item_defaults::ItemDefaults,
         context: &sunrise_world::native_load_context::LoadContext,
     ) -> crate::Result<Self> {
-        let sources = crate::crafting::ResolvedSources::load(root, overlay, context)?;
+        let sources = crate::crafting::ResolvedSources::load_collecting(root, overlay, context)?;
         let recipes = crate::crafting::Recipes::from_resolved(root, items, overlay, &sources)?;
         Ok(Self::from_sources(
             root,
@@ -401,8 +401,8 @@ pub fn anvil_result(
                     (*level).max(current)
                 };
                 let Some(def) = e.get(id) else { continue };
-                let mut compatible = e.can_enchant(items, id, &input.item);
-                if creative || &*input.item == "minecraft:enchanted_book" {
+                let mut compatible = e.can_enchant_in_anvil(items, def, &input.item);
+                if creative {
                     compatible = true;
                 }
                 for (other, _) in &enchantments {
@@ -784,7 +784,7 @@ impl StationRecipes {
         overlay: &PackOverlay,
         context: &sunrise_world::native_load_context::LoadContext,
     ) -> crate::Result<Self> {
-        let sources = crate::crafting::ResolvedSources::load(root, overlay, context)?;
+        let sources = crate::crafting::ResolvedSources::load_collecting(root, overlay, context)?;
         crate::crafting::Recipes::from_resolved(root, items, overlay, &sources)?;
         Ok(Self::from_sources(root, items, &sources))
     }
@@ -1501,6 +1501,45 @@ mod tests {
             apply_enchantment(&e, &items, 99, 2, 30, &ItemStack::new("minecraft:book", 1)).unwrap();
         assert_eq!(&*books.item, "minecraft:enchanted_book");
         assert!(!books.stored_enchantments().is_empty());
+    }
+
+    #[test]
+    fn anvil_books_keep_the_vanilla_default_but_respect_a_support_refusal() {
+        let e = sample();
+        let items = sample_items();
+        let input = book(&[]);
+        let addition = book(&[("minecraft:sharpness", 1)]);
+        let combine = |creative| {
+            anvil_result(
+                &e,
+                &items,
+                Some(&input),
+                Some(&addition),
+                None,
+                "Enchanted Book",
+                creative,
+            )
+        };
+        let vanilla = combine(false);
+        assert_eq!(
+            vanilla.result.unwrap().crafting_enchantments(),
+            [(Arc::from("minecraft:sharpness"), 1)]
+        );
+        assert_eq!(vanilla.cost, 1);
+        e.support_answers()
+            .install(std::collections::HashMap::from([(
+                "minecraft:enchanted_book".into(),
+                std::collections::HashMap::from([("minecraft:sharpness".into(), false)]),
+            )]));
+        assert!(
+            combine(false).result.is_none(),
+            "an enchanted book no longer bypasses the support answer"
+        );
+        assert_eq!(
+            combine(true).result.unwrap().crafting_enchantments(),
+            [(Arc::from("minecraft:sharpness"), 1)],
+            "creative still bypasses support"
+        );
     }
 
     #[test]

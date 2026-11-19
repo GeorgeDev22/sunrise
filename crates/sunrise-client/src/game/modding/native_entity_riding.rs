@@ -1811,7 +1811,8 @@ mod tests {
             );
             // A player with no motion state has nothing to measure.
             assert_eq!(cow.dismount_location(game, LivingRef::new(player)), None);
-            // An entity Sunrise doesn't simulate keeps no box to stand on.
+            // A marker has a zero-sized box. Entity's default dismount answer is
+            // still its position with the box's top as Y, even without a current ride.
             game.others.push(super::super::commands::OtherEntity {
                 attachment_lifetime: Default::default(),
                 knot_check: None,
@@ -1826,7 +1827,10 @@ mod tests {
                 pitch: 0.0,
             });
             let marker = game.entity(132).unwrap();
-            assert_eq!(marker.dismount_location(game, living), None);
+            assert_eq!(
+                marker.dismount_location(game, living),
+                Some([0.5, 64.0, 0.5])
+            );
         });
     }
 

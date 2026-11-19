@@ -4,10 +4,13 @@
 //! them through `ItemPlace`'s `stack`, `insert` and `extract`, which come here for these places; a block entity's slots,
 //! a stack inside an item and a mod's own places go through their handlers.
 use super::Game;
-use super::transactions::After;
+use super::transactions::{After, DeferredEffect};
 use mod_api::__private::game::*;
-use mod_api::{EquipmentSlot, ItemPlace, LivingRef, Transaction};
-use sunrise_client::{first_person::Hand, items::ItemStack};
+use mod_api::{
+    CraftedByError, EquipmentSlot, ItemPlace, ItemPlaceEditError, LivingRef, MenuSlotBacking,
+    Transaction,
+};
+use sunrise_client::{first_person::Hand, items::ItemStack, menu::Menu};
 
 impl Game<'_> {
     /// The player a place belongs to, if a player's: a cursor's only while its menu is open.
@@ -79,7 +82,7 @@ impl Game<'_> {
             _ => None,
         }
     }
-    /// All player place mutations use the command/host slot writer (and its journal).
+    /// Player place insert and extract use the command/host slot writer (and its journal).
     fn write_player_place(&mut self, place: &ItemPlace, stack: Option<ItemStack>) {
         use super::commands::items::Slot;
         let slot = match place {
@@ -163,6 +166,136 @@ impl Game<'_> {
             return self.scoped_game_stack(place);
         }
         self.unscoped_game_stack(place)
+    }
+    /// Component-only write, without going through an equipment setter or stopping item use.
+    pub(super) fn game_edit_stack(
+        &mut self,
+        place: &ItemPlace,
+        stack: ItemStack,
+        changed: &[String],
+        tx: &Transaction,
+    ) -> Result<(), ItemPlaceEditError> {
+        if !self.places_simulated() || !self.transaction_holds(tx) {
+            return Err(ItemPlaceEditError::Unavailable);
+        }
+        if let ItemPlace::Equipment { entity, slot } = *place {
+            let mut held = self
+                .equipment_stack(entity, slot)
+                .flatten()
+                .ok_or(ItemPlaceEditError::NotHeld)?;
+            held.copy_changed_components_from(stack, changed);
+            self.journal_equipment(entity);
+            if let Some(mob) = self.mobs.iter_mut().find(|m| m.id == entity && !m.removed) {
+                mob.set_equipment_stack(slot as usize, Some(held));
+                self.after_commit(After::EquipmentSync(entity));
+            } else if let Some(stand) = self.armor_stands.iter_mut().find(|a| a.id == entity) {
+                stand.equipment.set(slot as usize, Some(held));
+            }
+        } else {
+            let player = self
+                .place_player(place)
+                .ok_or(ItemPlaceEditError::NotHeld)?;
+            let mut written = false;
+            self.native_as_player(player, |game| {
+                game.journal_player(player);
+                if let Some(held) = game.player_place(place).and_then(Option::as_mut) {
+                    held.copy_changed_components_from(stack, changed);
+                    written = true;
+                }
+            });
+            if !written {
+                return Err(ItemPlaceEditError::NotHeld);
+            }
+        }
+        self.notice_menu_place_write(place);
+        Ok(())
+    }
+
+    /// Runs the vanilla `ItemStack.onCraftedBy` effects for a stack a mod-delivered menu result
+    /// owns. The stack mutation is journaled through the caller's transaction and the statistic
+    /// is deferred until its root commit.
+    pub(super) fn game_on_crafted_by(
+        &mut self,
+        place: &ItemPlace,
+        tx: &Transaction,
+        amount: i32,
+    ) -> Result<(), CraftedByError> {
+        if !self.transaction_holds(tx) {
+            return Err(CraftedByError::Unavailable);
+        }
+        let (menu, slot) = match *place {
+            ItemPlace::MenuSlot { menu, slot } => (menu, Some(slot)),
+            ItemPlace::PlayerCursor { menu } => (menu, None),
+            _ => return Err(CraftedByError::NotHeld),
+        };
+        let player = menu.fields().player;
+        let handler_stack = if slot.is_some_and(|slot| {
+            matches!(
+                self.menu_slot_backing(menu, slot),
+                Some(MenuSlotBacking::Place(_))
+            )
+        }) {
+            // The handler owns this stack, not the slot's display mirror.
+            Some(place.stack(self).ok_or(CraftedByError::NotHeld)?)
+        } else {
+            None
+        };
+        let mut held = if let Some(stack) = &handler_stack {
+            super::api_values::stack_value(stack).map_err(|_| CraftedByError::Unavailable)?
+        } else {
+            // Read engine storage directly: its API snapshot omits the transient directive.
+            match slot {
+                Some(slot) => self.menu_slot(menu, slot),
+                None => self.menu_carried(menu),
+            }
+            .flatten()
+            .filter(|stack| stack.count > 0 && stack.item.as_ref() != "minecraft:air")
+            .ok_or(CraftedByError::NotHeld)?
+        };
+        let item = held.item.clone();
+        if held.item.as_ref() == "minecraft:filled_map"
+            && held
+                .data()
+                .is_some_and(|data| data.map_post_processing.is_some())
+        {
+            mod_api::run_transaction(self, |game, tx| {
+                let maps = game.level_maps([&held]);
+                Menu::map_crafted(Some(&maps), &mut held);
+                // Reserve before calling the handler, which can make other maps. A refusal
+                // aborts the reservation along with any writes made during the replacement.
+                game.register_made_maps(maps);
+                let written = match (handler_stack, slot) {
+                    (Some(mut stack), _) => {
+                        use super::api_values::TryIntoApi;
+                        let processed = held
+                            .try_into_api()
+                            .map_err(|_| CraftedByError::Unavailable)?;
+                        // Only these two components change. Keep the rest of the handler's patch.
+                        stack.copy_component_from(&processed, "minecraft:map_id");
+                        stack.copy_component_from(&processed, "minecraft:map_post_processing");
+                        place.exchange(game, tx, &mod_api::ItemResource::of(&stack), stack.count())
+                            == stack.count()
+                    }
+                    (None, Some(slot)) => game.replace_crafted_menu_slot(menu, slot, held),
+                    (None, None) => game.native_as_player_handle(player, |game| {
+                        game.journal_player(player.uuid());
+                        game.carried = Some(held);
+                    }),
+                };
+                if !written {
+                    return Err(CraftedByError::Unavailable);
+                }
+                game.notice_menu_place_write(place);
+                Ok(())
+            })?;
+        }
+        self.defer_effect(DeferredEffect::ItemStat {
+            player: player.uuid(),
+            stat: "crafted",
+            item,
+            amount,
+        });
+        Ok(())
     }
     /// `ItemAccess.insert` at a player's place, an item entity's or an entity's slot: up to
     /// `stack.count` of `stack`, into the place where it's empty or holds the same item and
@@ -302,7 +435,13 @@ impl Game<'_> {
                 .then(|| g.add_stack_to_inventory(rest))
                 .flatten()
             {
-                g.drop_after_commit(player, rest);
+                // What is left drops at the player, unless they are in another level than
+                // this one: then it stays the caller's.
+                if g.acting_in_level_in_place() {
+                    g.drop_after_commit(player, rest);
+                } else {
+                    went -= rest.count;
+                }
             }
         });
         went
@@ -422,10 +561,6 @@ impl Game<'_> {
         });
         took
     }
-    /// Writes mob `entity`'s equipment `slot` (#932): the same write
-    /// `native_living_set_equipment` makes — stack, attribute map, equip sound and game event
-    /// — with the effects waiting for the root commit of the open transaction, so an abort of
-    /// it is quiet. The equipment goes back then too (`journal_equipment`).
     /// The equipment `slot` of living entity `entity` (#932): a mob's
     /// (`equipment_stacks`, the worn stacks overlaid) or an armor stand's
     /// own, `None` where the slot is empty. None where neither kind is
@@ -476,7 +611,10 @@ pub(super) mod tests {
     use super::super::native_entity_refs::tests::with_game;
     use mod_api::HostTransaction;
     use mod_api::ServerHost;
-    use mod_api::{ENTITY_AUTOMATION, ENTITY_ITEMS, ItemPlace, ItemResource, MenuRef};
+    use mod_api::{
+        CraftedByError, ENTITY_AUTOMATION, ENTITY_ITEMS, ItemPlace, ItemPlaceEditError,
+        ItemResource, MenuRef,
+    };
     use std::sync::{Arc, atomic::AtomicI32, mpsc};
     use sunrise_client::{
         items::ItemStack,
@@ -567,7 +705,7 @@ pub(super) mod tests {
                         .unwrap();
                 }))
             });
-            assert_eq!(result, Ok(true));
+            assert_eq!(result, Ok(Ok(())));
             assert_eq!(game.dropped.len(), dropped_before);
             assert_eq!(
                 inventory(game),
@@ -581,7 +719,7 @@ pub(super) mod tests {
                 game.transaction(|host, tx| {
                     Ok::<_, ()>(slot.edit(host, tx, |stack| stack.set_count(15).unwrap()))
                 }),
-                Ok(false)
+                Ok(Err(ItemPlaceEditError::CountChanged))
             );
             assert_eq!(inventory(game), expected);
             let stone = ItemStack::new("minecraft:stone", 16)
@@ -591,7 +729,7 @@ pub(super) mod tests {
                 game.transaction(|host, tx| {
                     Ok::<_, ()>(slot.edit(host, tx, |stack| *stack = stone))
                 }),
-                Ok(false)
+                Ok(Err(ItemPlaceEditError::ItemChanged))
             );
             assert_eq!(inventory(game), expected);
             assert_eq!(game.inventory, host_before);
@@ -604,7 +742,7 @@ pub(super) mod tests {
                 game.transaction(|host, tx| {
                     Ok::<_, ()>(empty.edit(host, tx, |_| panic!("empty place ran editor")))
                 }),
-                Ok(false)
+                Ok(Err(ItemPlaceEditError::NotHeld))
             );
             assert_eq!(inventory(game), expected);
             assert_eq!(game.dropped.len(), dropped_before);
@@ -637,9 +775,12 @@ pub(super) mod tests {
             let original_stack = before[3].as_ref().unwrap().try_into_api().unwrap();
             assert_eq!(
                 game.transaction(|host, tx| {
-                    assert!(slot.edit(host, tx, |stack| {
-                        stack.copy_component_from(&source, "minecraft:custom_name");
-                    }));
+                    assert!(
+                        slot.edit(host, tx, |stack| {
+                            stack.copy_component_from(&source, "minecraft:custom_name");
+                        })
+                        .is_ok()
+                    );
                     assert_eq!(slot.stack(host), Some(expected_stack.clone()));
                     Err::<(), ()>(())
                 }),
@@ -651,9 +792,12 @@ pub(super) mod tests {
             assert_eq!(
                 game.transaction(|host, _| {
                     let child = host.transaction(|host, tx| {
-                        assert!(slot.edit(host, tx, |stack| {
-                            stack.copy_component_from(&source, "minecraft:custom_name");
-                        }));
+                        assert!(
+                            slot.edit(host, tx, |stack| {
+                                stack.copy_component_from(&source, "minecraft:custom_name");
+                            })
+                            .is_ok()
+                        );
                         Err::<(), ()>(())
                     });
                     assert_eq!(child, Err(()));
@@ -908,6 +1052,599 @@ pub(super) mod tests {
             0.0,
         ));
         30
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn worn_component_edit_is_quiet_and_reaches_tracking() {
+        use mod_api::EquipmentSlot;
+        use sunrise_client::lan::Out;
+        use sunrise_protocol::{buf::Reader, packets::play::Clientbound};
+
+        with_game(|game| {
+            open_to_lan(game);
+            let (tx, rx) = mpsc::channel();
+            let mut viewer = guest(1);
+            viewer.sender = PlayerSender::new(tx, Arc::default());
+            viewer.position = [0.5, 64.0, 1.5];
+            viewer.dimension = "minecraft:overworld".into();
+            viewer.loaded = true;
+            viewer.load_timeout = 0;
+            viewer.sent_chunks.insert((0, 0));
+            game.lan.as_mut().unwrap().hub.guests.push(viewer);
+
+            let id = zombie(game);
+            let living = game.living(game.entity(id).unwrap()).unwrap();
+            let slot = EquipmentSlot::Chest;
+            let armor = ItemStack::new("minecraft:diamond_chestplate", 1);
+            assert!(game.living_set_equipment(living, slot, Some(armor)));
+            game.mobs[0].first_tick = false;
+            // Track once to pair, again to cache a full idle state, then confirm it can go bare.
+            for _ in 0..3 {
+                game.level_pass.packets_drained = true;
+                game.mobs[0].needs_sync = false;
+                game.tick_lan(false);
+            }
+            let host = game.lan.as_ref().unwrap();
+            assert!(host.hub.guests[0].tracker.is_tracking(id as i32));
+            assert!(
+                host.states
+                    .as_slice()
+                    .iter()
+                    .any(|state| state.id == id as i32 && state.bare)
+            );
+            rx.try_iter().for_each(drop);
+
+            game.audio.capture = Some(Vec::new());
+            let place = ItemPlace::Equipment { entity: id, slot };
+            super::super::dispense_fixture::start_recording();
+            game.transaction(|host, tx| place.edit(host, tx, |stack| stack.set_damage(7)))
+                .unwrap();
+            assert!(game.audio.capture.as_ref().unwrap().is_empty());
+            assert!(super::super::dispense_fixture::stop_recording().is_empty());
+
+            game.level_pass.packets_drained = true;
+            game.tick_lan(false);
+            let hub = &game.lan.as_ref().unwrap().hub;
+            let received = rx
+                .try_iter()
+                .flat_map(|message| match message {
+                    Out::Packet(body) => vec![body],
+                    Out::Packets(bodies) => bodies,
+                    Out::Disconnect(reason) => panic!("tracking viewer disconnected: {reason:?}"),
+                })
+                .find_map(|body| {
+                    let mut reader = Reader::new(&body);
+                    let packet = reader.varint().ok()?;
+                    let Clientbound::SetEquipment(equipment) =
+                        Clientbound::decode(packet, reader.rest()).ok()?
+                    else {
+                        return None;
+                    };
+                    if equipment.id != id as i32 {
+                        return None;
+                    }
+                    let (_, stack) = equipment
+                        .slots
+                        .into_iter()
+                        .find(|(at, _)| *at == slot as u8)?;
+                    Some(hub.stack_from_network(&stack?))
+                })
+                .expect("the existing viewer receives the idle mob's equipment edit");
+            assert_eq!(received.item.as_ref(), "minecraft:diamond_chestplate");
+            assert_eq!(received.count, 1);
+            assert_eq!(received.damage, 7);
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn virtual_wrappers_and_cursors_refuse_a_whole_stack_edit() {
+        super::super::native_guest_turn_tests::with_guests(|game| {
+            let stick = ItemStack::new("minecraft:stick", 32);
+            let cursor_stack = ItemStack::new("minecraft:paper", 1);
+            game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                guest.game_mode = 1;
+                guest.inventory[0] = Some(stick.clone());
+                guest.carried = Some(cursor_stack.clone());
+            });
+            let player = game.player(12).unwrap();
+            let menu = game.player_container_menu(player).unwrap();
+            let hand = ItemPlace::PlayerHand {
+                player: player.uuid(),
+                hand: mod_api::Hand::Main,
+            };
+            for place in [
+                ItemPlace::Strict(Box::new(ItemPlace::InfiniteMaterials {
+                    player: player.uuid(),
+                    inner: Box::new(hand.clone()),
+                })),
+                ItemPlace::OneByOne(Box::new(hand)),
+                menu.cursor(),
+            ] {
+                assert_eq!(
+                    game.transaction(|host, tx| {
+                        place.edit(host, tx, |_| panic!("a refused place ran its editor"))
+                    }),
+                    Err(ItemPlaceEditError::UnsupportedPlace)
+                );
+            }
+            let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+            assert_eq!(guest.inventory[0].as_ref(), Some(&stick));
+            assert_eq!(guest.carried.as_ref(), Some(&cursor_stack));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn component_edit_preserves_live_nested_data_and_applies_a_removal() {
+        use mod_api::Tag;
+
+        with_game(|game| {
+            open_to_lan(game);
+            let mut player = guest(1);
+            let mut map = ItemStack::new("minecraft:filled_map", 1);
+            map.data_mut().map_id = Some(27);
+            map.data_mut().map_post_processing = Some(1);
+            let mut bundle = ItemStack::new("minecraft:bundle", 1);
+            let data = bundle.data_mut();
+            data.bundle_contents.push(map);
+            data.bundle_selected = sunrise_items::item_data::BundleSelected(0);
+            data.custom_name = Some(Tag::String("keep my contents".into()));
+            player.inventory[3] = Some(bundle);
+            let place = ItemPlace::PlayerSlot {
+                player: 123,
+                slot: 3,
+            };
+            game.lan.as_mut().unwrap().hub.guests.push(player);
+
+            game.transaction(|host, tx| {
+                place.edit(host, tx, |stack| {
+                    stack
+                        .apply_components(
+                            &[(
+                                "!minecraft:custom_name".into(),
+                                Tag::compound(Vec::<(&str, Tag)>::new()),
+                            )]
+                            .into(),
+                        )
+                        .unwrap();
+                })
+            })
+            .unwrap();
+            let bundle = game.lan.as_ref().unwrap().hub.guests[0].inventory[3]
+                .as_ref()
+                .unwrap()
+                .data()
+                .unwrap();
+            assert!(bundle.custom_name.is_none());
+            assert!(bundle.other("!minecraft:custom_name").is_some());
+            assert_eq!(bundle.bundle_selected.0, 0);
+            let map = bundle.bundle_contents[0].data().unwrap();
+            assert_eq!(map.map_id, Some(27));
+            assert_eq!(map.map_post_processing, Some(1));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn editing_a_raid_banners_name_preserves_its_other_components() {
+        use mod_api::Tag;
+        use sunrise_items::item_data::encode_extra_components;
+
+        with_game(|game| {
+            open_to_lan(game);
+            let banner = sunrise_client::mobs::raider::ominous_banner();
+            let original = encode_extra_components(&banner).unwrap();
+            let mut player = guest(1);
+            player.inventory[3] = Some(banner);
+            game.lan.as_mut().unwrap().hub.guests.push(player);
+            let place = ItemPlace::PlayerSlot {
+                player: 123,
+                slot: 3,
+            };
+            let edit = |game: &mut super::Game<'_>, id: &str, value: Tag| {
+                game.transaction(|host, tx| {
+                    place.edit(host, tx, |stack| {
+                        stack
+                            .apply_components(&[(id.into(), value)].into())
+                            .unwrap();
+                    })
+                })
+                .unwrap();
+            };
+            let banner = |game: &super::Game<'_>| {
+                game.lan.as_ref().unwrap().hub.guests[0].inventory[3]
+                    .clone()
+                    .unwrap()
+            };
+            edit(
+                game,
+                "minecraft:custom_name",
+                Tag::String("Named Raid Banner".into()),
+            );
+            let compact = banner(game);
+            assert!(compact.data().unwrap().ominous_banner);
+            let mut named = sunrise_client::mobs::raider::ominous_banner();
+            named.data_mut().set_other(
+                "minecraft:custom_name",
+                Some(Tag::String("Named Raid Banner".into())),
+            );
+            assert!(compact.same_item_same_components(&named));
+
+            let name = Tag::String("Renamed Raid Banner".into());
+            edit(game, "minecraft:item_name", name.clone());
+            let edited = encode_extra_components(&banner(game)).unwrap();
+            assert_eq!(edited.get("minecraft:item_name"), Some(&name));
+            for id in [
+                "minecraft:banner_patterns",
+                "minecraft:rarity",
+                "minecraft:tooltip_display",
+            ] {
+                assert_eq!(
+                    edited.get(id).unwrap(),
+                    original.get(id).unwrap(),
+                    "{id} was not edited"
+                );
+            }
+
+            let rare = Tag::String("rare".into());
+            edit(game, "minecraft:rarity", rare.clone());
+            edit(
+                game,
+                "minecraft:item_name",
+                original.get("minecraft:item_name").unwrap().clone(),
+            );
+            let saved = sunrise_items::item_nbt::item_to_nbt(&banner(game), game.items());
+            let loaded = sunrise_items::item_nbt::item_from_nbt(&saved).unwrap();
+            for stack in [banner(game), loaded] {
+                let components = encode_extra_components(&stack).unwrap();
+                assert_eq!(components.get("minecraft:rarity"), Some(&rare));
+                for id in [
+                    "minecraft:item_name",
+                    "minecraft:banner_patterns",
+                    "minecraft:tooltip_display",
+                ] {
+                    assert_eq!(components.get(id), original.get(id), "{id} must survive");
+                }
+            }
+            // Writing the last differing value restores the stock representation,
+            // so a resource reconstructed from the same components compares equal.
+            let fresh = sunrise_client::mobs::raider::ominous_banner();
+            let prototype = fresh.try_into_api().unwrap();
+            game.transaction(|host, tx| {
+                place.edit(host, tx, |stack| {
+                    for id in ["minecraft:rarity", "minecraft:custom_name"] {
+                        stack.copy_component_from(&prototype, id);
+                    }
+                })
+            })
+            .unwrap();
+            assert!(banner(game).same_item_same_components(&fresh));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn nested_equipment_rollback_restores_the_live_modifiers_not_the_quiet_stack() {
+        use mod_api::{EquipmentSlot, Tag};
+
+        with_game(|game| {
+            let id = zombie(game);
+            let living = game.living(game.entity(id).unwrap()).unwrap();
+            let slot = EquipmentSlot::Chest;
+            let place = ItemPlace::Equipment { entity: id, slot };
+            assert!(game.living_set_equipment(
+                living,
+                slot,
+                Some(ItemStack::new("minecraft:diamond_chestplate", 1))
+            ));
+            let armor = |host: &dyn mod_api::ServerHost| {
+                living.attribute_value(host, "minecraft:armor").unwrap()
+            };
+            let before = armor(game);
+            assert!(before >= 8.0);
+            for (commit_child, gravity) in [(false, 0.1), (true, 0.2)] {
+                let rolled_back = game.transaction(|host, tx| {
+                    place
+                        .edit(host, tx, |stack| {
+                            stack
+                                .apply_components(
+                                    &[(
+                                        "!minecraft:attribute_modifiers".into(),
+                                        Tag::compound(Vec::<(&str, Tag)>::new()),
+                                    )]
+                                    .into(),
+                                )
+                                .unwrap();
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        armor(host),
+                        before,
+                        "quiet edit must not recollect the worn stack"
+                    );
+                    let taken = place.resource(host).unwrap();
+                    let child = host.transaction(|host, tx| {
+                        assert_eq!(place.extract(host, tx, &taken, 1), 1);
+                        assert!(armor(host) < before);
+                        assert!(living.set_attribute_base(host, "minecraft:gravity", gravity));
+                        // This disjoint write invalidates the live map. Rollback must use
+                        // the updated seed and restore armor without asking the item again.
+                        assert!(living.set_attribute_base(host, "minecraft:max_health", 30.0));
+                        commit_child.then_some(()).ok_or(())
+                    });
+                    assert_eq!(child.is_ok(), commit_child);
+                    assert_eq!(
+                        living.attribute_base(host, "minecraft:gravity"),
+                        Some(gravity)
+                    );
+                    if !commit_child {
+                        assert_eq!(
+                            armor(host),
+                            before,
+                            "child abort restores the still-active modifiers"
+                        );
+                        assert_eq!(place.resource(host), Some(taken));
+                    }
+                    Err::<(), ()>(())
+                });
+                assert_eq!(rolled_back, Err(()));
+                assert_eq!(
+                    living.attribute_base(game, "minecraft:gravity"),
+                    Some(gravity)
+                );
+                assert_eq!(
+                    living.attribute_base(game, "minecraft:max_health"),
+                    Some(30.0)
+                );
+                assert_eq!(
+                    armor(game),
+                    before,
+                    "parent abort restores the original modifiers"
+                );
+                assert_eq!(
+                    game.mobs[0]
+                        .equipment_stacks()
+                        .get(slot as usize)
+                        .unwrap()
+                        .item
+                        .as_ref(),
+                    "minecraft:diamond_chestplate"
+                );
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn equipment_rollback_undoes_a_rebuild_after_a_quiet_edit() {
+        use mod_api::{EquipmentSlot, Tag};
+
+        with_game(|game| {
+            let entity = zombie(game);
+            let living = game.living(game.entity(entity).unwrap()).unwrap();
+            let slot = EquipmentSlot::Chest;
+            let place = ItemPlace::Equipment { entity, slot };
+            assert!(game.living_set_equipment(
+                living,
+                slot,
+                Some(ItemStack::new("minecraft:diamond_chestplate", 1))
+            ));
+            let before = place.resource(game).unwrap();
+            let armor =
+                |host: &dyn ServerHost| living.attribute_value(host, "minecraft:armor").unwrap();
+            let worn_armor = armor(game);
+            assert!(worn_armor >= 8.0);
+            let result = game.transaction(|host, tx| {
+                place
+                    .edit(host, tx, |stack| {
+                        stack
+                            .apply_components(
+                                &[(
+                                    "!minecraft:attribute_modifiers".into(),
+                                    Tag::Compound(Default::default()),
+                                )]
+                                .into(),
+                            )
+                            .unwrap();
+                    })
+                    .unwrap();
+                assert_eq!(
+                    armor(host),
+                    worn_armor,
+                    "the quiet edit does not refresh armor"
+                );
+                assert!(living.set_attribute_base(host, "minecraft:max_health", 32.0));
+                assert!(
+                    armor(host) < worn_armor,
+                    "the rebuild sees the tentative edit"
+                );
+                Err::<(), ()>(())
+            });
+            assert_eq!(result, Err(()));
+            assert_eq!(place.resource(game), Some(before));
+            assert_eq!(
+                armor(game),
+                worn_armor,
+                "rollback restores the pre-rebuild live modifiers"
+            );
+            assert_eq!(
+                living.attribute_base(game, "minecraft:max_health"),
+                Some(32.0)
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn equipment_rollback_keeps_a_later_permanent_modifier_with_the_same_id() {
+        use mod_api::{
+            AttributeModifier, AttributeOperation, EquipmentSlot, Identifier, ModifierLifetime, Tag,
+        };
+
+        with_game(|game| {
+            let entity = zombie(game);
+            let living = game.living(game.entity(entity).unwrap()).unwrap();
+            let slot = EquipmentSlot::Chest;
+            let place = ItemPlace::Equipment { entity, slot };
+            let attribute = "minecraft:gravity";
+            let modifier = "test:bonus";
+            let gravity = |host: &dyn ServerHost| living.attribute_value(host, attribute).unwrap();
+            assert!(living.set_attribute_base(game, attribute, 0.125));
+            let mut armor = ItemStack::new("minecraft:diamond_chestplate", 1);
+            armor.data_mut().set_other(
+                "minecraft:attribute_modifiers",
+                Some(Tag::List(vec![Tag::compound([
+                    ("type", Tag::String(attribute.into())),
+                    ("id", Tag::String(modifier.into())),
+                    ("amount", Tag::Double(0.25f64.to_bits())),
+                    ("operation", Tag::String("add_value".into())),
+                    ("slot", Tag::String("chest".into())),
+                ])])),
+            );
+            assert!(game.living_set_equipment(living, slot, Some(armor)));
+            assert_eq!(gravity(game), 0.375);
+            let resource = place.resource(game).unwrap();
+            game.transaction(|host, _| {
+                let child = host.transaction(|host, tx| {
+                    assert_eq!(place.extract(host, tx, &resource, 1), 1);
+                    assert_eq!(gravity(host), 0.125);
+                    assert!(living.add_attribute_modifier(
+                        host,
+                        attribute,
+                        AttributeModifier::new(
+                            Identifier::parse(modifier).unwrap(),
+                            0.5,
+                            AttributeOperation::AddValue
+                        ),
+                        ModifierLifetime::Permanent,
+                    ));
+                    Err::<(), ()>(())
+                });
+                assert_eq!(child, Err(()));
+                assert_eq!(place.resource(host), Some(resource));
+                assert_eq!(gravity(host), 0.625);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+            assert_eq!(gravity(game), 0.625);
+            let entry = saved_mob_attribute(game, entity, attribute);
+            assert_eq!(
+                entry.get("modifiers"),
+                Some(&Tag::List(vec![Tag::compound([
+                    ("id", Tag::String(modifier.into())),
+                    ("amount", Tag::Double(0.5f64.to_bits())),
+                    ("operation", Tag::String("add_value".into())),
+                ])]))
+            );
+        });
+    }
+
+    fn saved_mob_attribute(game: &super::Game<'_>, entity: u32, attribute: &str) -> mod_api::Tag {
+        use mod_api::Tag;
+        let mob = game.mobs.iter().find(|mob| mob.id == entity).unwrap();
+        let saved = sunrise_client::entity_nbt::mob_to_nbt(
+            mob,
+            [0, 0, 0, 1],
+            None,
+            None,
+            |_| None,
+            game.items(),
+        );
+        let Some(Tag::List(attributes)) = saved.get("attributes") else {
+            panic!("the mob must save its live attributes");
+        };
+        let id = Tag::String(attribute.into());
+        attributes
+            .iter()
+            .find(|entry| entry.get("id") == Some(&id))
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_same_id_gear_refresh_only_keeps_its_overwrite_on_commit() {
+        use mod_api::{
+            AttributeModifier, AttributeOperation, EquipmentSlot, Identifier, ModifierLifetime, Tag,
+        };
+
+        for commit in [false, true] {
+            with_game(|game| {
+                let entity = zombie(game);
+                let living = game.living(game.entity(entity).unwrap()).unwrap();
+                let slot = EquipmentSlot::Chest;
+                let place = ItemPlace::Equipment { entity, slot };
+                let attribute = "minecraft:max_health";
+                let modifier = "test:bonus";
+                assert!(living.set_attribute_base(game, attribute, 20.0));
+                assert!(game.living_set_equipment(
+                    living,
+                    slot,
+                    Some(ItemStack::new("minecraft:diamond_chestplate", 1))
+                ));
+                let before = place.resource(game).unwrap();
+                let mut after = None;
+                let result = game.transaction(|host, tx| {
+                    place
+                        .edit(host, tx, |stack| {
+                            let rows = Tag::List(vec![Tag::compound([
+                                ("type", Tag::String(attribute.into())),
+                                ("id", Tag::String(modifier.into())),
+                                ("amount", Tag::Double(3.0f64.to_bits())),
+                                ("operation", Tag::String("add_value".into())),
+                                ("slot", Tag::String("chest".into())),
+                            ])]);
+                            stack
+                                .apply_components(
+                                    &[("minecraft:attribute_modifiers".into(), rows)].into(),
+                                )
+                                .unwrap();
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        living.attribute_value(host, attribute),
+                        Some(20.0),
+                        "the edit is quiet"
+                    );
+                    after = place.resource(host);
+                    assert_ne!(after.as_ref(), Some(&before));
+                    assert!(living.add_attribute_modifier(
+                        host,
+                        attribute,
+                        AttributeModifier::new(
+                            Identifier::parse(modifier).unwrap(),
+                            5.0,
+                            AttributeOperation::AddValue
+                        ),
+                        ModifierLifetime::Permanent,
+                    ));
+                    assert_eq!(
+                        living.attribute_value(host, attribute),
+                        Some(23.0),
+                        "refresh applies the now-worn item"
+                    );
+                    commit.then_some(()).ok_or(())
+                });
+                assert_eq!(result.is_ok(), commit);
+                assert_eq!(
+                    place.resource(game),
+                    if commit { after } else { Some(before) }
+                );
+                assert_eq!(
+                    living.attribute_value(game, attribute),
+                    Some(if commit { 23.0 } else { 25.0 })
+                );
+                let entry = saved_mob_attribute(game, entity, attribute);
+                let permanent = Tag::List(vec![Tag::compound([
+                    ("id", Tag::String(modifier.into())),
+                    ("amount", Tag::Double(5.0f64.to_bits())),
+                    ("operation", Tag::String("add_value".into())),
+                ])]);
+                assert_eq!(entry.get("modifiers"), (!commit).then_some(&permanent));
+            });
+        }
     }
 
     /// A living entity's [`ENTITY_ITEMS`] is its equipment (#932): seven slots by
@@ -1235,6 +1972,375 @@ pub(super) mod tests {
             if commit { Ok(()) } else { Err(()) }
         });
         moved
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn crafted_by_processes_a_held_map_and_defers_the_stat_and_new_map_until_commit() {
+        use crate::game::maps::MapData;
+
+        super::super::native_guest_turn_tests::with_guests(|game| {
+            let source = game.new_map_id(MapData::fresh(0.0, 0.0, 0, "minecraft:overworld"));
+            let mut map = ItemStack::new("minecraft:filled_map", 1);
+            map.data_mut().map_id = Some(source);
+            map.data_mut().map_post_processing = Some(1);
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .guests
+                .update(0, |guest| guest.carried = Some(map.clone()));
+            let menu = game
+                .player_container_menu(game.player(12).unwrap())
+                .unwrap();
+            let cursor = menu.cursor();
+            let other = ItemPlace::PlayerSlot {
+                player: 12,
+                slot: 0,
+            };
+            let host: &mut dyn ServerHost = game;
+            let aborted = host.transaction(|host, tx| {
+                assert_eq!(
+                    other.on_crafted_by(host, tx, 1),
+                    Err(CraftedByError::NotHeld)
+                );
+                cursor.on_crafted_by(host, tx, 3)?;
+                Err::<(), CraftedByError>(CraftedByError::Unavailable)
+            });
+            assert_eq!(aborted, Err(CraftedByError::Unavailable));
+            let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+            assert_eq!(guest.carried, Some(map.clone()));
+            let conn = guest.conn;
+            assert_eq!(
+                game.lan
+                    .as_ref()
+                    .unwrap()
+                    .play
+                    .get(&conn)
+                    .unwrap()
+                    .stats
+                    .get("crafted", "minecraft:filled_map"),
+                0
+            );
+            assert!(game.map(source + 1).is_none());
+
+            let host: &mut dyn ServerHost = game;
+            assert_eq!(
+                host.transaction(|host, tx| cursor.on_crafted_by(host, tx, 3)),
+                Ok(())
+            );
+            let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+            let carried = guest.carried.as_ref().unwrap();
+            assert_eq!(
+                carried.data().and_then(|data| data.map_id),
+                Some(source + 1)
+            );
+            assert_eq!(
+                carried.data().and_then(|data| data.map_post_processing),
+                None
+            );
+            assert_eq!(game.map(source + 1).unwrap().scale, 1);
+            assert_eq!(
+                game.lan
+                    .as_ref()
+                    .unwrap()
+                    .play
+                    .get(&conn)
+                    .unwrap()
+                    .stats
+                    .get("crafted", "minecraft:filled_map"),
+                3
+            );
+
+            game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                guest.carried = Some(ItemStack::new("minecraft:stick", 2))
+            });
+            let host: &mut dyn ServerHost = game;
+            assert_eq!(
+                host.transaction(|host, tx| cursor.on_crafted_by(host, tx, 2)),
+                Ok(())
+            );
+            assert_eq!(
+                game.lan.as_ref().unwrap().hub.guests[0].carried,
+                Some(ItemStack::new("minecraft:stick", 2))
+            );
+            assert_eq!(
+                game.lan
+                    .as_ref()
+                    .unwrap()
+                    .play
+                    .get(&conn)
+                    .unwrap()
+                    .stats
+                    .get("crafted", "minecraft:stick"),
+                2
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn crafted_by_map_reservations_follow_nested_commit_and_abort() {
+        use super::{Game, Menu};
+        use crate::game::maps::{MapData, map_id};
+        use sunrise_client::save::read_dat;
+        use sunrise_core::nbt::Tag;
+
+        super::super::native_guest_turn_tests::with_guests(|game| {
+            let save = tempfile::tempdir().unwrap();
+            game.world_root = save.path().to_owned();
+            let maps_dir = save.path().join("data/minecraft/maps");
+            let source = game.new_map_id(MapData::fresh(0.0, 0.0, 0, "minecraft:overworld"));
+            let map = |directive| {
+                let mut stack = ItemStack::new("minecraft:filled_map", 1);
+                stack.data_mut().map_id = Some(source);
+                stack.data_mut().map_post_processing = Some(directive);
+                stack
+            };
+            game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                guest.carried = Some(map(1));
+                guest.inventory[0] = Some(map(0));
+            });
+            let menu = game
+                .player_container_menu(game.player(12).unwrap())
+                .unwrap();
+            let cursor = menu.cursor();
+            let slot = ItemPlace::MenuSlot { menu, slot: 36 };
+            let held_ids = |game: &Game<'_>| {
+                [
+                    game.menu_carried(menu).flatten().as_ref().and_then(map_id),
+                    game.menu_slot(menu, 36).flatten().as_ref().and_then(map_id),
+                ]
+            };
+            let saved_counter = || {
+                let index = read_dat(&maps_dir.join("last_id.dat")).unwrap();
+                index.get("data").unwrap().get("map").unwrap().clone()
+            };
+
+            let root = game.transaction_open();
+            let tx = game.transaction_current().unwrap();
+            cursor.on_crafted_by(game, &tx, 1).unwrap();
+            let child = game.transaction_open();
+            let child_tx = game.transaction_current().unwrap();
+            slot.on_crafted_by(game, &child_tx, 1).unwrap();
+            assert_eq!(held_ids(game), [Some(source + 1), Some(source + 2)]);
+
+            // A held map derived from the parent's pending copy can find the new map.
+            let mut derived = game.menu_carried(menu).flatten().unwrap();
+            derived.data_mut().map_post_processing = Some(0);
+            let maps = game.level_maps([&derived]);
+            Menu::map_crafted(Some(&maps), &mut derived);
+            assert_eq!(map_id(&derived), Some(source + 3));
+            game.register_made_maps(maps);
+            let chained = game.map(source + 3).unwrap();
+            assert_eq!(chained.scale, 1);
+            assert!(chained.locked);
+
+            game.transaction_close(&child, false);
+            assert_eq!(held_ids(game), [Some(source + 1), Some(source)]);
+            assert!(game.map(source + 2).is_none());
+            assert!(game.map(source + 3).is_none());
+
+            let child = game.transaction_open();
+            let child_tx = game.transaction_current().unwrap();
+            slot.on_crafted_by(game, &child_tx, 1).unwrap();
+            game.transaction_close(&child, true);
+            assert_eq!(held_ids(game), [Some(source + 1), Some(source + 2)]);
+            assert!(game.map(source + 2).unwrap().locked);
+
+            // Child commit still isn't a save boundary. Root abort restores both slots and IDs.
+            game.save_maps();
+            assert_eq!(saved_counter(), Tag::Int(source));
+            for id in [source + 1, source + 2, source + 3] {
+                assert!(!maps_dir.join(format!("{id}.dat")).exists());
+            }
+            game.transaction_close(&root, false);
+            game.save_maps();
+            assert_eq!(saved_counter(), Tag::Int(source));
+            assert_eq!(game.peek_map_id(), source + 1);
+            assert_eq!(game.menu_carried(menu).flatten(), Some(map(1)));
+            assert_eq!(game.menu_slot(menu, 36).flatten(), Some(map(0)));
+            for id in [source + 1, source + 2, source + 3] {
+                assert!(game.map(id).is_none());
+                assert!(!maps_dir.join(format!("{id}.dat")).exists());
+            }
+
+            let host: &mut dyn ServerHost = game;
+            assert_eq!(
+                host.transaction(|host, tx| {
+                    cursor.on_crafted_by(host, tx, 1)?;
+                    slot.on_crafted_by(host, tx, 1)
+                }),
+                Ok(())
+            );
+            assert_eq!(held_ids(game), [Some(source + 1), Some(source + 2)]);
+            assert_eq!(game.map(source + 1).unwrap().scale, 1);
+            assert!(game.map(source + 2).unwrap().locked);
+            game.save_maps();
+            assert_eq!(saved_counter(), Tag::Int(source + 2));
+            assert!(maps_dir.join(format!("{}.dat", source + 1)).is_file());
+            assert!(maps_dir.join(format!("{}.dat", source + 2)).is_file());
+            assert!(!maps_dir.join(format!("{}.dat", source + 3)).exists());
+        });
+    }
+
+    fn with_crafted_by_handler_map(
+        accepts_replacement: bool,
+        test: impl FnOnce(&mut super::Game<'_>, ItemPlace, i32, mod_api::ItemStack),
+    ) {
+        use crate::game::maps::MapData;
+        use mod_api::__private::game::Fields;
+        use mod_api::{
+            AttachedItems, AttachmentType, Holder, MenuReplace, MenuSlotPlace, StackList,
+        };
+        use sunrise_core::nbt::{JavaString, Tag};
+
+        static MAP_SLOT: AttachmentType<StackList<ItemResource>> = AttachmentType {
+            namespace: "crafted_map_fixture",
+            name: "slot",
+            default: Vec::new,
+            codec: None,
+            copy_on_death: false,
+            sync: false,
+        };
+
+        struct MapStorage(bool);
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for MapStorage {
+            fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+                let valid: fn(&ItemResource) -> bool = if self.0 { |_| true } else { |_| false };
+                r.entity_capability_before_game(
+                    &ENTITY_ITEMS,
+                    "minecraft:pig",
+                    move |_, entity, ()| {
+                        Some(Box::new(AttachedItems::single(
+                            &MAP_SLOT,
+                            Holder::Entity(entity.id()),
+                            1,
+                            valid,
+                        )))
+                    },
+                );
+            }
+        }
+
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+            "crafted_map_fixture",
+            Box::new(MapStorage(accepts_replacement)),
+        )]
+        .into();
+        crate::game::api_values::install_parts(&mods).unwrap();
+        mod_platform::testing::with_mods(mods, || {
+            super::super::native_guest_turn_tests::with_guests(|game| {
+                let source = game.new_map_id(MapData::fresh(0.0, 0.0, 1, "minecraft:overworld"));
+                let mut map = ItemStack::new("minecraft:filled_map", 1);
+                map.data_mut().map_id = Some(source);
+                let mut map = map.try_into_api().unwrap();
+                map.apply_components(
+                    &[
+                        (
+                            JavaString::from("minecraft:map_post_processing"),
+                            Tag::String("scale".into()),
+                        ),
+                        (
+                            JavaString::from("minecraft:custom_data"),
+                            Tag::compound([("marker", Tag::Int(17))]),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                )
+                .unwrap();
+
+                pig(game, 700, 64.0);
+                let entity = game.entity(700).unwrap();
+                MAP_SLOT
+                    .set(
+                        game,
+                        Holder::Entity(entity.id()),
+                        vec![Some((ItemResource::of(&map), 1))],
+                    )
+                    .unwrap();
+                let host: &mut dyn ServerHost = game;
+                let window = host
+                    .open_menu(
+                        12,
+                        3,
+                        mod_api::Text::literal("map fixture"),
+                        Vec::new(),
+                        MenuReplace::CloseFirst,
+                    )
+                    .unwrap()
+                    .unwrap();
+                let menu = host.menu(12, window).unwrap();
+                game.player_back_mod_menu_slots(
+                    menu.fields().player,
+                    window,
+                    vec![MenuSlotPlace::EntityItems { entity, slot: 0 }],
+                )
+                .unwrap();
+                let place = ItemPlace::MenuSlot { menu, slot: 0 };
+                assert_eq!(place.stack(game), Some(map.clone()));
+                test(game, place, source, map);
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn crafted_by_replaces_the_map_in_a_handler_backed_slot() {
+        with_crafted_by_handler_map(true, |game, place, source, original| {
+            assert_eq!(
+                game.transaction(|game, tx| place.on_crafted_by(game, tx, 3)),
+                Ok(())
+            );
+            let updated = place.stack(game).unwrap();
+            use sunrise_core::nbt::JavaString;
+            let patch = updated.components().unwrap().as_nbt();
+            let custom_data = JavaString::from("minecraft:custom_data");
+            assert_eq!(updated.item(), original.item());
+            assert_eq!(updated.count(), original.count());
+            assert_eq!(
+                patch.get(&JavaString::from("minecraft:map_id")),
+                Some(&mod_api::Tag::Int(source + 1))
+            );
+            assert!(!patch.contains_key(&JavaString::from("minecraft:map_post_processing")));
+            assert_eq!(
+                patch.get(&custom_data),
+                original.components().unwrap().as_nbt().get(&custom_data)
+            );
+            assert_eq!(game.map(source + 1).unwrap().scale, 2);
+            assert_eq!(game.map(source).unwrap().scale, 1);
+            assert_eq!(
+                game.lan.as_ref().unwrap().play[&12]
+                    .stats
+                    .get("crafted", "minecraft:filled_map"),
+                3
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn crafted_by_refused_handler_write_drops_the_map_and_stat() {
+        with_crafted_by_handler_map(false, |game, place, source, original| {
+            // Catch the refusal and commit the caller's transaction anyway.
+            assert_eq!(
+                game.transaction(|game, tx| Ok::<_, ()>(place.on_crafted_by(game, tx, 3))),
+                Ok(Err(CraftedByError::Unavailable))
+            );
+            assert_eq!(place.stack(game), Some(original));
+            assert!(game.map(source + 1).is_none());
+            assert_eq!(game.peek_map_id(), source + 1);
+            let crafted = game
+                .lan
+                .as_ref()
+                .unwrap()
+                .play
+                .get(&12)
+                .map_or(0, |play| play.stats.get("crafted", "minecraft:filled_map"));
+            assert_eq!(crafted, 0);
+        });
     }
 
     #[test]

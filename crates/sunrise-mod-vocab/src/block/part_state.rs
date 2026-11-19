@@ -57,6 +57,33 @@ pub trait BlockEntityPartState: BlockEntityPart + Sized {
         read_state(host, entity, Self::DATA)
     }
 
+    /// The value through a read-only level, or its default. Inserts nothing.
+    /// No chunk loading or loot generation; unloaded/stale holders fail, clients read the
+    /// default. Owning game thread only, never reachable from worker-thread hook bodies.
+    fn state_in(
+        level: &dyn crate::LevelHost,
+        entity: BlockEntityRef,
+    ) -> Result<Self::Data, PartStateError> {
+        Ok(Self::state_existing_in(level, entity)?.unwrap_or_else(Self::DATA.default))
+    }
+    /// The existing value through a read-only level. No chunk loading or loot generation;
+    /// unloaded/stale holders fail and clients return None. Owning game thread only, never
+    /// reachable from worker-thread hook bodies.
+    fn state_existing_in(
+        level: &dyn crate::LevelHost,
+        entity: BlockEntityRef,
+    ) -> Result<Option<Self::Data>, PartStateError> {
+        level
+            .block_entity_part_snapshot(entity, Self::DATA.namespace, Self::DATA.name)?
+            .query(Self::DATA)
+            .map_err(|error| attachment(Self::DATA, error))?
+            .get(AttachmentHolder::BlockEntity(entity))
+            .map_err(|error| match error {
+                AttachmentRowError::Value(error) => attachment(Self::DATA, error),
+                _ => PartStateError::Stale,
+            })
+    }
+
     /// Changes the block entity's value with `edit`, starting from the default when it has
     /// none, and stores the result: see [`edit_part_state`].
     fn edit_state<R>(
@@ -72,7 +99,7 @@ pub trait BlockEntityPartState: BlockEntityPart + Sized {
 /// stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-// no wire: returned inside the mod that called; the calls it reports on cross as attachment calls.
+#[derive(sunrise_mod_api_macros::Wire)]
 pub enum PartStateError {
     /// The handle names a block entity or an entity of another level than the one this host
     /// is in.
@@ -125,9 +152,7 @@ impl fmt::Display for PartStateError {
 impl std::error::Error for PartStateError {}
 
 /// Why a Part's state declaration was refused at registration.
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PartStateRefusal {
     /// `DATA.sync` is set: Part state is not sent to clients yet.
@@ -141,7 +166,7 @@ pub enum PartStateRefusal {
     /// `Arc<dyn BlockPart>`), which crosses only into one link group's resource scope:
     /// not as data both targets read, nor into a save.
     ResourceHandle,
-    /// The same key is already declared with a type of another Wire layout, named here.
+    /// The same key is already declared with a type of another Rust type name, named here.
     Incompatible {
         /// The type the key was first declared with.
         declared: &'static str,
@@ -171,7 +196,7 @@ impl PartStateRefusal {
             ),
             Self::Incompatible { declared } => write!(
                 f,
-                "the key is already declared with type {declared}, whose Wire layout differs"
+                "the key is already declared with type {declared}, a different Rust type"
             ),
             Self::EntityKind { kind, reason } => write!(f, "entity type {kind}: {reason}"),
         }
@@ -179,9 +204,7 @@ impl PartStateRefusal {
 }
 
 /// A Part with state could not be attached.
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BlockEntityStateError {
     /// The Part itself was refused, as by `block_entity_part`.
@@ -233,19 +256,14 @@ impl From<BlockEntityPartError> for BlockEntityStateError {
 }
 
 /// One Part state declaration, as the registrar checks it.
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PartStateDeclaration {
     /// The state's namespace.
     pub namespace: &'static str,
     /// The state's name.
     pub name: &'static str,
-    /// The state type's Wire layout: its schema across the native and wasm boundary, which two
-    /// declarations of one key must share.
-    pub layout: u64,
-    /// Its name, for a refusal.
+    /// The state type's name, which two declarations of one key must share, and a refusal names.
     pub data_name: &'static str,
     sync: bool,
     copy_on_death: bool,
@@ -258,16 +276,14 @@ impl PartStateDeclaration {
     /// The declaration of `key`: what the typed declaration is erased to, the same on both
     /// targets.
     pub fn of<T: crate::wire::Wire + 'static>(key: &AttachmentType<T>) -> Self {
-        let (layout, resource) = crate::wire::resource_layout::<T>();
         Self {
             namespace: key.namespace,
             name: key.name,
-            layout,
             data_name: std::any::type_name::<T>(),
             sync: key.sync,
             copy_on_death: key.copy_on_death,
             codec: key.codec.is_some(),
-            resource,
+            resource: T::holds_resource(&mut Vec::new()),
         }
     }
 
@@ -488,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn declarations_refuse_sync_copy_on_death_handles_and_codec_less_wasm_state() {
+    fn declarations_refuse_sync_copy_on_death_and_codec_less_wasm_state() {
         let check = |key: &AttachmentType<i32>, wasm| PartStateDeclaration::of(key).check(wasm);
         assert_eq!(check(&key(false, false, true), true), Ok(()));
         assert_eq!(check(&key(false, false, false), false), Ok(()));
@@ -504,21 +520,43 @@ mod tests {
             check(&key(false, true, true), false),
             Err(PartStateRefusal::CopyOnDeath)
         );
-        // A handle anywhere in the type, however deep, on either target.
-        type Held = Option<Vec<(u8, Arc<dyn crate::BlockPart>)>>;
-        static HELD: AttachmentType<Held> = AttachmentType {
-            namespace: "test",
-            name: "held",
-            default: || None,
-            codec: None,
-            copy_on_death: false,
-            sync: false,
-        };
+    }
+
+    #[test]
+    fn a_resource_handle_anywhere_in_the_type_refuses_the_declaration_on_both_targets() {
+        #[derive(sunrise_mod_api_macros::Wire)]
+        struct Holds {
+            _part: Vec<(u8, Option<Arc<dyn BlockPart>>)>,
+        }
+        #[derive(sunrise_mod_api_macros::Wire)]
+        enum Plain {
+            _A(u8, String),
+            _B { _x: Vec<Option<i64>> },
+        }
+        fn declared<T: crate::wire::Wire + 'static>(wasm: bool) -> Result<(), PartStateRefusal> {
+            let key = AttachmentType::<T> {
+                namespace: "test",
+                name: "state",
+                default: || unreachable!(),
+                codec: Some(AttachmentCodec {
+                    encode: |_| Ok(Compound::new()),
+                    decode: |_| unreachable!(),
+                }),
+                copy_on_death: false,
+                sync: false,
+            };
+            PartStateDeclaration::of(&key).check(wasm)
+        }
         for wasm in [false, true] {
             assert_eq!(
-                PartStateDeclaration::of(&HELD).check(wasm),
+                declared::<Option<Arc<dyn BlockPart>>>(wasm),
                 Err(PartStateRefusal::ResourceHandle)
             );
+            assert_eq!(
+                declared::<Holds>(wasm),
+                Err(PartStateRefusal::ResourceHandle)
+            );
+            assert_eq!(declared::<Plain>(wasm), Ok(()));
         }
     }
 

@@ -37,13 +37,11 @@ pub fn register(m: &mut Mob) {
 pub fn suffocating(m: &Mob) -> bool {
     m.species() == Species::Strider && m.extra.flag
 }
-/// The movement speed attribute with `SUFFOCATING_MODIFIER` while cold.
-pub fn movement_speed(m: &Mob, base: f64) -> f64 {
-    if suffocating(m) {
-        base + base * SUFFOCATING
-    } else {
-        base
-    }
+/// `SUFFOCATING_MODIFIER` while cold (`ADD_MULTIPLIED_BASE`): it sums with the
+/// base before an effect's `ADD_MULTIPLIED_TOTAL` multiplies
+/// (`Mob::movement_speed`).
+pub fn suffocating_modifier(m: &Mob) -> Option<(f64, super::finalize::Op)> {
+    suffocating(m).then_some((SUFFOCATING, super::finalize::Op::AddMultipliedBase))
 }
 /// `Strider.tick` before `super.tick()`: the tempted and retreating sounds,
 /// then cold unless in or on a warm block or riding a warm strider.

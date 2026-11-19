@@ -103,7 +103,7 @@ fn add_sections(groups: &mut Vec<Group<ExtraRow>>) {
                     Row::new(id, lang::get(label), Value::Choice(label_text(value)))
                 }
                 added::Row::Slider { label, value, text } => {
-                    let position = value.clamp(0.0, 1.0);
+                    let position = f64::from(value.clamp(0.0, 1.0));
                     let text = label_text(text);
                     let value = Value::Slider {
                         position,
@@ -170,8 +170,7 @@ fn item_row(item: Item, s: &Settings) -> Row<ExtraRow> {
         .live(live)
 }
 
-/// Zoom, the FPS counter, Keystrokes and the Minimap are official mods now; Extras keeps a way to
-/// the one players look for here.
+/// Zoom is an official mod now; Extras keeps a way to it, as players look for it here.
 fn zoom_rows(s: &Settings) -> Vec<Row<ExtraRow>> {
     let installed = &s.mods.installed;
     let found = installed
@@ -256,9 +255,9 @@ impl Screen for ExtrasScreen {
             }
         }
     }
-    fn slide(&mut self, _s: &mut Settings, row: ExtraRow, position: f32) {
+    fn slide(&mut self, _s: &mut Settings, row: ExtraRow, position: f64) {
         if let ExtraRow::Added(page, r) = row {
-            act(page, r, Act::Slide(position));
+            act(page, r, Act::Slide(position as f32));
         }
     }
     /// With the wheel extra on, the wheel over an item changes it, without a click; the mod's rows

@@ -117,7 +117,10 @@ pub fn main() -> sunrise_client::Result<()> {
                 .flatten()
                 .map(|n| read(&stand.live, &catalog, entity, n, Vec::new()))
                 .collect();
-            (reads, entity_nbt::armor_stand_to_nbt(&stand, [0; 4], None))
+            (
+                reads,
+                entity_nbt::armor_stand_to_nbt(&stand, [0; 4], None, &Default::default()),
+            )
         } else {
             let mut mob = entity_nbt::mob_from_nbt(&tag, &mobs, 1, None).ok_or("mob")?;
             let mut live = std::mem::take(&mut mob.extra.live);
@@ -139,7 +142,7 @@ pub fn main() -> sunrise_client::Result<()> {
                 .collect();
             (
                 reads,
-                entity_nbt::mob_to_nbt(&mob, [0; 4], None, None, |_| None),
+                entity_nbt::mob_to_nbt(&mob, [0; 4], None, None, |_| None, &Default::default()),
             )
         };
         for (n, r) in case["read"].as_array().into_iter().flatten().zip(reads) {

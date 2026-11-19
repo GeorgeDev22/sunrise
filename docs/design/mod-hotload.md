@@ -12,7 +12,7 @@ restart" to seconds. It builds on the registry v2 ([registry-v2.md](registry-v2.
 | | Install | Turn on or off | Change |
 |---|---|---|---|
 | Content mod (`.smod`) | launcher, or by hand in `sunrise-mods/` | Options > Mods, then **restart** | rebuild the `.smod`, restart |
-| Native mod (`.hnmod`) | launcher only | off: at once, if the mod checks `on`; on: **rebuild** | **rebuild** (minutes), restart |
+| Native mod (`.smod` with `[native]`) | launcher only | off: at once, if the mod checks `on`; on: **rebuild** | **rebuild** (minutes), restart |
 
 Three facts from the code shape the plan:
 
@@ -138,7 +138,7 @@ with the options screen's widgets (`options_ui`), every string through `Text::tr
   where the launcher puts it.
 - **Native mods.** Listed with the launcher's warning, word for word: they are native code with the player's rights,
   not sandboxed, and the red **Install** button asks first, as the launcher's trust notice does. The game can't
-  compile, so it installs the `.hnmod` into `sunrise-native-mods/`, and the launcher builds it before the next play
+  compile, so it installs the native `.smod` into `sunrise-native-mods/`, and the launcher builds it before the next play
   (#9901). The registry review stays the gate for every kind.
 
 ## Native mods: the fast path

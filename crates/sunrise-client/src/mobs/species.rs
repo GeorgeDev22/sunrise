@@ -1596,6 +1596,7 @@ impl Def {
                     s,
                     S::Villager | S::WanderingTrader | S::IronGolem | S::SnowGolem | S::CopperGolem
                 ),
+            tick_alone: false,
         }
     }
     fn hostile_class(&self) -> bool {

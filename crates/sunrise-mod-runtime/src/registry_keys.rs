@@ -16,7 +16,7 @@ pub struct Requests {
     pub game_events: Names,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Names {
     pub entries: Vec<Request>,
     pub slots: HashMap<String, u32>,
@@ -29,7 +29,7 @@ pub struct Names {
     pub order: Vec<u32>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Request {
     pub id: String,
     pub mods: Vec<&'static str>,
@@ -81,6 +81,15 @@ impl Names {
             mods.push(mod_id);
         }
         Ok(slot)
+    }
+
+    /// Take back `mod_id`'s request for `id`, as when its only use was dropped. The slot keeps
+    /// its number and an id another mod requested stays requested; with no requester left,
+    /// resolution has nothing to refuse (and returns no value at that position).
+    pub fn withdraw(&mut self, mod_id: &'static str, id: &str) {
+        if let Some(slot) = self.slots.get(id) {
+            self.entries[*slot as usize].mods.retain(|m| *m != mod_id);
+        }
     }
 
     pub fn id(&self, slot: u32) -> Option<&str> {
@@ -259,7 +268,8 @@ pub fn dimension_id(slot: u32) -> Option<&'static str> {
 #[derive(Default)]
 pub struct Effects {
     pub names: Names,
-    pub indices: Vec<usize>,
+    /// Registry index per retained key slot; withdrawn absent requests keep an empty slot.
+    pub indices: Vec<Option<usize>>,
     pub keys: Vec<u32>,
 }
 
@@ -313,14 +323,31 @@ pub fn resolve_effects<'a>(
             .request("sunrise", id)
             .expect("registry owns valid ids");
     }
-    let indices = names.resolve(&mut resolve, |mod_id, id| {
-        EffectResolutionError::UnknownEffect {
-            mod_id,
-            id: id.to_owned(),
-        }
-    })?;
+    let mut errors = Vec::new();
+    let indices: Vec<_> = names
+        .entries
+        .iter()
+        .map(|entry| {
+            let index = resolve(&entry.id);
+            if index.is_none() {
+                errors.extend(entry.mods.iter().map(|&mod_id| {
+                    EffectResolutionError::UnknownEffect {
+                        mod_id,
+                        id: entry.id.clone(),
+                    }
+                }));
+            }
+            index
+        })
+        .collect();
+    if !errors.is_empty() {
+        return Err(errors);
+    }
     let mut keys = vec![u32::MAX; all.len()];
     for (slot, &index) in indices.iter().enumerate() {
+        let Some(index) = index else {
+            continue;
+        };
         let Some(key) = keys.get_mut(index) else {
             return Err(vec![EffectResolutionError::InvalidIndex {
                 id: names.entries[slot].id.clone(),

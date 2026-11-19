@@ -1,5 +1,5 @@
 //! The pending-children matrix crosses native and real wasm dispatch: the same listener source
-//! (`sunrise-mod-wasm/tests/hook-fixture/src/pending_children.rs`) runs as a native mod and inside the
+//! (`sunrise-mod-wasm/tests/fixture/src/pending_children.rs`) runs as a native mod and inside the
 //! wasm fixture, and the same rows check what spawns. The listener's mode is the last digit of the
 //! parent id; what a guest learns from a refused call comes back as decimal digits in the first
 //! child's yaw (see the fixture's header).
@@ -9,7 +9,7 @@ use super::*;
 use crate::game::native_entity_refs::tests::with_game;
 use mod_api::{BabyEntitySpawnEvent, Flow, Hooks, MobSplitEvent, ServerHost};
 
-#[path = "../../../../../sunrise-mod-wasm/tests/hook-fixture/src/pending_children.rs"]
+#[path = "../../../../../sunrise-mod-wasm/tests/fixture/src/pending_children.rs"]
 mod fixture;
 
 struct Native;
@@ -139,7 +139,7 @@ fn load_wasm() -> mod_api::Mods {
     let manifest = Package::read(&path).unwrap().manifest;
     let info = mod_api::PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         mod_api::PackageKind::Code,
         mod_api::Side::Both,
         vec![manifest.id.clone()],

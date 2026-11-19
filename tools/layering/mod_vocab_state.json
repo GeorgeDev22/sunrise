@@ -44,15 +44,20 @@
     "category": "Parts lookup table",
     "reason": "Resolved engine registry identity lookup, replaced on registry reload; it stores installed slot mappings, not authoring requests."
   },
-  "content/registry_keys.rs::MENUS": {
-    "type": "std::sync::LazyLock<std::sync::RwLock<Option<sunrise_mod_runtime::registry_keys::Names>>,>",
+  "content/registry_keys.rs::resolved_menus::EMPTY": {
+    "type": "std::sync::RwLock<Option<sunrise_mod_runtime::registry_keys::Names>>",
     "category": "Parts lookup table",
-    "reason": "Resolved engine registry identity lookup, replaced on registry reload; it stores installed slot mappings, not authoring requests."
+    "reason": "Fallback menu identity lookup before Parts are installed. Installed loads own their menu tables, including fixture registration epochs."
   },
   "content/registry_keys.rs::resolved_block_keys::EMPTY": {
-    "type": "std::sync::OnceLock<sunrise_mod_runtime::block_definitions::Blocks>",
+    "type": "std::sync::OnceLock<Arc<sunrise_mod_runtime::block_definitions::Blocks>>",
     "category": "immutable cache",
     "reason": "Empty or set-once resolved registry lookup returned when no installed Parts inventory supplies one."
+  },
+  "content/registry_keys.rs::share_blocks::SHARED": {
+    "type": "std::sync::Mutex<Vec<Arc<sunrise_mod_runtime::block_definitions::Blocks>>>",
+    "category": "test-support",
+    "reason": "Test installations retain one resolved block table per distinct payload, shared by full equality, so repeated fixtures do not each keep a copy; production builds keep their one install's own table."
   },
   "content/registry_keys.rs::resolved_entity_types::EMPTY": {
     "type": "std::sync::OnceLock<sunrise_mod_runtime::registry_keys::Names>",
@@ -88,6 +93,11 @@
     "type": "RefCell<Option<ListenScope>>",
     "category": "Parts lookup table",
     "reason": "Per-thread listen snapshot a tick phase's worker answers routing questions from, in force only for the phase's work."
+  },
+  "parts/registration_access.rs::install_input::EPOCHS": {
+    "type": "std::sync::atomic::AtomicU64",
+    "category": "monotonic counter",
+    "reason": "Names each Parts installation with a number no later installation reuses, so a registry identity never depends on an installation's address."
   },
   "parts/shared.rs::GAME_PARTS": {
     "type": "RefCell<GamePartsLookup>",
@@ -149,11 +159,6 @@
     "category": "dispatch table",
     "reason": "Thread-local dispatch inventory for isolated engine tests."
   },
-  "wire/mod.rs::RESOURCE_REACHED": {
-    "type": "std::cell::Cell<bool>",
-    "category": "reentrancy guard",
-    "reason": "Per-thread flag set while a Wire layout walk reaches a resource handle's codec, read by the Part state declaration's capability check."
-  },
   "wire/wire_resources.rs::ACCESS": {
     "type": "OnceLock<ResourceAccess>",
     "category": "set-once socket",
@@ -194,11 +199,6 @@
     "category": "test-support",
     "reason": "Compiled only under cfg(any(test, feature = \"testing\")), never in a production build. Set once with installed datapack-registry declarations so connection tests on other threads can look them up; holds no live authoring requests."
   },
-  "@generated/wire_generated.rs::WIRE_LAYOUT": {
-    "type": "::std::sync::LazyLock<u64>",
-    "category": "immutable ABI layout fingerprint",
-    "reason": "Hash of the build-fixed Wire layouts; the generator validates its sole declaration and type before writing output."
-  },
   "world/startup_progress.rs::SCREEN": {
     "type": "OnceLock<Arc<dynStartupScreen>>",
     "category": "dispatch table",
@@ -208,5 +208,15 @@
     "type": "std::cell::Cell<u64>",
     "category": "dispatch table",
     "reason": "Thread-wide count of all listeners entered, bumped by the dispatch loop; scoped engine leases (pending children) compare it so a lease never outlives one listener."
+  },
+  "world/phase_refusal.rs::report::LOGGED": {
+    "type": "OnceLock<Mutex<HashSet<(&'staticstr,&'staticstr)>>>",
+    "category": "reentrancy guard",
+    "reason": "Process-wide set of the (mod, operation) pairs whose refusal has been logged, so a refusing hook names the operation once and not on every call."
+  },
+  "world/phase_refusal.rs::SCOPE": {
+    "type": "Cell<Option<Scope>>",
+    "category": "reentrancy guard",
+    "reason": "Per-thread record of the mod and hook whose listener call is in flight and whether a refusal has latched, which the gate reads to contain a wrong-phase Host call."
   }
 }

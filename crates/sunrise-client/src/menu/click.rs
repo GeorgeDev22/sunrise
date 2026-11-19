@@ -201,10 +201,10 @@ impl Menu {
                 if let Some(carried) = self.state.carried.as_mut() {
                     if primary {
                         let dropped = self.state.carried.take().expect("some");
-                        self.drop_stack(&dropped);
+                        self.drop_stack(&dropped, env.items);
                     } else {
                         let one = split(carried, 1);
-                        self.drop_stack(&one);
+                        self.drop_stack(&one, env.items);
                         tidy(&mut self.state.carried);
                     }
                 }
@@ -269,7 +269,7 @@ impl Menu {
             };
             let mut taken = self.safe_take(env, s, amount, u32::MAX);
             if let Some(t) = &taken {
-                self.drop_stack(t);
+                self.drop_stack(t, env.items);
             }
             if button == 1 {
                 while let Some(t) = &taken {
@@ -278,7 +278,7 @@ impl Menu {
                     }
                     taken = self.safe_take(env, s, amount, u32::MAX);
                     if let Some(t) = &taken {
-                        self.drop_stack(t);
+                        self.drop_stack(t, env.items);
                     }
                 }
             }
@@ -454,7 +454,7 @@ impl Menu {
                         self.set_by_player(env, target, Some(part));
                         self.on_take(env, target, &mut taken);
                         if !self.inventory_add(env, &mut taken) {
-                            self.drop_stack(&taken);
+                            self.drop_stack(&taken, env.items);
                         }
                     } else {
                         self.state.containers[PLAYER][inv_slot] = Some(taken.clone());

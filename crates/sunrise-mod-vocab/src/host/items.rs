@@ -62,6 +62,18 @@ pub trait ItemsHost {
     /// overflow the parser.
     #[access(WorldOnly)]
     fn item_from_snbt(&self, snbt: &str) -> Option<ItemStack>;
+    /// Side: both. Read the creative catalog against this world's active holders and flags.
+    /// On a cache miss, build it with explicit `permissions` and dispatch
+    /// `build_creative_mode_tab_contents`. It does not require an open creative screen.
+    /// A same-parameter read from a listener sees tabs already built and the previous
+    /// contents of tabs not yet built. Reentering with different parameters is refused.
+    /// Published snapshots stay immutable. Permission is a build parameter, not a grant.
+    /// During setup, reload, or without a live world, returns [`CreativeTabReadError::Unavailable`].
+    #[access(Metadata)]
+    fn creative_tabs(
+        &mut self,
+        permissions: CreativeTabPermissions,
+    ) -> Result<std::sync::Arc<CreativeModeTabs>, CreativeTabReadError>;
 }
 /// The server host's methods of the `items` area, implemented by the game and reached through [`ServerHost`].
 #[sunrise_mod_api_macros::host_area]
@@ -150,28 +162,12 @@ pub trait ItemsClientHost {
     #[access(ClientSetup)]
     fn hover_name(&self, stack: &ItemStack) -> String;
     /// Side: client.
-    /// The creative search tab's stacks in order (`CreativeModeTabs.searchTab()`'s
-    /// `getSearchTabDisplayItems`): every item tab's stacks in tab order, each once (the same
-    /// item and components), then the stacks mods add in `build_creative_mode_tab_contents`,
-    /// which join when the tabs are built (the first time the creative inventory opens). The
-    /// operator items tab's only with the last build's `hasPermissions`. A stack's place here
-    /// is its creative order, the order inventory sorters rank by (an item not listed, by its
-    /// first stack). Empty before the game's resources load.
-    #[access(ClientSetup)]
-    fn creative_search_items(&self) -> Vec<ItemStack>;
-    /// Side: client.
-    /// The creative inventory's item tabs, each with the stacks it shows
-    /// (`CreativeModeTabs.tabs()`, `CreativeModeTab.getDisplayItems`), in tab order, and the
-    /// build's `hasPermissions` they were last built with. A tab's stacks keep their
-    /// components, are the ones the creative inventory shows (the operator items tab's only
-    /// when `has_permissions`), and include what mods add in `build_creative_mode_tab_contents`
-    /// once the tabs are built (the first time the creative inventory opens). Not the search,
-    /// saved toolbars or survival inventory tabs; [`creative_search_items`](Self::creative_search_items)
-    /// is the search tab's. The contents come from the game's prepared tab export, which is built
-    /// with vanilla's default feature flags: the build's feature set is not a world's. No tabs
-    /// before the game's resources load.
-    #[access(ClientSetup)]
-    fn creative_tabs(&self) -> CreativeModeTabs;
+    /// The creative search tab's final display order, for ranking stacks in inventory sorters.
+    /// This requests the same catalog as the creative screen (using the player's permission and
+    /// Operator Items Tab option). On a miss it dispatches the creative build hook. During setup,
+    /// reload, a different build, or without a live catalog, this returns an empty list.
+    #[access(Metadata)]
+    fn creative_search_items(&mut self) -> Vec<ItemStack>;
     /// Side: client.
     /// Registered enchantments, in registry order.
     #[access(ClientSetup)]
@@ -197,6 +193,26 @@ pub trait ItemsClientHost {
 #[doc(hidden)]
 #[sunrise_mod_api_macros::host_area]
 pub trait ItemsBackend {
+    /// Side: both. Normalize a creative membership key against the game's item prototypes.
+    #[access(Metadata)]
+    fn creative_stack_key(&self, stack: &ItemStack) -> Option<ItemStack>;
+
+    // The editor checks the active callback on both sides; setup and reload can only return Stale.
+    /// Side: both. Read the current entries through the active creative tab editor.
+    #[access(Metadata)]
+    fn creative_tab_entries(
+        &self,
+        edit: CreativeTabEdit,
+        list: CreativeTabList,
+    ) -> Result<Vec<ItemStack>, CreativeTabEditError>;
+    /// Side: both. Apply a change to the active creative tab editor.
+    #[access(Metadata)]
+    fn creative_tab_change(
+        &self,
+        edit: CreativeTabEdit,
+        change: CreativeTabChange,
+    ) -> Result<(), CreativeTabEditError>;
+
     /// Side: both. Effective damageability after defaults and the stack patch.
     #[access(Metadata)]
     fn item_resource_damageable(&self, stack: &ItemStack) -> bool;
@@ -246,7 +262,9 @@ pub trait ItemsBackend {
         target: EntityRef,
         base_damage: f32,
     ) -> Option<f32>;
-    /// Side: client. The item's standard tooltip lines before mod callbacks or drawing.
+    /// Side: client. Inventory tooltip lines including mod edits, before drawing.
+    /// A request during item tooltip line construction returns base lines without dispatching
+    /// line callbacks again. No request gathers images or draws.
     #[access(WorldOnly)]
     fn item_resource_tooltip(
         &self,
@@ -485,6 +503,27 @@ pub trait ItemsBackendMut {
     /// (`ItemPlace::stack` reads those), and on a client.
     #[access(WorldOnly)]
     fn game_stack(&mut self, place: &ItemPlace) -> Option<ItemStack>;
+    /// Side: server. Writes the changed components on a stack in a player slot, hand or mob or
+    /// armor stand equipment, without running any equipment effects. The stack must already be
+    /// there. Journaled in `tx`.
+    #[access(WorldOnly)]
+    fn game_edit_stack(
+        &mut self,
+        place: &ItemPlace,
+        stack: ItemStack,
+        changed: &[String],
+        tx: &Transaction,
+    ) -> Result<(), ItemPlaceEditError>;
+    /// Side: server. Runs `ItemStack.onCraftedBy` for a stack held by a menu slot or its cursor,
+    /// including the item's post-processing and the player's crafted statistic, in transaction
+    /// `tx`.
+    #[access(WorldOnly)]
+    fn game_on_crafted_by(
+        &mut self,
+        place: &ItemPlace,
+        tx: &Transaction,
+        amount: i32,
+    ) -> Result<(), CraftedByError>;
     /// Side: server.
     /// `ItemAccess.insert` at a player's place, an item entity's or an entity's slot: up to
     /// `amount` of `resource`, into the place where it's empty or holds the same item and

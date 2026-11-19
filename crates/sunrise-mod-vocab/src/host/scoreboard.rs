@@ -44,6 +44,26 @@ pub trait ScoreboardServerHost {
     /// stale objective.
     #[access(WorldOnly)]
     fn set_display_slot(&mut self, slot: DisplaySlot, objective: Option<ObjectiveRef>) -> bool;
+    /// Side: server.
+    /// `Scoreboard.getPlayerTeam`: the team with that name, or None.
+    #[access(WorldOnly)]
+    fn team(&self, name: &str) -> Option<TeamRef>;
+    /// Side: server.
+    /// `Scoreboard.getPlayerTeams`: every team, in the board's own order (vanilla's is a hash
+    /// map's, so no order is promised).
+    #[access(WorldOnly)]
+    fn teams(&self) -> Vec<TeamRef>;
+    /// Side: server.
+    /// `/team add`: a new team with its name as display name, no color, no members and
+    /// vanilla's default options. The name is any string, as the board takes it. Refused with
+    /// [`TeamError::NameTaken`] when a team has it.
+    #[access(WorldOnly)]
+    fn add_team(&mut self, name: &str) -> Result<TeamRef, TeamError>;
+    /// Side: server.
+    /// `Scoreboard.getPlayersTeam`: the team the holder is on, or None when it is on none or
+    /// does not resolve. Membership is by the holder's key, so an offline player's name works.
+    #[access(WorldOnly)]
+    fn holder_team(&self, holder: ScoreHolder) -> Option<TeamRef>;
 }
 /// The handles' reads of the `scoreboard` area, implemented by the game and reached through [`Backend`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -98,6 +118,51 @@ pub trait ScoreboardBackend {
     /// one loaded from a save without the flag, unlocked. None when there is no score.
     #[access(WorldOnly)]
     fn objective_score_locked(&self, objective: ObjectiveRef, holder: ScoreHolder) -> Option<bool>;
+    /// Side: server.
+    /// `PlayerTeam.getName`, or None for a stale handle.
+    #[access(WorldOnly)]
+    fn team_name(&self, team: TeamRef) -> Option<String>;
+    /// Side: server.
+    /// `PlayerTeam.getDisplayName`.
+    #[access(WorldOnly)]
+    fn team_display_name(&self, team: TeamRef) -> Result<Text, TeamError>;
+    /// Side: server.
+    /// `PlayerTeam.getColor`: None inside the Ok when the team has none.
+    #[access(WorldOnly)]
+    fn team_color(&self, team: TeamRef) -> Result<Option<TeamColor>, TeamError>;
+    /// Side: server.
+    /// `PlayerTeam.getPlayerPrefix`.
+    #[access(WorldOnly)]
+    fn team_prefix(&self, team: TeamRef) -> Result<Text, TeamError>;
+    /// Side: server.
+    /// `PlayerTeam.getPlayerSuffix`.
+    #[access(WorldOnly)]
+    fn team_suffix(&self, team: TeamRef) -> Result<Text, TeamError>;
+    /// Side: server.
+    /// `PlayerTeam.isAllowFriendlyFire`.
+    #[access(WorldOnly)]
+    fn team_friendly_fire(&self, team: TeamRef) -> Option<bool>;
+    /// Side: server.
+    /// `PlayerTeam.canSeeFriendlyInvisibles`.
+    #[access(WorldOnly)]
+    fn team_see_friendly_invisibles(&self, team: TeamRef) -> Option<bool>;
+    /// Side: server.
+    /// `PlayerTeam.getNameTagVisibility`.
+    #[access(WorldOnly)]
+    fn team_name_tag_visibility(&self, team: TeamRef) -> Option<TeamVisibility>;
+    /// Side: server.
+    /// `PlayerTeam.getDeathMessageVisibility`.
+    #[access(WorldOnly)]
+    fn team_death_message_visibility(&self, team: TeamRef) -> Option<TeamVisibility>;
+    /// Side: server.
+    /// `PlayerTeam.getCollisionRule`.
+    #[access(WorldOnly)]
+    fn team_collision_rule(&self, team: TeamRef) -> Option<CollisionRule>;
+    /// Side: server.
+    /// `PlayerTeam.getPlayers`: the members, as [`ScoreHolder::Name`] keys, in the team's own
+    /// order. Vanilla's is a hash set's, so no order is promised.
+    #[access(WorldOnly)]
+    fn team_members(&self, team: TeamRef) -> Option<Vec<ScoreHolder>>;
 }
 /// The handles' writes of the `scoreboard` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -174,13 +239,73 @@ pub trait ScoreboardBackendMut {
     /// any other for it) is stale for good, even if the name is added again.
     #[access(WorldOnly)]
     fn objective_remove(&mut self, objective: ObjectiveRef) -> bool;
+    /// Side: server.
+    /// `PlayerTeam.setDisplayName`: members' clients are sent the change.
+    ///
+    /// `name` is bounded as every `Text` is: one deeper than 512 component nodes is refused with
+    /// [`TeamError::Text`] before any change.
+    #[access(WorldOnly)]
+    fn team_set_display_name(&mut self, team: TeamRef, name: Text) -> Result<(), TeamError>;
+    /// Side: server.
+    /// `PlayerTeam.setColor`: None clears it. False for a stale handle.
+    #[access(WorldOnly)]
+    fn team_set_color(&mut self, team: TeamRef, color: Option<TeamColor>) -> bool;
+    /// Side: server.
+    /// `PlayerTeam.setPlayerPrefix`, with the bound on `Text` of `set_display_name`.
+    #[access(WorldOnly)]
+    fn team_set_prefix(&mut self, team: TeamRef, prefix: Text) -> Result<(), TeamError>;
+    /// Side: server.
+    /// `PlayerTeam.setPlayerSuffix`, with the bound on `Text` of `set_display_name`.
+    #[access(WorldOnly)]
+    fn team_set_suffix(&mut self, team: TeamRef, suffix: Text) -> Result<(), TeamError>;
+    /// Side: server.
+    /// `PlayerTeam.setAllowFriendlyFire`. False for a stale handle.
+    #[access(WorldOnly)]
+    fn team_set_friendly_fire(&mut self, team: TeamRef, allowed: bool) -> bool;
+    /// Side: server.
+    /// `PlayerTeam.setSeeFriendlyInvisibles`. False for a stale handle.
+    #[access(WorldOnly)]
+    fn team_set_see_friendly_invisibles(&mut self, team: TeamRef, allowed: bool) -> bool;
+    /// Side: server.
+    /// `PlayerTeam.setNameTagVisibility`. False for a stale handle.
+    #[access(WorldOnly)]
+    fn team_set_name_tag_visibility(&mut self, team: TeamRef, visibility: TeamVisibility) -> bool;
+    /// Side: server.
+    /// `PlayerTeam.setDeathMessageVisibility`. False for a stale handle.
+    #[access(WorldOnly)]
+    fn team_set_death_message_visibility(
+        &mut self,
+        team: TeamRef,
+        visibility: TeamVisibility,
+    ) -> bool;
+    /// Side: server.
+    /// `PlayerTeam.setCollisionRule`. False for a stale handle.
+    #[access(WorldOnly)]
+    fn team_set_collision_rule(&mut self, team: TeamRef, rule: CollisionRule) -> bool;
+    /// Side: server.
+    /// `Scoreboard.addPlayerToTeam`: the holder leaves the team it is on, if any (this one
+    /// included), then joins this one, so it is on exactly one team. Returns whether the
+    /// team's member set changed. Refused with [`TeamError::Stale`] for a stale handle and
+    /// [`TeamError::UnknownHolder`] for a holder that does not resolve.
+    #[access(WorldOnly)]
+    fn team_join(&mut self, team: TeamRef, holder: ScoreHolder) -> Result<bool, TeamError>;
+    /// Side: server.
+    /// `Scoreboard.removePlayerFromTeam(holder, team)`: false when the holder is not on this
+    /// team (vanilla throws), the handle is stale or the holder does not resolve.
+    #[access(WorldOnly)]
+    fn team_leave(&mut self, team: TeamRef, holder: ScoreHolder) -> bool;
+    /// Side: server.
+    /// `Scoreboard.removePlayerTeam`: its members are on no team and the handle (and any other
+    /// for it) is stale for good, even if the name is added again.
+    #[access(WorldOnly)]
+    fn team_remove(&mut self, team: TeamRef) -> bool;
 }
 /// The client host's methods of the `scoreboard` area, implemented by the game and reached through [`ClientHost`].
 #[sunrise_mod_api_macros::host_area]
 pub trait ScoreboardClientHost {
     /// Side: client.
     /// What this client has been sent of the scoreboard: the objectives shown in a display
-    /// slot, with their scores. None outside a logged-in client world. A text the API cannot hold
+    /// slot, with their scores, and every team. None outside a logged-in client world. A text the API cannot hold
     /// (nested deeper than 512 component nodes) refuses the whole snapshot with
     /// [`TextFormError::TooDeep`]; nothing is flattened or skipped.
     #[access(ClientSetup)]

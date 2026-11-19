@@ -448,16 +448,16 @@ pub fn third_person_attack_item(swing: f32, forward: f32) -> Mat4 {
 /// `ProjectileUtil.getManyEntityHitResult` over `boxes`: those the segment
 /// `from`..`to` meets, or comes within the margin of with no block between
 /// (`clip`: where a segment first meets a block), each with where it is hit.
-fn hits_along(
-    boxes: &[(usize, Aabb)],
+fn visit_hits_along(
+    boxes: impl IntoIterator<Item = (usize, Aabb)>,
     from: Vec3d,
     to: Vec3d,
     margin: f64,
     clip: &impl Fn(Vec3d, Vec3d) -> Option<Vec3d>,
-) -> Vec<(usize, Vec3d)> {
+    mut visit: impl FnMut(usize, Vec3d),
+) {
     let grow = Vec3d::new(margin, margin, margin);
-    let mut hits = Vec::new();
-    for &(i, bounds) in boxes {
+    for (i, bounds) in boxes {
         let hit = if bounds.contains(from) {
             Some(from)
         } else if let Some(at) = bounds.clip(from, to) {
@@ -472,10 +472,9 @@ fn hits_along(
             None
         };
         if let Some(at) = hit {
-            hits.push((i, at));
+            visit(i, at);
         }
     }
-    hits
 }
 
 /// `ProjectileUtil.getHitEntitiesAlong` with an `AttackRange` of `reach` (its
@@ -490,16 +489,40 @@ pub fn hits_in_reach(
     (min, max, margin): (f32, f32, f32),
     clip: impl Fn(Vec3d, Vec3d) -> Option<Vec3d>,
 ) -> Vec<(usize, Vec3d)> {
+    let mut hits = Vec::new();
+    for_each_hit_in_reach(
+        boxes.iter().copied(),
+        eye,
+        look,
+        movement,
+        (min, max, margin),
+        clip,
+        |i, at| hits.push((i, at)),
+    );
+    hits
+}
+
+/// Visit the same ordered hits as hits_in_reach without allocating candidate or result lists.
+/// Client picks reduce these to one nearest hit; multi-target attacks may collect them.
+pub fn for_each_hit_in_reach(
+    boxes: impl IntoIterator<Item = (usize, Aabb)>,
+    eye: Vec3d,
+    look: Vec3d,
+    movement: Vec3d,
+    (min, max, margin): (f32, f32, f32),
+    clip: impl Fn(Vec3d, Vec3d) -> Option<Vec3d>,
+    visit: impl FnMut(usize, Vec3d),
+) {
     let from = eye.add_vector(look.scale(f64::from(min)));
     let mut to = eye.add_vector(look.scale(f64::from(max) + movement.dot(look).max(0.0)));
     // A block closer than the minimum reach takes the whole stab.
     if let Some(block) = clip(eye, to) {
         to = block;
         if eye.distance_squared(to) < eye.distance_squared(from) {
-            return Vec::new();
+            return;
         }
     }
-    hits_along(boxes, from, to, f64::from(margin), &clip)
+    visit_hits_along(boxes, from, to, f64::from(margin), &clip, visit)
 }
 
 #[cfg(test)]

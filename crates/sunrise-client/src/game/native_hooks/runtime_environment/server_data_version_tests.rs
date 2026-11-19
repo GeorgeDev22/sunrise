@@ -14,7 +14,11 @@ use sunrise_world::region::RegionFile;
 fn host_data_version_matches_a_freshly_saved_chunk() {
     with_game(|game| {
         let scratch = tempfile::tempdir().unwrap();
-        let save = SaveDir::new(scratch.path().to_path_buf(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(
+            scratch.path().to_path_buf(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         assert_eq!(
             save.save(
                 &[Arc::new(Chunk::empty(0, 0))],

@@ -47,7 +47,7 @@ fn class_tags_dispatch_and_failed_preparation_preserve_installed_snapshot() {
     struct Counter(Arc<AtomicUsize>);
     #[mod_api::sunrise_part]
     impl BlockPart for Counter {
-        fn analog_output(&self, _: &dyn LevelHost, _: &mut AnalogOutputEvent) {
+        fn analog_output(&self, _: &mut dyn LevelRandomHost, _: &mut AnalogOutputEvent) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -66,6 +66,7 @@ fn class_tags_dispatch_and_failed_preparation_preserve_installed_snapshot() {
     }
     struct Level;
     impl LevelHost for Level {}
+    impl mod_api::LevelRandomHost for Level {}
     let calls = Arc::new(AtomicUsize::new(0));
     let mods: Mods = vec![ModEntry::new("demo", Box::new(Listener(calls.clone())))].into();
     mod_platform::testing::with_mods(mods.clone(), || {
@@ -103,7 +104,7 @@ fn class_tags_dispatch_and_failed_preparation_preserve_installed_snapshot() {
         let visit = |id| {
             let mut output = 0;
             mod_api::dispatch_analog_output(
-                &Level,
+                &mut Level,
                 LevelDimension::Overworld,
                 sunrise_core::position::BlockPos::new(0, 64, 0),
                 BlockStateId(id).try_into_api().unwrap(),

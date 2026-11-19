@@ -32,6 +32,7 @@ fn with_scene(test: impl FnOnce(&mut super::Game<'_>)) {
             custom_name: None,
             random: sunrise_core::random::LegacyRandom::new(0),
             check_interval: 0,
+            ticks: 0,
         });
         game.paintings.push(Painting {
             attachment_lifetime: Default::default(),
@@ -43,6 +44,7 @@ fn with_scene(test: impl FnOnce(&mut super::Game<'_>)) {
             width: 1,
             height: 1,
             check_interval: 0,
+            ticks: 0,
         });
         game.next_entity = game.next_entity.max(PIG);
         test(game);

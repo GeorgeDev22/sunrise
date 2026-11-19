@@ -20,7 +20,7 @@ use sunrise_client::{
 };
 use sunrise_core::geometry::Vec3;
 
-fn game() -> Game<'static> {
+fn game<'a>(resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>) -> Game<'a> {
     let root = std::path::PathBuf::from(
         std::env::var_os("SUNRISE_TEST_RESOURCES")
             .expect("set SUNRISE_TEST_RESOURCES to prepared resources"),
@@ -42,7 +42,7 @@ fn game() -> Game<'static> {
     let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
     options.resources = root.clone();
     options.execution_role = execution_role::ExecutionRole::IntegratedServer;
-    let res: &'static _ = Box::leak(Box::new(loaded.resources));
+    let res = &*resources.insert(loaded.resources);
     let mut game = Game::new(
         res,
         loaded.pack,
@@ -81,7 +81,8 @@ fn drawn(game: &mut Game<'_>, command: &str) -> ParticleOptions {
 #[test]
 #[ignore = "daily"]
 fn particle_options_carry_their_codec_data() {
-    let mut game = game();
+    let mut resources = None;
+    let mut game = game(&mut resources);
     // BlockParticleOption: `block_crumble` is the crumbs of the named block.
     let crumble = drawn(
         &mut game,
@@ -131,7 +132,8 @@ fn particle_options_carry_their_codec_data() {
 #[test]
 #[ignore = "daily"]
 fn block_crumble_draws_the_block_it_names() {
-    let mut game = game();
+    let mut resources = None;
+    let mut game = game(&mut resources);
     game.particles.created_requests = None;
     game.particles.clear();
     assert!(game.run_command(

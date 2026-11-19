@@ -60,11 +60,15 @@ impl Table {
         };
         let slot = &sealed.slots[place];
         let entries = &slot.entries;
+        let contained = crate::runtime::outside_world();
         for entry in entries {
             let listener = &sealed.listeners[entry.listener as usize];
             if listener.active() {
                 let _guard = super::enter(listener.id, entry.injection);
-                call(entry.kind);
+                // Outside `World` a Host call the phase gate refuses skips this listener for the call.
+                if let Err(refusal) = crate::runtime::refusable(contained, || call(entry.kind)) {
+                    refusal.report();
+                }
             }
         }
     }
@@ -165,7 +169,7 @@ pub enum PointHost<'a> {
 /// A checked hook endpoint. The runtime calls the ordinary hook export under its limits.
 pub trait Forward: Send + Sync {
     /// Dispatches one generated listener id with its mutable wire record.
-    fn forward(&self, id: u32, host: PointHost<'_>, record: &mut dyn crate::wire::Record);
+    fn forward(&self, id: u64, host: PointHost<'_>, record: &mut dyn crate::wire::Record);
 }
 
 /// A typed API function.
@@ -176,7 +180,7 @@ pub enum ApiKind {
     /// A function checked by the generated typed constructor before erasure.
     Typed(*const ()),
     /// A runtime endpoint in the same ordered list as native functions.
-    Forwarded(&'static dyn Forward, u32),
+    Forwarded(&'static dyn Forward, u64),
 }
 
 // The pointer is a function; forwarding endpoints are Send + Sync resources.
@@ -326,7 +330,7 @@ impl SlotListener {
         id: &'static str,
         place: Place,
         endpoint: &'static dyn Forward,
-        export: u32,
+        export: u64,
     ) -> Self {
         Self::of(id, place, ApiKind::Forwarded(endpoint, export))
     }

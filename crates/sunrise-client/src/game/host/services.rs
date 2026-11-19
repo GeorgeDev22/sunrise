@@ -71,10 +71,6 @@ impl Levels for Game<'_> {
     }
 }
 impl Messages for Game<'_> {
-    fn text_allowed(&self, text: &str) -> Option<bool> {
-        mod_api::__private::check_access("text_allowed", mod_api::__private::LoadAccess::WorldOnly);
-        self.native_text_allowed(text)
-    }
     fn broadcast(&self, line: Text) -> Result<(), mod_api::text::TextFormError> {
         mod_api::__private::check_access("broadcast", mod_api::__private::LoadAccess::WorldOnly);
         self.native_broadcast(line.try_into_engine(&())?);

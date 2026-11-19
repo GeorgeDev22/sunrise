@@ -4,11 +4,8 @@
 use super::*;
 
 impl Game<'_> {
-    /// The cracks to draw and their stage sprite's atlas origin: our own mining and the
-    /// other players' (`renderBlockDestroyAnimation`: within 32 blocks of the camera, the
-    /// furthest progress on each block).
-    pub(super) fn cracks(&self, camera: glam::DVec3) -> Vec<([i32; 3], [f32; 2])> {
-        let names = crack_stage_names(self.settings.improved_transparency);
+    /// Stored local and remote display positions, keeping the furthest stage on each cell.
+    pub(super) fn crack_stages(&self) -> Vec<([i32; 3], u32)> {
         let mut stages: Vec<([i32; 3], u32)> = Vec::new();
         let mut add = |pos: [i32; 3], stage: u32| match stages.iter_mut().find(|c| c.0 == pos) {
             Some(c) => c.1 = c.1.max(stage),
@@ -18,14 +15,29 @@ impl Game<'_> {
             && let Some(stage) = m.stage()
         {
             add(m.pos, u32::from(stage));
+            if let Some(crack) = &m.crack {
+                for &pos in &crack.positions {
+                    add(pos, u32::from(stage));
+                }
+            }
         }
         let now = self.world.game_time;
-        for (pos, stage, at) in self.destroying.values() {
-            if now.saturating_sub(*at) <= 400 {
-                add(*pos, u32::from(*stage));
+        for crack in self.destroying.values() {
+            if now.saturating_sub(crack.updated_at) <= 400 {
+                add(crack.pos, u32::from(crack.stage));
+                for &pos in &crack.positions {
+                    add(pos, u32::from(crack.stage));
+                }
             }
         }
         stages
+    }
+
+    /// `renderBlockDestroyAnimation`: eligible cells within 32 blocks of the camera,
+    /// with each stage sprite's atlas origin. No hook is asked during extraction.
+    pub(super) fn cracks(&self, camera: glam::DVec3) -> Vec<([i32; 3], [f32; 2])> {
+        let names = crack_stage_names(self.settings.improved_transparency);
+        self.crack_stages()
             .into_iter()
             .filter(|(pos, _)| {
                 let d = glam::DVec3::new(f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2]))

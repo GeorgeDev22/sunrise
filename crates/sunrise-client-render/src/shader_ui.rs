@@ -381,7 +381,7 @@ fn row(item: Item, s: &Settings, screens: &[PackScreen]) -> Row<Item> {
     let value = match (item, switch(item, s), slider(item, s), text) {
         (_, Some(on), ..) => Value::Switch(on),
         (_, None, Some(position), Some(text)) => Value::Slider {
-            position,
+            position: f64::from(position),
             steps: slider_steps(item, s),
             text,
         },
@@ -564,12 +564,12 @@ impl shell::Screen for ShaderScreen {
         }
     }
     /// A slider moves an option to the value nearest it.
-    fn slide(&mut self, s: &mut Settings, item: Item, position: f32) {
+    fn slide(&mut self, s: &mut Settings, item: Item, position: f64) {
         let Item::Option(i) = item else {
             return;
         };
         if let Some((p, _)) = native(s) {
-            if s.shader_packs[p].set_slider_position(usize::from(i), position) {
+            if s.shader_packs[p].set_slider_position(usize::from(i), position as f32) {
                 self.drag_changed = Some(p);
             }
             return;
@@ -578,7 +578,7 @@ impl shell::Screen for ShaderScreen {
         if let Some(o) = s.shader_options.as_mut().filter(|o| o.pack == pack)
             && let Some(name) = option_name(o, i).map(str::to_owned)
         {
-            o.set_position(&name, position);
+            o.set_position(&name, position as f32);
         }
     }
     /// A Sunrise pack's options are saved, and the pack rebuilt, once a drag.

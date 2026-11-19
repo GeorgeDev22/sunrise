@@ -5,6 +5,10 @@ is one of vanilla's `GuiGraphics` calls: `fill`, `text`, `sprite`, `item_stack` 
 takes a buffer of `GuiDraw` ops for the same calls, with `Push` / `Pop` for the pose. Native and wasm mods use
 the same methods and the same ops.
 
+`ClientHost::debug_overlay_visible()` reports whether the client draws its debug overlay this frame. In
+`render_gui_post`, use it to leave space for the overlay. Always-on debug entries can make it visible with
+F3 off. F1 hides the overlay unless a screen is open. The read is available only on the client host.
+
 ## Gradient fills
 
 `DrawContext::fill_gradient(rect, top, bottom)` is vanilla's `GuiGraphics.fillGradient`, the call screen
@@ -36,3 +40,18 @@ vanilla's corner arguments: `top` stays on the `y0` edge and `bottom` on the `y1
   Zero-area calls are culled here; vanilla can retain their layering bounds without drawing pixels.
 - **Cost.** One quad on the GUI batch, as `fill`; nothing is drawn or kept when a mod doesn't call it.
 - **Wire layout.** `GuiDraw` gained the `FillGradient` variant: rebuild wasm mods against the new SDK.
+
+## Scaled text
+
+`DrawContext::text_scaled(text, at, scale, argb, shadow)` draws `text` as `text` does, scaled by `scale` about
+`at`, its top-left corner: what vanilla's HUD draws with `PoseStack.scale` around a line, without a `gui_paint`
+buffer of `Push`, `Text` and `Pop`. A half-size line under a label is `scale` 0.5, starting a quarter of its
+unscaled width left of where it is centred.
+
+```rust,ignore
+fn gui_layer_draw(&self, _: &dyn ClientHost, event: &mut GuiLayerDrawEvent<'_>) {
+    let width = event.draw.text_width("12 CPS");
+    // Centred at (40, 30), half size.
+    event.draw.text_scaled("12 CPS", [40.0 - width / 4.0, 30.0], 0.5, 0xFFFF_FFFF, false);
+}
+```

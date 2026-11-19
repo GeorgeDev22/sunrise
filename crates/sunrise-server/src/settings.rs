@@ -149,7 +149,7 @@ fn range(section: &str, field: &str) -> Option<std::ops::RangeInclusive<i64>> {
             "max_viewed_loaded_chunks_per_level" | "max_viewed_ticking_chunks_per_level",
         ) => Some(0..=1_048_576),
         ("server", "max_players") => Some(1..=1000),
-        ("backups", "keep") => Some(1..=1000),
+        ("backups", "keep") => Some(config::BACKUP_KEEP_RANGE),
         _ => None,
     }
 }

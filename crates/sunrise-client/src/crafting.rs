@@ -177,7 +177,7 @@ impl Template {
 /// Assembly also carries the transient map postprocess component; the saved
 /// ItemStack codec deliberately omits it. Do not turn it into saved data.
 fn assembly_components(stack: &ItemStack) -> Tag {
-    let mut components = match crate::item_data::encode_components(stack) {
+    let mut components = match crate::item_data::component_snapshot(stack) {
         Some(Tag::Compound(map)) => map,
         _ => Default::default(),
     };
@@ -660,7 +660,7 @@ impl Special {
                         Some(c) if c != this => return false,
                         _ => {}
                     }
-                    let layers = banner::layers(s).len();
+                    let layers = s.banner_layers().len();
                     if layers > banner::MAX_LAYERS {
                         return false;
                     }
@@ -688,7 +688,7 @@ impl Special {
                         }
                         patterned = true;
                     } else {
-                        if !tgt.test_in(ctx.context, s) || clear || !banner::layers(s).is_empty() {
+                        if !tgt.test_in(ctx.context, s) || clear || !s.banner_layers().is_empty() {
                             return false;
                         }
                         clear = true;
@@ -941,7 +941,7 @@ impl Special {
             Self::BannerDuplicate { result, .. } => {
                 let source = stacks
                     .iter()
-                    .find(|s| (1..=banner::MAX_LAYERS).contains(&banner::layers(s).len()))?;
+                    .find(|s| (1..=banner::MAX_LAYERS).contains(&s.banner_layers().len()))?;
                 // TransmuteRecipe.createWithOriginalComponents: the source's components.
                 result.over(source, 0)
             }
@@ -963,7 +963,7 @@ impl Special {
                 let data = out.data_mut();
                 data.set_other("!minecraft:base_color", None);
                 data.set_other("!minecraft:banner_patterns", None);
-                data.banner_patterns = banner::layers(banner_stack).to_vec();
+                *data.banner_layers_mut() = banner_stack.banner_layers().to_vec();
                 data.base_color = banner::banner_color(&banner_stack.item).map(Arc::from);
                 out
             }
@@ -1324,14 +1324,45 @@ fn shrink(pattern: &[Vec<char>]) -> Vec<Vec<char>> {
 }
 pub use sunrise_items::recipe_sources::qualified;
 
-fn recipe_refused(name: &str, reason: &str) -> Box<dyn std::error::Error> {
+fn recipe_refused(name: &str, reason: &str) -> String {
     let id = qualified(name);
     let (namespace, path) = id.split_once(':').unwrap();
-    let message = format!("recipes: data/{namespace}/recipe/{path}.json refused: {reason}");
-    // The error-level diagnostic naming the file (#1273); the load returns the
-    // same message, which its caller may log again at its own level.
-    log::error!("{message}");
-    message.into()
+    format!("recipes: data/{namespace}/recipe/{path}.json refused: {reason}")
+}
+/// Recipes explicitly refused during a load, distinct from failures to read resources.
+#[derive(Debug)]
+pub struct RecipeLoadRefusals(Vec<(String, String)>);
+
+impl RecipeLoadRefusals {
+    /// Whether exactly this named recipe was refused.
+    pub fn only_recipe(&self, name: &str) -> bool {
+        matches!(self.0.as_slice(), [(refused, _)] if refused == name)
+    }
+}
+
+impl std::fmt::Display for RecipeLoadRefusals {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self.0.len();
+        write!(
+            f,
+            "{count} {} failed to load:",
+            if count == 1 { "recipe" } else { "recipes" }
+        )?;
+        for (_, failure) in &self.0 {
+            write!(f, "\n  {failure}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RecipeLoadRefusals {}
+
+/// Report every recipe refusal in registration order, then return the same diagnostic to the caller.
+fn load_failed(mut failures: Vec<(String, String)>) -> Box<dyn std::error::Error> {
+    failures.sort_by_cached_key(|(name, _)| registration_key(name));
+    let refusals = RecipeLoadRefusals(failures);
+    log::error!("{refusals}");
+    Box::new(refusals)
 }
 
 /// The keys of a minecraft-typed recipe that hold an ingredient: one entry
@@ -1369,7 +1400,8 @@ pub(crate) const INGREDIENT_MAPS: [&str; 2] = ["key", "shapes"];
 pub struct ResolvedRecipe {
     /// The id as `recipe_sources::sources` names it.
     pub name: String,
-    /// The file as written: what mods and clients see.
+    /// The file as written, but with its `type` canonicalized to
+    /// `namespace:path` (`recipe_sources::decode_type`): what mods and clients see.
     pub file: Arc<Value>,
     /// The file with the `ingredient` hook's answers in place, for the tables
     /// to parse. The file itself when it names no mod kind.
@@ -1387,6 +1419,10 @@ pub struct ResolvedSources {
     stations: std::sync::OnceLock<Vec<Option<crate::stations::ParsedStationRecipe>>>,
     /// What mods added to the recipe property sets, asked once per load.
     pub property_additions: PropertyAdditions,
+    /// Recipes `resolve_collecting` refused, by name and reason; the strict
+    /// entry points turn them into the load's error, `Recipes::from_resolved`
+    /// adds them to its own validation failures.
+    failures: Vec<(String, String)>,
 }
 /// The items mods added to the recipe property sets
 /// (`RecipeManager.RECIPE_PROPERTY_SETS`) in one load, by set key without
@@ -1472,11 +1508,38 @@ impl ResolvedSources {
         overlay: &PackOverlay,
         context: &sunrise_world::native_load_context::LoadContext,
     ) -> Result<Self> {
+        Self::load_collecting(root, overlay, context)?.checked()
+    }
+    /// `load` that keeps the refused recipes instead of failing: the caller
+    /// must build the tables with `Recipes::from_resolved`, which reports them
+    /// together with the validation failures and refuses the whole generation.
+    /// A caller that publishes or reads the sources otherwise uses `load`.
+    pub fn load_collecting(
+        root: &Path,
+        overlay: &PackOverlay,
+        context: &sunrise_world::native_load_context::LoadContext,
+    ) -> Result<Self> {
         let context = context.with_fluid_tags(sunrise_items::items::fluid_tag_list(root, overlay)?);
-        Self::resolve(
-            sunrise_items::recipe_sources::sources(root, overlay)?,
-            &context,
-        )
+        let (sources, refused) = sunrise_items::recipe_sources::sources_collecting(root, overlay)?;
+        let mut resolved = Self::resolve_collecting(sources, &context)?;
+        resolved.failures.extend(refused);
+        Ok(resolved)
+    }
+    /// Whether every recipe resolved; sources with failures are never shared.
+    pub fn is_complete(&self) -> bool {
+        self.failures.is_empty()
+    }
+    /// The error naming every recipe that failed to resolve, if any did.
+    pub fn check(&self) -> Result<()> {
+        if self.failures.is_empty() {
+            Ok(())
+        } else {
+            Err(load_failed(self.failures.clone()))
+        }
+    }
+    fn checked(self) -> Result<Self> {
+        self.check()?;
+        Ok(self)
     }
     /// `sources` (`recipe_sources::sources`' shape), the hook asked once for
     /// each mod ingredient in the recipes the loader parses (minecraft's own
@@ -1484,20 +1547,25 @@ impl ResolvedSources {
     /// An unregistered ingredient kind in a known recipe type refuses the
     /// whole load, naming its file and kind.
     pub fn resolve(
+        sources: Vec<(String, Value)>,
+        context: &sunrise_world::native_load_context::LoadContext,
+    ) -> Result<Self> {
+        Self::resolve_collecting(sources, context)?.checked()
+    }
+    fn resolve_collecting(
         mut sources: Vec<(String, Value)>,
         context: &sunrise_world::native_load_context::LoadContext,
     ) -> Result<Self> {
         // Every consumer keeps vanilla's resource-file registration order.
         sources.sort_by_cached_key(|(name, _)| registration_key(name));
-        for (name, file) in &sources {
-            if let Some(serializer) = file["type"].as_str() {
-                mod_kinds::recipe_type(name, serializer)?;
-            }
-        }
         let listened = mod_api::__private::listened(mod_api::HookId::Ingredient);
         let recipes = sources
             .into_iter()
-            .map(|(name, file)| {
+            .map(|(name, file)| -> std::result::Result<ResolvedRecipe, (String, String)> {
+                let refused = |reason: String| (name.clone(), reason);
+                if let Some(serializer) = file["type"].as_str() {
+                    mod_kinds::recipe_type(&name, serializer).map_err(refused)?;
+                }
                 let mut resolved = file.clone();
                 let parsed_here = resolved["type"]
                     .as_str()
@@ -1535,10 +1603,10 @@ impl ResolvedSources {
                         .flat_map(Ingredient::custom_kinds)
                         .collect();
                     if !listened && let Some((kind, _)) = kinds.first() {
-                        return Err(recipe_refused(
+                        return Err(refused(recipe_refused(
                             &name,
                             &format!("ingredient kind {kind} is not registered by any mod"),
-                        ));
+                        )));
                     }
                     for (kind, _) in kinds.iter().filter(|(_, empty)| *empty) {
                         log::warn!(
@@ -1558,9 +1626,15 @@ impl ResolvedSources {
                     resolved,
                 })
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<std::result::Result<_, (String, String)>>>();
+        let mut failures = Vec::new();
+        let recipes = recipes
+            .into_iter()
+            .filter_map(|recipe| recipe.map_err(|failure| failures.push(failure)).ok())
+            .collect();
         Ok(Self {
             recipes,
+            failures,
             property_additions: PropertyAdditions::ask(context),
             ..Self::default()
         })
@@ -1603,7 +1677,7 @@ impl Recipes {
         overlay: &PackOverlay,
         context: &sunrise_world::native_load_context::LoadContext,
     ) -> Result<Self> {
-        let sources = ResolvedSources::load(root, overlay, context)?;
+        let sources = ResolvedSources::load_collecting(root, overlay, context)?;
         Self::from_resolved(root, items, overlay, &sources)
     }
     /// The tables from condition-selected recipe sources (recipe_sources::sources' shape).
@@ -1619,7 +1693,7 @@ impl Recipes {
             root,
             items,
             overlay,
-            &ResolvedSources::resolve(sources, context)?,
+            &ResolvedSources::resolve_collecting(sources, context)?,
         )
     }
     /// Tables from one condition-selected load. Unregistered serializers and malformed
@@ -1630,11 +1704,7 @@ impl Recipes {
         overlay: &PackOverlay,
         sources: &ResolvedSources,
     ) -> Result<Self> {
-        for recipe in &sources.recipes {
-            if let Some(serializer) = recipe.file["type"].as_str() {
-                mod_kinds::recipe_type(&recipe.name, serializer)?;
-            }
-        }
+        let mut failures = sources.failures.clone();
         let mut mod_read_only = Vec::new();
         let mut crafting = Vec::new();
         let mut cooking = Vec::new();
@@ -1656,11 +1726,19 @@ impl Recipes {
                 } else {
                     format!("minecraft:{name}")
                 };
-                entry = Some(crate::crafting::RecipeSnapshot::new(
-                    id,
-                    mod_kinds::recipe_type(name, kind)?,
-                    json.clone(),
-                ));
+                match mod_kinds::recipe_type(name, kind) {
+                    Ok(recipe_type) => {
+                        entry = Some(crate::crafting::RecipeSnapshot::new(
+                            id,
+                            recipe_type,
+                            json.clone(),
+                        ));
+                    }
+                    Err(failure) => {
+                        failures.push((name.clone(), failure));
+                        continue;
+                    }
+                }
             }
             if custom_type(json).is_some() {
                 if let Some(recipe) = mod_kinds::decode(name, json)
@@ -1679,8 +1757,10 @@ impl Recipes {
             if !VANILLA_RECIPE_SERIALIZERS.contains(&kind) {
                 continue;
             }
-            Ingredient::validate_recipe(resolved, items)
-                .map_err(|error| recipe_refused(name, &error))?;
+            if let Err(error) = Ingredient::validate_recipe(resolved, items) {
+                failures.push((name.clone(), recipe_refused(name, &error)));
+                continue;
+            }
             let v = &**resolved;
             let text = |k: &str| v[k].as_str().unwrap_or("").to_owned();
             meta.insert(name.clone(), (text("category"), text("group")));
@@ -1879,25 +1959,29 @@ impl Recipes {
                     None
                 }
                 "minecraft:brewing" => {
-                    crate::brewing::BrewingRecipe::validate(v)
-                        .map_err(|error| recipe_refused(name, error))?;
+                    if let Err(error) = crate::brewing::BrewingRecipe::validate(v) {
+                        failures.push((name.clone(), recipe_refused(name, error)));
+                        continue;
+                    }
                     None
                 }
                 "minecraft:stonecutting"
                 | "minecraft:smithing_transform"
                 | "minecraft:smithing_trim" => None,
                 _ => {
-                    return Err(recipe_refused(
-                        name,
-                        &format!("recipe type {kind} has no parser"),
+                    failures.push((
+                        name.clone(),
+                        recipe_refused(name, &format!("recipe type {kind} has no parser")),
                     ));
+                    continue;
                 }
             };
             if parsed_by_game && parsed.is_none() && cooking.len() == cooked && station.is_none() {
                 let reason = failure.into_inner().unwrap_or_else(|| {
                     format!("invalid ingredients or required fields for {kind}")
                 });
-                return Err(recipe_refused(name, &reason));
+                failures.push((name.clone(), recipe_refused(name, &reason)));
+                continue;
             }
             // Every known recipe was parsed successfully before any table
             // can be published; every view reads that same parse.
@@ -1944,6 +2028,9 @@ impl Recipes {
             if let Some(recipe) = parsed {
                 crafting.push((name.clone(), recipe));
             }
+        }
+        if !failures.is_empty() {
+            return Err(load_failed(failures));
         }
         let facts = items
             .items
@@ -2071,7 +2158,7 @@ impl Recipes {
             return false;
         };
         if let Recipe::Mod(recipe) = recipe {
-            return recipe.assemble(grid, size).is_some();
+            return recipe.assemble(context, grid, size).is_some();
         }
         let Some(input) = Input::of(grid, size) else {
             return false;
@@ -2229,7 +2316,7 @@ mod tests {
             let output = template.over(&input, 0);
             assert_eq!(output.item.as_ref(), "minecraft:stone_sword");
             assert_eq!(output.damage, expected_damage);
-            let encoded = crate::item_data::encode_components(&output).unwrap();
+            let encoded = crate::item_data::component_snapshot(&output).unwrap();
             assert_eq!(
                 encoded.get("minecraft:lore"),
                 input_tag.get("minecraft:lore")
@@ -2252,7 +2339,7 @@ mod tests {
         let output = template.over(&map, 0);
         assert_eq!(output.data().unwrap().map_post_processing, Some(1));
         assert!(
-            crate::item_data::encode_components(&output)
+            crate::item_data::component_snapshot(&output)
                 .unwrap()
                 .get("minecraft:map_post_processing")
                 .is_none()
@@ -2373,7 +2460,7 @@ mod tests {
             fs::write(
                 folder.join(format!("{file}.json")),
                 serde_json::to_vec(&serde_json::json!({
-                    "type":kind, "neoforge:conditions":[{"type":"neoforge:false"}]
+                    "type":kind, "neoforge:conditions":[{"type":"neoforge:never"}]
                 }))
                 .unwrap(),
             )
@@ -2381,10 +2468,7 @@ mod tests {
         }
         let items = Items::for_tests(HashMap::new());
         let load = crate::test_resources::server_load();
-        let conditions = sunrise_world::conditions::LoadConditions::new([]).with_lookup(
-            std::collections::BTreeMap::from([("unregistered".into(), "unregistered".into())]),
-            |_, _| None,
-        );
+        let conditions = sunrise_world::conditions::LoadConditions::new([]);
         let overlay = PackOverlay {
             files: &[],
             conditions: &conditions,
@@ -2855,7 +2939,7 @@ mod tests {
     }
     fn patterned(item: &str) -> ItemStack {
         let mut s = ItemStack::new(item, 1);
-        s.data_mut().banner_patterns = vec![BannerLayer::new("minecraft:cross", "red")];
+        *s.data_mut().banner_layers_mut() = vec![BannerLayer::new("minecraft:cross", "red")];
         s
     }
     /// About vanilla's count of cooking recipes: four kinds, ingredients of
@@ -3226,7 +3310,7 @@ mod tests {
             // A pack's gated file answers the same gate.
             let packs = [(
                 "recipe/minecraft:pack_yes".to_owned(),
-                vec![file(r#"[{"type":"neoforge:true"}]"#, "pack_yes")],
+                vec![file(r#"[{"type":"neoforge:always"}]"#, "pack_yes")],
             )];
             let recipes = Recipes::load(
                 &root,
@@ -3363,7 +3447,7 @@ mod tests {
         let source = patterned("minecraft:white_banner");
         let blank = ItemStack::new("minecraft:white_banner", 1);
         let out = run(&recipe, &[source.clone(), blank.clone()]).expect("copy");
-        assert_eq!(out.data().unwrap().banner_patterns.len(), 1);
+        assert_eq!(out.banner_layers().len(), 1);
         // Two blanks, or two patterned banners, do not match.
         assert!(run(&recipe, &[blank.clone(), blank.clone()]).is_none());
         assert!(run(&recipe, &[source.clone(), source.clone()]).is_none());
@@ -3386,7 +3470,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let patch = crate::item_data::encode_components(&out).unwrap();
+        let patch = crate::item_data::component_snapshot(&out).unwrap();
         assert_eq!(
             patch.get("minecraft:base_color"),
             Some(&Tag::String("red".into()))
@@ -3407,7 +3491,7 @@ mod tests {
         let out = run(&recipe, &[banner.clone(), shield]).expect("decorated");
         let data = out.data().unwrap();
         assert_eq!(data.base_color.as_deref(), Some("red"));
-        assert_eq!(data.banner_patterns.len(), 1);
+        assert_eq!(data.banner_layers().len(), 1);
         // A shield that already has patterns cannot be decorated again.
         assert!(run(&recipe, &[banner, out]).is_none());
     }
@@ -3466,10 +3550,16 @@ mod crafting_remainder_tests {
             None,
         ];
         let calls = std::cell::Cell::new(0);
-        let remainder = recipes.remainders("copy", &grid, 2, &|_| {
-            calls.set(calls.get() + 1);
-            None
-        });
+        let remainder = recipes.remainders(
+            crate::test_resources::server_loop_context(),
+            "copy",
+            &grid,
+            2,
+            &|_| {
+                calls.set(calls.get() + 1);
+                None
+            },
+        );
         assert_eq!(
             calls.get(),
             1,

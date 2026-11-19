@@ -256,12 +256,19 @@ fn pre_teleport_to_unloaded_edge_keeps_the_resolved_body_tick() {
             with_game(|game| {
                 game.world_root = game.save.root.clone();
                 open_to_lan(game);
-                game.world
-                    .chunks
-                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                // The teleport's target is lit land (an in-level `tp` to land not lit yet holds the
+                // player and skips its body, #15727), yet chunk 1 is not loaded for the edge test.
+                for x in -2..=2 {
+                    for z in -2..=2 {
+                        game.streaming
+                            .insert_remote(&mut game.world, Chunk::empty(x, z));
+                    }
+                }
+                game.world.chunks.remove(&(1, 0));
                 assert!(!game.world.chunks.contains_key(&(1, 0)));
                 let mut watcher = placed(1, 8.5, SPECTATOR);
                 let mut motion = PlayerMotion::new(game.motion, Vec3::new(8.5, 64.0, 8.5)).unwrap();
+                motion.spectator = true;
                 motion.health.food.exhaustion = 5.0;
                 watcher.motion = Some(Box::new(motion));
                 watcher.saved = Some(sunrise_core::nbt::Tag::compound([(

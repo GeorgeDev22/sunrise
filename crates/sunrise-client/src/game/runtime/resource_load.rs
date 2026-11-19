@@ -158,10 +158,11 @@ pub(super) struct GameplayTables {
 /// parsed models), the face visibility, the collisions, the biomes and the
 /// environment need no block facts and load beside them. The outer error
 /// fails the load; the inner one is the packs' (the registry or the block
-/// models), which `load_resources` rolls back from.
+/// models), which [`load_resources_for_mods`] rolls back from.
 pub(super) fn load_core(
     resources: &sunrise_assets::resource_source::ResourceRoot,
     additional_data: &[Arc<sunrise_client::datapack::DataPack>],
+    conditions: &sunrise_world::conditions::LoadConditions,
     load_role: mods::LoadRole,
     parallel: bool,
     progress: &Progress,
@@ -284,7 +285,7 @@ pub(super) fn load_core(
                 startup::time("core.collision", || collisions::load(root, registry))
                     .map_err(|e| e.to_string())
             });
-            let gameplay = gameplay_tables(root, assets, parallel, progress);
+            let gameplay = gameplay_tables(root, assets, conditions, parallel, progress);
             (
                 render.join(),
                 gameplay,
@@ -321,6 +322,7 @@ pub(super) fn load_core(
 pub(super) fn gameplay_tables(
     root: &std::path::Path,
     assets: &Assets,
+    conditions: &sunrise_world::conditions::LoadConditions,
     parallel: bool,
     progress: &Progress,
 ) -> std::result::Result<GameplayTables, String> {
@@ -345,10 +347,8 @@ pub(super) fn gameplay_tables(
             .map_err(|e| e.to_string())
         });
         let motion = startup::time("core.motion", || {
-            let inventory = sunrise_mod_package::enabled::EnabledMods::read(root)?;
-            let conditions = sunrise_world::conditions::LoadConditions::new(inventory.server_ids());
             let mut motion =
-                MotionResources::load_with_conditions(root, assets, &facts, &conditions)?;
+                MotionResources::load_with_conditions(root, assets, &facts, conditions)?;
             // #812: the attribute types mods declare come first, appended
             // after every vanilla attribute in the sorted catalog order, so
             // the rows below may name a mod's own new attribute and the
@@ -527,11 +527,44 @@ pub(super) fn take_modified_attribute_rows(
     }
 }
 
-/// The synchronous launch loads both phases; an ordinary launch returns the
-/// core bundle while the rest worker keeps loading. `launch_world`: the world
-/// the launch opens, whose data is preloaded meanwhile.
+/// Fixture helper for tests without a launch mod state.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn load_resources(
+    resolved: sunrise_assets::resource_source::ResourceRoot,
+    additional_data: Vec<Arc<sunrise_client::datapack::DataPack>>,
+    launch_world: Option<&str>,
+    vanilla_root: &std::path::Path,
+    settings: &Settings,
+    started: Instant,
+    menu: bool,
+    role: impl Into<mods::LoadRole>,
+    progress: &Progress,
+    publish: &mut dyn FnMut(UiResources, &std::path::Path),
+) -> Result<Loaded> {
+    load_resources_for_mods(
+        resolved,
+        additional_data,
+        launch_world,
+        vanilla_root,
+        settings,
+        started,
+        menu,
+        role,
+        progress,
+        publish,
+        &mods::ModsState::default(),
+    )
+}
+
+/// A synchronous launch loads both phases; an ordinary launch returns the
+/// core bundle while the rest worker keeps loading. `launch_world` names the
+/// world to open, whose data is preloaded during startup.
+///
+/// The owning mod state supplies the same cached condition table used to build
+/// content roots and reload data.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn load_resources_for_mods(
     mut resolved: sunrise_assets::resource_source::ResourceRoot,
     additional_data: Vec<Arc<sunrise_client::datapack::DataPack>>,
     launch_world: Option<&str>,
@@ -542,6 +575,7 @@ pub(super) fn load_resources(
     role: impl Into<mods::LoadRole>,
     progress: &Progress,
     publish: &mut dyn FnMut(UiResources, &std::path::Path),
+    mod_sources: &mods::ModsState,
 ) -> Result<Loaded> {
     let load_role: mods::LoadRole = role.into();
     let role = load_role.execution;
@@ -574,7 +608,7 @@ pub(super) fn load_resources(
         if headless {
             UiResources::server(source)
         } else {
-            UiResources::load(source).map(|ui| {
+            UiResources::load(source, vanilla_root).map(|ui| {
                 ui.with_splashes(
                     source,
                     vanilla_root,
@@ -601,7 +635,9 @@ pub(super) fn load_resources(
         }
     };
     let mut can_rollback = true;
-    let (core, loaded_gui, resolved) = loop {
+    let (core, loaded_gui, resolved, conditions) = loop {
+        let inventory = sunrise_mod_package::enabled::EnabledMods::read(&root)?;
+        let conditions = super::load_conditions::conditions_for_mods(mod_sources, &inventory)?;
         let (ui, core) = std::thread::scope(|scope| {
             let core = Step::spawn(scope, parallel, "core", || {
                 // A failed pack starts core again from the game's own
@@ -612,6 +648,7 @@ pub(super) fn load_resources(
                     load_core(
                         &resolved,
                         &additional_data,
+                        &conditions,
                         load_role,
                         parallel,
                         progress,
@@ -622,8 +659,9 @@ pub(super) fn load_resources(
             let ui = load_ui(resolved.source()).map(|ui| offer(ui, &root));
             (ui, core.join())
         });
+        // Core data is provisional: a selected world pack may replace an entry.
         let failure = match (ui, core) {
-            (Ok(gui), Ok(Ok(core))) => break (core, gui, resolved),
+            (Ok(gui), Ok(Ok(core))) => break (core, gui, resolved, conditions),
             (Err(e), _) if can_rollback => e.to_string(),
             (_, Ok(Err(e))) if can_rollback => e,
             (_, Ok(Err(e))) => {
@@ -723,11 +761,15 @@ pub(super) fn load_resources(
     log::info!("load pack tables: {:.2}s", started.elapsed().as_secs_f32());
     progress.set(4);
     if !menu {
+        use sunrise_client::lang::{self, Language};
         sunrise_client::ui::load_metadata(resolved.source());
-        sunrise_client::lang::set(sunrise_client::lang::Language::load(
-            &[&pack.source],
-            &settings.language,
-        ));
+        // An integrated server shares the client's loaded resources and
+        // language; it doesn't run this loader in production.
+        lang::set(if role.is_dedicated_server() {
+            Language::load_default(&vanilla_root.to_path_buf())
+        } else {
+            Language::load(&[&pack.source], &settings.language)
+        });
     }
     progress.set(5);
     let suffocation =
@@ -769,6 +811,7 @@ pub(super) fn load_resources(
                 let _step = startup::step("rest");
                 let rest = world_rest::load_world_rest(
                     &resource_root,
+                    &conditions,
                     &resources,
                     &assets,
                     &behaviour_json,
@@ -800,6 +843,7 @@ pub(super) fn load_resources(
     } else {
         let rest = world_rest::load_world_rest(
             &resolved,
+            &conditions,
             &resources,
             &assets,
             &behaviour_json,

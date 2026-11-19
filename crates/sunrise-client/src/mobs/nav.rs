@@ -5,6 +5,7 @@ use super::{
     Mob, MobWorld,
     path::{Evaluator, Finder, Path, PathMob, PathNode, PathType},
 };
+use crate::items::BlockTagFlags;
 use sunrise_core::geometry::Vec3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -525,9 +526,7 @@ impl Mob {
     /// sun keeps only the nodes before the first one the sky sees.
     fn trim_path(&mut self, w: &MobWorld) {
         if let Some(path) = &mut self.ai.nav.path {
-            path.raise_cauldron_nodes(|x, y, z| {
-                w.has_tag("minecraft:cauldrons", w.block_name(x, y, z))
-            });
+            path.raise_cauldron_nodes(|x, y, z| w.block_flag(x, y, z, BlockTagFlags::CAULDRONS));
         }
         if !self.ai.nav.avoid_sun
             || !matches!(self.ai.nav.kind, NavKind::Ground | NavKind::WallClimber)

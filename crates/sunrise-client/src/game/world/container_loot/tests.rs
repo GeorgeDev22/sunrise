@@ -9,6 +9,84 @@ use sunrise_world::loot::{LootData, PackOverlay};
 const POS: (i32, i32, i32) = (8, 64, 8);
 const TABLE: &str = "test:first_access";
 
+#[test]
+#[ignore = "daily"]
+fn level_container_reads_preserve_snapshot_and_unpack_comparator_once() {
+    if in_child("level_container_reads_preserve_snapshot_and_unpack_comparator_once") {
+        return;
+    }
+    mod_platform::testing::with_mods(Default::default(), || {
+        with_game(|game| {
+            use mod_api::{LevelHost, LevelRandomHost};
+            place(game, POS, TABLE, 37);
+            let handle = game.level(game.dim.id()).unwrap();
+            let at = mod_api::BlockSide {
+                level: handle,
+                pos: [8, 64, 8],
+                side: None,
+            };
+            let entity = game.block_entity(handle, at.pos).unwrap();
+            game.with_level(|_, level, _| {
+                assert_eq!(level.block_entity(at.pos), Some(entity));
+                assert_eq!(level.container_size(at), Some(27));
+                for slot in 0..27 {
+                    assert!(level.container_stack(at, slot).is_none());
+                }
+                assert!(level.block_entity([32, 64, 8]).is_none());
+                let unloaded = mod_api::BlockSide {
+                    pos: [32, 64, 8],
+                    ..at
+                };
+                assert_eq!(level.container_size(unloaded), None);
+                assert!(level.container_stack(unloaded, 0).is_none());
+                assert_eq!(level.container_signal(unloaded.pos), None);
+            });
+            pending_seed(game, POS, &[37]);
+            game.with_level(|_, level, ticks| {
+                let mut host = crate::game::mod_api_host::LevelTicks::new(level, ticks);
+                assert_eq!(host.container_signal(at.pos), Some(1));
+                assert_eq!(host.container_signal([32, 64, 8]), None);
+            });
+            consumed(game, POS);
+            assert_eq!(count(game, POS, "minecraft:diamond"), 1);
+            game.world
+                .block_entities
+                .get_mut(&POS)
+                .unwrap()
+                .slots_mut()
+                .fill(None);
+            game.with_level(|_, level, _| assert_eq!(level.container_signal(at.pos), Some(0)));
+            assert_eq!(
+                count(game, POS, "minecraft:diamond"),
+                0,
+                "no second loot roll"
+            );
+            let chunk = game.world.chunks[&(0, 0)].clone();
+            let chest = game.world.block_entities.remove(&POS).unwrap();
+            game.options.dedicated = None;
+            game.options.execution_role = crate::game::execution_role::ExecutionRole::Client;
+            let (client, _server) = sunrise_protocol::connection::Pipe::pair();
+            game.connect_local(client, "ContainerReadTest").unwrap();
+            game.remote.as_mut().unwrap().logged_in = true;
+            game.world.chunks.insert((0, 0), chunk);
+            game.world.block_entities.insert(POS, chest);
+            let client_level = game.level(game.dim.id()).unwrap();
+            let at = mod_api::BlockSide {
+                level: client_level,
+                ..at
+            };
+            let local_entity = game.block_entity(client_level, at.pos).unwrap();
+            game.with_level(|_, level, _| {
+                assert_eq!(level.block_entity(at.pos), Some(local_entity));
+                assert_eq!(level.container_size(at), None);
+                assert!(level.container_stack(at, 0).is_none());
+                assert_eq!(level.container_signal(at.pos), None);
+            });
+            assert!(!game.world.loaded(32, 8));
+        });
+    });
+}
+
 /// Runs the group in one child process, so the game resources load once per group and the
 /// memory returns to the system when the child exits. Returns true in the parent, once the
 /// child passed; false inside the child, which then runs the group's scenarios itself.

@@ -18,14 +18,14 @@ use super::{
     hostile,
     nav::Navigation,
     path::{PATH_TYPES, Path},
-    push::{Cap, Verdict, root_vehicle},
+    push::root_vehicle,
     undead,
 };
 use crate::blocks::Fluid;
 use crate::breathing::{Breath, breathe, drown, own_air};
 use crate::health::DamageLevel;
 use sunrise_core::{
-    geometry::{Aabb, ShapeOp, Vec3, VoxelShape},
+    geometry::{Aabb, Axis, ShapeOp, Vec3, VoxelShape},
     random::RandomSource,
 };
 use sunrise_world::native_load_context::LoopContext;
@@ -386,7 +386,42 @@ mod inside_walk_tests {
         );
         assert!(ran, "the vanilla test resources must be available");
     }
+
+    /// #478: a part's `AddEffect` write is `LivingEntity.addEffect` on a mob,
+    /// so a second write updates the one instance instead of listing it
+    /// twice. It installs the same Wither-only registry as `reset`, so the
+    /// process-wide `OnceLock` holds the same keys whichever test runs first;
+    /// the stored modifier `addEffect` adds is covered by
+    /// `effect_modifier_tests`, which read no registry.
+    #[test]
+    #[ignore = "daily"]
+    fn a_parts_add_effect_write_merges_into_one_instance() {
+        let _test = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reset(usize::MAX, usize::MAX, false);
+        let mut mob = Mob::new(1, crate::mobs::sensor_scan_tests::kind(), Vec3::ZERO, 0.0);
+        let mut level = crate::health::TestLevel::new(0);
+        let write = |amplifier| mod_api::EntityWrite::AddEffect {
+            effect: mod_api::__private::effect_key("minecraft:wither").expect("a resolved key"),
+            duration: 40,
+            amplifier,
+        };
+        let ran = crate::mobs::world::with_test_world(&[], |w, _| {
+            let mut events = Vec::new();
+            apply_entity_write(&mut mob, w, &mut level.level(), &mut events, write(1));
+            apply_entity_write(&mut mob, w, &mut level.level(), &mut events, write(0));
+        });
+        assert!(ran, "the vanilla test resources must be available");
+        assert_eq!(
+            mob.extra.effects,
+            vec![crate::mobs::StoredEffect::new("minecraft:wither", 40, 1)]
+        );
+    }
 }
+#[cfg(test)]
+#[path = "effect_modifier_tests.rs"]
+mod effect_modifier_tests;
 #[cfg(test)]
 #[path = "fall_flying_tests.rs"]
 mod fall_flying_tests;
@@ -414,7 +449,7 @@ fn block_contact_damage(
     fire: f32,
     lava: bool,
 ) {
-    if fire > 0.0 && !m.kind.flags.fire_immune {
+    if fire > 0.0 && !m.fire_immune() {
         let multiplier = m.burning_time();
         m.fire_ticks = crate::motion::environment::ignite_contact(
             m.fire_ticks,
@@ -424,7 +459,7 @@ fn block_contact_damage(
         );
         m.damage(level, fire, Damage::of(DamageKind::InFire));
     }
-    if lava && !m.kind.flags.fire_immune {
+    if lava && !m.fire_immune() {
         m.ignite_for_ticks(300);
         m.damage(level, 4.0, Damage::of(DamageKind::Lava));
     }
@@ -463,7 +498,6 @@ pub struct Ai {
     pub last_hurt_by_player: i32,
     pub no_action_time: i32,
     pub ai_paused: bool, // A mod paused serverAiStep (`MobRef::set_ai_paused`): mobs/ai_pause.rs.
-    pub dab_turns: u32,
     pub aggressive: bool,
     pub panicking: bool,
     pub malus: [Option<f32>; PATH_TYPES],
@@ -1219,10 +1253,12 @@ fn ai_and_finish_tick(
             super::equine::tail_tick(m);
         }
         // LivingEntity.aiStep: without AI there is no serverAiStep and no
-        // travel, but the motion below 0.003 is still dropped and
-        // pushEntities still runs, so a NoAI mob pushes what it overlaps
-        // (and is pushed back by its own push).
+        // travel, but the motion below 0.003 is still dropped, the block
+        // walk and freezing still run, and pushEntities still runs, so a
+        // NoAI mob pushes what it overlaps (and is pushed back by its own
+        // push).
         drop_tiny_motion(m);
+        walk_and_freeze(m, w, level, events);
         push_entities(m, w, level, events);
         ageable_step(m, w, level, events);
         animal_step(m, events);
@@ -1268,7 +1304,8 @@ fn ai_and_finish_tick(
     finish_tick(m, w, level, was_on_fire, events)
 }
 
-/// Resume the living tick after species AI, before block effects and animation.
+/// Resume the living tick after species AI (and the block walk and freezing
+/// in `LivingEntity.aiStep`), before the wet fire check and animation.
 /// Kept as one continuation so an inline action can regain its owning host and
 /// then run the same remaining work, in the original order.
 #[inline]
@@ -1280,10 +1317,6 @@ pub fn finish_tick(
     events: &mut Vec<MobEvent>,
 ) -> bool {
     count_fall_fly_ticks(m);
-    effects_from_blocks(m, w, level, events);
-    if m.alive() {
-        freeze_tick(m, w, level);
-    }
     extinguish_if_wet(m, w, was_on_fire, events);
     m.reset_unlit_fire();
     if m.species() == Species::SulfurCube && m.alive() {
@@ -1332,6 +1365,23 @@ pub fn finish_tick(
     // TraderLlama.maybeDespawn discards the llama in its aiStep: it leaves the
     // level's entity list in this tick, after the rest of its tick ran.
     !(m.removed && m.species() == Species::TraderLlama)
+}
+/// `LivingEntity.aiStep` after `travel`, with or without AI: the block walk
+/// (`applyEffectsFromBlocks`), then the freezing and its hurt, both before
+/// `pushEntities` (cramming) and the water's hurt (#1760). `isInPowderSnow`
+/// was cleared by `Entity.baseTick`; the walk's FREEZE effect sets it for a
+/// powder snow cell on the tick's path, so a hurt that teleports the mob
+/// during the walk keeps it.
+fn walk_and_freeze(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+) {
+    effects_from_blocks(m, w, level, events);
+    if m.alive() {
+        freeze_tick(m, w, level, events);
+    }
 }
 /// `LivingEntity.aiStep` -> `Entity.applyEffectsFromBlocks` for the blocks
 /// that hurt, hold or slide a mob: the cactus (`CactusBlock.entityInside`, 1),
@@ -1426,7 +1476,12 @@ pub(crate) fn effects_from_blocks(
     );
     let _ =
         crate::block_contact::sweep_movements(&mut inside, &movements, &mut visited, &mut effects);
-    let MobInside { m, level, .. } = inside;
+    let MobInside {
+        m,
+        w,
+        level,
+        events,
+    } = inside;
     // `applyAndClear` for the part's queued writes, in the collector's order,
     // in this mob's tick, until it dies.
     for planned in effects.take_planned() {
@@ -1434,15 +1489,24 @@ pub(crate) fn effects_from_blocks(
             break;
         }
         if let mod_api::PlannedInside::Write(write) = planned {
-            apply_entity_write(m, level, write);
+            apply_entity_write(m, w, level, events, write);
         }
     }
 }
 
 /// A typed entity write an `entity_inside` part queued for a mob, applied in
 /// its own tick. `Hurt` uses the generic damage kind: the block's own hurts
-/// keep their named kinds in the walk's arms above.
-fn apply_entity_write(m: &mut Mob, level: &mut DamageLevel<'_>, write: mod_api::EntityWrite) {
+/// keep their named kinds in the walk's arms above. Its `source` is not
+/// resolved to an attacker, so an enderman always draws its teleport chance,
+/// where `Enderman.hurtServer` skips it for a living attacker. The hurt's
+/// teleport is settled inside it.
+fn apply_entity_write(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    write: mod_api::EntityWrite,
+) {
     let triple = |v: [f64; 3]| Vec3::new(v[0], v[1], v[2]);
     match write {
         mod_api::EntityWrite::Push(v) => {
@@ -1455,6 +1519,8 @@ fn apply_entity_write(m: &mut Mob, level: &mut DamageLevel<'_>, write: mod_api::
         }
         mod_api::EntityWrite::Hurt { amount, .. } => {
             m.damage(level, amount, Damage::of(DamageKind::Generic));
+            // The hurt's own teleport, inside it (#1697).
+            hurt_teleports(m, w, events);
         }
         mod_api::EntityWrite::ResetFallDistance => m.fall_distance = 0.0,
         mod_api::EntityWrite::SetFireTicks(ticks) => m.fire_ticks = ticks,
@@ -1463,14 +1529,10 @@ fn apply_entity_write(m: &mut Mob, level: &mut DamageLevel<'_>, write: mod_api::
             duration,
             amplifier,
         } => {
+            // `LivingEntity.addEffect`, as the write's contract names: one
+            // instance an effect, its attribute modifiers stored.
             if let Some(id) = mod_api::__private::effect_key_id(effect) {
-                m.extra.effects.push(crate::mobs::StoredEffect {
-                    id,
-                    duration,
-                    amplifier: i32::from(amplifier),
-                    registry_index: None,
-                    show_icon: true,
-                });
+                m.add_effect(id, duration, i32::from(amplifier));
             }
         }
     }
@@ -1553,6 +1615,8 @@ impl crate::block_contact::InsideWalk for MobInside<'_, '_, '_> {
         // PowderSnowBlock.entityInside: a burning mob destroys the
         // block (`canEntityGrief` for the mob), then EXTINGUISH puts it out.
         if self.w.block_name(x, y, z) == "minecraft:powder_snow" {
+            // InsideBlockEffectType.FREEZE: `setIsInPowderSnow(true)`.
+            self.m.in_powder_snow = true;
             if self.m.is_on_fire() && self.w.can_grief(self.m.id) {
                 self.events.push(MobEvent::BreakBlock {
                     pos: p,
@@ -1567,6 +1631,8 @@ impl crate::block_contact::InsideWalk for MobInside<'_, '_, '_> {
             "minecraft:cactus" => {
                 self.m
                     .damage(self.level, 1.0, Damage::of(DamageKind::Cactus));
+                // The hurt's own teleport, inside it, as magma's (#1697).
+                hurt_teleports(self.m, self.w, self.events);
             }
             // CampfireBlock.entityInside: a lit campfire hurts a
             // living entity by its fire damage (1, soul 2).
@@ -1580,6 +1646,8 @@ impl crate::block_contact::InsideWalk for MobInside<'_, '_, '_> {
                 };
                 self.m
                     .damage(self.level, damage, Damage::of(DamageKind::Campfire));
+                // The hurt's own teleport, inside it, as magma's (#1697).
+                hurt_teleports(self.m, self.w, self.events);
             }
             // WebBlock.entityInside -> makeStuckInBlock, which a
             // spider ignores for cobwebs and a wither always.
@@ -1612,6 +1680,8 @@ impl crate::block_contact::InsideWalk for MobInside<'_, '_, '_> {
                 {
                     self.m
                         .damage(self.level, 1.0, Damage::of(DamageKind::SweetBerryBush));
+                    // The hurt's own teleport, inside it, as magma's (#1697).
+                    hurt_teleports(self.m, self.w, self.events);
                 }
             }
             // PowderSnowBlock.entityInside: a living entity is stuck
@@ -1818,6 +1888,18 @@ fn nautilus_air_supply(m: &mut Mob, w: &MobWorld, level: &mut DamageLevel<'_>) {
         m.damage(level, damage, Damage::of(DamageKind::DryOut));
     }
 }
+/// The thin box at a body's eyes `Entity.isInWall` tests: 0.8 of the width wide (a float
+/// multiplication) and 1e-6 high.
+fn eye_bounds(width: f32, eye: [f64; 3]) -> Aabb {
+    let side = f64::from(width * 0.8_f32);
+    let half = [side / 2.0, 1.0e-6 / 2.0, side / 2.0];
+    let lo = [0, 1, 2].map(|i| eye[i] - half[i]);
+    let hi = [0, 1, 2].map(|i| eye[i] + half[i]);
+    Aabb::new(
+        Vec3::new(lo[0], lo[1], lo[2]),
+        Vec3::new(hi[0], hi[1], hi[2]),
+    )
+}
 /// `Entity.isInWall` (minus the noPhysics early-out, which the caller applies):
 /// visit every cell covered by the thin eye box and ask whether a suffocating
 /// collision shape actually intersects it. Width multiplication is a float.
@@ -1826,14 +1908,17 @@ fn in_wall(
     eye: [f64; 3],
     mut intersects: impl FnMut(i32, i32, i32, &Aabb) -> bool,
 ) -> bool {
-    let side = f64::from(width * 0.8_f32);
-    let half = [side / 2.0, 1.0e-6 / 2.0, side / 2.0];
-    let lo = [0, 1, 2].map(|i| eye[i] - half[i]);
-    let hi = [0, 1, 2].map(|i| eye[i] + half[i]);
-    let bounds = Aabb::new(
-        Vec3::new(lo[0], lo[1], lo[2]),
-        Vec3::new(hi[0], hi[1], hi[2]),
-    );
+    let bounds = eye_bounds(width, eye);
+    let lo = [
+        bounds.min(Axis::X),
+        bounds.min(Axis::Y),
+        bounds.min(Axis::Z),
+    ];
+    let hi = [
+        bounds.max(Axis::X),
+        bounds.max(Axis::Y),
+        bounds.max(Axis::Z),
+    ];
     let c0 = lo.map(|v| v.floor() as i32);
     let c1 = hi.map(|v| v.floor() as i32);
     (c0[0]..=c1[0])
@@ -1900,6 +1985,10 @@ fn base_tick(
             let _ = (m.random.next_double(), m.random.next_double());
         }
     }
+    // Entity.baseTick: `wasInPowderSnow` keeps last tick's walk, and
+    // `isInPowderSnow` waits for this tick's walk to set it.
+    m.was_in_powder_snow = m.in_powder_snow;
+    m.in_powder_snow = false;
     m.was_eye_in_water = m.fluids.eye_in_water;
     m.update_fluids(w, events);
     if m.species() == Species::Drowned {
@@ -1913,7 +2002,7 @@ fn base_tick(
     }
     // Entity.baseTick counts burn damage and the timer before a wet mob is put out.
     if m.fire_ticks > 0 {
-        if m.kind.flags.fire_immune {
+        if m.fire_immune() {
             m.fire_ticks = 0;
         } else {
             if m.fire_ticks % 20 == 0 && !m.fluids.in_lava {
@@ -1939,34 +2028,41 @@ fn base_tick(
             binding: w.collision,
             subject: None,
         };
-        if m.species() != Species::Vex
-            && in_wall(
-                m.width(),
-                [m.position.x, m.eye_y(), m.position.z],
-                |x, y, z, eye_bounds| {
-                    let p = [x, y, z];
-                    let state = w.world.block(x, y, z);
-                    if !w
-                        .suffocation
-                        .is_suffocating(&mut scene, state, p)
-                        .unwrap_or(false)
-                    {
-                        return false;
-                    }
-                    w.collision
-                        .collision_shape(&mut scene, state, p)
-                        .ok()
-                        .is_some_and(|shape| {
-                            let Ok(eye_shape) = VoxelShape::from_box(*eye_bounds) else {
-                                return false;
-                            };
-                            shape
-                                .moved(Vec3::new(f64::from(x), f64::from(y), f64::from(z)))
-                                .join_is_not_empty(&eye_shape, ShapeOp::AND)
-                                .unwrap_or(false)
-                        })
-                },
-            )
+        // A collider box at the eyes is a wall as well: the crush a moving collider gives.
+        let in_collider = m.species() != Species::Vex
+            && sunrise_client_render::moving_colliders::overlaps(
+                sunrise_world::entity_obstruction::EntityIdentity(u64::from(m.id)),
+                eye_bounds(m.width(), [m.position.x, m.eye_y(), m.position.z]),
+            );
+        if in_collider
+            || m.species() != Species::Vex
+                && in_wall(
+                    m.width(),
+                    [m.position.x, m.eye_y(), m.position.z],
+                    |x, y, z, eye_bounds| {
+                        let p = [x, y, z];
+                        let state = w.world.block(x, y, z);
+                        if !w
+                            .suffocation
+                            .is_suffocating(&mut scene, state, p)
+                            .unwrap_or(false)
+                        {
+                            return false;
+                        }
+                        w.collision
+                            .collision_shape(&mut scene, state, p)
+                            .ok()
+                            .is_some_and(|shape| {
+                                let Ok(eye_shape) = VoxelShape::from_box(*eye_bounds) else {
+                                    return false;
+                                };
+                                shape
+                                    .moved(Vec3::new(f64::from(x), f64::from(y), f64::from(z)))
+                                    .join_is_not_empty(&eye_shape, ShapeOp::AND)
+                                    .unwrap_or(false)
+                            })
+                    },
+                )
         {
             m.damage(level, 1.0, Damage::of(DamageKind::InWall));
             hurt_teleports(m, w, events);
@@ -2060,7 +2156,7 @@ fn base_tick(
     };
     block_contact_damage(m, w, level, fire, lava);
     // Enderman.hurtServer and Shulker.hurtServer teleport inside the hurt
-    // (fire, lava, a block).
+    // (fire, lava).
     hurt_teleports(m, w, events);
     if !m.alive() {
         m.death_time += 1;
@@ -2081,10 +2177,11 @@ fn base_tick(
     super::leash::tick(m, w, events);
     was_on_fire
 }
-/// Freezing runs after movement and block effects.
-fn freeze_tick(m: &mut Mob, w: &MobWorld, level: &mut DamageLevel<'_>) {
-    let in_snow = in_powder_snow(m, w);
-    m.in_powder_snow = in_snow;
+/// `LivingEntity.aiStep`'s freezing, after movement and the block walk and
+/// before cramming and the water's hurt, on `isInPowderSnow` as the tick's
+/// block walk left it (`m.in_powder_snow`).
+fn freeze_tick(m: &mut Mob, w: &MobWorld, level: &mut DamageLevel<'_>, events: &mut Vec<MobEvent>) {
+    let in_snow = m.in_powder_snow;
     if !in_snow && m.ticks_frozen == 0 {
         return;
     }
@@ -2097,6 +2194,8 @@ fn freeze_tick(m: &mut Mob, w: &MobWorld, level: &mut DamageLevel<'_>) {
     }
     if m.age.is_multiple_of(40) && m.is_fully_frozen() && can_freeze {
         m.damage(level, 1.0, Damage::of(DamageKind::Freeze));
+        // Enderman.hurtServer and Shulker.hurtServer teleport inside the hurt (#1697).
+        hurt_teleports(m, w, events);
     }
 }
 /// Whether the mob's box (shrunk by `1.0E-5`) touches a lava block: the
@@ -2385,7 +2484,7 @@ fn ai_step(m: &mut Mob, w: &MobWorld, level: &mut DamageLevel<'_>, events: &mut 
         super::piglin::before_goals(m, w, level.random(), events);
     }
     if m.alive() && !immobile {
-        super::dab::step(m, w, level, events);
+        server_ai_step(m, w, level, events);
     } else {
         m.ai.jumping = false;
         m.ai.xxa = 0.0;
@@ -2409,8 +2508,10 @@ fn ai_step(m: &mut Mob, w: &MobWorld, level: &mut DamageLevel<'_>, events: &mut 
         // A fall's hurt (checkFallDamage) teleports at once.
         hurt_teleports(m, w, events);
     }
-    // LivingEntity.aiStep: applyEffectsFromBlocks follows travel.
+    // LivingEntity.aiStep: applyEffectsFromBlocks follows travel, then
+    // the freezing, before pushEntities and the water's hurt.
     m.apply_effects_from_blocks(w, events);
+    walk_and_freeze(m, w, level, events);
     push_entities(m, w, level, events);
     hurt_by_water(m, w, level, events);
     // Spider.tick: climbing while pressed against a wall.
@@ -2438,9 +2539,10 @@ fn hurt_by_water(
     }
 }
 /// A hurt the mob's own tick deals (`Entity.baseTick`, `tickEffects`, a
-/// block's touch, cramming), with the teleport `Enderman.hurtServer` or
-/// `Shulker.hurtServer` makes inside it: a second hurt of the same tick draws
-/// after the first one's teleport and sees where it landed.
+/// block's touch or a mod part's queued hurt, freezing, cramming), with the
+/// teleport `Enderman.hurtServer` or `Shulker.hurtServer` makes inside it: a
+/// second hurt of the same tick draws after the first one's teleport and sees
+/// where it landed.
 #[cfg(test)]
 fn hurt(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>, amount: f32, source: Damage) {
     m.damage(
@@ -2536,15 +2638,10 @@ fn push_entities(
         && targets.iter().filter(|t| !t.2).count() as i64 > i64::from(limit) - 1
     {
         m.damage(level, 6.0, Damage::of(DamageKind::Cramming));
+        // The hurt's own teleport, inside it (#1697).
+        hurt_teleports(m, w, events);
     }
-    // The server's collision cap, after the cramming check above, which counts every entity.
-    let mut cap = Cap::new(m, w);
     for &(who, at, _, same, vehicle) in &targets {
-        match cap.check(who, w) {
-            Verdict::Push => {}
-            Verdict::Skip => continue,
-            Verdict::Stop => break,
-        }
         // Warden.doPush: touching it angers it, then the push itself.
         if m.species() == Species::Warden {
             super::warden::do_push(m, w, who, events);
@@ -2596,7 +2693,6 @@ fn push_entities(
         if self_pushable {
             m.velocity = Vec3::new(m.velocity.x + xa, m.velocity.y, m.velocity.z + za);
         }
-        cap.record(m, who);
     }
     super::world::give_push_targets(targets);
 }
@@ -2622,7 +2718,7 @@ fn sun_burn_tick(m: &mut Mob, w: &MobWorld) -> bool {
         m.position.z.floor() as i32,
     );
     let br = w.brightness(x, y, z);
-    let wet = m.fluids.in_water || in_rain(m, w) || in_powder_snow(m, w) || m.in_powder_snow;
+    let wet = m.fluids.in_water || in_rain(m, w) || in_powder_snow(m, w) || m.was_in_powder_snow;
     br > 0.5 && m.random.next_float() * 30.0 < (br - 0.4) * 2.0 && !wet && w.can_see_sky(x, y, z)
 }
 // Keep the actual selectors (including partially updated goal state) attached to
@@ -2883,7 +2979,7 @@ pub(super) fn server_ai_step(
         return;
     }
     super::riders::drive(m, w);
-    let tick_count = super::dab::selector_tick(m);
+    let tick_count = i64::from(m.age);
     let id_based = tick_count + i64::from(m.id);
     {
         let BorrowedGoalSelectors {
@@ -2913,7 +3009,7 @@ pub(super) fn server_ai_step(
     }
     if m.species() == Species::Villager {
         // Villager.customServerAiStep: the brain, then the raid sound roll.
-        super::villager::lobotomy::brain_tick(m, w, level, events);
+        super::villager::tick_brain(m, w, level, events);
         if let Some(player) = super::villager::ext_mut(m).last_traded_player.take() {
             events.push(MobEvent::VillagerTrade { mob: m.id, player });
         }
@@ -3181,16 +3277,6 @@ fn never_removed_when_far(s: Species) -> bool {
             | Species::Warden
             | Species::Wither
     )
-}
-/// The movement speed multiplier of the mob's transient `minecraft:baby`
-/// modifier (`Zombie.SPEED_MODIFIER_BABY` +0.5, `Piglin.SPEED_MODIFIER_BABY`
-/// +0.2, both `ADD_MULTIPLIED_BASE`): the same modifier `/attribute` reads, so
-/// one taken away with `modifier remove` no longer speeds the baby up.
-pub fn speed_bonus(m: &Mob) -> f64 {
-    match super::finalize::transient(m, super::finalize::Attr::MovementSpeed) {
-        Some((amount, super::finalize::Op::AddMultipliedBase)) => 1.0 + amount,
-        _ => 1.0,
-    }
 }
 /// The ambient, hurt and death sounds of species that pick them by state
 /// (`getHurtSound` / `getDeathSound` overrides); the type's otherwise.
@@ -3761,24 +3847,42 @@ pub(crate) fn tick_effects_hurting(
     // list it finds (Resistance softens the hit, Infested spawns silverfish,
     // a totem adds its effects to it). An effect a tick appends ticks from
     // the next tick on.
-    let first = m.extra.effects.len();
+    let mut first = m.extra.effects.len();
+    // Finish expiry before the next callback reads the holder. A cancelled expiry
+    // keeps even a zero-duration instance; hidden promotion happens before this.
+    let expire = |m: &mut Mob, i: usize| {
+        let e = &m.extra.effects[i];
+        if e.duration > 0 || e.duration == -1 {
+            return false;
+        }
+        let mut cancel = false;
+        if let Some(mods) = mods
+            && let Some(index) = e.registry_index
+        {
+            mods.effect_expired(m.id, index, e.amplifier, &mut cancel);
+        }
+        if cancel {
+            return false;
+        }
+        let id = e.id;
+        m.retain_effects(|effect| effect.id != id);
+        true
+    };
     let old_max_absorption = super::armor::max_absorption(m);
-    let old_boost_amp = m
-        .extra
-        .effects
-        .iter()
-        .find(|e| e.id == "minecraft:health_boost")
-        .map(|e| e.amplifier);
     let mut i = 0;
     while i < m.extra.effects.len() && i < first {
         let (effect, amp) = (m.extra.effects[i].id, m.extra.effects[i].amplifier);
         // MobEffectInstance.tickServer: an infinite (-1) effect times its
         // ticks by the mob's tickCount and never counts down.
         let infinite = m.extra.effects[i].duration == -1;
-        // MobEffectInstance.tickServer: hasRemainingDuration is false at 0, so the
-        // instance ticks nothing; LivingEntity.tickEffects drops it below.
-        if !infinite && m.extra.effects[i].duration == 0 {
-            i += 1;
+        // MobEffectInstance.tickServer: without remaining duration the instance
+        // ticks nothing; resolve its expiry before the next instance.
+        if !infinite && m.extra.effects[i].duration <= 0 {
+            if expire(m, i) {
+                first -= 1;
+            } else {
+                i += 1;
+            }
             continue;
         }
         let count = if infinite {
@@ -3787,7 +3891,7 @@ pub(crate) fn tick_effects_hurting(
             m.extra.effects[i].duration
         };
         let interval = |base: i32| base.wrapping_shr(amp as u32).max(1);
-        // A refused mod effect is left at 0 ticks for the retain below.
+        // A refused mod effect expires before the next effect ticks.
         let mut expired = false;
         match effect {
             "minecraft:poison"
@@ -3824,11 +3928,6 @@ pub(crate) fn tick_effects_hurting(
                 expired = true;
             }
             id if sunrise_client_core::potions::is_mod_effect(id) => {
-                // tickServer: one with no ticks left goes unasked.
-                if !infinite && m.extra.effects[i].duration <= 0 {
-                    i += 1;
-                    continue;
-                }
                 if let Some(mods) = mods
                     && let Some(index) = m.extra.effects[i].registry_index
                     && !mods.tick_mod_effect(level, index, m, count, amp)
@@ -3860,9 +3959,9 @@ pub(crate) fn tick_effects_hurting(
                     m.absorption = m.absorption.min(4.0 * (hidden.amplifier + 1) as f32);
                 }
                 m.extra.effects[i] = super::StoredEffect::from_instance(effect, &hidden);
-                if effect == "minecraft:health_boost" {
-                    super::finalize::health_boost_changed(m);
-                }
+                // `tickServer`'s onExpire: `onEffectUpdated(instance, true, null)`,
+                // the modifiers of the amplifier that is active now.
+                m.set_effect_modifiers(effect, Some(hidden.amplifier));
                 m.extra.ambient_effects.retain(|e| *e != effect);
                 if hidden.ambient {
                     m.extra.ambient_effects.push(effect);
@@ -3885,22 +3984,14 @@ pub(crate) fn tick_effects_hurting(
         {
             m.effects_dirty = true;
         }
-        i += 1;
+        if m.extra.effects.get(i).is_some_and(|e| e.id == effect) && expire(m, i) {
+            // Removal shifts the next original effect into this slot. Shrink the
+            // original-pass boundary too, so newly appended effects still wait.
+            first -= 1;
+        } else {
+            i += 1;
+        }
     }
-    let mob_id = m.id;
-    m.retain_effects(|e| {
-        if e.duration > 0 || e.duration == -1 {
-            return true;
-        }
-        // `MobEffectEvent.Expired`: canceling the expiry keeps the effect.
-        let mut cancel = false;
-        if let Some(mods) = mods
-            && let Some(index) = e.registry_index
-        {
-            mods.effect_expired(mob_id, index, e.amplifier, &mut cancel);
-        }
-        cancel
-    });
     if m.effects_dirty {
         let invisible = m.has_effect("minecraft:invisibility");
         m.needs_sync |= m.invisible != invisible;
@@ -3911,16 +4002,6 @@ pub(crate) fn tick_effects_hurting(
     let max_absorption = super::armor::max_absorption(m);
     if max_absorption != old_max_absorption {
         m.absorption = m.absorption.min(max_absorption);
-    }
-
-    if old_boost_amp
-        != m.extra
-            .effects
-            .iter()
-            .find(|e| e.id == "minecraft:health_boost")
-            .map(|e| e.amplifier)
-    {
-        super::finalize::health_boost_changed(m);
     }
 }
 
@@ -4880,125 +4961,6 @@ mod same_vehicle_push_tests {
         assert_eq!(velocity, Vec3::ZERO, "its rider pushes the camel");
         let (pushed, _) = push(true).unwrap();
         assert_eq!(pushed, vec![3], "the camel pushes the zombie");
-    }
-
-    /// The server's collision cap (`[entities] max_collisions`): in a pen of twelve chickens one
-    /// pushes every other (11) with no cap, and exactly the first N in vanilla's order with a cap
-    /// of N, skipping a chicken that already had N pushes this tick.
-    #[test]
-    #[ignore = "daily"]
-    fn a_mob_in_a_crowded_pen_pushes_at_most_the_cap() {
-        let mut pen = None;
-        assert!(
-            with_test_world(&[], |_, types| {
-                let chicken = |id: u32| {
-                    // All inside one another's boxes, none exactly on the pusher.
-                    let at = Vec3::new(0.5 + f64::from(id) * 0.02, 64.0, 0.5);
-                    Mob::new(
-                        id,
-                        std::sync::Arc::new(types.types["minecraft:chicken"].clone()),
-                        at,
-                        0.0,
-                    )
-                };
-                pen = Some((0..12).map(chicken).collect::<Vec<_>>());
-            }),
-            "vanilla data is missing"
-        );
-        let Some(pen) = pen else {
-            return;
-        };
-        let pushed = |cap: u32, crowd: &[crate::mobs::Seen]| {
-            let mut pusher = pen[0].clone();
-            let mut events = Vec::new();
-            super::super::push::with_cap(cap, || {
-                with_test_world(crowd, |w, _| {
-                    let mut level = crate::health::TestLevel::new(0);
-                    push_entities(&mut pusher, w, &mut level.level(), &mut events)
-                })
-            });
-            let ids: Vec<u32> = events
-                .iter()
-                .filter_map(|e| match e {
-                    MobEvent::Push {
-                        target: Who::Mob(id),
-                        ..
-                    } => Some(*id),
-                    _ => None,
-                })
-                .collect();
-            // What the loop reports for the counts that follow.
-            assert_eq!(pusher.pushed, if cap > 0 { ids.clone() } else { vec![] });
-            ids
-        };
-        let mut crowd: Vec<crate::mobs::Seen> = pen
-            .iter()
-            .map(|m| m.seen(None, &crate::items::Items::empty()))
-            .collect();
-        assert_eq!(pushed(0, &crowd), (1..12).collect::<Vec<u32>>());
-        assert_eq!(pushed(3, &crowd), vec![1, 2, 3]);
-        // Chickens 1 and 2 have taken 3 pushes already: skipped, the next ones are pushed.
-        crowd[1].collisions = 3;
-        crowd[2].collisions = 3;
-        assert_eq!(pushed(3, &crowd), vec![3, 4, 5]);
-        // The pusher's own count includes what it received: two left of three.
-        crowd[0].collisions = 1;
-        assert_eq!(pushed(3, &crowd), vec![3, 4]);
-        crowd[0].collisions = 3;
-        assert!(pushed(3, &crowd).is_empty());
-        // Off, the counts are not read.
-        assert_eq!(pushed(0, &crowd), (1..12).collect::<Vec<u32>>());
-    }
-
-    /// MSPT of one tick of a crowded chicken pen with the cap off and at 8 (run by hand with
-    /// `--ignored --nocapture`; needs the vanilla data). It measures the pushes a mob gives; the
-    /// received counts the mob loop adds are not simulated.
-    #[test]
-    #[ignore]
-    fn collision_cap_cost() {
-        for n in [50u32, 100, 200] {
-            let mut pen = None;
-            with_test_world(&[], |_, types| {
-                let ty = std::sync::Arc::new(types.types["minecraft:chicken"].clone());
-                pen = Some(
-                    (0..n)
-                        .map(|id| {
-                            let at = Vec3::new(
-                                0.5 + f64::from(id % 7) * 0.05,
-                                64.0,
-                                0.5 + f64::from(id / 7 % 7) * 0.05 + f64::from(id) * 0.0001,
-                            );
-                            Mob::new(id, ty.clone(), at, 0.0)
-                        })
-                        .collect::<Vec<_>>(),
-                );
-            });
-            let Some(mut pen) = pen else {
-                return;
-            };
-            for cap in [0u32, 8] {
-                let crowd: Vec<crate::mobs::Seen> = pen
-                    .iter()
-                    .map(|m| m.seen(None, &crate::items::Items::empty()))
-                    .collect();
-                let t = std::time::Instant::now();
-                super::super::push::with_cap(cap, || {
-                    with_test_world(&crowd, |w, _| {
-                        let mut events = Vec::new();
-                        let mut level = crate::health::TestLevel::new(0);
-                        for m in pen.iter_mut() {
-                            events.clear();
-                            push_entities(m, w, &mut level.level(), &mut events);
-                            m.pushed.clear();
-                        }
-                    })
-                });
-                println!(
-                    "{n} chickens, cap {cap}: {:.3} ms",
-                    t.elapsed().as_secs_f64() * 1e3
-                );
-            }
-        }
     }
 
     #[test]
@@ -6215,10 +6177,10 @@ mod burn_and_rose_tests {
                 assert!(!m.in_powder_snow);
                 assert!(burns(&mut m), "in plain daylight");
                 // Having been in the powder snow last tick (`wasInPowderSnow`).
-                m.in_powder_snow = true;
+                m.was_in_powder_snow = true;
                 assert!(!burns(&mut m), "was in the powder snow");
                 // It waits that one tick before the sun reaches it.
-                m.in_powder_snow = false;
+                m.was_in_powder_snow = false;
                 assert!(burns(&mut m), "the tick after it stepped out");
             },
         );
@@ -7377,7 +7339,14 @@ mod freeze_tests {
                     // The freeze damage falls on a tick that is a multiple of 40.
                     m.age = 40;
                     let start = m.health;
-                    freeze_tick(&mut m, w, &mut crate::health::TestLevel::new(0).level());
+                    // The block walk's FREEZE effect for the snow it stands in.
+                    m.in_powder_snow = in_powder_snow(&m, w);
+                    freeze_tick(
+                        &mut m,
+                        w,
+                        &mut crate::health::TestLevel::new(0).level(),
+                        &mut Vec::new(),
+                    );
                     (m.ticks_frozen, start - m.health)
                 };
                 let frozen = |id: &str, ticks_frozen: i32| frozen_with(id, ticks_frozen, None);
@@ -7762,6 +7731,9 @@ mod trader_llama_no_ai_tests {
 }
 
 #[cfg(test)]
+#[path = "aistep_order_tests.rs"]
+mod aistep_order_tests;
+#[cfg(test)]
 #[path = "hurt_teleport_contact_tests.rs"]
 mod hurt_teleport_contact_tests;
 
@@ -7808,11 +7780,16 @@ mod baby_speed_tests {
     use std::sync::Arc;
     use sunrise_core::geometry::Vec3;
 
-    fn baby(species: Species, id: &str) -> Mob {
+    fn baby(species: Species, id: &str, speed: f64) -> Mob {
         let mut k = kind();
         let km = Arc::make_mut(&mut k);
         km.id = id.into();
         km.species = species;
+        km.speed = speed;
+        km.attributes = Arc::new(std::collections::HashMap::from([(
+            "minecraft:movement_speed".to_owned(),
+            speed,
+        )]));
         let mut m = Mob::new(1, k, Vec3::ZERO, 0.0);
         finalize::set_baby(&mut m, true);
         m
@@ -7824,22 +7801,28 @@ mod baby_speed_tests {
     /// took it away, until the next `setBaby`.
     #[test]
     fn a_babys_speed_follows_its_baby_modifier() {
-        let mut zombie = baby(Species::Zombie, "minecraft:zombie");
-        assert_eq!(speed_bonus(&zombie), 1.5);
+        let mut zombie = baby(Species::Zombie, "minecraft:zombie", 0.23);
+        // 0.23 + 0.23 x 0.5.
+        assert_eq!(zombie.movement_speed(), 0.345_000_000_000_000_03);
         zombie
             .extra
             .attributes
             .get_or_insert_default()
             .baby_speed_removed = true;
-        assert_eq!(speed_bonus(&zombie), 1.0, "removed with /attribute");
+        assert_eq!(zombie.movement_speed(), 0.23, "removed with /attribute");
         finalize::set_baby(&mut zombie, true);
-        assert_eq!(speed_bonus(&zombie), 1.5, "setBaby adds it back");
-        // The piglin's is 0.2F widened to a double, not the zombie's 0.5.
-        let piglin = baby(Species::Piglin, "minecraft:piglin");
-        assert_eq!(speed_bonus(&piglin), 1.0 + f64::from(0.2f32));
-        let mut adult = baby(Species::Zombie, "minecraft:zombie");
+        assert_eq!(
+            zombie.movement_speed(),
+            0.345_000_000_000_000_03,
+            "setBaby adds it back"
+        );
+        // The piglin's is 0.2F widened to a double, not the zombie's 0.5:
+        // 0.35 + 0.35 x 0.20000000298023224.
+        let piglin = baby(Species::Piglin, "minecraft:piglin", 0.35);
+        assert_eq!(piglin.movement_speed(), 0.420_000_001_043_081_3);
+        let mut adult = baby(Species::Zombie, "minecraft:zombie", 0.23);
         finalize::set_baby(&mut adult, false);
-        assert_eq!(speed_bonus(&adult), 1.0);
+        assert_eq!(adult.movement_speed(), 0.23);
     }
 }
 

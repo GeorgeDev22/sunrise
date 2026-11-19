@@ -741,13 +741,25 @@ mod tests {
                     assert_eq!(m.extra.owner, owner);
                     assert_eq!(m.extra.sitting, expected, "{id} {owner:?} {sitting:?}");
                     // No raw compound: this must come from the modeled flag.
-                    let saved =
-                        crate::entity_nbt::mob_to_nbt(&m, [5, 6, 7, 8], None, None, |_| None);
+                    let saved = crate::entity_nbt::mob_to_nbt(
+                        &m,
+                        [5, 6, 7, 8],
+                        None,
+                        None,
+                        |_| None,
+                        &Default::default(),
+                    );
                     assert_eq!(saved.get("Sitting"), Some(&Tag::Byte(i8::from(expected))));
                     // A stale raw flag must not override a later model change.
                     m.extra.sitting = !expected;
-                    let saved =
-                        crate::entity_nbt::mob_to_nbt(&m, [5, 6, 7, 8], Some(&raw), None, |_| None);
+                    let saved = crate::entity_nbt::mob_to_nbt(
+                        &m,
+                        [5, 6, 7, 8],
+                        Some(&raw),
+                        None,
+                        |_| None,
+                        &Default::default(),
+                    );
                     assert_eq!(saved.get("Sitting"), Some(&Tag::Byte(i8::from(!expected))));
                 }
             }
@@ -1007,7 +1019,14 @@ mod cooldown_memory_tests {
         })
     }
     fn saved(m: &Mob, stale: Option<&Tag>) -> Tag {
-        crate::entity_nbt::mob_to_nbt(m, [140, 1, 0, 7], stale, None, |_| None)
+        crate::entity_nbt::mob_to_nbt(
+            m,
+            [140, 1, 0, 7],
+            stale,
+            None,
+            |_| None,
+            &Default::default(),
+        )
     }
     #[test]
     fn decoded_cooldown_presence_ttl_and_model_mutation_save_without_raw() {

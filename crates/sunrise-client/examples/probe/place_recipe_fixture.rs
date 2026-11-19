@@ -14,16 +14,18 @@ use sunrise_client::{
 };
 use sunrise_world::loot::PackOverlay;
 
-fn state(menu: &Menu) -> String {
+fn state(menu: &Menu, catalog: &Items) -> String {
     let slots: Vec<String> = (0..menu.slot_count())
-        .map(|i| canon_stack(menu.slot(i)))
+        .map(|i| canon_stack(menu.slot(i), catalog))
         .collect();
     let data: String = menu.data.iter().map(|d| format!(" {d}")).collect();
-    let inv: Vec<String> = (0..41).map(|i| canon_stack(menu.player_item(i))).collect();
+    let inv: Vec<String> = (0..41)
+        .map(|i| canon_stack(menu.player_item(i), catalog))
+        .collect();
     format!(
         "{} | {} |{data} | {} | inv {}",
         slots.join(" "),
-        canon_stack(menu.carried.as_ref()),
+        canon_stack(menu.carried.as_ref(), catalog),
         menu.drops.join(";"),
         inv.join(" ")
     )
@@ -108,7 +110,7 @@ pub fn main() -> sunrise_client::Result<()> {
                 PostPlace::Ghost => "PLACE_GHOST_RECIPE",
             }
         };
-        out += &format!("post {post} | {}\n", state(&menu));
+        out += &format!("post {post} | {}\n", state(&menu, &items));
     }
     fs::write(args.get(4).ok_or(usage)?, out)?;
     Ok(())

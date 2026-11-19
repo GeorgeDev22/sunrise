@@ -397,6 +397,7 @@ fn saved_proto_chunks_restore_exactly() {
     let save = Arc::new(SaveDir::new(
         dir.clone(),
         sunrise_client::save::LevelShape::OVERWORLD,
+        Some(Default::default()),
     ));
     let generator = Persistent {
         inner: Arc::new(terrain),
@@ -538,6 +539,7 @@ fn saved_proto_block_entities_keep_their_id() {
     let save = Arc::new(SaveDir::new(
         dir.clone(),
         sunrise_client::save::LevelShape::OVERWORLD,
+        Some(Default::default()),
     ));
     let generator = Persistent {
         inner: Arc::new(terrain),
@@ -627,6 +629,7 @@ fn persistent_forwards_the_block_entities_decoration_made_in_a_final_chunk() {
         save: Arc::new(SaveDir::new(
             dir.clone(),
             sunrise_client::save::LevelShape::OVERWORLD,
+            Some(Default::default()),
         )),
         registry: assets,
         biomes,

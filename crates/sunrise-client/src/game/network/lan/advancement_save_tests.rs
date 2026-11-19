@@ -46,6 +46,7 @@ mod connected_advancement_save_tests {
         game.save = Arc::new(sunrise_client::save::SaveDir::new(
             dir.clone(),
             sunrise_client::save::LevelShape::OVERWORLD,
+            Some(Default::default()),
         ));
         use sunrise_client::server::user_lists::{BanList, IpBanList, OpList, WhiteList};
         game.server_lists = Some(Arc::new(Mutex::new(super::super::dedicated::Lists {
@@ -59,7 +60,6 @@ mod connected_advancement_save_tests {
             player_idle_timeout: 0,
             stop: false,
             autosave: true,
-            whitelist_bypass: Vec::new(),
         })));
         game.set_allow_commands(true);
         let _rx = super::world_spawn_sync_tests::host_for(&mut game);
@@ -213,6 +213,7 @@ mod connected_advancement_preservation_tests {
         game.save = Arc::new(sunrise_client::save::SaveDir::new(
             dir.clone(),
             sunrise_client::save::LevelShape::OVERWORLD,
+            Some(Default::default()),
         ));
         use sunrise_client::server::user_lists::{BanList, IpBanList, OpList, WhiteList};
         game.server_lists = Some(Arc::new(Mutex::new(super::super::dedicated::Lists {
@@ -226,7 +227,6 @@ mod connected_advancement_preservation_tests {
             player_idle_timeout: 0,
             stop: false,
             autosave: true,
-            whitelist_bypass: Vec::new(),
         })));
         game.set_allow_commands(true);
         let _rx = super::world_spawn_sync_tests::host_for(&mut game);

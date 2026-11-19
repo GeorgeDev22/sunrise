@@ -2,8 +2,9 @@
 use super::Game;
 use std::sync::{Arc, Mutex};
 use sunrise_client::{
+    advancements::Tree,
     crafting::ResolvedSources,
-    lan::data::{FrozenDamage, SyncData},
+    lan::data::{FrozenDamage, PackRegistryDefinitions, SyncData},
 };
 use sunrise_world::item_defaults::ItemData;
 
@@ -37,7 +38,20 @@ pub(in crate::game) fn server_sources(
     item_data: &ItemData,
     overlay: &sunrise_world::loot::PackOverlay,
 ) -> std::io::Result<Arc<ResolvedSources>> {
-    server_sources_with(root, item_data, overlay, || {
+    server_sources_with(root, item_data, overlay, false, || {
+        server_data_load(root, item_data)
+    })
+}
+
+/// `server_sources` for an owning load that goes on to build the tables with
+/// `Recipes::from_resolved`, which reports the recipes that failed to resolve
+/// together with its own. Sources with failures are never cached.
+fn server_sources_collecting(
+    root: &std::path::Path,
+    item_data: &ItemData,
+    overlay: &sunrise_world::loot::PackOverlay,
+) -> std::io::Result<Arc<ResolvedSources>> {
+    server_sources_with(root, item_data, overlay, true, || {
         server_data_load(root, item_data)
     })
 }
@@ -46,6 +60,7 @@ fn server_sources_with(
     root: &std::path::Path,
     item_data: &ItemData,
     overlay: &sunrise_world::loot::PackOverlay,
+    collecting: bool,
     load: impl FnOnce() -> std::io::Result<sunrise_world::native_load_context::LoadContext>,
 ) -> std::io::Result<Arc<ResolvedSources>> {
     let generation = item_data.defaults().generation();
@@ -58,17 +73,32 @@ fn server_sources_with(
         return Ok(held.sources.clone());
     }
     let context = load()?;
-    let sources = Arc::new(
-        ResolvedSources::load(root, overlay, &context)
-            .map_err(|error| std::io::Error::other(error.to_string()))?,
-    );
-    *slot = Some(ServerSources {
-        root: root.to_owned(),
-        generation,
-        overlay: key,
-        sources: sources.clone(),
-    });
+    let sources = collect(root, overlay, &context, collecting)?;
+    if sources.is_complete() {
+        *slot = Some(ServerSources {
+            root: root.to_owned(),
+            generation,
+            overlay: key,
+            sources: sources.clone(),
+        });
+    }
     Ok(sources)
+}
+
+fn collect(
+    root: &std::path::Path,
+    overlay: &sunrise_world::loot::PackOverlay,
+    context: &sunrise_world::native_load_context::LoadContext,
+    collecting: bool,
+) -> std::io::Result<Arc<ResolvedSources>> {
+    let loaded = ResolvedSources::load_collecting(root, overlay, context)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    if !collecting {
+        loaded
+            .check()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+    Ok(Arc::new(loaded))
 }
 
 /// Initial tables borrow the settings already captured with their item data.
@@ -82,25 +112,20 @@ pub(in crate::game) fn initial_sources(
     use sunrise_world::native_load_context::DataLoadOrigin;
     let context = item_data.context();
     if context.origin() == DataLoadOrigin::ServerDataLoad {
-        server_sources_with(root, item_data, overlay, || Ok(context.clone()))
+        server_sources_with(root, item_data, overlay, true, || Ok(context.clone()))
     } else {
-        Ok(Arc::new(
-            ResolvedSources::load(root, overlay, context)
-                .map_err(|error| std::io::Error::other(error.to_string()))?,
-        ))
+        collect(root, overlay, context, true)
     }
 }
 
 /// Build server recipes privately so a refused reload leaves the current cache intact.
+/// Like `load_sources`, for a caller that builds the tables with `Recipes::from_resolved`.
 pub(in crate::game) fn prepare_server_sources(
     root: &std::path::Path,
     item_data: &ItemData,
     overlay: &sunrise_world::loot::PackOverlay,
 ) -> std::io::Result<Arc<ResolvedSources>> {
-    Ok(Arc::new(
-        ResolvedSources::load(root, overlay, &server_data_load(root, item_data)?)
-            .map_err(|error| std::io::Error::other(error.to_string()))?,
-    ))
+    collect(root, overlay, &server_data_load(root, item_data)?, true)
 }
 
 pub(in crate::game) fn install_server_sources(
@@ -126,11 +151,13 @@ pub(in crate::game) fn load_sources(
 ) -> std::io::Result<Arc<ResolvedSources>> {
     use sunrise_world::native_load_context::DataLoadOrigin;
     match origin {
-        DataLoadOrigin::ServerDataLoad => server_sources(root, item_data, overlay),
-        DataLoadOrigin::ClientPreload | _ => Ok(Arc::new(
-            ResolvedSources::load(root, overlay, &data_load_context(root, item_data, origin)?)
-                .map_err(|error| std::io::Error::other(error.to_string()))?,
-        )),
+        DataLoadOrigin::ServerDataLoad => server_sources_collecting(root, item_data, overlay),
+        DataLoadOrigin::ClientPreload | _ => collect(
+            root,
+            overlay,
+            &data_load_context(root, item_data, origin)?,
+            true,
+        ),
     }
 }
 
@@ -141,6 +168,7 @@ pub(in crate::game) fn forget_server_sources() {
 }
 
 /// What `sync_data` loaded from this resource generation.
+#[derive(Clone)]
 pub(super) struct Synced {
     pub(super) root: std::path::PathBuf,
     pub(super) with_packs: bool,
@@ -151,15 +179,19 @@ pub(super) struct Synced {
 /// Only damage is bound eagerly for gameplay. Full wire data remains lazy
 /// except when the entering world actually defines damage types.
 #[derive(Default)]
-pub(super) struct SyncCache {
+pub(in crate::game) struct SyncCache {
     pub(super) data: Option<Synced>,
     pub(super) damage: Option<FrozenDamage>,
+    pub(super) packed_registries: Option<Arc<PackRegistryDefinitions>>,
+    pub(super) advancements: Option<Arc<Tree>>,
     pub(super) world_packs: bool,
 }
 
 static SYNC: Mutex<SyncCache> = Mutex::new(SyncCache {
     data: None,
     damage: None,
+    packed_registries: None,
+    advancements: None,
     world_packs: false,
 });
 
@@ -188,7 +220,7 @@ pub(super) fn cached_sync_data(
     {
         sync.data = None;
     }
-    let load = || {
+    let load = |packed, advancements| {
         let sources =
             server_sources(root, item_data, overlay).map_err(|error| error.to_string())?;
         match &sync.damage {
@@ -196,8 +228,10 @@ pub(super) fn cached_sync_data(
                 root,
                 overlay,
                 damage,
+                packed,
                 item_data.defaults(),
                 &sources,
+                advancements,
             ),
             None => SyncData::load(root, overlay, item_data.defaults(), &sources),
         }
@@ -205,27 +239,42 @@ pub(super) fn cached_sync_data(
     };
     // A late vanilla preload must not replace a packed world's lazy snapshot.
     if sync.data.is_none() && sync.world_packs && !packs {
-        return load();
+        return load(None, None);
     }
+    let advancements = sync.advancements.as_ref();
     sync.data
         .get_or_insert_with(|| Synced {
             root: root.to_owned(),
             with_packs: packs,
             generation,
-            result: load(),
+            result: load(sync.packed_registries.as_ref(), advancements),
         })
         .result
         .clone()
 }
 
-pub(in crate::game) fn open_world_sync_data(
+/// Keep a usable no-pack preload, but decode any eager world wire data in a
+/// private cache so a refused decode cannot publish the world's registries.
+pub(in crate::game) fn prepare_world_sync_data(
     root: &std::path::Path,
     item_data: &ItemData,
     overlay: &sunrise_world::loot::PackOverlay,
     damage: &sunrise_world::damage_source::Catalog,
-) -> std::result::Result<(), String> {
-    let mut sync = SYNC.lock().unwrap_or_else(|e| e.into_inner());
-    initialize_world_sync_data(&mut sync, root, overlay, damage, item_data)
+    packed_registries: Option<Arc<PackRegistryDefinitions>>,
+    advancements: Arc<Tree>,
+) -> std::result::Result<SyncCache, String> {
+    let mut staged = SyncCache {
+        data: SYNC.lock().unwrap_or_else(|e| e.into_inner()).data.clone(),
+        packed_registries,
+        advancements: Some(advancements),
+        ..Default::default()
+    };
+    initialize_world_sync_data(&mut staged, root, overlay, damage, item_data)?;
+    Ok(staged)
+}
+
+pub(in crate::game) fn install_world_sync_data(staged: SyncCache) {
+    *SYNC.lock().unwrap_or_else(|e| e.into_inner()) = staged;
 }
 
 pub(super) fn initialize_world_sync_data(
@@ -291,8 +340,17 @@ pub(in crate::game) fn prepare_wire_reload(
     overlay: &sunrise_world::loot::PackOverlay,
     kept: &SyncData,
     sources: &ResolvedSources,
+    advancements: &Arc<Tree>,
 ) -> std::result::Result<Arc<SyncData>, String> {
-    SyncData::reload(root, overlay, kept, item_data.defaults(), sources).map(|mut sync| {
+    SyncData::reload(
+        root,
+        overlay,
+        kept,
+        item_data.defaults(),
+        sources,
+        advancements,
+    )
+    .map(|mut sync| {
         sync.features.clone_from(&kept.features);
         Arc::new(sync)
     })
@@ -303,11 +361,13 @@ pub(in crate::game) fn install_wire_reload(
     item_data: &ItemData,
     overlay: &sunrise_world::loot::PackOverlay,
     sync: Option<Arc<SyncData>>,
+    advancements: Arc<Tree>,
 ) {
     // Kept pack dialogs count as packs: a world opened without packs after
     // a `/reload` that dropped them must read its own registries again.
     let mut cache = SYNC.lock().unwrap_or_else(|e| e.into_inner());
     cache.world_packs = !overlay.files.is_empty();
+    cache.advancements = Some(advancements);
     cache.data = sync.map(|sync| Synced {
         root: root.to_owned(),
         with_packs: !overlay.files.is_empty() || sync.has_pack_entries(),
@@ -444,6 +504,41 @@ mod initial_source_tests {
         let data = ItemData::load(root.path(), context).unwrap();
         assert!(
             initial_sources(root.path(), &data, &sunrise_world::loot::PackOverlay::NONE).is_err()
+        );
+    }
+
+    #[test]
+    fn initial_sources_keep_refused_recipes_for_the_table_build() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("items.json"), "{}").unwrap();
+        let folder = root.path().join("data/minecraft/recipe");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.json"), r#"{"type":"absent:serializer"}"#).unwrap();
+        std::fs::write(
+            folder.join("b.json"),
+            r#"{"type":"minecraft:crafting_shapeless","ingredients":[],"result":{"id":"minecraft:stick"}}"#,
+        )
+        .unwrap();
+        let inputs = Arc::new(LoadInputs::new(Default::default(), Default::default()));
+        let context = LoadContext::new(DataLoadOrigin::ClientPreload, inputs, [] as [&str; 0]);
+        let data = ItemData::load(root.path(), context).unwrap();
+        let sources =
+            initial_sources(root.path(), &data, &sunrise_world::loot::PackOverlay::NONE).unwrap();
+        assert!(!sources.is_complete());
+        let none = sunrise_world::loot::PackOverlay::NONE;
+        let error = sunrise_client::crafting::Recipes::from_resolved(
+            root.path(),
+            &sunrise_client::items::Items::for_tests(Default::default()),
+            &none,
+            &sources,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.starts_with("2 recipes failed to load:"), "{error}");
+        assert!(
+            error.find("recipe/a.json").unwrap() < error.find("recipe/b.json").unwrap(),
+            "{error}"
         );
     }
 }

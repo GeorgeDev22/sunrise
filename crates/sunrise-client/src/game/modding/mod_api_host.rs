@@ -370,6 +370,18 @@ impl SidedLevel for super::GameLevel<'_> {
     }
 }
 
+impl<
+    'a: 'b,
+    'b,
+    L: std::ops::Deref<Target = super::GameLevel<'a>>,
+    T: std::ops::Deref<Target = Ticks>,
+> SidedLevel for LevelTicks<'b, L, T>
+{
+    fn client_side(&self) -> bool {
+        self.level.client_side()
+    }
+}
+
 impl SidedLevel for super::native_hooks::HitLevel<'_> {
     fn client_side(&self) -> bool {
         self.0.client_side()
@@ -384,7 +396,229 @@ pub(super) fn level_side(level: &impl SidedLevel) -> mod_api::LevelSide<'_> {
     }
 }
 
+/// The prediction's block states and the live block entities it invalidated.
+pub(in crate::game) trait PredictedLevel:
+    sunrise_world::level::LevelAccess
+{
+    fn block_entity_removed(&self, pos: BlockPos) -> bool;
+}
+
+/// The level read by fire-odds listeners, including edits already made in a dry prediction.
+pub(in crate::game) struct FireOddsLevel<'a> {
+    pub(in crate::game) base: &'a super::GameLevel<'a>,
+    pub(in crate::game) prediction: Option<&'a dyn PredictedLevel>,
+}
+
+impl FireOddsLevel<'_> {
+    fn block_entity_removed(&self, [x, y, z]: [i32; 3]) -> bool {
+        self.prediction
+            .is_some_and(|level| level.block_entity_removed(BlockPos::new(x, y, z)))
+    }
+
+    fn block(&self, [x, y, z]: [i32; 3]) -> sunrise_world::registry::BlockStateId {
+        let pos = BlockPos::new(x, y, z);
+        match self.prediction {
+            Some(level) => level.block_state(pos),
+            None => sunrise_world::level::LevelAccess::block_state(self.base, pos),
+        }
+    }
+}
+
+impl SidedLevel for FireOddsLevel<'_> {
+    fn client_side(&self) -> bool {
+        self.base.client_side()
+    }
+}
+
+// Prediction uses the same implementation for reads not affected by staged blocks.
+macro_rules! base_level_reads {
+    ($(fn $method:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
+        $(fn $method(&self, $($arg: $ty),*) -> $ret {
+            mod_api::LevelHost::$method(self.base, $($arg),*)
+        })*
+    };
+}
+
+impl mod_api::LevelHost for FireOddsLevel<'_> {
+    base_level_reads! {
+        fn container_size(at: mod_api::BlockSide) -> Option<usize>;
+        fn container_stack(at: mod_api::BlockSide, slot: usize) -> Option<mod_api::ItemStack>;
+        fn block_state_id(name: &str) -> Option<mod_api::BlockState>;
+        fn block_state_default(block: mod_api::BlockKey) -> Option<mod_api::BlockState>;
+        fn state_block(state: mod_api::BlockState) -> Option<&str>;
+        fn state_string(state: mod_api::BlockState) -> Option<String>;
+        fn min_y() -> i32;
+        fn height() -> i32;
+        fn block_in_tag(block: mod_api::BlockKey, tag: &str) -> Option<bool>;
+        fn tags() -> &dyn mod_api::Tags;
+        fn state_fluid_state(state: mod_api::BlockState) -> Option<mod_api::FluidState>;
+        fn fluid_in_tag(fluid: &str, tag: &str) -> Option<bool>;
+        fn state_with_property(state: mod_api::BlockState, key: &str, value: &str) -> Option<mod_api::BlockState>;
+        fn brightness(layer: mod_api::LightLayer, pos: [i32; 3]) -> i32;
+        fn raw_brightness(pos: [i32; 3], sky_darken: i32) -> i32;
+        fn is_loaded(pos: [i32; 3]) -> bool;
+        fn enabled_features() -> mod_api::FeatureFlags;
+    }
+
+    fn block_entity(&self, pos: [i32; 3]) -> Option<mod_api::BlockEntityRef> {
+        if self.block_entity_removed(pos) {
+            return None;
+        }
+        mod_api::LevelHost::block_entity(self.base, pos)
+    }
+    fn block_entity_part_snapshot(
+        &self,
+        entity: mod_api::BlockEntityRef,
+        namespace: &str,
+        name: &str,
+    ) -> Result<mod_api::AttachmentBatch, mod_api::PartStateError> {
+        use mod_api::__private::game::Fields;
+        let fields = entity.fields();
+        // The live reader still diagnoses handles from another level.
+        if self.base.api_level == Some(fields.level) && self.block_entity_removed(fields.position) {
+            return Err(mod_api::PartStateError::Stale);
+        }
+        mod_api::LevelHost::block_entity_part_snapshot(self.base, entity, namespace, name)
+    }
+    fn block_entity_data(&self, entity: mod_api::BlockEntityRef) -> Option<mod_api::Compound> {
+        use mod_api::__private::game::Fields;
+        if self.block_entity_removed(entity.fields().position) {
+            return None;
+        }
+        mod_api::LevelHost::block_entity_data(self.base, entity)
+    }
+    fn block_state(&self, pos: [i32; 3]) -> Option<mod_api::BlockState> {
+        self.block(pos).try_into_api().ok()
+    }
+    fn fluid_state(&self, pos: [i32; 3]) -> Option<mod_api::FluidState> {
+        if !self.is_loaded(pos) {
+            return None;
+        }
+        super::native_world_read::state_fluid(
+            self.base.behaviours,
+            self.base.registry,
+            self.block(pos),
+        )
+    }
+    fn collision_shape(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {
+        if !self.is_loaded(pos) {
+            return None;
+        }
+        let [x, y, z] = pos;
+        let state = self.block(pos);
+        let binding = self.base.collision;
+        let world = &*self.base.world;
+        if !self.block_entity_removed(pos)
+            && (world.block(x, y, z) == state || world.block_entities.contains_key(&(x, y, z)))
+        {
+            // Use the staged state but preserve the live entity's geometry when it survives.
+            return Some(super::native_state_shapes::collision_boxes(
+                binding, world, state, pos,
+            ));
+        }
+        let mut scene = sunrise_client::collisions::LookupCollisions {
+            block: &|x, y, z| self.block([x, y, z]),
+            binding,
+        };
+        let shape = binding.collision_shape_with_context(
+            &mut scene,
+            state,
+            BlockPos::new(x, y, z),
+            &sunrise_world::collision_context::CollisionContext::empty(false),
+        );
+        Some(shape.map_or_else(
+            |_| Vec::new(),
+            |shape| {
+                shape
+                    .boxes()
+                    .iter()
+                    .map(|bounds| {
+                        let min = bounds.min_position();
+                        let max = bounds.max_position();
+                        [min.x, min.y, min.z, max.x, max.y, max.z]
+                    })
+                    .collect()
+            },
+        ))
+    }
+    fn is_raining_at(&self, [x, y, z]: [i32; 3]) -> bool {
+        if let Some(level) = self.prediction {
+            self.is_loaded([x, y, z])
+                && self
+                    .base
+                    .behaviours
+                    .is_raining_at(level, BlockPos::new(x, y, z))
+        } else {
+            mod_api::LevelHost::is_raining_at(self.base, [x, y, z])
+        }
+    }
+}
+
 impl mod_api::LevelHost for super::GameLevel<'_> {
+    fn block_face_sturdy(
+        &self,
+        pos: [i32; 3],
+        face: mod_api::BlockFace,
+        support: mod_api::SupportType,
+    ) -> Option<bool> {
+        if !self.native_authoritative {
+            self.api_level?;
+        }
+        super::native_world_read::block_face_sturdy(
+            self.world,
+            self.behaviours,
+            self.collision,
+            pos,
+            face,
+            support,
+        )
+    }
+    fn can_see_sky(&self, pos: [i32; 3]) -> Option<bool> {
+        if !self.native_authoritative {
+            self.api_level?;
+        }
+        Some(super::native_world_read::can_see_sky(self.world, pos))
+    }
+    fn block_entity(&self, pos: [i32; 3]) -> Option<mod_api::BlockEntityRef> {
+        super::native_block_entity_refs::world_block_entity(self.world, self.api_level?, pos)
+    }
+    fn container_size(&self, at: mod_api::BlockSide) -> Option<usize> {
+        if !self.native_authoritative
+            || self.api_level != Some(at.level)
+            || !self.world.is_loaded_at(at.pos[0], at.pos[1], at.pos[2])
+        {
+            return None;
+        }
+        self.containers().capability_size(at)
+    }
+    fn container_stack(&self, at: mod_api::BlockSide, slot: usize) -> Option<mod_api::ItemStack> {
+        if !self.native_authoritative
+            || self.api_level != Some(at.level)
+            || !self.world.is_loaded_at(at.pos[0], at.pos[1], at.pos[2])
+        {
+            return None;
+        }
+        self.containers()
+            .capability_stack(at, slot)?
+            .try_into_api()
+            .ok()
+    }
+    fn block_entity_part_snapshot(
+        &self,
+        entity: mod_api::BlockEntityRef,
+        namespace: &str,
+        name: &str,
+    ) -> Result<mod_api::AttachmentBatch, mod_api::PartStateError> {
+        super::native_block_entity_refs::part_snapshot(
+            self.world,
+            self.api_level,
+            self.native_authoritative,
+            self.part_state_index,
+            entity,
+            namespace,
+            name,
+        )
+    }
     fn block_entity_data(&self, entity: mod_api::BlockEntityRef) -> Option<mod_api::Compound> {
         use mod_api::__private::game::Fields;
         let fields = entity.fields();
@@ -406,7 +640,9 @@ impl mod_api::LevelHost for super::GameLevel<'_> {
         }
         let entity = self.world.block_entities.get(&key)?;
         let name = &self.facts.get(self.world.block(x, y, z)).name;
-        super::native_block_entity_refs::save_without_metadata(self.world, key, entity, name)
+        super::native_block_entity_refs::save_without_metadata(
+            self.world, key, entity, name, self.items,
+        )
     }
 
     fn block_state_id(&self, name: &str) -> Option<mod_api::BlockState> {
@@ -554,6 +790,15 @@ impl mod_api::AttachmentHost for super::GameLevel<'_> {
 }
 
 impl mod_api::LevelRandomHost for super::GameLevel<'_> {
+    fn container_signal(&mut self, pos: [i32; 3]) -> Option<i32> {
+        if !self.native_authoritative || !self.world.is_loaded_at(pos[0], pos[1], pos[2]) {
+            return None;
+        }
+        Some(super::machines::container_signal(
+            self,
+            BlockPos::new(pos[0], pos[1], pos[2]),
+        ))
+    }
     fn attachments(&mut self) -> &mut dyn mod_api::AttachmentStore {
         self
     }
@@ -723,6 +968,9 @@ impl mod_api::HitHost for super::native_hooks::HitLevel<'_> {
 pub(in crate::game) struct LevelTicks<'b, L, T = &'b mut Ticks> {
     level: L,
     ticks: T,
+    unpack_container_loot: bool,
+    /// The blocks a preview standing in for the level changed, which the reads see over it.
+    preview: Option<&'b sunrise_world::level::PreviewBlocks>,
     /// The level's and the ticks' borrow, which the delegating reads below are bounded by.
     borrow: std::marker::PhantomData<&'b ()>,
 }
@@ -732,8 +980,29 @@ impl<'b, L, T> LevelTicks<'b, L, T> {
         Self {
             level,
             ticks,
+            unpack_container_loot: true,
+            preview: None,
             borrow: std::marker::PhantomData,
         }
+    }
+
+    /// `place_liquid` reads stored slots whether it uses a direct or journalled host.
+    pub(in crate::game) fn without_container_loot(mut self) -> Self {
+        self.unpack_container_loot = false;
+        self
+    }
+
+    /// This level as the preview that changed `preview` sees it (`None`: as it is).
+    pub(in crate::game) fn previewing(
+        mut self,
+        preview: Option<&'b sunrise_world::level::PreviewBlocks>,
+    ) -> Self {
+        self.preview = preview;
+        self
+    }
+    /// The block the preview put at `pos`, if it changed it.
+    fn previewed(&self, pos: BlockPos) -> Option<sunrise_world::registry::BlockStateId> {
+        self.preview?.get(&pos).copied()
     }
 }
 
@@ -744,7 +1013,59 @@ impl<
     T: std::ops::Deref<Target = Ticks>,
 > mod_api::LevelHost for LevelTicks<'b, L, T>
 {
+    fn block_face_sturdy(
+        &self,
+        pos: [i32; 3],
+        face: mod_api::BlockFace,
+        support: mod_api::SupportType,
+    ) -> Option<bool> {
+        mod_api::LevelHost::block_face_sturdy(&*self.level, pos, face, support)
+    }
+    fn can_see_sky(&self, pos: [i32; 3]) -> Option<bool> {
+        mod_api::LevelHost::can_see_sky(&*self.level, pos)
+    }
+    fn block_entity(&self, pos: [i32; 3]) -> Option<mod_api::BlockEntityRef> {
+        // A block the preview changed has no block entity left.
+        if self
+            .previewed(BlockPos::new(pos[0], pos[1], pos[2]))
+            .is_some()
+        {
+            return None;
+        }
+        mod_api::LevelHost::block_entity(&*self.level, pos)
+    }
+    fn container_size(&self, at: mod_api::BlockSide) -> Option<usize> {
+        if self
+            .previewed(BlockPos::new(at.pos[0], at.pos[1], at.pos[2]))
+            .is_some()
+        {
+            return None;
+        }
+        mod_api::LevelHost::container_size(&*self.level, at)
+    }
+    fn container_stack(&self, at: mod_api::BlockSide, slot: usize) -> Option<mod_api::ItemStack> {
+        if self
+            .previewed(BlockPos::new(at.pos[0], at.pos[1], at.pos[2]))
+            .is_some()
+        {
+            return None;
+        }
+        mod_api::LevelHost::container_stack(&*self.level, at, slot)
+    }
+    fn block_entity_part_snapshot(
+        &self,
+        entity: mod_api::BlockEntityRef,
+        namespace: &str,
+        name: &str,
+    ) -> Result<mod_api::AttachmentBatch, mod_api::PartStateError> {
+        mod_api::LevelHost::block_entity_part_snapshot(&*self.level, entity, namespace, name)
+    }
     fn block_entity_data(&self, entity: mod_api::BlockEntityRef) -> Option<mod_api::Compound> {
+        use mod_api::__private::game::Fields;
+        let [x, y, z] = entity.fields().position;
+        if self.previewed(BlockPos::new(x, y, z)).is_some() {
+            return None;
+        }
         mod_api::LevelHost::block_entity_data(&*self.level, entity)
     }
     fn block_state_id(&self, name: &str) -> Option<mod_api::BlockState> {
@@ -754,7 +1075,10 @@ impl<
         mod_api::LevelHost::block_state_default(&*self.level, block)
     }
     fn block_state(&self, pos: [i32; 3]) -> Option<mod_api::BlockState> {
-        mod_api::LevelHost::block_state(&*self.level, pos)
+        match self.previewed(BlockPos::new(pos[0], pos[1], pos[2])) {
+            Some(state) => state.try_into_api().ok(),
+            None => mod_api::LevelHost::block_state(&*self.level, pos),
+        }
     }
     fn state_block(&self, state: mod_api::BlockState) -> Option<&str> {
         mod_api::LevelHost::state_block(&*self.level, state)
@@ -775,7 +1099,10 @@ impl<
         mod_api::LevelHost::tags(&*self.level)
     }
     fn fluid_state(&self, pos: [i32; 3]) -> Option<mod_api::FluidState> {
-        mod_api::LevelHost::fluid_state(&*self.level, pos)
+        match self.previewed(BlockPos::new(pos[0], pos[1], pos[2])) {
+            Some(state) => self.state_fluid_state(state.try_into_api().ok()?),
+            None => mod_api::LevelHost::fluid_state(&*self.level, pos),
+        }
     }
     fn state_fluid_state(&self, state: mod_api::BlockState) -> Option<mod_api::FluidState> {
         mod_api::LevelHost::state_fluid_state(&*self.level, state)
@@ -807,43 +1134,44 @@ impl<
         mod_api::LevelHost::enabled_features(&*self.level)
     }
     fn signal(&self, pos: [i32; 3], direction: Direction) -> Option<i32> {
-        Some(
-            self.signals()
-                .signal(BlockPos::new(pos[0], pos[1], pos[2]), direction),
-        )
+        self.read_signals(|s| s.signal(BlockPos::new(pos[0], pos[1], pos[2]), direction))
     }
     fn direct_signal(&self, pos: [i32; 3], direction: Direction) -> Option<i32> {
-        Some(
-            self.signals()
-                .direct_signal(BlockPos::new(pos[0], pos[1], pos[2]), direction),
-        )
+        self.read_signals(|s| s.direct_signal(BlockPos::new(pos[0], pos[1], pos[2]), direction))
     }
     fn direct_signal_to(&self, pos: [i32; 3]) -> Option<i32> {
-        Some(
-            self.signals()
-                .direct_signal_to(BlockPos::new(pos[0], pos[1], pos[2])),
-        )
+        self.read_signals(|s| s.direct_signal_to(BlockPos::new(pos[0], pos[1], pos[2])))
     }
     fn best_neighbor_signal(&self, pos: [i32; 3]) -> Option<i32> {
-        Some(
-            self.signals()
-                .best_neighbor_signal(BlockPos::new(pos[0], pos[1], pos[2])),
-        )
+        self.read_signals(|s| s.best_neighbor_signal(BlockPos::new(pos[0], pos[1], pos[2])))
     }
     fn has_neighbor_signal(&self, pos: [i32; 3]) -> Option<bool> {
-        Some(
-            self.signals()
-                .has_neighbor_signal(BlockPos::new(pos[0], pos[1], pos[2])),
-        )
+        self.read_signals(|s| s.has_neighbor_signal(BlockPos::new(pos[0], pos[1], pos[2])))
     }
     fn collision_shape(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {
-        mod_api::LevelHost::collision_shape(&*self.level, pos)
+        let Some(state) = self.previewed(BlockPos::new(pos[0], pos[1], pos[2])) else {
+            return mod_api::LevelHost::collision_shape(&*self.level, pos);
+        };
+        Some(super::native_state_shapes::collision_boxes(
+            self.level.collision,
+            self.level.world,
+            state,
+            pos,
+        ))
     }
 }
 
 impl<'a: 'b, 'b, T: std::ops::Deref<Target = Ticks>> mod_api::LevelRandomHost
     for LevelTicks<'b, &mut super::GameLevel<'a>, T>
 {
+    fn container_signal(&mut self, pos: [i32; 3]) -> Option<i32> {
+        if self.unpack_container_loot {
+            return mod_api::LevelRandomHost::container_signal(&mut *self.level, pos);
+        }
+        let [x, y, z] = pos;
+        (self.level.native_authoritative && self.level.world.is_loaded_at(x, y, z))
+            .then(|| self.level.containers().stored_container_signal((x, y, z)))
+    }
     fn attachments(&mut self) -> &mut dyn mod_api::AttachmentStore {
         mod_api::LevelRandomHost::attachments(&mut *self.level)
     }
@@ -879,10 +1207,118 @@ impl<
     T: std::ops::Deref<Target = Ticks>,
 > LevelTicks<'b, L, T>
 {
-    /// The level in place read through the game's own `SignalGetter`, with this write's
-    /// comparator outputs.
-    fn signals(&self) -> sunrise_world::level::Signals<'_, super::GameLevel<'a>> {
-        self.level.behaviours.signals(&*self.level, &self.ticks)
+    /// A read of the level in place (over the preview's blocks) through the game's own
+    /// `SignalGetter`, with these ticks' comparator outputs. A client's ticks don't hold the
+    /// server's outputs: a read that needed one it lacks is unknown there, `None`.
+    fn read_signals<R>(
+        &self,
+        read: impl FnOnce(&sunrise_world::level::Signals<'_, Self>) -> R,
+    ) -> Option<R> {
+        let signals = self.level.behaviours.signals(self, &self.ticks);
+        let value = read(&signals);
+        (!(self.level.client_side && signals.read_unknown_output())).then_some(value)
+    }
+}
+
+/// The signal reads of the level in place, over the preview's blocks: a block the preview
+/// changed has no block entity left, as `DryLevel` reads it.
+impl<
+    'a: 'b,
+    'b,
+    L: std::ops::Deref<Target = super::GameLevel<'a>>,
+    T: std::ops::Deref<Target = Ticks>,
+> sunrise_world::level::signal_access::SignalAccess for LevelTicks<'b, L, T>
+{
+    fn block_state(&self, pos: BlockPos) -> sunrise_world::registry::BlockStateId {
+        self.previewed(pos)
+            .unwrap_or_else(|| sunrise_world::level::LevelAccess::block_state(&*self.level, pos))
+    }
+    fn shulker_is_closed(&self, pos: BlockPos) -> Option<bool> {
+        if self.previewed(pos).is_some() {
+            return None;
+        }
+        sunrise_world::level::LevelAccess::shulker_is_closed(&*self.level, pos)
+    }
+    fn published_collision_shape(
+        &self,
+        pos: BlockPos,
+        state: sunrise_world::registry::BlockStateId,
+    ) -> Option<sunrise_core::geometry::VoxelShape> {
+        if self.previewed(pos).is_some() {
+            return None;
+        }
+        sunrise_world::level::LevelAccess::published_collision_shape(&*self.level, pos, state)
+    }
+    fn adjust_signal_source(
+        &self,
+        state: sunrise_world::registry::BlockStateId,
+        vanilla: bool,
+    ) -> bool {
+        sunrise_world::level::LevelAccess::adjust_signal_source(&*self.level, state, vanilla)
+    }
+    fn has_weak_power_hook(&self) -> bool {
+        sunrise_world::level::LevelAccess::has_weak_power_hook(&*self.level)
+    }
+    fn adjust_should_check_weak_power(
+        &self,
+        pos: BlockPos,
+        state: sunrise_world::registry::BlockStateId,
+        direction: Direction,
+        vanilla: bool,
+    ) -> bool {
+        sunrise_world::level::LevelAccess::adjust_should_check_weak_power(
+            &*self.level,
+            pos,
+            state,
+            direction,
+            vanilla,
+        )
+    }
+    fn has_redstone_wire_connection_hook(&self) -> bool {
+        sunrise_world::level::LevelAccess::has_redstone_wire_connection_hook(&*self.level)
+    }
+    fn adjust_should_redstone_wire_connect_to(
+        &self,
+        pos: BlockPos,
+        state: sunrise_world::registry::BlockStateId,
+        direction: Option<Direction>,
+        vanilla: bool,
+    ) -> bool {
+        sunrise_world::level::LevelAccess::adjust_should_redstone_wire_connect_to(
+            &*self.level,
+            pos,
+            state,
+            direction,
+            vanilla,
+        )
+    }
+    fn adjust_signal(
+        &self,
+        pos: BlockPos,
+        state: sunrise_world::registry::BlockStateId,
+        direction: Direction,
+        direct: bool,
+        vanilla: i32,
+    ) -> i32 {
+        sunrise_world::level::LevelAccess::adjust_signal(
+            &*self.level,
+            pos,
+            state,
+            direction,
+            direct,
+            vanilla,
+        )
+    }
+    fn block_entity_signal(
+        &self,
+        pos: BlockPos,
+        state: sunrise_world::registry::BlockStateId,
+        direction: Direction,
+    ) -> i32 {
+        if self.previewed(pos).is_some() {
+            return 0;
+        }
+        sunrise_world::level::LevelAccess::block_entity_signal(&*self.level, pos, state, direction)
     }
 }
 
@@ -1107,6 +1543,7 @@ mod attachment_membership_tests {
                 width: 1,
                 height: 1,
                 check_interval: 0,
+                ticks: 0,
             });
             game.persist.removals.push(Target::Painting(420));
             assert_eq!(

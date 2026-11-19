@@ -9,13 +9,13 @@ struct EmptyCode;
 impl Hooks for EmptyCode {}
 
 fn selected(fixture: &Fixture, id: &str, code: bool, side: &str) -> SelectedPackage {
-    // The smallest shared group member: `dylink.0` memory info and the three guest exports.
+    // The smallest shared group member: `dylink.0` memory info and the two guest exports.
     let module = [
         b"\0asm\x01\0\0\0".as_slice(),
         b"\0\x0f\x08dylink.0\x01\x04\0\0\0\0",
         b"\x01\x04\x01\x60\0\0",
         b"\x03\x04\x03\0\0\0",
-        b"\x07\x2e\x03\x0esunrise_layout\0\0\x0asunrise_in\0\x01\x0csunrise_hook\0\x02",
+        b"\x07\x1d\x02\x0asunrise_in\0\x01\x0csunrise_hook\0\x02",
         b"\x0a\x0a\x03\x02\0\x0b\x02\0\x0b\x02\0\x0b",
     ]
     .concat();
@@ -208,11 +208,11 @@ fn code_only_reload_publishes_one_new_inventory_after_prepare_and_preserves_old_
                     ("loot_table", serde_json::json!({"pools":[]})),
                     (
                         "predicate",
-                        serde_json::json!({"condition":"minecraft:random_chance","chance":1}),
+                        serde_json::json!({"type":"minecraft:random_chance","chance":1}),
                     ),
                     (
                         "item_modifier",
-                        serde_json::json!({"function":"minecraft:set_count","count":1}),
+                        serde_json::json!({"type":"minecraft:set_count","count":1}),
                     ),
                     (
                         "jukebox_song",
@@ -220,7 +220,7 @@ fn code_only_reload_publishes_one_new_inventory_after_prepare_and_preserves_old_
                     ),
                     (
                         "instrument",
-                        serde_json::json!({"sound_event":"minecraft:item.goat_horn.sound.0","use_duration":7,"range":256}),
+                        serde_json::json!({"sound_event":"minecraft:item.goat_horn.sound.0","use_duration":7,"range":256,"description":"condition test"}),
                     ),
                     (
                         "enchantment",

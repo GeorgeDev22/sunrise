@@ -13,11 +13,9 @@ pub trait Hooks {
     /// and the correction after a veto). `from` is that location. Set `cancel`
     /// for a real veto and not a rollback: the report is not applied and its
     /// bookkeeping is skipped, and the client is corrected to the accepted
-    /// position and rotation through the existing teleport correction. The veto
-    /// adds no anticheat violation of its own, but the report was already seen
-    /// by the server's own checks and by the anticheat's record of the client's
-    /// ticks before the hook, and what a violation of those would have done
-    /// still happens. The values are the exact ones: there is no once-per-tick
+    /// position and rotation through the existing teleport correction. The report
+    /// was already seen by the server's own checks before the hook, and what a
+    /// violation of those would have done still happens. The values are the exact ones: there is no once-per-tick
     /// accumulation and no threshold in the engine, so the mod filters
     /// (`if (to - from).length() < 1.0 / 16.0 { return; }` skips anything under
     /// 1/16 of a block). Their state is swapped in
@@ -33,8 +31,8 @@ pub trait Hooks {
     /// drops a pending report cleanly. Not heard: the first tick in a level (the
     /// tick after a join or a level change; the second is heard), a player riding
     /// something (`vehicle_moved` hears the vehicle), any teleport (its
-    /// confirmation is validated and committed without the hook, at the teleport's
-    /// target, and so is the veto's own correction; a report that arrives while a teleport is
+    /// confirmation's own position is validated from the teleport's target and
+    /// committed without the hook, and so is the veto's own correction; a report that arrives while a teleport is
     /// unconfirmed is not heard either), and a passage crossing (its caller
     /// reads the position at once, so the report is committed in place). The
     /// first report after a teleport that passed validation is heard, with the

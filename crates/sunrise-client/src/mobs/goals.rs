@@ -1068,6 +1068,10 @@ pub struct Panic {
     pos: [f64; 3],
 }
 impl Panic {
+    /// The position `canUse` chose (`PanicGoal.posX/Y/Z`).
+    pub fn target(&self) -> [f64; 3] {
+        self.pos
+    }
     pub fn new(speed: f64) -> Self {
         Self {
             speed,
@@ -1085,7 +1089,7 @@ impl Panic {
 pub fn should_panic(m: &Mob) -> bool {
     m.last_damage
         .is_some_and(|(d, t)| d.causes_panic() && i64::from(m.age) - t <= 40)
-        || m.fire_ticks > 0 && !m.kind.flags.fire_immune
+        || m.is_on_fire()
 }
 impl Goal for Panic {
     goal_clone!();
@@ -1096,7 +1100,7 @@ impl Goal for Panic {
         let wanted = if self.environmental {
             m.last_damage.is_some_and(|(d, t)| {
                 super::armadillo::environmental(d.kind) && i64::from(m.age) - t <= 40
-            }) || m.fire_ticks > 0 && !m.kind.flags.fire_immune
+            }) || m.is_on_fire()
         } else {
             should_panic(m)
         };
@@ -1110,7 +1114,19 @@ impl Goal for Panic {
                 m.position.y.floor() as i32,
                 m.position.z.floor() as i32,
             );
-            if cx.w.data.state(cx.w.world.block(bx, by, bz)).top == 0.0 {
+            // lookForWater: only when `getCollisionShape(level, pos).isEmpty()`. A state that
+            // takes its shapes from its block entity asks for the published one (#1710): a
+            // box ending at the block's bottom is not empty though its top is 0. Vanilla's
+            // query cannot fail; a failed one here is not taken for empty, so the goal goes
+            // on to a random position as over any other shape.
+            let state = cx.w.world.block(bx, by, bz);
+            let empty = if cx.w.collision.publishes_shapes(state) {
+                cx.w.bound_collision_shape(state, [bx, by, bz])
+                    .is_some_and(|shape| shape.is_empty())
+            } else {
+                cx.w.data.state(state).top == 0.0
+            };
+            if empty {
                 // findBlocksInBoxByManhattanDistance(pos, range, 1) for water.
                 let mut best: Option<([i32; 3], i32)> = None;
                 for dy in -1i32..=1 {
@@ -2482,7 +2498,7 @@ impl Goal for Breed {
                     // Wolf.canMate: a sitting wolf is no partner.
                     && !(species == Species::Wolf && s.sitting)
                     // AbstractHorse.canParent of the partner.
-                    && (!(equine || camel) || s.tame && !s.ridden && s.health >= s.stats[0] as f32)
+                    && (!(equine || camel) || s.tame && !s.ridden && s.health >= s.max_health)
                     && (!sniffer || super::sniffer::can_mate_state(s.variant))
                     // BreedGoal.getFreePartner: `!potentialPartner.isPanicking()`.
                     && !s.panicking

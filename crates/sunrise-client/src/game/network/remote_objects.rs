@@ -114,6 +114,7 @@ impl Game<'_> {
                 fixed: false,
                 invisible: false,
                 check_interval: 0,
+                ticks: 0,
                 custom_name: None,
                 random: sunrise_client::random_source::entity(),
             });
@@ -157,6 +158,7 @@ impl Game<'_> {
                 width,
                 height,
                 check_interval: 0,
+                ticks: 0,
             });
         } else {
             return false;
@@ -468,6 +470,14 @@ impl Game<'_> {
                 self.entity_section_step(id, [from.x, from.y, from.z], [to.x, to.y, to.z]);
             }
             stand += 1;
+        }
+        // `Entity.tickCount` on the client: a painting's and an item frame's lived ticks, which
+        // their renderers read as the age.
+        for painting in &mut self.paintings {
+            painting.ticks = painting.ticks.saturating_add(1);
+        }
+        for frame in &mut self.item_frames {
+            frame.ticks = frame.ticks.saturating_add(1);
         }
         self.tick_remote_boat_bubbles();
     }

@@ -9,6 +9,7 @@ fn fixture(expected: Option<ItemStack>, run: impl FnOnce(&mut Game<'_>)) {
         game.save = Arc::new(sunrise_client::save::SaveDir::new(
             scratch.path().join("save"),
             sunrise_client::save::LevelShape::OVERWORLD,
+            Some(Default::default()),
         ));
         game.build_registries();
         game.next_entity = 1000;

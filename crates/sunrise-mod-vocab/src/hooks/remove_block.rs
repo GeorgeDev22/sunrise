@@ -2,6 +2,8 @@
 pub trait Hooks {
     /// Choose the state left by removing your block. Return a state in `answer`
     /// to replace vanilla's fluid block (air when dry), or leave it unanswered.
+    /// `replacement` is the state written when the listener leaves `answer`
+    /// unanswered: the fluid's legacy block (air when dry, water for a waterlogged block).
     /// Only the removed block's Part is asked, on the authoritative server.
     /// The replacement must be a registered block state; an invalid answer is
     /// refused with a diagnostic and vanilla's replacement is written instead.
@@ -9,6 +11,7 @@ pub trait Hooks {
     /// apply to the written state. The level is read-only during this call.
     #[hook(
         side = "server",
+        version = 2,
         contract = "replace",
         out = "answer",
         scope = "block",
@@ -21,6 +24,7 @@ pub trait Hooks {
         pos: BlockPos,
         state: BlockState,
         moved_by_piston: bool,
+        replacement: BlockState,
         answer: &mut Option<BlockState>,
     );
 }

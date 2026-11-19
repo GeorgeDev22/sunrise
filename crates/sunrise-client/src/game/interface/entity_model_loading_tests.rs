@@ -219,7 +219,8 @@ fn armor_equipment_loads_without_an_entity_model_document() {
         equipment.join("leather.json"),
         serde_json::to_vec(&json!({"layers": {"humanoid": [
             {"texture": "minecraft:leather", "dyeable": {"color_when_undyed": 0x123456}},
-            {"texture": "minecraft:leather_overlay"}
+            {"texture": "minecraft:leather_overlay"},
+            {"texture": "minecraft:dyed_only", "dyeable": {}}
         ]}}))
         .unwrap(),
     )
@@ -232,10 +233,22 @@ fn armor_equipment_loads_without_an_entity_model_document() {
     assert!(assets.main.is_none());
     assert!(assets.layers.is_empty());
     assert_eq!(
-        assets.equipment["minecraft:leather"]["humanoid"],
+        assets.equipment["minecraft:leather"]["humanoid"]
+            .iter()
+            .map(|l| (l.texture.clone(), l.dyeable, l.color_when_undyed))
+            .collect::<Vec<_>>(),
         vec![
-            ("entity/equipment/humanoid/leather".into(), Some(0x123456)),
-            ("entity/equipment/humanoid/leather_overlay".into(), None),
+            (
+                "entity/equipment/humanoid/leather".into(),
+                true,
+                Some(0x123456)
+            ),
+            (
+                "entity/equipment/humanoid/leather_overlay".into(),
+                false,
+                None
+            ),
+            ("entity/equipment/humanoid/dyed_only".into(), true, None),
         ]
     );
     assert!(!assets.equipment.contains_key("minecraft:invalid"));
@@ -277,7 +290,10 @@ fn equipment_assets_load_from_resource_namespaces_without_a_content_marker() {
     ] {
         let assets = ArmorStandAssets::load(&source, None);
         assert_eq!(
-            assets.equipment["gems:ruby"]["humanoid_leggings"],
+            assets.equipment["gems:ruby"]["humanoid_leggings"]
+                .iter()
+                .map(|l| (l.texture.clone(), l.color_when_undyed))
+                .collect::<Vec<_>>(),
             vec![("gems:entity/equipment/humanoid_leggings/ruby".into(), None)]
         );
     }
@@ -346,7 +362,7 @@ fn equipment_layers_read_resolved_resources_and_retain_the_source() {
     assets.apply_resources(ArmorStandAssets::load(&source, None));
     assert!(!assets.equipment.contains_key("example:old"));
     assert_eq!(
-        assets.equipment["example:nested/cloth"]["humanoid"][0].0,
+        assets.equipment["example:nested/cloth"]["humanoid"][0].texture,
         "example:entity/equipment/humanoid/cloth"
     );
     assert!(assets.root.same_generation(&source));

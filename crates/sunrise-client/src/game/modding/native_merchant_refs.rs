@@ -553,7 +553,7 @@ pub(super) mod tests {
                 .unwrap()
                 .try_into_engine(game.items())
                 .unwrap();
-            let tag = sunrise_client::entity_nbt::offers_to_nbt(&saved);
+            let tag = sunrise_client::entity_nbt::offers_to_nbt(&saved, &Default::default());
             assert_eq!(sunrise_client::entity_nbt::offers_from_nbt(&tag), saved);
 
             let stale = MerchantRef::new(EntityRef::new(

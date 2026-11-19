@@ -2711,6 +2711,7 @@ def function_return_fixtures(group_names):
         functions.update(anger_functions())
     if 'macro source type error' in group_names:
         functions.update({'command_macro:apply': '$scoreboard players add #hits macro_error $(amount)\n',
+                          'command_macro:decimal': '$data modify storage command_macro:args written set value "$(amount)"\n',
                           'command_macro:admit': 'scoreboard players add #admit macro_error 1\n',
                           'command_macro:fail': 'return fail\n',
                           'command_macro:zero': 'return 0\n'})
@@ -2772,6 +2773,10 @@ def macro_source_type_error():
                 cmd('/scoreboard players get #r macro_error', expect_result=0),
                 cmd('/scoreboard players get #s macro_error', expect_result=int(name == 'zero')),
                 cmd('/scoreboard players get #hits macro_error', expect_result=count)]
+    for amount, text in [('0.1f', '.100000001490116'), ('-1e-16d', '-0')]:
+        ops += [cmd(f'/data modify storage command_macro:args decimal set value {{amount:{amount}}}', expect_result=1),
+                cmd('/function command_macro:decimal with storage command_macro:args decimal'),
+                cmd(f'/execute if data storage command_macro:args {{written:"{text}"}}', expect_result=1)]
     ops += setup('/execute store result score #elapsed macro_error run time query gametime',
                  '/scoreboard players operation #elapsed macro_error -= #clock macro_error')
     return ops + [cmd('/scoreboard players get #elapsed macro_error', expect_result=0)]

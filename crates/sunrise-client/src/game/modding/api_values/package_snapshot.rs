@@ -87,7 +87,7 @@ fn package_snapshot(
         .collect();
     mod_api::PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         kind,
         manifest.side,
         std::iter::once(&manifest.id)
@@ -264,6 +264,7 @@ mod tests {
             path: std::path::PathBuf::from("sunrise-native-mods/test"),
             manifest: manifest("[properties]\ntier = 3\n"),
             has_icon: true,
+            runtime: None,
         };
         let info = native.try_into_api().unwrap();
         assert_eq!(info.kind(), mod_api::PackageKind::Code);

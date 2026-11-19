@@ -1,44 +1,70 @@
-use super::{block_entity_id, item_to_nbt, string, uuid_tag};
+use super::{block_entity_id, string, uuid_tag};
 use crate::{
     beehive::BeehiveExt,
     mobs::{spawner::SpawnerExt, trial_spawner::TrialSpawnerExt},
 };
 use sunrise_core::nbt::{Compound, Tag};
 
-pub fn encode(p: (i32, i32, i32), e: &crate::containers::BlockEntity, block: &str) -> Tag {
-    encode_using(p, e, block, item_to_nbt)
-}
-
 /// Save block-entity stacks against the world's loaded item prototypes.
-pub fn encode_with_items(
+pub fn encode(
     p: (i32, i32, i32),
     e: &crate::containers::BlockEntity,
     block: &str,
     items: &crate::items::Items,
 ) -> Tag {
-    encode_using(p, e, block, |stack| {
-        sunrise_items::item_nbt::item_to_nbt_with_items(stack, items)
-    })
+    encode_with(p, e, block, items, |_, _| None)
 }
 
-fn encode_using(
+/// Merge modeled stacks with saved rows the engine did not take ownership of.
+pub fn mod_items(
+    m: &crate::containers::ModBlockEntity,
+    items: &crate::items::Items,
+) -> Option<Tag> {
+    let mut entries = sunrise_items::item_nbt::encode_items_using(&m.items, |stack| {
+        sunrise_items::item_nbt::item_to_nbt(stack, items)
+    });
+    match m.nbt.get(&"Items".into()) {
+        Some(Tag::List(raw)) => {
+            entries.extend(raw.iter().cloned());
+            Some(Tag::List(entries))
+        }
+        // A non-list is opaque; unoccupied modeled slots introduce no field.
+        raw if entries.is_empty() => raw.cloned(),
+        _ => Some(Tag::List(entries)),
+    }
+}
+
+/// Encode a live block entity, allowing its owner to supply the mod payload
+/// before the engine adds identity, position, item slots and published shapes.
+pub fn encode_with(
     p: (i32, i32, i32),
     e: &crate::containers::BlockEntity,
     block: &str,
-    item_to_nbt: impl Fn(&crate::items::ItemStack) -> Tag,
+    items: &crate::items::Items,
+    save_additional: impl FnOnce(&str, &Compound) -> Option<Compound>,
 ) -> Tag {
+    let item_to_nbt =
+        |stack: &crate::items::ItemStack| sunrise_items::item_nbt::item_to_nbt(stack, items);
     use crate::containers::BlockEntity;
     let encode_items = |slots: &[Option<crate::items::ItemStack>]| {
-        sunrise_items::item_nbt::encode_items_using(slots, &item_to_nbt)
+        Tag::List(sunrise_items::item_nbt::encode_items_using(
+            slots,
+            item_to_nbt,
+        ))
     };
     if let BlockEntity::Mod(m) = e {
-        let mut map = m.nbt.clone();
+        let mut map = save_additional(m.id(), &m.nbt).unwrap_or_else(|| m.nbt.clone());
         if let Some((key, shapes)) = m.shapes_tag() {
             map.insert(key.into(), shapes);
         }
         map.insert("id".into(), string(m.id()));
-        if m.items.iter().any(Option::is_some) {
-            map.insert("Items".into(), encode_items(&m.items));
+        if !m.items.is_empty() {
+            let key = "Items".into();
+            if let Some(items) = mod_items(m, items) {
+                map.insert(key, items);
+            } else {
+                map.remove(&key);
+            }
         }
         for (key, v) in [("x", p.0), ("y", p.1), ("z", p.2)] {
             map.insert(key.into(), Tag::Int(v));
@@ -185,7 +211,7 @@ fn encode_using(
         }
         BlockEntity::Spawner(s) => entries.extend(s.save()),
         BlockEntity::TrialSpawner(s) => entries.extend(s.save()),
-        BlockEntity::Vault(v) => entries.extend(v.save()),
+        BlockEntity::Vault(v) => entries.extend(v.save(items)),
         BlockEntity::Beehive(h) => entries.extend(h.to_nbt()),
         BlockEntity::CommandBlock(c) => entries.extend(c.save()),
         BlockEntity::StructureBlock(b) => entries.extend(b.save()),

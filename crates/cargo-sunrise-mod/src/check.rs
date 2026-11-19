@@ -1,9 +1,11 @@
 //! `cargo sunrise-mod check <file>`: what the registry checks of a submission,
 //! run anywhere: its kind's own checks (docs/modding/src/reference/registry-index.md), its signature
-//! when given a key, and for a `.smod` that it is content only.
+//! when given a key, and for a `.smod` whether it runs WebAssembly code or is content only.
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::Path;
 use sunrise_mod_package::index::{self, Facts, Kind};
+use sunrise_shader_api::mod_pipeline;
 
 pub struct Report {
     pub kind: Kind,
@@ -29,10 +31,12 @@ impl Report {
             "side": self.facts.side,
             "capabilities": self.facts.capabilities,
             "game": self.facts.game,
+            "dependencies": self.facts.dependencies,
             "requires": requires,
             "sha256": self.sha256,
             "size": self.size,
             "signed": self.signed,
+            "wasm": self.facts.wasm,
         })
     }
 
@@ -67,13 +71,28 @@ impl Report {
         for c in &f.capabilities {
             out += &format!("  may {}\n", c.describe());
         }
+        for dep in &f.dependencies {
+            let label = if dep.optional {
+                "optional:"
+            } else {
+                "requires"
+            };
+            let side = match dep.side {
+                Some(sunrise_mod_package::manifest::Side::Client) => " (client only)",
+                Some(sunrise_mod_package::manifest::Side::Server) => " (dedicated server only)",
+                _ => "",
+            };
+            out += &format!("  {label} {} {}{side}\n", dep.id, dep.version);
+        }
         for r in &f.requires {
             out += &format!("  needs {} {} ({})\n", r.id, r.version, &r.sha256[..12]);
         }
         if self.kind == Kind::NativeMod {
             out += "  native source: unsandboxed; not executed by the registry check. Compile and test against the exact pinned Sunrise and Mixins revisions before review.\n";
         }
-        if self.kind == Kind::Mod {
+        if self.kind == Kind::Mod && self.facts.wasm {
+            out += "  WebAssembly code: runs sandboxed in the game, within its time and memory limits; not executed by the registry check\n";
+        } else if self.kind == Kind::Mod {
             out += "  no code: content only, nothing to run\n";
         }
         out
@@ -125,9 +144,90 @@ pub fn check(
     })
 }
 
+/// The references among a project's content files ([`sunrise_mod_package::content::check_references`]):
+/// warnings are printed, errors fail with one line each.
+pub fn references(root: &Path, manifest: &sunrise_mod_package::Manifest) -> Result<(), String> {
+    let content = sunrise_mod_package::Content::read(root, manifest)?;
+    let findings = sunrise_mod_package::content::check_references(&content, manifest)?;
+    for warning in &findings.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if findings.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(findings.errors.join("\nerror: "))
+    }
+}
+
+/// Composes and validates every render pipeline fragment file in a mod's `files`
+/// (`assets/<namespace>/shaders/pipeline/<path>.wgsl`) with the game's own code
+/// (`sunrise_shader_api::mod_pipeline`), returning how many there are and each refusal as
+/// `<file>:<line>:<column>: <message>` (`<file>: <message>` where it has no span), the text the game logs after the pipeline's id. Whether a pipeline is
+/// textured is in the mod's code, which this cannot see: a file that calls `pipeline_texture`
+/// is composed as textured, any other as untextured.
+pub fn pipeline_shaders(files: &BTreeMap<String, Vec<u8>>) -> (usize, Vec<String>) {
+    let mut count = 0;
+    let mut refused = Vec::new();
+    for (name, bytes) in files {
+        let mut parts = name.splitn(3, '/');
+        let in_folder = parts.next() == Some("assets")
+            && parts.next().is_some()
+            && parts.next().is_some_and(|rest| {
+                rest.strip_prefix(mod_pipeline::FOLDER)
+                    .is_some_and(|rest| rest.starts_with('/') && rest.ends_with(".wgsl"))
+            });
+        if !in_folder {
+            continue;
+        }
+        count += 1;
+        let composed = std::str::from_utf8(bytes)
+            .map_err(|e| e.to_string())
+            .map_err(|e| vec![format!("{name}: {e}")])
+            .and_then(|text| {
+                mod_pipeline::compose_with(name, text, text.contains("pipeline_texture"))
+                    .map_err(|problems| problems.iter().map(ToString::to_string).collect())
+            });
+        if let Err(reasons) = composed {
+            refused.extend(reasons);
+        }
+    }
+    (count, refused)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipeline_files_are_composed_as_the_game_does() {
+        let glow =
+            "fn pipeline_fragment(input: PipelineInput) -> vec4<f32> { return input.color; }";
+        let sample = "fn pipeline_fragment(input: PipelineInput) -> vec4<f32> { return pipeline_texture(input.uv); }";
+        let files: BTreeMap<String, Vec<u8>> = [
+            ("assets/m/shaders/pipeline/glow.wgsl", glow),
+            ("assets/m/shaders/pipeline/deep/sample.wgsl", sample),
+            ("assets/m/shaders/pipeline/broken.wgsl", "fn nothing() {}"),
+            (
+                "assets/m/shaders/pipeline/typo.wgsl",
+                "fn pipeline_fragment(input: PipelineInput) -> vec4<f32> {\n    let x: f32 = input.uv;\n    return vec4<f32>(x);\n}",
+            ),
+            // Not a pipeline file: other shaders are not this check's.
+            ("assets/m/shaders/post/other.wgsl", "garbage"),
+            ("assets/m/lang/en_us.json", "{}"),
+        ]
+        .map(|(name, text)| (name.to_owned(), text.as_bytes().to_vec()))
+        .into();
+        let (count, refused) = pipeline_shaders(&files);
+        assert_eq!(count, 4);
+        assert_eq!(
+            refused,
+            [
+                "assets/m/shaders/pipeline/broken.wgsl: no function `pipeline_fragment`: expected `fn pipeline_fragment(input: PipelineInput) -> vec4<f32>`",
+                // The binding `x` is at line 2, column 9 of the mod's own file.
+                "assets/m/shaders/pipeline/typo.wgsl:2:9: the type of `x` is expected to be `f32`, but got `vec2<f32>`",
+            ]
+        );
+    }
 
     fn fixture(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -165,5 +265,53 @@ mod tests {
         let e = check(&pack, Kind::Shader, None, None).err().unwrap();
         assert!(e.contains("sunrise-shaders.toml"), "{e}");
         assert!(check(&pack, Kind::Mod, None, None).is_err());
+    }
+
+    #[test]
+    fn dependencies_are_reported_as_required_or_optional() {
+        let dependencies = json!([
+            {"id": "creature", "version": "^0.1"},
+            {"id": "jei", "version": "^0.5", "optional": true, "side": "client"}
+        ]);
+        let report = Report {
+            kind: Kind::NativeMod,
+            facts: Facts {
+                id: Some("fireflies".into()),
+                version: Some("1.0.0".into()),
+                dependencies: serde_json::from_value(dependencies.clone()).unwrap(),
+                ..Facts::default()
+            },
+            sha256: "0".repeat(64),
+            size: 1,
+            signed: false,
+        };
+        let text = report.text();
+        for word in ["creature", "^0.1", "jei", "^0.5"] {
+            assert!(text.contains(word), "{text}");
+        }
+        assert_eq!(report.json()["dependencies"], dependencies);
+    }
+
+    #[test]
+    fn a_wasm_mod_is_reported_as_code_and_a_content_mod_as_none() {
+        let report = |wasm| Report {
+            kind: Kind::Mod,
+            facts: Facts {
+                id: Some("m".into()),
+                version: Some("1.0.0".into()),
+                wasm,
+                ..Facts::default()
+            },
+            sha256: "0".repeat(64),
+            size: 1,
+            signed: false,
+        };
+        let wasm = report(true);
+        assert!(wasm.text().contains("WebAssembly code: runs sandboxed"));
+        assert!(!wasm.text().contains("no code"));
+        assert_eq!(wasm.json()["wasm"], true);
+        let content = report(false);
+        assert!(content.text().contains("no code: content only"));
+        assert_eq!(content.json()["wasm"], false);
     }
 }

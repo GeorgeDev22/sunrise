@@ -220,9 +220,7 @@ pub struct ExplosionStart<'a> {
 }
 
 /// One server world open or client level; it rejects a previous world's handles.
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct WorldEpoch(pub(crate) u64);
 
@@ -242,9 +240,7 @@ impl WorldEpoch {
 /// A block in a dimension, vanilla's `GlobalPos`: the dimension's key
 /// (`minecraft:the_nether`) and the block. The dimension is data, so it need
 /// not be open; `host.level(&pos.dimension().to_string())` gives its level when it is.
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Debug, PartialEq, Eq)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct GlobalPos {
     pub(crate) dimension: Identifier,
@@ -292,9 +288,7 @@ pub struct PlayerRespawnConfig {
 
 /// A level of the open world, by its dimension (`minecraft:the_nether`).
 /// `Host::level` makes one, and `entity.level(host)` gives an entity's.
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct LevelRef {
     pub(crate) epoch: WorldEpoch,
@@ -362,9 +356,7 @@ impl LevelRef {
 
 /// A mod-owned watered area in one server level. Created by [`LevelRef::add_water_ticket`].
 /// Explicit removal, owner disable and level unload invalidate it. Never saved.
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct WaterTicket {
     pub(crate) level: LevelRef,
@@ -396,9 +388,7 @@ impl WaterTicket {
 /// again on each call: it reads as `None` or `false` once the raid is gone,
 /// for a handle of an earlier open, for a closed level, and on a client.
 /// Reads and writes reach parked server levels without moving them into place.
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct RaidRef {
     pub(crate) level: LevelRef,
@@ -439,9 +429,7 @@ pub enum RaidStatus {
 
 /// A chunk position in an open level. A handle may be kept after unloading;
 /// reads resolve it again, returning `false` or `None` when it is no longer loaded.
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct ChunkRef {
     pub(crate) level: LevelRef,
@@ -857,6 +845,62 @@ pub enum SpawnReason {
     DimensionTravel,
 }
 
+/// What [`LevelRef::spawn_entity`] spawns besides its kind and position: the
+/// velocity, rotation and owner it starts with, and the body its family takes.
+/// Built with [`EntitySpawn::new`], then its fields set.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub struct EntitySpawn {
+    /// The velocity it starts with, in blocks per tick (`Entity.setDeltaMovement`).
+    pub velocity: [f64; 3],
+    /// Its yaw and pitch in degrees. None: a thrown projectile faces along its
+    /// velocity (`Projectile.shoot`), a mob takes `EntityType.spawn`'s yaw, and
+    /// a general row faces south, level.
+    pub rotation: Option<[f32; 2]>,
+    /// The entity that fired it (`Projectile.setOwner`, `TraceableEntity`): for
+    /// damage credit, and so its shooter is not hit by its own shot. None for
+    /// a mob.
+    pub owner: Option<EntityRef>,
+    /// The family's own part of the spawn, which must match the kind's family.
+    pub body: SpawnBody,
+}
+
+impl EntitySpawn {
+    /// A spawn of `body` at rest, unturned and with no owner.
+    pub fn new(body: SpawnBody) -> Self {
+        Self {
+            velocity: [0.0; 3],
+            rotation: None,
+            owner: None,
+            body,
+        }
+    }
+}
+
+/// The family of entity [`LevelRef::spawn_entity`] spawns, with what that
+/// family's spawn takes.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum SpawnBody {
+    /// A thrown item projectile (vanilla's snowball, egg, ender pearl,
+    /// experience bottle, wind charge, splash or lingering potion, or a content
+    /// thrown type), carrying and drawn as `item` (`ThrowableItemProjectile.setItem`).
+    Thrown {
+        /// The item it carries; one of it is kept.
+        item: ItemStack,
+    },
+    /// A mob (vanilla's or a content living type), finalized with `reason`
+    /// (`Mob.finalizeSpawn`).
+    Living {
+        /// Why it spawns, as `finalize_spawn` and `finalizeSpawn` read it.
+        reason: SpawnReason,
+    },
+    /// A row of a code-declared general type (`declare_general_entity`).
+    General,
+}
+
 /// The local difficulty at a spawn (`DifficultyInstance`): what `finalize_spawn` reads and
 /// may change before the mob is finalized.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1101,9 +1145,7 @@ pub struct EntityRayHit {
 }
 
 /// Non-paused authoritative server ticks since open (not game or frame time).
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct TickId(pub(crate) u64);
 
@@ -1327,6 +1369,71 @@ impl TriState {
 /// }
 /// ```
 pub trait LevelHost {
+    /// `BlockState.isFaceSturdy`, through the same engine read as `LevelRef::block_face_sturdy`.
+    /// `canSupportRigidBlock` is `(pos, Up, Rigid)`. `canSupportCenter` is `(pos, face, Center)`
+    /// except that vanilla also refuses `Down` on blocks tagged `minecraft:unstable_bottom_center`.
+    /// Uses the local shapes in an open server level or the current client level. Returns None
+    /// for unloaded or out-of-height positions or without a support view. Never loads chunks or
+    /// opens loot containers. Available only on the owning game thread, never in worker-thread
+    /// hook bodies.
+    fn block_face_sturdy(
+        &self,
+        _pos: [i32; 3],
+        _face: crate::BlockFace,
+        _support: crate::SupportType,
+    ) -> Option<bool> {
+        None
+    }
+    /// `BlockAndLightGetter.canSeeSky`: true when the level's published sky light is 15, as
+    /// `LevelRef::can_see_sky` reads it. This is not a block or heightmap read. A dimension with
+    /// no skylight always returns false. Returns None without a light view. Never loads chunks;
+    /// available only on the owning game thread, never in worker-thread hook bodies.
+    ///
+    /// Vanilla's light storage includes padding above and below build height. Sky light is full
+    /// above the highest stored section and in columns with no stored sections. A missing
+    /// section below a stored one repeats that next section's bottom row. Unloaded border
+    /// sections can retain the last light on a server; they have no full sky on a client.
+    ///
+    /// **Known gap ([#2761](https://github.com/sunrise-org/sunrise/issues/2761)):** In skylit
+    /// dimensions, Sunrise reads the resident column's allocated sections, with full sky above
+    /// them and in every missing column, and darkness below them, instead of tracking vanilla's
+    /// padding and unloaded border.
+    fn can_see_sky(&self, _pos: [i32; 3]) -> Option<bool> {
+        None
+    }
+    /// `BlockGetter.getBlockEntity` in this level. None if absent, unloaded, outside the
+    /// build height, or out for its own tick. Never loads chunks or opens loot containers.
+    /// Clients return their local block entity handle, not unsynced server contents. Owning
+    /// game thread only, never reachable from a worker-thread hook body.
+    fn block_entity(&self, _pos: [i32; 3]) -> Option<crate::BlockEntityRef> {
+        None
+    }
+    /// The slots on this side, as `ItemsHost::container_size` reads them.
+    /// Snapshot only: never generates loot or loads chunks. None for unloaded positions,
+    /// clients or unsupported storage. Owning game thread only, never in worker hook bodies.
+    fn container_size(&self, _at: crate::BlockSide) -> Option<usize> {
+        None
+    }
+    /// A side-local slot snapshot, as `ItemsHost::container_stack` reads it.
+    /// Never generates unopened container loot or loads chunks; unopened slots remain empty.
+    /// None for unloaded positions, clients, empty slots or unsupported storage.
+    /// Owning game thread only, never reachable from a worker-thread hook body.
+    fn container_stack(&self, _at: crate::BlockSide, _slot: usize) -> Option<crate::ItemStack> {
+        None
+    }
+    /// Capture Part state using the same attachment snapshot as `Host::query`.
+    /// No chunk loading or loot generation. Refuses unloaded or stale holders; clients
+    /// have no server Part state. Owning game thread only, never in worker hook bodies.
+    // hidden: typed BlockEntityPartState read implementation.
+    #[doc(hidden)]
+    fn block_entity_part_snapshot(
+        &self,
+        _entity: crate::BlockEntityRef,
+        _namespace: &str,
+        _name: &str,
+    ) -> Result<crate::AttachmentBatch, crate::PartStateError> {
+        Err(crate::PartStateError::Stale)
+    }
     /// Read a block entity's saved data without identity metadata from this level.
     /// Stale generations and handles from another level or world return None.
     fn block_entity_data(&self, _entity: crate::BlockEntityRef) -> Option<crate::Compound> {
@@ -1430,8 +1537,9 @@ pub trait LevelHost {
     /// `LevelRef::signal` reads it. It writes nothing and draws nothing, so it leaves the
     /// call it is read in as it was, and it asks no placement or survival hook, so a read made
     /// inside `state_for_placement` or `can_survive` cannot re-enter them. None in a callback
-    /// whose level has no signal view: `state_for_placement`, `can_survive` and the level
-    /// tick and shape-update hooks have one.
+    /// whose level has no signal view: `state_for_placement`, `can_survive`, `may_place_on`,
+    /// `can_sustain_plant` and the level tick and shape-update hooks have one. None on a client
+    /// for a read that needs a comparator's output the client doesn't hold.
     fn signal(&self, _pos: [i32; 3], _direction: Direction) -> Option<i32> {
         None
     }
@@ -1469,6 +1577,15 @@ pub trait LevelHost {
 
 /// Access vanilla's `Level.random`, so draws come in vanilla's order.
 pub trait LevelRandomHost: LevelHost {
+    /// Vanilla comparator container signal, 0 to 15, through the engine comparator path.
+    /// Generates unopened container loot once before reading, as vanilla getItem does;
+    /// stack maxima are honoured. `Some(0)` at a loaded position without a usable container view.
+    /// None on clients, for unloaded or out-of-height positions.
+    /// Never loads chunks. Owning game thread only, never
+    /// reachable from a worker-thread hook body.
+    fn container_signal(&mut self, _pos: [i32; 3]) -> Option<i32> {
+        None
+    }
     /// The holders' server-owned attachments; `TYPE.get(host, holder)` reads one through it.
     fn attachments(&mut self) -> &mut dyn AttachmentStore {
         unimplemented!("LevelRandomHost::attachments")
@@ -1675,11 +1792,20 @@ pub enum GameRuleReadError {
 /// objective that was removed (even if its name was added again) or a handle from an earlier
 /// open reads as stale: reads answer `None` or [`ObjectiveError::Stale`] and writes change
 /// nothing.
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct ObjectiveRef {
+    pub(crate) epoch: WorldEpoch,
+    pub(crate) id: u64,
+}
+
+/// One of the scoreboard's teams of an open server world (vanilla's `PlayerTeam`). It holds the
+/// world's epoch and an identity the board gave the team when it was added, so a team that was
+/// removed (even if its name was added again) or a handle from an earlier open reads as stale:
+/// reads answer `None` or [`TeamError::Stale`] and writes change nothing.
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+// exhaustive: its fields are private, so mods cannot build or destructure it
+pub struct TeamRef {
     pub(crate) epoch: WorldEpoch,
     pub(crate) id: u64,
 }
