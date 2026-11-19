@@ -137,6 +137,7 @@ fn a_client_and_a_server_that_disagree_about_a_parts_state_get_a_correction() {
         next_entity: &mut next_entity,
         spawn: [20.5, 5.0, 20.5],
         spawn_angle: [0.0; 2],
+        spawn_dimension: "minecraft:overworld",
         difficulty: 2,
         difficulty_locked: false,
         clock_rate: 1.0,

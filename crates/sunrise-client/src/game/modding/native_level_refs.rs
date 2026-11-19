@@ -836,7 +836,7 @@ impl Game<'_> {
         {
             return false;
         }
-        self.set_world_spawn(pos, [yaw, pitch]);
+        self.set_world_spawn(super::Dim::Overworld, pos, [yaw, pitch]);
         true
     }
     /// Map `id`'s saved data as it stands (`with_map`). None on a client, for a stale handle

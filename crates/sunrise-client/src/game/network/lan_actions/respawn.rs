@@ -36,6 +36,7 @@ impl Game<'_> {
         // player's open container goes with it, so a chest's lid (its opener
         // count) falls instead of staying up for a player who is gone.
         self.guest_close_menus_and_tell(conn);
+        let spawn_level = self.world_spawn_level();
         let Some(host) = self.lan.as_mut() else {
             return;
         };
@@ -47,7 +48,7 @@ impl Game<'_> {
             play.level_up_sound = Default::default();
         }
         // PlayerList.respawn: a server's player comes back in its respawn
-        // point's level: the Overworld, where the world spawn and beds are,
+        // point's level: the world spawn's, the Overworld for a bed,
         // or another one's anchor or forced point, which its block resolves
         // once the level has loaded around it.
         let server = self.options.dedicated.is_some();
@@ -67,7 +68,8 @@ impl Game<'_> {
                 f64::from(c.pos[2]) + 0.5,
             ]
         });
-        let level = elsewhere.map_or(crate::game::Dim::Overworld, |c| c.dim);
+        // Without a point of its own: the world spawn's level (findRespawnDimension).
+        let level = elsewhere.map_or(spawn_level, |c| c.dim);
         let spawn = elsewhere.map_or(spawn, |c| {
             [
                 f64::from(c.pos[0]) + 0.5,
@@ -162,6 +164,7 @@ impl Game<'_> {
             // independently of the personal destination passed to Hub::respawn.
             spawn: world,
             spawn_angle: self.level.world_spawn_angle,
+            spawn_dimension: crate::game::Dim::of_world_spawn(&self.level).id(),
             sea_level: self.end.locator().map_or(63, |terrain| terrain.sea_level()),
             difficulty: i32::from(self.ui.difficulty),
             difficulty_locked: self.level.difficulty_locked,

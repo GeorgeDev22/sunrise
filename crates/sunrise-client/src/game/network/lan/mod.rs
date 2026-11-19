@@ -1076,15 +1076,20 @@ impl Game<'_> {
             })
     }
 
+    /// MinecraftServer.findRespawnDimension: the world spawn's level.
+    pub(super) fn world_spawn_level(&self) -> super::Dim {
+        super::Dim::of_world_spawn(&self.level)
+    }
+
     /// MinecraftServer.setRespawnData: every placed player hears a changed world spawn.
     pub(super) fn lan_broadcast_world_spawn(&self) {
         if let Some(host) = &self.lan {
             for guest in host.hub.guests.iter().filter(|guest| guest.placed) {
-                guest.send(
-                    &host
-                        .hub
-                        .default_spawn(self.world_spawn_position(), self.level.world_spawn_angle),
-                );
+                guest.send(&host.hub.default_spawn(
+                    self.world_spawn_position(),
+                    self.level.world_spawn_angle,
+                    self.world_spawn_level().id(),
+                ));
             }
         }
     }
@@ -2459,6 +2464,7 @@ impl Game<'_> {
                 next_entity: &mut self.next_entity,
                 spawn,
                 spawn_angle: self.level.world_spawn_angle,
+                spawn_dimension: crate::game::Dim::of_world_spawn(&self.level).id(),
                 difficulty: i32::from(self.ui.difficulty),
                 difficulty_locked: self.level.difficulty_locked,
                 clock_rate,
@@ -2808,6 +2814,7 @@ impl Game<'_> {
                     next_entity: &mut self.next_entity,
                     spawn,
                     spawn_angle: self.level.world_spawn_angle,
+                    spawn_dimension: crate::game::Dim::of_world_spawn(&self.level).id(),
                     difficulty: i32::from(self.ui.difficulty),
                     difficulty_locked: self.level.difficulty_locked,
                     clock_rate,
@@ -3001,8 +3008,9 @@ impl Game<'_> {
             // ServerPlayer.adjustSpawnLocation: a player new to the world
             // stands where PlayerSpawnFinder puts them, not all on one spot
             // (it reads the loaded level, which holds the spawn when it is
-            // the overworld).
-            let feet = if self.dim == super::Dim::Overworld {
+            // the world spawn's). PrepareSpawnTask puts them in that level.
+            let spawn_level = self.world_spawn_level();
+            let feet = if self.dim == spawn_level {
                 self.server_player_spawn(spawn)
             } else {
                 spawn
@@ -3020,7 +3028,7 @@ impl Game<'_> {
                     g.head_yaw = g.yaw;
                     g.health = 20.0;
                     g.food = 20;
-                    g.dimension = super::Dim::Overworld.id().to_owned();
+                    g.dimension = spawn_level.id().to_owned();
                 })
                 .is_none()
             {
@@ -3077,6 +3085,7 @@ impl Game<'_> {
             next_entity: &mut self.next_entity,
             spawn,
             spawn_angle: self.level.world_spawn_angle,
+            spawn_dimension: crate::game::Dim::of_world_spawn(&self.level).id(),
             difficulty: i32::from(self.ui.difficulty),
             difficulty_locked: self.level.difficulty_locked,
             clock_rate,
@@ -5074,6 +5083,18 @@ mod sources_tests {
     include!("sulfur_cube_meta_tests.rs");
 }
 
+impl super::Dim {
+    /// The level `level`'s world spawn is in (MinecraftServer.findRespawnDimension), the
+    /// Overworld when the world has no such level. It borrows only the level data, so a
+    /// `TickCtx` can name it beside the world it borrows mutably.
+    pub(super) fn of_world_spawn(level: &sunrise_client::save::Level) -> Self {
+        match level.world_spawn_dimension.as_deref() {
+            Some(id) if Self::exists(id) => Self::from_id(id),
+            _ => Self::Overworld,
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod world_spawn_sync_tests {
     use super::*;
@@ -5177,7 +5198,7 @@ pub(crate) mod world_spawn_sync_tests {
 
     #[test]
     #[ignore = "daily"]
-    fn setworldspawn_reaches_guests_in_other_dimensions_and_keeps_compass_overrides() {
+    fn setworldspawn_reaches_guests_with_the_dimension_it_ran_in() {
         crate::game::native_entity_refs::tests::with_game(|game| {
             game.build_registries();
             game.level.world_spawn = None;
@@ -5214,6 +5235,19 @@ pub(crate) mod world_spawn_sync_tests {
             assert!(
                 spawns(&rx).is_empty(),
                 "unchanged respawn data is not broadcast again"
+            );
+            // SetWorldSpawnCommand keeps the level it runs in (RespawnData.of(level.dimension(), ..)):
+            // a world spawn in another dimension reaches the guests with that dimension.
+            game.as_console(|game| {
+                assert!(game.run_command("execute in minecraft:the_end run setworldspawn 9 70 -4"))
+            });
+            let sent = spawns(&rx);
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].pos.dimension, "minecraft:the_end");
+            assert_eq!(sent[0].pos.pos, [9, 70, -4]);
+            println!(
+                "world-spawn\tother_dimension\t{}\t{}\t{}\t{}",
+                sent[0].pos.dimension, sent[0].pos.pos[0], sent[0].pos.pos[1], sent[0].pos.pos[2]
             );
             game.as_console(|game| assert!(game.run_command("setworldspawn -7 90 12")));
             let sent = spawns(&rx);

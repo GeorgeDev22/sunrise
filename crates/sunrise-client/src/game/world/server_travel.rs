@@ -161,6 +161,7 @@ macro_rules! server_ctx {
             next_entity: &mut $s.next_entity,
             spawn,
             spawn_angle: $s.level.world_spawn_angle,
+            spawn_dimension: crate::game::Dim::of_world_spawn(&$s.level).id(),
             sea_level: $s.end.locator().map_or(63, |terrain| terrain.sea_level()),
             difficulty: i32::from($s.ui.difficulty),
             difficulty_locked: $s.level.difficulty_locked,
@@ -494,11 +495,14 @@ impl Game<'_> {
 
     /// The level a player leaving the End goes to, and the respawn point it
     /// resolves there: the point's own level
-    /// (`ServerPlayer.RespawnConfig.getDimensionOrDefault`), else the
-    /// Overworld's.
+    /// (`ServerPlayer.RespawnConfig.getDimensionOrDefault`), else the world
+    /// spawn's (`TeleportTransition.createDefault`, `findRespawnDimension`).
     fn end_departure(&mut self, conn: u32) -> (Dim, Option<RespawnConfig>) {
         let config = self.as_guest(conn, |g| g.respawn_config).flatten();
-        (config.map_or(Dim::Overworld, |c| c.dim), config)
+        (
+            config.map_or_else(|| self.world_spawn_level(), |c| c.dim),
+            config,
+        )
     }
 
     /// The respawn point of the trip a player has just started: its block is
@@ -1080,7 +1084,7 @@ impl Game<'_> {
         self.server_trips.retain(|t| !t.is(conn));
         self.server_trips.push(Trip {
             conn,
-            dim: Dim::Overworld,
+            dim: self.world_spawn_level(),
             source: self.dim,
             target: Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5),
             end: false,
@@ -1098,8 +1102,8 @@ impl Game<'_> {
         });
     }
 
-    /// TeleportTransition.missingRespawnBlock: the world spawn, in the
-    /// Overworld.
+    /// TeleportTransition.missingRespawnBlock: the world spawn, in its level
+    /// (MinecraftServer.findRespawnDimension).
     fn respawn_at_world_spawn(&mut self, conn: u32, missing: RespawnConfig) {
         let at = self.level.world_spawn.map_or(
             self.spawn.map_or([0.5, 80.0, 0.5], |s| [s.x, s.y, s.z]),
@@ -1107,9 +1111,10 @@ impl Game<'_> {
         );
         self.level_teleports.push(LevelTeleport {
             conn,
-            dim: Dim::Overworld,
+            dim: self.world_spawn_level(),
             at,
-            rotation: None,
+            // Facing the world spawn's angle (respawnData.yaw(), pitch()).
+            rotation: Some(self.level.world_spawn_angle),
             vehicle: None,
         });
         self.run_level_teleports();
@@ -1604,6 +1609,7 @@ impl Game<'_> {
             next_entity: &mut self.next_entity,
             spawn,
             spawn_angle: self.level.world_spawn_angle,
+            spawn_dimension: crate::game::Dim::of_world_spawn(&self.level).id(),
             difficulty: i32::from(self.ui.difficulty),
             difficulty_locked: self.level.difficulty_locked,
             clock_rate,
