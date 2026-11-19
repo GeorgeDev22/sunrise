@@ -789,7 +789,17 @@ pub fn decode_block_entity_for_block(
     tag: &Tag,
     block: &str,
 ) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
-    let decoded = decode_block_entity(tag)?;
+    decode_block_entity_replacing(tag, block, None)
+}
+
+/// Like [`decode_block_entity_for_block`], retaining mutable set history when
+/// reading new NBT onto an existing trial spawner.
+pub fn decode_block_entity_replacing(
+    tag: &Tag,
+    block: &str,
+    previous: Option<&crate::containers::BlockEntity>,
+) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
+    let decoded = decode_block_entity_with_history(tag, previous)?;
     // Several vanilla types share a decoded representation (for example barrel
     // and chest). Membership belongs to the saved type, not that representation.
     let saved_id = text(tag.get("id"))?;
@@ -804,6 +814,13 @@ pub fn decode_block_entity_for_block(
 }
 
 pub fn decode_block_entity(tag: &Tag) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
+    decode_block_entity_with_history(tag, None)
+}
+
+fn decode_block_entity_with_history(
+    tag: &Tag,
+    previous: Option<&crate::containers::BlockEntity>,
+) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
     use crate::containers::BlockEntity;
     let int = |k: &str| tag.get(k).and_then(crate::nbt_path::int_value); // getIntOr
     let id = text(tag.get("id"))?;
@@ -1026,7 +1043,13 @@ pub fn decode_block_entity(tag: &Tag) -> Option<((i32, i32, i32), crate::contain
             };
         }
         BlockEntity::Spawner(s) => **s = crate::mobs::spawner::Spawner::load(tag),
-        BlockEntity::TrialSpawner(s) => **s = crate::mobs::trial_spawner::TrialSpawner::load(tag),
+        BlockEntity::TrialSpawner(s) => {
+            let previous = match previous {
+                Some(BlockEntity::TrialSpawner(old)) => Some(old.as_ref()),
+                _ => None,
+            };
+            **s = crate::mobs::trial_spawner::TrialSpawner::load(tag, previous);
+        }
         BlockEntity::Vault(v) => **v = crate::vault::Vault::load(tag),
         BlockEntity::Beehive(h) => **h = crate::beehive::Beehive::from_nbt(tag),
         BlockEntity::CommandBlock(c) => **c = crate::command_block::CommandBlock::load(tag),

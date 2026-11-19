@@ -823,6 +823,12 @@ jobs:
             echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
           fi
           bash tools/ci/rustup_install.sh --profile minimal --component rustfmt --component clippy
+      # Dyna's runner builds in its persistent target (CARGO_TARGET_DIR) here too: the ignored-test inventory builds
+      # sunrise-game-discovery and its path dependencies (sunrise-mod-surface among them). Without the snapshot, a
+      # build of this tree left artifacts that a later job of another tree judged fresh (R55's verify, 2026-11-19).
+      - name: Restore unchanged source timestamps
+        if: env.RUNNER_KIND == 'dyna'
+        run: python3 tools/ci/source_mtimes.py "${CARGO_TARGET_DIR:-target}/ci-source-mtimes-v2.json"
       - name: Setup done
         id: setup
         run: 'true'

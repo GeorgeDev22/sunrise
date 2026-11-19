@@ -161,10 +161,6 @@ pub fn title_entry() -> Option<Screen> {
         None => crate::net::joins_friends().then(|| Screen::friend(true)),
     }
 }
-/// Whether the title screen's Friends icon opens something ([`title_entry`]).
-pub fn has_title_entry() -> bool {
-    page::title_page().is_some() || crate::net::joins_friends()
-}
 
 /// What a click asks the title screen to do.
 pub enum Outcome {

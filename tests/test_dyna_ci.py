@@ -642,6 +642,31 @@ class DynaRoutingTests(unittest.TestCase):
             self.assertEqual(calls.read_text().splitlines(), ["test --locked --no-run -p sunrise-client-lib --lib",
                                                              "test --locked --no-run -p sunrise-client --lib"])
 
+class PersistentTargetTests(unittest.TestCase):
+    def test_every_job_that_can_build_on_a_self_hosted_runner_keeps_the_source_snapshot_first(self):
+        # A job that builds in the runner's persistent target without tools/ci/source_mtimes.py leaves artifacts of
+        # its tree under a snapshot of another, which a later job then judges fresh: R55's verify linked a
+        # sunrise-mod-surface from a tree before 09339ddb31 (2026-11-19). The first step that can compile (cargo, or a
+        # repository tool that runs it) must come after the snapshot.
+        import re
+        from test_ci_concurrency import yaml
+        builds = re.compile(r"\bcargo (build|test|run|clippy|check|doc|fetch)\b|tools/ci/check_ignored_test_rows\.py|"
+                            r"tools/ci/check_machine_sample\.py|tools/parity\.py|tools/prebuilt_game\.py|xtask")
+        checked = 0
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            for name, job in yaml.load(path.read_text(), Loader=yaml.BaseLoader)["jobs"].items():
+                if not re.search(r"dyna|DYNA", str(job.get("runs-on", ""))):
+                    continue
+                steps = [str(step.get("run", "")) for step in job.get("steps", [])]
+                first = next((index for index, run in enumerate(steps) if builds.search(run)), None)
+                if first is None:
+                    continue
+                checked += 1
+                with self.subTest(workflow=path.name, job=name):
+                    self.assertTrue(any("tools/ci/source_mtimes.py" in run for run in steps[:first]))
+        self.assertGreater(checked, 8)
+
+
 class ParityWorkflowTests(unittest.TestCase):
     def setUp(self):
         from test_ci_concurrency import yaml

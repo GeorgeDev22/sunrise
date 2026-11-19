@@ -312,6 +312,27 @@ impl ShaderModifiers {
         uniforms.iter().find(|(n, _)| n == name).map(|(_, p)| p)
     }
 
+    /// The uniform `name` of any file, as if a pipeline's stages `stages` read it at
+    /// `binding`.
+    #[cfg(test)]
+    pub(crate) fn uniform_for_test(
+        &self,
+        name: &str,
+        binding: u32,
+        stages: wgpu::ShaderStages,
+    ) -> ExpressionUniform {
+        let program = (self.shaders.iter())
+            .find_map(|(id, _)| self.uniform(id, name))
+            .expect("a file gives it");
+        ExpressionUniform {
+            name: name.to_owned(),
+            binding,
+            stages,
+            program: program.clone(),
+            configs: self.configs.clone(),
+        }
+    }
+
     /// The names the files of `shaders` (a pipeline's stages' ids) give: the blocks the loader
     /// lets the pipeline's shaders declare.
     pub fn names(&self, shaders: &[&str]) -> Vec<String> {
