@@ -1,2 +1,3 @@
-bash tools/ci/launcher_check.sh verify/settings-shapes
-bash tools/ci/launcher_check.sh verify/servers-header
+bash tools/ci/launcher_check.sh verify/topbar-search-height
+bash tools/ci/launcher_check.sh verify/field-button-heights
+bash tools/ci/launcher_check.sh verify/language-dropdown
