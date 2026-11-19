@@ -1,0 +1,2 @@
+cargo fmt --all -- --check
+python3 tools/parity.py mace dispenser item_blocking
