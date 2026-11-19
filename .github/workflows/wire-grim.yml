@@ -8,18 +8,32 @@ on:
   push:
     branches: ['wire-grim']
   workflow_dispatch:
+    inputs:
+      list:
+        description: 'Scenario list (default: SCENARIO_LIST below)'
+        required: false
+      options:
+        description: 'WIRE_STREAM_OPTIONS for both clients (e.g. chatVisibility:2)'
+        required: false
+      sunrise_run:
+        description: 'The game build run to play Sunrise from (default: SUNRISE_RUN below)'
+        required: false
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: wire-grim
+  group: wire-grim-${{ github.event_name }}-${{ inputs.list }}-${{ inputs.options }}-${{ inputs.sunrise_run }}
   cancel-in-progress: true
 env:
   # lead fixes 44381753743: main + every open fix PR (#2322 #2478 #2595 #2650 #2698 #2724 #2866 #2867 #2094) + #2689 + leads AM, AA, boat clamp.
-  SUNRISE_RUN: '44381753743'
+  SUNRISE_RUN: ${{ inputs.sunrise_run || '44381753743' }}
   SHARDS: '2'
-  # The scenario list this run plays (tools/ci/wire-grim-scenarios.txt: all of item 93).
-  SCENARIO_LIST: tools/ci/wire-vehicle-scenarios.txt
+  # The scenario list this run plays (tools/ci/wire-grim-scenarios.txt: all of item 93; wire-grim-audit-scenarios.txt:
+  # what the Grim check audit found no scenario for).
+  SCENARIO_LIST: ${{ inputs.list || 'tools/ci/wire-grim-audit-scenarios.txt' }}
+  # Grim's experimental checks count too (tools/test_wire_stream_parity.py grim_experimental).
+  WIRE_STREAM_GRIM_EXPERIMENTAL: '1'
+  WIRE_STREAM_OPTIONS: ${{ inputs.options || '' }}
 jobs:
   grim:
     name: ${{ matrix.anticheat }} ${{ matrix.server }} r${{ matrix.round }} s${{ matrix.shard }}

@@ -21,7 +21,13 @@ import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.MouseHandler;
 import net.minecraft.client.Options;
+import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.inventory.BookEditScreen;
+import net.minecraft.client.gui.screens.inventory.BookSignScreen;
+import net.minecraft.client.gui.screens.inventory.BookViewScreen;
+import net.minecraft.client.input.CharacterEvent;
+import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.tutorial.Tutorial;
 import net.minecraft.world.inventory.AbstractContainerMenu;
@@ -50,6 +56,7 @@ import org.lwjgl.sdl.SDLVideo;
 public final class VanillaTickScript {
     private static final String TAG = "[VanillaTickScript] ";
     private static final Map<String, Integer> KEYS = new HashMap<>();
+    private static final Map<Integer, Integer> KEYCODES = new HashMap<>();
 
     static {
         // SDL scancodes (InputConstants' names), as the default key mappings use them.
@@ -65,6 +72,24 @@ public final class VanillaTickScript {
         KEYS.put("f", InputConstants.KEY_F);
         KEYS.put("esc", InputConstants.KEY_ESCAPE);
         KEYS.put("l", InputConstants.KEY_L);
+        // The chat (T, /), its suggestions (Tab), Enter, Backspace and a book's page keys.
+        KEYS.put("t", InputConstants.KEY_T);
+        KEYS.put("slash", InputConstants.KEY_SLASH);
+        KEYS.put("tab", InputConstants.KEY_TAB);
+        KEYS.put("enter", InputConstants.KEY_RETURN);
+        KEYS.put("backspace", InputConstants.KEY_BACKSPACE);
+        KEYS.put("pageup", InputConstants.KEY_PAGEUP);
+        KEYS.put("pagedown", InputConstants.KEY_PAGEDOWN);
+        // Their SDL key codes (KeyEvent.shortcutKey, what a text screen's keyPressed switches on).
+        KEYCODES.put(InputConstants.KEY_T, (int) 't');
+        KEYCODES.put(InputConstants.KEY_SLASH, (int) '/');
+        KEYCODES.put(InputConstants.KEY_TAB, 9);
+        KEYCODES.put(InputConstants.KEY_RETURN, 13);
+        KEYCODES.put(InputConstants.KEY_BACKSPACE, 8);
+        KEYCODES.put(InputConstants.KEY_ESCAPE, 27);
+        KEYCODES.put(InputConstants.KEY_E, (int) 'e');
+        KEYCODES.put(InputConstants.KEY_PAGEUP, 0x4000004B);
+        KEYCODES.put(InputConstants.KEY_PAGEDOWN, 0x4000004E);
         for (int i = 1; i <= 9; i++) {
             KEYS.put(Integer.toString(i), InputConstants.KEY_1 + i - 1);
         }
@@ -260,6 +285,15 @@ public final class VanillaTickScript {
         try {
             grab(mc);
             for (String line : running.steps().getOrDefault(tick, List.of())) {
+                if (line.startsWith("type ")) {
+                    // `type TEXT`: TEXT as it stands (its spaces too), each character to the open screen, as
+                    // KeyboardHandler.charTyped hands it a typed one.
+                    Screen screen = mc.gui.screen();
+                    if (screen != null) {
+                        line.substring(5).codePoints().forEach(c -> screen.charTyped(new CharacterEvent(c)));
+                    }
+                    continue;
+                }
                 apply(mc, line.trim().split("\\s+"));
             }
         } catch (ReflectiveOperationException e) {
@@ -278,6 +312,15 @@ public final class VanillaTickScript {
             case "key" -> {
                 InputConstants.Key key = InputConstants.Type.KEYBOARD.getOrCreate(KEYS.get(w[1]));
                 boolean down = !w[2].equals("up");
+                if (screen instanceof ChatScreen || screen instanceof BookEditScreen || screen instanceof BookViewScreen
+                        || screen instanceof BookSignScreen) {
+                    // A text screen takes the press (KeyboardHandler.keyPress: Screen.keyPressed): Tab, Enter,
+                    // Backspace, Escape, a book's Page Up and Page Down.
+                    if (down) {
+                        screen.keyPressed(new KeyEvent(key.getValue(), KEYCODES.getOrDefault(key.getValue(), 0), 0));
+                    }
+                    return;
+                }
                 if (screen != null) {
                     // KeyboardHandler.keyPress hands the open screen the press: the inventory key and
                     // Escape close a container screen (AbstractContainerScreen.keyPressed, onClose).

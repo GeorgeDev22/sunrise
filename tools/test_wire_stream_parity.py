@@ -1604,6 +1604,115 @@ SCENARIOS = {
     'goat_horn_use': dict(
         setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:goat_horn[minecraft:instrument="minecraft:ponder_goat_horn"]'],
         ticks=60, steps={5: ['mouse right down'], 15: ['mouse right up'], 25: ['mouse right down'], 30: ['mouse right up']}),
+    # The Grim check audit (2026-11-19, .local/wire-parity/grim-check-audit.md): what no scenario produced yet.
+    # S1: a full-strength sprint hit on something that isn't a mob (Player.attack's hurtOrSimulate is true for a
+    # boat, a minecart, an End crystal and a shulker bullet): causeExtraKnockback slows the attacker to 0.6 and
+    # stops its sprint (STOP_SPRINTING in that tick's sendChanges). The target stands 6 blocks ahead, so the
+    # player sprints up to full speed and hits before it runs into it.
+    **{f'sprint_hit_{name}': dict(
+        setup=[*extra, MACE_RESISTANCE, SWORD],
+        ticks=40, steps={0: [f'look 0 {pitch}'], 1: ['key w down', *(['key ctrl down'] if sprint else [])], 15: ['mouse left click'],
+                         30: ['key w up', *(['key ctrl up'] if sprint else [])]})
+       for name, sprint, pitch, extra in (
+           ('boat', True, 25, [f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 6.5 {{Rotation:[0f,0f]}}']),
+           ('minecart', True, 25, [f'summon minecraft:minecart 0.5 {FLOOR + 1} 6.5 {{Rotation:[0f,0f]}}']),
+           ('end_crystal', True, 15, [f'setblock 0 {FLOOR} 6 minecraft:obsidian',
+                                      f'summon minecraft:end_crystal 0.5 {FLOOR + 1} 6.5 {{ShowBottom:0b}}']),
+           ('shulker_bullet', True, 0, [f'summon minecraft:shulker_bullet 0.5 {FLOOR + 2.45} 5.5 {{NoGravity:1b,Motion:[0.0,0.0,0.0]}}']),
+           # Controls: a husk is a living target (hurtClient false: neither client slows), and a walking hit has
+           # no extra knockback (neither client slows).
+           ('husk', True, 15, [TARGET.format(x=0.5, y=FLOOR + 1, z=6.5)]),
+       )},
+    'walk_hit_boat': dict(
+        setup=[f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 6.5 {{Rotation:[0f,0f]}}', SWORD],
+        ticks=40, steps={0: ['look 0 25'], 1: ['key w down'], 15: ['mouse left click'], 30: ['key w up']}),
+    # S2: F (swap), Q (drop) and the inventory key in the same tick as a click. Minecraft.handleKeybinds handles them
+    # in its fixed order (inventory, swap, drop), all before the attack, use and pick, whatever the press order.
+    'keys_with_clicks': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=3.0), SWORD,
+               f'item replace entity {PLAYER} weapon.offhand with minecraft:totem_of_undying',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:stone 16'],
+        ticks=70, steps={0: ['look 0 20'], 5: ['key f tap', 'mouse left click'], 15: ['key q tap', 'mouse left click'],
+                         25: ['key 2 tap'], 30: ['look 0 60', 'mouse right click', 'key f tap'],
+                         40: ['key q tap', 'key f tap'], 48: ['look 0 60'], 50: ['mouse left down'], 55: ['key q tap'],
+                         60: ['mouse left up']}),
+    # A donkey with a chest: E sends OPEN_INVENTORY (isServerControlledInventory), before the tick's click.
+    'mount_keys_with_clicks': dict(
+        setup=[f'summon minecraft:donkey 0.5 {FLOOR + 1} 1.5 {{Tame:1b,ChestedHorse:1b,PersistenceRequired:1b,Rotation:[0f,0f],'
+               'equipment:{saddle:{id:"minecraft:saddle",count:1}}}', TARGET.format(x=0.5, y=FLOOR + 1, z=4.5), SWORD],
+        ticks=50, steps={0: ['command ride @s mount @e[type=minecraft:donkey,limit=1]'], 5: ['look 0 20'],
+                         10: ['mouse left click', 'key e tap'], 20: ['key esc tap'], 25: ['look 0 20'],
+                         30: ['key e tap', 'mouse left click'], 40: ['key esc tap']}),
+    # S3: Q in creative mode (MultiPlayerGameMode.dropItem: the drop and its swing, no creative slot packet), walking
+    # and standing, one item and (Ctrl) the stack.
+    'creative_drop': dict(
+        setup=[f'gamemode creative {PLAYER}', f'item replace entity {PLAYER} hotbar.0 with minecraft:stone 16',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:egg 16'],
+        ticks=45, steps={0: ['key w down'], 5: ['key q tap'], 10: ['key ctrl down', 'key q tap', 'key ctrl up'],
+                         15: ['key 2 tap'], 20: ['key q tap'], 30: ['key w up'], 35: ['key 1 tap', 'key q tap'],
+                         40: ['key q tap']}),
+    # BadPacketsK: a spectator clicks a husk (the camera goes to it), leaves it with Shift, right-clicks it and opens
+    # the spectator menu with the hotbar keys.
+    'spectator_click_entity': dict(
+        setup=[f'gamemode spectator {PLAYER}', TARGET.format(x=0.5, y=FLOOR + 1, z=3.0)],
+        ticks=50, steps={0: ['look 0 20'], 5: ['mouse left click'], 15: ['key shift down'], 17: ['key shift up'],
+                         22: ['look 0 20'], 25: ['mouse right click'], 30: ['key 1 tap'], 34: ['key 1 tap'], 40: ['key 2 tap']}),
+    # ElytraD/E/G/H: a jump in the air without an elytra, flying in creative with one, under Levitation with one and
+    # riding a minecart with one. tryToStartFallFlying refuses each, so neither client sends START_FALL_FLYING.
+    'jump_air_no_elytra': dict(
+        setup=[MACE_RESISTANCE], ticks=50, anchor='accept_teleportation',
+        steps={0: [f'command tp @s 0.5 {FLOOR + 12} 0.5 0 0'], 6: ['key space down'], 7: ['key space up'],
+               10: ['key space down'], 11: ['key space up'], 16: ['key space down'], 20: ['key space up']}),
+    'jump_flying_elytra': dict(
+        setup=[f'gamemode creative {PLAYER}', f'item replace entity {PLAYER} armor.chest with minecraft:elytra'],
+        ticks=50, steps={2: ['key space down'], 3: ['key space up'], 5: ['key space down'], 6: ['key space up'],
+                         15: ['key space down'], 16: ['key space up'], 20: ['key space down'], 26: ['key space up'],
+                         30: ['key shift down'], 36: ['key shift up'], 40: ['key space down'], 41: ['key space up']}),
+    'jump_levitation_elytra': dict(
+        setup=[MACE_RESISTANCE, f'item replace entity {PLAYER} armor.chest with minecraft:elytra'],
+        ticks=60, steps={0: [f'command effect give {PLAYER} minecraft:levitation 2 1 true'], 12: ['key space down'],
+                         13: ['key space up'], 18: ['key space down'], 19: ['key space up'], 30: ['key space down'],
+                         31: ['key space up']}),
+    'jump_riding_elytra': dict(
+        setup=[f'summon minecraft:minecart 0.5 {FLOOR + 1} 1.5 {{Rotation:[0f,0f]}}',
+               f'item replace entity {PLAYER} armor.chest with minecraft:elytra'],
+        ticks=50, steps={0: ['command ride @s mount @e[type=minecraft:minecart,limit=1]'], 10: ['key space down'],
+                         11: ['key space up'], 13: ['key space down'], 14: ['key space up'], 20: ['key space down'],
+                         30: ['key space up'], 40: ['key shift down'], 42: ['key shift up']}),
+    # MultiActionsG: attacks and uses from a boat while paddling, at a husk on a stone block in the water.
+    'boat_attack_use_paddled': dict(
+        setup=[f'fill -5 {FLOOR} 1 5 {FLOOR} 26 minecraft:water', f'setblock 0 {FLOOR} 8 minecraft:stone',
+               TARGET.format(x=0.5, y=FLOOR + 1, z=8.5), f'summon minecraft:oak_boat 0.5 {FLOOR + 1} 3.5 {{Rotation:[0f,0f]}}',
+               SWORD, f'item replace entity {PLAYER} weapon.offhand with minecraft:snowball 16'],
+        ticks=70, steps={0: ['command ride @s mount @e[type=minecraft:oak_boat,limit=1]'], 5: ['look 0 10'],
+                         8: ['key w down'], 20: ['mouse left click'], 26: ['mouse left click'], 32: ['mouse right click'],
+                         38: ['mouse left click'], 44: ['mouse right click'], 50: ['key w up'], 55: ['mouse right click']}),
+    # ChatA, CrashH: command suggestions typed into the chat screen (`/` opens it with a slash; Tab asks for and
+    # cycles the suggestions), a server-suggested argument (function names), a 70-letter word and a 300-letter line
+    # (the box keeps 256).
+    'command_suggestions': dict(
+        ticks=70, steps={5: ['key slash tap'], 8: ['type g'], 10: ['type ive Steve '], 14: ['key tab tap'],
+                         16: ['key tab tap'], 20: ['key esc tap'], 25: ['key t tap'], 28: ['type /function '],
+                         32: ['key tab tap'], 36: ['type ' + 'a' * 70], 40: ['key esc tap'], 45: ['key t tap'],
+                         48: ['type /say ' + 'x' * 300], 52: ['key enter tap']}),
+    # ChatC: chat typed while walking (the screen stops the walk; W pressed again after it), and a line sent while W
+    # is held.
+    'chat_walking': dict(
+        ticks=60, steps={0: ['key w down'], 5: ['key t tap'], 7: ['type hello there'], 9: ['key enter tap'],
+                         12: ['key w down'], 25: ['chat walking and talking'], 35: ['key w up']}),
+    # CrashD: a book on a lectern, its pages turned with Page Down and Page Up (LecternScreen's buttons send
+    # ServerboundContainerButtonClick), then closed.
+    'lectern_book': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:lectern[facing=north,has_book=true]{{Book:{{id:"minecraft:written_book",count:1,'
+               'components:{"minecraft:written_book_content":{title:"t",author:"a",pages:["one","two","three"]}}}}'],
+        ticks=50, steps={0: ['look 0 40'], 5: ['mouse right click'], 12: ['key pagedown tap'], 18: ['key pagedown tap'],
+                         24: ['key pageup tap'], 30: ['key esc tap']}),
+    # ExploitB: a book and quill written on two pages and closed (BookEditScreen.saveChanges: EditBook), opened again.
+    'book_write': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:writable_book'],
+        ticks=45, steps={2: ['mouse right click'], 6: ['type hello world'], 8: ['key enter tap'], 10: ['type second line'],
+                         14: ['key pagedown tap'], 16: ['type page two'], 20: ['key esc tap'], 26: ['mouse right click'],
+                         30: ['key pageup tap'], 36: ['key esc tap']}),
 }
 
 
@@ -1691,11 +1800,30 @@ def grim_server(directory, jars):
     if os.environ.get('WIRE_STREAM_ANTICHEAT', 'grim') == 'intave':
         intave_plugin(servers, directory / 'plugins')
     else:
-        shutil.copy(next(servers.glob('grimac-bukkit-*.jar')), directory / 'plugins')
+        grim = next(servers.glob('grimac-bukkit-*.jar'))
+        shutil.copy(grim, directory / 'plugins')
+        # WIRE_STREAM_GRIM_EXPERIMENTAL=1: Grim's 53 experimental checks count too (Check.recordFlag skips them
+        # while config.yml says `experimental-checks: false`, its default).
+        if os.environ.get('WIRE_STREAM_GRIM_EXPERIMENTAL') == '1':
+            grim_experimental(grim, directory / 'plugins')
     if via:
         shutil.copy(next(servers.glob('ViaVersion-*.jar')), directory / 'plugins')
     shutil.copy(paper, directory / 'paper.jar')
     return ['java', '-Xmx1536m', '-jar', 'paper.jar', 'nogui']
+
+
+def grim_experimental(jar, plugins):
+    """Grim's own default config.yml (config/en.yml in its jar, what it writes on a first start), with
+    `experimental-checks: true`. Every experimental check's name falls in one of punishments.yml's groups, whose
+    `1:1 [log]` puts each violation in the history database grim_violations reads."""
+    import zipfile
+    with zipfile.ZipFile(jar) as archive:
+        config = archive.read('config/en.yml').decode('utf-8')
+    config, count = re.subn(r'(?m)^experimental-checks: false$', 'experimental-checks: true', config)
+    if count != 1:
+        raise Failed("Grim's config/en.yml has no `experimental-checks: false` line to turn on")
+    (plugins / 'GrimAC').mkdir()
+    (plugins / 'GrimAC' / 'config.yml').write_text(config, encoding='utf-8')
 
 
 def intave_plugin(servers, plugins):
@@ -2175,6 +2303,10 @@ def run(args, out):
         grim_db = directory / 'plugins' / 'GrimAC' / 'data' / 'history.v1.db'
         if grim_db.exists():
             shutil.copy(grim_db, out / 'grim.db')
+        # The config Grim ran with (after its own upgrade pass), so a run shows whether experimental checks were on.
+        grim_config = directory / 'plugins' / 'GrimAC' / 'config.yml'
+        if grim_config.exists():
+            shutil.copy(grim_config, out / 'grim-config.yml')
         intave_logs = directory / 'plugins' / 'Intave' / 'logs'
         if intave_logs.exists():
             shutil.copytree(intave_logs, out / 'intave-logs', dirs_exist_ok=True)
