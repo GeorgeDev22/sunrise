@@ -1,0 +1,52 @@
+name: grim fixes
+# Fork only: the game built from lead-fixes plus the Grim audit's fixes (#3010-#3013), for the wire-grim run's
+# SUNRISE_RUN. No harnesses here; each fix's own verify/* branch runs its tests.
+on:
+  push:
+    branches: ['grim-fixes']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: grim-fixes
+  cancel-in-progress: true
+jobs:
+  game:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: The pinned Rust (tools/ci/rust-version)
+        id: rust
+        run: echo "version=$(cat tools/ci/rust-version)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+          targets: wasm32-unknown-unknown
+          components: rust-src
+      - name: Room for target/ (the hosted image ships tools this build never uses)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - name: ALSA and udev headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cloud-game-build
+      - name: Build the game and its companion programs
+        run: |
+          cargo build --locked --profile fast -p sunrise-game -p sunrise-client-lib --bin sunrise-client --bin sunrise-ctl
+          cargo build --locked --profile fast -p sunrise-prepare -p sunrise-server
+      - name: The wasm standard library a developer install places beside the game
+        run: cargo run --locked -p cargo-sunrise-mod -- wasm-std target/fast/sunrise-wasm-std.wasm
+      - name: Pack the programs
+        run: |
+          tar -C target/fast -czf sunrise-linux-x86_64-fast.tar.gz \
+            sunrise-client sunrise-ctl sunrise-prepare sunrise-server sunrise-wasm-std.wasm
+          ls -la sunrise-linux-x86_64-fast.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sunrise-linux-x86_64-fast
+          path: sunrise-linux-x86_64-fast.tar.gz
+          retention-days: 7
+
