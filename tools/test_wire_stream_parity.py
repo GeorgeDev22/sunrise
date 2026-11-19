@@ -1715,6 +1715,167 @@ SCENARIOS = {
         ticks=45, steps={2: ['mouse right click'], 6: ['type hello world'], 8: ['key enter tap'], 10: ['type second line'],
                          14: ['key pagedown tap'], 16: ['type page two'], 20: ['key esc tap'], 26: ['mouse right click'],
                          30: ['key pageup tap'], 36: ['key esc tap']}),
+    # Section 25 (2026-11-19): blocks, effects, items, mobs and containers no scenario touched yet.
+    'magma_sneak_walk': dict(
+        setup=[f'fill -1 {FLOOR} 1 1 {FLOOR} 8 minecraft:magma_block'],
+        ticks=70, steps={0: ['key w down'], 20: ['key shift down'], 45: ['key shift up'], 60: ['key w up']}),
+    'sweet_berry_walk': dict(
+        setup=[f'fill 0 {FLOOR + 1} 2 0 {FLOOR + 1} 4 minecraft:sweet_berry_bush[age=3]'],
+        ticks=60, steps={0: ['key w down'], 45: ['key w up']}),
+    'campfire_step': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:campfire[lit=true]'],
+        ticks=60, steps={0: ['key w down'], 8: ['key space tap'], 30: ['key w up']}),
+    'cactus_touch': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:cactus', f'setblock 0 {FLOOR + 2} 2 minecraft:cactus'],
+        ticks=50, steps={0: ['key w down'], 30: ['key w up']}),
+    'dripstone_fall': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 0 minecraft:pointed_dripstone[vertical_direction=up,thickness=tip]'],
+        ticks=60, steps={0: ['command tp @s 0.5 ~6 0.5']}),
+    'hay_bale_fall': dict(
+        setup=[f'setblock 0 {FLOOR} 0 minecraft:hay_block'],
+        ticks=60, steps={0: ['command tp @s 0.5 ~12 0.5']}),
+    'honey_wall_slide': dict(
+        setup=[f'fill -1 {FLOOR + 1} 2 1 {FLOOR + 6} 2 minecraft:honey_block'],
+        ticks=70, steps={0: ['command tp @s 0.5 ~5 1.2'], 2: ['key w down'], 50: ['key w up']}),
+    'water_current_push': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 6 minecraft:water', f'fill -1 {FLOOR + 1} 0 1 {FLOOR + 1} 7 minecraft:air replace minecraft:air'],
+        ticks=80, steps={0: ['key w down'], 30: ['key w up'], 60: ['key s down'], 70: ['key s up']}),
+    'lava_step_no_res': dict(
+        setup=[f'fill 0 {FLOOR} 2 0 {FLOOR} 3 minecraft:lava'],
+        ticks=60, steps={0: ['key w down'], 12: ['key w up'], 14: ['key s down'], 30: ['key s up']}),
+    'dolphins_grace_swim': dict(
+        setup=[f'fill -3 {FLOOR - 2} 1 3 {FLOOR} 20 minecraft:water',
+               f'effect give {PLAYER} minecraft:dolphins_grace 30 0 true',
+               f'effect give {PLAYER} minecraft:water_breathing 30 0 true'],
+        ticks=80, steps={0: ['look 0 20', 'key w down', 'key ctrl down'], 60: ['key w up', 'key ctrl up']}),
+    'swim_into_tunnel': dict(
+        setup=[f'fill -2 {FLOOR - 2} 1 2 {FLOOR} 14 minecraft:water', f'fill -2 {FLOOR - 1} 8 2 {FLOOR} 14 minecraft:stone',
+               f'effect give {PLAYER} minecraft:water_breathing 30 0 true'],
+        ticks=90, steps={0: ['command tp @s 0.5 ~-2 1.5', 'look 0 30'], 2: ['key w down', 'key ctrl down'],
+                         70: ['key w up', 'key ctrl up']}),
+    'ladder_sneak_hold': dict(
+        setup=[f'fill 0 {FLOOR + 1} 2 0 {FLOOR + 6} 2 minecraft:stone',
+               f'fill 0 {FLOOR + 1} 1 0 {FLOOR + 6} 1 minecraft:ladder[facing=north]'],
+        ticks=80, steps={0: ['key w down'], 25: ['key shift down'], 45: ['key shift up'], 60: ['key w up']}),
+    'scaffolding_descend': dict(
+        setup=[f'fill 0 {FLOOR + 1} 0 0 {FLOOR + 5} 0 minecraft:scaffolding'],
+        ticks=80, steps={0: ['command tp @s 0.5 ~6 0.5'], 15: ['key shift down'], 60: ['key shift up']}),
+    'fence_jump_attempt': dict(
+        setup=[f'fill -2 {FLOOR + 1} 2 2 {FLOOR + 1} 2 minecraft:oak_fence'],
+        ticks=60, steps={0: ['key w down', 'key space down'], 30: ['key space up'], 40: ['key w up']}),
+    'pressure_plate_tripwire': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:stone_pressure_plate', f'setblock 0 {FLOOR + 1} 4 minecraft:tripwire',
+               f'setblock 0 {FLOOR + 1} 6 minecraft:heavy_weighted_pressure_plate'],
+        ticks=60, steps={0: ['key w down'], 40: ['key w up']}),
+    'kelp_swim_down': dict(
+        setup=[f'fill -2 {FLOOR - 2} -2 2 {FLOOR + 4} 6 minecraft:water', f'fill 0 {FLOOR - 2} 2 0 {FLOOR + 3} 2 minecraft:kelp_plant',
+               f'effect give {PLAYER} minecraft:water_breathing 30 0 true'],
+        ticks=80, steps={0: ['command tp @s 0.5 ~3 0.5'], 5: ['key w down'], 20: ['key shift down'], 60: ['key shift up', 'key w up']}),
+    'slow_falling_drop': dict(
+        setup=[f'effect give {PLAYER} minecraft:slow_falling 20 0 true'],
+        ticks=90, steps={0: ['command tp @s 0.5 ~10 0.5'], 10: ['key w down'], 40: ['key w up']}),
+    'mud_ice_walk': dict(
+        setup=[f'fill -1 {FLOOR} 1 1 {FLOOR} 4 minecraft:mud', f'fill -1 {FLOOR} 5 1 {FLOOR} 10 minecraft:ice'],
+        ticks=70, steps={0: ['key w down', 'key ctrl down'], 35: ['key w up', 'key ctrl up']}),
+    'poison_wither_ticks': dict(
+        setup=[f'effect give {PLAYER} minecraft:poison 4 1 true', f'effect give {PLAYER} minecraft:wither 4 0 true'],
+        ticks=100, steps={10: ['key w down'], 50: ['key w up']}),
+    'absorption_regen_hits': dict(
+        setup=[f'effect give {PLAYER} minecraft:absorption 30 1 true', f'effect give {PLAYER} minecraft:regeneration 30 1 true',
+               FAR_HUSK],
+        ticks=80, steps=merge({0: ['key w down'], 60: ['key w up']}, every(10, 60, 12, KNOCKBACK))),
+    'harming_splash_self': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:splash_potion[minecraft:potion_contents={{potion:"minecraft:harming"}}]'],
+        ticks=50, steps={0: ['look 0 90'], 5: ['mouse right click'], 30: ['key w down'], 40: ['key w up']}),
+    'fire_aspect_hits': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.5),
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:diamond_sword[minecraft:enchantments={{"minecraft:fire_aspect":2}}]'],
+        ticks=70, steps=merge({0: ['look 0 20']}, every(5, 60, 13, 'mouse left click'))),
+    'bow_flame_punch': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=8.5), f'item replace entity {PLAYER} hotbar.0 with minecraft:arrow 64',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:bow[minecraft:enchantments={{"minecraft:flame":1,"minecraft:punch":2}}]'],
+        ticks=90, steps={0: ['look 0 0'], 5: ['mouse right down'], 30: ['mouse right up'], 45: ['mouse right down'], 55: ['mouse right up']}),
+    'sweeping_edge_pair': dict(
+        setup=[TARGET.format(x=0.0, y=FLOOR + 1, z=2.0), TARGET.format(x=1.2, y=FLOOR + 1, z=2.2),
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:netherite_sword[minecraft:enchantments={{"minecraft:sweeping_edge":3}}]'],
+        ticks=70, steps=merge({0: ['look 10 20']}, every(5, 60, 13, 'mouse left click'))),
+    'water_lava_buckets': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:water_bucket',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:lava_bucket'],
+        ticks=70, steps={0: ['look 0 50'], 5: ['mouse right click'], 15: ['mouse right click'], 25: ['key 2 tap'],
+                         27: ['look 30 50'], 30: ['mouse right click'], 40: ['mouse right click']}),
+    'milk_clears_effects': dict(
+        setup=[f'effect give {PLAYER} minecraft:speed 60 2 true', f'item replace entity {PLAYER} weapon.mainhand with minecraft:milk_bucket'],
+        ticks=70, steps={0: ['key w down'], 10: ['mouse right down'], 50: ['mouse right up'], 60: ['key w up']}),
+    'golden_apple_honey': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:golden_apple 2',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:honey_bottle', f'effect give {PLAYER} minecraft:hunger 2 50 true'],
+        ticks=110, steps={20: ['mouse right down'], 60: ['mouse right up', 'key 2 tap'], 62: ['mouse right down'],
+                          102: ['mouse right up']}),
+    'equip_armor_click': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:diamond_chestplate',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:elytra', f'item replace entity {PLAYER} hotbar.2 with minecraft:iron_helmet'],
+        ticks=40, steps={2: ['mouse right click'], 8: ['key 2 tap'], 10: ['mouse right click'], 16: ['key 3 tap'],
+                         18: ['mouse right click'], 24: ['key 1 tap'], 26: ['mouse right click']}),
+    'shield_walk_block': dict(
+        setup=[f'item replace entity {PLAYER} weapon.offhand with minecraft:shield', FAR_HUSK],
+        ticks=80, steps=merge({0: ['key w down'], 5: ['mouse right down'], 50: ['mouse right up'], 60: ['key w up']},
+                              every(15, 45, 10, KNOCKBACK))),
+    'name_tag_lead_mob': dict(
+        setup=['summon minecraft:cow 0.5 {y} 2.5 {{NoAI:1b,PersistenceRequired:1b}}'.format(y=FLOOR + 1),
+               f'setblock 2 {FLOOR + 1} 1 minecraft:oak_fence',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:name_tag[minecraft:custom_name="Bessie"]',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:lead'],
+        ticks=60, steps={0: ['look 0 30'], 5: ['mouse right click'], 12: ['key 2 tap'], 14: ['mouse right click'],
+                         24: ['look -60 40'], 28: ['mouse right click']}),
+    'shear_sheep_milk_cow': dict(
+        setup=['summon minecraft:sheep 0.5 {y} 2.5 {{NoAI:1b,PersistenceRequired:1b,Color:0b}}'.format(y=FLOOR + 1),
+               'summon minecraft:cow -1.5 {y} 2.5 {{NoAI:1b,PersistenceRequired:1b}}'.format(y=FLOOR + 1),
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:shears',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:bucket'],
+        ticks=50, steps={0: ['look 0 30'], 5: ['mouse right click'], 12: ['key 2 tap'], 14: ['look 35 30'], 18: ['mouse right click']}),
+    'feed_breed_cows': dict(
+        setup=['summon minecraft:cow 0.5 {y} 2.5 {{NoAI:1b,PersistenceRequired:1b}}'.format(y=FLOOR + 1),
+               'summon minecraft:cow -1.5 {y} 2.5 {{NoAI:1b,PersistenceRequired:1b}}'.format(y=FLOOR + 1),
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:wheat 8'],
+        ticks=50, steps={0: ['look 0 30'], 5: ['mouse right click'], 12: ['look 35 30'], 16: ['mouse right click']}),
+    'brewing_stand_use': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:brewing_stand',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:potion[minecraft:potion_contents={{potion:"minecraft:water"}}]',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:nether_wart 4', f'item replace entity {PLAYER} hotbar.2 with minecraft:blaze_powder 2'],
+        ticks=60, steps={0: ['look 0 40'], 5: ['mouse right click'], 12: ['click-slot 32 shift'], 16: ['click-slot 33 shift'],
+                         20: ['click-slot 34 shift'], 26: ['click-slot 3 shift'], 32: ['key esc tap']}),
+    'hopper_crafter_use': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:hopper', f'setblock 2 {FLOOR + 1} 2 minecraft:crafter',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:cobblestone 32'],
+        ticks=70, steps={0: ['look 0 45'], 5: ['mouse right click'], 10: ['click-slot 32 shift'], 14: ['click-slot 0'],
+                         18: ['key esc tap'], 22: ['look -40 35'], 26: ['mouse right click'], 32: ['click-slot 0'], 36: ['click-slot 4'],
+                         40: ['click-slot 8'], 46: ['key esc tap']}),
+    'cartography_fletching': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:cartography_table', f'setblock 1 {FLOOR + 1} 2 minecraft:fletching_table',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:map 2', f'item replace entity {PLAYER} hotbar.1 with minecraft:paper 4'],
+        ticks=50, steps={0: ['look 0 40'], 5: ['mouse right click'], 10: ['click-slot 30 shift'], 14: ['click-slot 31 shift'],
+                         20: ['key esc tap'], 24: ['look -25 40'], 28: ['mouse right click'], 36: ['key esc tap']}),
+    'cake_bell_pot': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:cake', f'setblock 1 {FLOOR + 1} 2 minecraft:bell[attachment=floor,facing=north]',
+               f'setblock -1 {FLOOR + 1} 2 minecraft:flower_pot', f'item replace entity {PLAYER} weapon.mainhand with minecraft:poppy',
+               f'effect give {PLAYER} minecraft:hunger 2 50 true'],
+        ticks=70, steps={20: ['look 0 40', 'key 2 tap'], 22: ['mouse right click'], 28: ['mouse right click'], 34: ['look -25 40'],
+                         36: ['mouse right click'], 42: ['key 1 tap', 'look 25 40'], 46: ['mouse right click'], 52: ['look -25 40'],
+                         54: ['mouse right click']}),
+    'painting_place': dict(
+        setup=[f'fill -2 {FLOOR + 1} 3 2 {FLOOR + 4} 3 minecraft:stone', f'item replace entity {PLAYER} weapon.mainhand with minecraft:painting 2'],
+        ticks=40, steps={0: ['look 0 0'], 5: ['mouse right click'], 15: ['mouse left click']}),
+    'chiseled_bookshelf_pot': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:chiseled_bookshelf[facing=north]', f'setblock 1 {FLOOR + 1} 2 minecraft:decorated_pot',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:book 3'],
+        ticks=50, steps={0: ['look -5 30'], 5: ['mouse right click'], 10: ['mouse right click'], 16: ['key 2 tap'], 18: ['mouse right click'],
+                         26: ['look 25 40'], 30: ['mouse left click']}),
+    'place_boat_minecart': dict(
+        setup=[f'fill -1 {FLOOR} 2 1 {FLOOR} 4 minecraft:water', f'setblock -3 {FLOOR + 1} 2 minecraft:rail',
+               f'item replace entity {PLAYER} hotbar.0 with minecraft:oak_boat', f'item replace entity {PLAYER} hotbar.1 with minecraft:minecart'],
+        ticks=50, steps={0: ['look 0 45'], 5: ['mouse right click'], 15: ['key 2 tap', 'look -60 45'], 20: ['mouse right click'],
+                         30: ['mouse left click'], 34: ['mouse left click']}),
 }
 
 
