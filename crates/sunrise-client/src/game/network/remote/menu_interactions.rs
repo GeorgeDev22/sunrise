@@ -17,25 +17,22 @@ impl Game<'_> {
             None => (0, "inventory".to_owned()),
         }
     }
-    /// One click on the open menu's own slot `menu_slot`, in the menu's numbering (the server's,
-    /// and vanilla's driver's); a negative slot is outside the screen (-999). False when the menu
-    /// has no such slot.
-    pub(in crate::game) fn remote_menu_slot_click(
-        &mut self,
+    /// A click on the open menu's own slot `menu_slot`, in the menu's numbering (the server's,
+    /// and vanilla's driver's), as one of `remote_menu_ops`'s: a negative slot is outside the
+    /// screen (-999). None when the menu has no such slot.
+    pub(in crate::game) fn remote_menu_slot_op(
+        &self,
         menu_slot: i32,
         button: i32,
         input: Input,
-    ) -> bool {
+    ) -> Option<(Option<usize>, i32, Input)> {
         let internal = if menu_slot < 0 {
             None
         } else {
             let (_, menu) = self.remote_menu();
-            let Some(internal) = Self::inventory_screen_slot(&menu, menu_slot) else {
-                return false;
-            };
-            Some(internal)
+            Some(Self::inventory_screen_slot(&menu, menu_slot)?)
         };
-        self.remote_menu_ops(&[(internal, button, input)])
+        Some((internal, button, input))
     }
     /// `MultiPlayerGameMode.handleContainerInput` for each click of `ops` on
     /// the server's open menu (a quick craft drag is several): the verified

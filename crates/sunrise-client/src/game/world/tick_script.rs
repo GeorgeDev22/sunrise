@@ -87,11 +87,27 @@ impl Game<'_> {
         running.tick += 1;
         let lines = running.steps.remove(&tick).unwrap_or_default();
         let finished = (running.tick > running.ticks).then(|| running.name.clone());
+        // A drag's clicks go out together, as a screen sends them when the button comes up
+        // (AbstractContainerScreen.mouseReleased): the menu predicts them as one quick craft.
+        let mut drag = Vec::new();
         for line in lines {
-            if !self.tick_script_menu_line(&line) {
-                self.replay_line(&line, event_loop);
+            match self.tick_script_click(&line) {
+                Some(Some(op)) if op.2 == sunrise_client::menu::Input::QuickCraft => drag.push(op),
+                Some(op) => {
+                    self.flush_tick_script_drag(&mut drag);
+                    if let Some(op) = op {
+                        self.remote_menu_ops(&[op]);
+                    }
+                }
+                None => {
+                    self.flush_tick_script_drag(&mut drag);
+                    if !self.tick_script_menu_line(&line) {
+                        self.replay_line(&line, event_loop);
+                    }
+                }
             }
         }
+        self.flush_tick_script_drag(&mut drag);
         if let Some(name) = finished {
             self.tick_script.running = None;
             let _ = std::fs::write(path.with_extension("done"), name);
@@ -99,38 +115,40 @@ impl Game<'_> {
     }
 }
 
+/// A click on the open menu: Sunrise's slot (None outside the screen), its button and input.
+type MenuOp = (Option<usize>, i32, sunrise_client::menu::Input);
+
 impl Game<'_> {
-    /// The menu lines, without a renderer, as the vanilla driver takes them:
-    /// - `click-slot SLOT [right] [shift] [INPUT] [bBUTTON]`: SLOT is the open menu's own slot
-    ///   (-999 outside the screen), INPUT a `ContainerInput` name and BUTTON its button;
+    /// The menu lines, without a renderer, as the vanilla driver takes them. sunrise-ctl's
+    /// versions press where the screen draws them, and `--headless` draws nothing; the vanilla
+    /// driver works the menu itself (`MultiPlayerGameMode.handleContainerInput`), and so does this.
     /// - `menu-button N`: a station screen's button (a stonecutter's recipe, a loom's pattern, an
     ///   enchantment), `clickMenuButton` and then `handleInventoryButtonClick`;
     /// - `select-trade N`: a merchant screen's offer (`MerchantScreen.postButtonClick`).
-    ///
-    /// sunrise-ctl's versions press where the screen draws them, and `--headless` draws nothing.
-    /// The vanilla driver works the menu itself (`MultiPlayerGameMode.handleContainerInput`), and
-    /// so does this.
     fn tick_script_menu_line(&mut self, line: &str) -> bool {
-        use sunrise_client::menu::Input;
         let words: Vec<&str> = line.split_whitespace().collect();
         let number = words.get(1).and_then(|w| w.parse::<i32>().ok());
         match (words.first(), number) {
-            (Some(&"menu-button"), Some(button)) => {
-                self.station_menu_button(button);
-                return true;
-            }
+            (Some(&"menu-button"), Some(button)) => self.station_menu_button(button),
             (Some(&"select-trade"), Some(offer)) => {
                 if let Ok(offer) = usize::try_from(offer) {
                     self.try_move_items(offer);
                 }
-                return true;
             }
-            _ => {}
+            _ => return false,
         }
+        true
+    }
+    /// `click-slot SLOT [right] [shift] [INPUT] [bBUTTON]`: SLOT is the open menu's own slot
+    /// (-999 outside the screen), INPUT a `ContainerInput` name and BUTTON its button. None for
+    /// another line; Some(None) for a slot the open menu doesn't have.
+    fn tick_script_click(&self, line: &str) -> Option<Option<MenuOp>> {
+        use sunrise_client::menu::Input;
+        let words: Vec<&str> = line.split_whitespace().collect();
         let (Some(&"click-slot"), Some(Ok(slot))) =
             (words.first(), words.get(1).map(|w| w.parse::<i32>()))
         else {
-            return false;
+            return None;
         };
         let rest = &words[2..];
         let mut input = if rest.contains(&"shift") {
@@ -147,8 +165,13 @@ impl Game<'_> {
                 button = b;
             }
         }
-        self.remote_menu_slot_click(slot, button, input);
-        true
+        Some(self.remote_menu_slot_op(slot, button, input))
+    }
+    fn flush_tick_script_drag(&mut self, drag: &mut Vec<MenuOp>) {
+        if !drag.is_empty() {
+            self.remote_menu_ops(drag);
+            drag.clear();
+        }
     }
 }
 
