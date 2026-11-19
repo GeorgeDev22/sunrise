@@ -69,7 +69,9 @@ RESET = [
     f'fill -12 {FLOOR - 3} -12 12 {FLOOR - 3} 28 minecraft:bedrock',
     f'fill -12 {FLOOR - 2} -12 12 {FLOOR - 1} 28 minecraft:dirt',
     f'fill -12 {FLOOR} -12 12 {FLOOR} 28 minecraft:grass_block',
-    'kill @e[type=!minecraft:player]', f'clear {PLAYER}', f'effect clear {PLAYER}', f'gamemode survival {PLAYER}',
+    # Twice: a killed mob drops its loot and equipment (a saddled pig its saddle) during the first kill, after
+    # its selector has run, and the drops would land in the next scenario's hands after their pickup delay.
+    'kill @e[type=!minecraft:player]', 'kill @e[type=!minecraft:player]', f'clear {PLAYER}', f'effect clear {PLAYER}', f'gamemode survival {PLAYER}',
     f'effect give {PLAYER} minecraft:saturation 1 20 true', f'effect give {PLAYER} minecraft:instant_health 1 5 true',
     # What a scenario may have changed that the commands above don't undo: server-set attributes, the border.
     *[f'attribute {PLAYER} minecraft:{a} base reset' for a in ATTRIBUTES], 'worldborder set 59999968',
