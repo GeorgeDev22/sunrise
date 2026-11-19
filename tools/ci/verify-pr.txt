@@ -1,0 +1,2 @@
+bash tools/ci/launcher_check.sh verify/settings-shapes
+bash tools/ci/launcher_check.sh verify/servers-header
