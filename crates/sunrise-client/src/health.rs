@@ -1137,23 +1137,6 @@ impl PlayerMotion {
             level, resources, rules, source, amount, blocking, false, 0, false,
         )
     }
-    /// [`hurt_blocking`](Self::hurt_blocking) from a source whose hit was a
-    /// creative player's (`DamageSource.isCreativePlayer`): it passes the
-    /// invulnerability the victim has (`Entity.isInvulnerableToBase`'s one
-    /// exception, #916).
-    pub fn hurt_blocking_creative(
-        &mut self,
-        level: &mut DamageLevel<'_>,
-        resources: &HealthResources,
-        rules: HealthRules,
-        source: DamageTypeId,
-        amount: f32,
-        blocking: Option<Blocking>,
-    ) -> Result<BlockOutcome> {
-        self.hurt_caused_by(
-            level, resources, rules, source, amount, blocking, false, 0, true,
-        )
-    }
     /// `hurt_blocking` from a source whose causing entity is a living
     /// non-player (`living_cause`), which the `when_caused_by_living_non_player`
     /// damage types scale with the difficulty. `causing` is that entity's id

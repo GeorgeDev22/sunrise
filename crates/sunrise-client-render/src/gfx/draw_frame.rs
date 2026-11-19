@@ -1267,7 +1267,7 @@ impl Renderer {
                     fog_color,
                     pack.fog,
                 );
-                self.uploads.buffer(&mut encoder, core.uniform(), 0, &data);
+                core.upload(&mut self.uploads, &mut encoder, &data);
             }
         }
         // A pack's core/sky and core/stars: the disc with the sky colour, the stars with their

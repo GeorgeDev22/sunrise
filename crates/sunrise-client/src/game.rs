@@ -8294,8 +8294,8 @@ impl Game<'_> {
             .get(&(block[0] >> 4, block[2] >> 4))
             .map(|c| c.biome(block[0], block[1], block[2]))
             .unwrap_or(0);
-        // Asked before the environment's borrow: the renderer's lightmap answers.
-        let lightmap_expressions = self.lightmap_reads_expressions();
+        // Asked before the environment's borrow: the renderer's pack shaders answer.
+        let pack_expressions = self.reads_pack_expressions();
         let environment = self.view_environment();
         // EnvironmentAttributeProbe: the spatially interpolated biome colours,
         // Gaussian-weighted over the noise biomes around the camera (plains
@@ -8343,7 +8343,7 @@ impl Game<'_> {
         if self.pack.environments.is_some()
             || self.pack.polytone_particles.is_some()
             || self.pack.polytone_post.is_some()
-            || lightmap_expressions
+            || pack_expressions
         {
             let light = self.world.light(block[0], block[1], block[2]);
             let frame = sunrise_client::environment::Frame {
@@ -8579,7 +8579,7 @@ impl Game<'_> {
         let game_ticks = self.world.game_time as f64 + alpha;
         let delta_ticks = (game_ticks - self.polytone_post_ticks).clamp(0.0, 20.0) as f32;
         self.polytone_post_ticks = game_ticks;
-        self.evaluate_lightmap_expressions(polytone_frame.as_ref());
+        self.evaluate_pack_expressions(polytone_frame.as_ref());
         let polytone_extras = match (&self.pack.polytone_post, &polytone_frame) {
             (Some(post), Some(frame)) => {
                 let view = bob * spin * sunrise_client::camera::view_matrix(yaw, pitch);
