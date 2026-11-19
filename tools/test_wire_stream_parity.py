@@ -737,6 +737,14 @@ SCENARIOS = {
         setup=[f'setblock 0 {FLOOR} 3 minecraft:end_portal'],
         ticks=120, steps={0: [f'command tp @s 0.5 {FLOOR + 6} 3.5'],
                           100: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
+    # Into the End with momentum (2026-11-19): a sprint jump ends airborne in a portal block at the feet, so both
+    # clients go through moving, whatever tick the server takes them. The arrival's position packet keeps the
+    # motion (DELTA_* and ROTATE_DELTA), and handleRespawn's KEEP_ENTITY_DATA keeps it on the new player: whether
+    # each client's first moves on the platform carry it.
+    'end_portal_momentum': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 4 minecraft:end_portal'],
+        ticks=120, steps={0: ['key w down', 'key ctrl down'], 5: ['key space tap'], 8: ['key w up', 'key ctrl up'],
+                          100: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
     # The portal goes once the player has gone through: left at the spawn point, it sent the next client to join
     # (after the last scenario, before any reset) straight into the End.
     'end_portal_inside': dict(
