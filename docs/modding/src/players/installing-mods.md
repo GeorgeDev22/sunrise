@@ -51,17 +51,13 @@ id, version, license, authors, credits and description:
 
 The screen has no on/off switch; the launcher and `sunrise-mods.txt` decide which mods run.
 
+## Making a mod
+
+[Install the mod tool](../start/install-tool.md), then follow [Your first native mod](../start/first-mod.md) or
+[Your first content mod](../start/first-content-mod.md).
+
 ## Sunrise's own mods
 
-Sunrise's optional extras are native mods in
-[horizon-rust/horizon-mods](https://github.com/horizon-rust/horizon-mods), under `native/<name>/`:
-
-| Mod | Folder | Adds |
-| --- | --- | --- |
-| FPS Counter | `native/fps-overlay` | The frame rate on screen |
-| Keystrokes | `native/keystrokes` | The movement and mouse keys you press |
-| Zoom | `native/zoom` | A zoom key |
-| Recipes | `native/recipes` | An item panel and recipe pages |
-| Coordinates HUD | `native/coords-hud` | Position and facing, `/where` and `/coords`: a small example mod |
-
-The game keeps the parts that must be fast, such as applying the zoom to the view, and the mod chooses the options.
+Sunrise's official mods are native mods, each in its own repository under
+[sunrise-org](https://github.com/sunrise-org). The registry every mod is listed in is
+[sunrise-org/sunrise-mods](https://github.com/sunrise-org/sunrise-mods).

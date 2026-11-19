@@ -400,7 +400,7 @@ events a mod listens to and the capabilities it uses. A listener is an `@Subscri
 parameter, or a method reference or lambda that takes one event
 (`NeoForge.EVENT_BUS.addListener(this::onTick)`). It looks each name up in the hook catalog's
 `neoforge` names, generated at build time from the Rust hook declarations (see the
-[hook notes](https://sunrise-org.github.io/sunrise/reference/hook-notes.html)). An optional JSON
+[hook notes](https://playsunrise.net/docs/modding/reference/hook-notes)). An optional JSON
 file with `hooks` entries containing `name` and `neoforge` can replace those labels for a report.
 Over a folder of jars it ranks the names by how many mods use them. Each name gets one of eight answers:
 
@@ -417,7 +417,7 @@ Over a folder of jars it ranks the names by how many mods use them. Each name ge
 - none.
 
 The load-phase events follow the modding book's
-[load phases](https://sunrise-org.github.io/sunrise/concepts/load-phases.html).
+[load phases](https://playsunrise.net/docs/modding/concepts/load-phases).
 `FMLCommonSetupEvent`'s work goes in `Hooks::register`, then the first server reload.
 `FMLLoadCompleteEvent`'s goes after the initial config and before `server_about_to_start`.
 `FMLDedicatedServerSetupEvent`'s goes in `server_about_to_start`, when its `dedicated` flag is set.

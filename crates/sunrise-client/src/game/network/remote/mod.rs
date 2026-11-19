@@ -8913,17 +8913,7 @@ impl Game<'_> {
         if mod_api::__private::mods().is_empty() {
             return;
         }
-        let speed = self
-            .own_attribute("minecraft:attack_speed")
-            .unwrap_or_else(|| self.main_hand_attack_speed());
-        let scale = self.hand_strength.scale(0.5, speed);
-        let spin = self.player.as_ref().map_or(0.0, |p| p.auto_spin_attack_dmg);
-        let damage = if spin > 0.0 {
-            spin
-        } else {
-            self.own_attribute("minecraft:attack_damage")
-                .map_or(1.0, |v| v as f32)
-        };
+        let (damage, scale) = self.remote_attack_damage();
         let magic = scale * (self.enchanted_damage(target, damage, None) - damage);
         if damage <= 0.0 && magic <= 0.0 {
             return;
@@ -8954,9 +8944,8 @@ impl Game<'_> {
     /// `MultiPlayerGameMode.attack` runs `Player.attack` on this client too.
     /// For a mob `hurtOrSimulate` fails here (`Entity.hurtClient`), so the
     /// hit has no attacker side; but `RemotePlayer.hurtClient` is true, so a
-    /// hit on another player with extra knockback runs the attacker's side of
-    /// `causeExtraKnockback`: the 0.6 horizontal speed cut and the sprint
-    /// stop. Without it the next move outruns the server's player.
+    /// hit on another player runs the attacker's side: a critical hit's
+    /// particles and `causeExtraKnockback` (`remote_attacker_knockback`).
     fn remote_player_attack(&mut self, mob: usize) {
         // Java dispatches this through the target's RemotePlayer type. The
         // level_players map is profile bookkeeping and can lag the entity;
@@ -8964,26 +8953,7 @@ impl Game<'_> {
         if self.mobs[mob].kind.id != "minecraft:player" {
             return;
         }
-        // `getAttackStrengthScale(0.5)`: here the ticker is `hand_strength`'s
-        // (`attack_ticks` only counts in the local world), and the attack
-        // speed is the player's synced attribute, which a server may change.
-        let speed = self
-            .own_attribute("minecraft:attack_speed")
-            .unwrap_or_else(|| self.main_hand_attack_speed());
-        let strength = self.hand_strength.scale(0.5, speed);
-        // Player.attack's damage: a riptide spin's, or this client's own
-        // ATTACK_DAMAGE, which the held item and effects don't change here.
-        let spin = self.player.as_ref().map_or(0.0, |p| p.auto_spin_attack_dmg);
-        let damage = if spin > 0.0 {
-            spin
-        } else {
-            self.own_attribute("minecraft:attack_damage")
-                .map_or(1.0, |v| v as f32)
-        };
-        let knockback = self
-            .own_attribute("minecraft:attack_knockback")
-            .map_or(0.0, |v| v as f32);
-        let sprinting = self.player.as_ref().is_some_and(|p| p.sprinting);
+        let (damage, strength) = self.remote_attack_damage();
         // attackVisualEffects: a RemotePlayer's hurtClient is true, so a
         // critical hit (full strength, canCriticalAttack) with damage left
         // after baseDamageScaleFactor runs LocalPlayer.crit, this client's
@@ -8998,20 +8968,7 @@ impl Game<'_> {
                 mob_tracking_body(m),
             );
         }
-        if !sunrise_client::attack_strength::attacker_slows_after_hit(
-            damage, knockback, strength, sprinting,
-        ) {
-            return;
-        }
-        if let Some(p) = self.player.as_mut() {
-            let slowdown = sunrise_client::attack_strength::ATTACKER_SLOWDOWN;
-            p.velocity = Vec3::new(
-                p.velocity.x * slowdown,
-                p.velocity.y,
-                p.velocity.z * slowdown,
-            );
-        }
-        self.stop_sprint_after_extra_knockback();
+        self.remote_attacker_knockback(damage, strength);
     }
     /// The latency the server's player list gives this player
     /// (`PlayerInfo.getLatency`), none before the server lists it. A new entry reads 0 until the

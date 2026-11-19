@@ -65,8 +65,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.fresh.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # Hosted macOS runner speed varies: 41 to 90+ minutes observed.
-    timeout-minutes: ${{ matrix.os == 'macos-15' && 120 || 90 }}
+    # Hosted macOS runner speed varies: 41 to 90+ minutes observed. Windows without its build cache (the first run after
+    # a lock or toolchain change saves it) takes over 85 minutes in "Build and collect" alone.
+    timeout-minutes: ${{ (matrix.os == 'macos-15' && 120) || (matrix.os == 'windows-latest' && 180) || 90 }}
     defaults:
       run:
         shell: bash

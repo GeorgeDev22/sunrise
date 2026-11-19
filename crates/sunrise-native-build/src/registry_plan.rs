@@ -6,19 +6,12 @@ pub struct Plan {
     pub game: RegistryLock,
     pub mods: RegistryLock,
     pub allowed: RegistryLock,
-    owned: Vec<(String, String, RegistryLock)>,
-    roots: std::collections::BTreeSet<String>,
 }
 
 impl Plan {
     pub fn read(game: &str, projects: &[Project<'_>], wanted: &[Wanted]) -> Result<Self, String> {
         let game = RegistryLock::parse(game)?;
         let mut mods = RegistryLock::default();
-        let mut owned = Vec::new();
-        let roots = projects
-            .iter()
-            .map(|project| project.package.clone())
-            .collect();
         for project in projects {
             let bundle = project.bundle;
             let requested: Vec<_> = wanted
@@ -36,13 +29,14 @@ impl Plan {
                     .any(|id| id.name == request.name && request.requirement.matches(&id.version))
                 {
                     return Err(format!(
-                        "{}: Cargo.lock does not pin {} {}",
-                        request.mod_id, request.name, request.version
+                        "{mod_id}: Cargo.lock does not pin {} {}, which its Cargo.toml asks for. Run native-lock with update on {mod_id}.",
+                        request.name,
+                        request.version,
+                        mod_id = request.mod_id
                     ));
                 }
             }
             mods.extend(&pins)?;
-            owned.push((bundle.manifest.id.clone(), project.package.clone(), pins));
         }
         let mut allowed = game.clone();
         allowed.extend(&mods)?;
@@ -50,8 +44,6 @@ impl Plan {
             game,
             mods,
             allowed,
-            owned,
-            roots,
         })
     }
 
@@ -68,27 +60,6 @@ impl Plan {
             })
             .collect();
         self.allowed.withhold_sdk_patched(&self.game, &names);
-    }
-
-    pub fn check_mods(&self, resolved: &RegistryLock) -> Result<(), String> {
-        for (id, root, pins) in &self.owned {
-            let mut skip_local: std::collections::BTreeSet<String> = self
-                .roots
-                .iter()
-                .filter(|other| *other != root)
-                .cloned()
-                .collect();
-            skip_local.extend(
-                super::api::PACKAGES
-                    .iter()
-                    .map(|(package, _)| (*package).to_owned()),
-            );
-            skip_local.insert(super::internals::package(id));
-            let mut owned_pins = self.game.clone();
-            owned_pins.extend(pins)?;
-            resolved.check_mod(id, root, &skip_local, &owned_pins)?;
-        }
-        Ok(())
     }
 
     pub fn explain_resolution(&self, error: String) -> String {
@@ -146,7 +117,6 @@ impl Plan {
         super::run(index, "Checking the pinned registry index", |_| {})
             .map_err(|error| self.explain_resolution(error))?;
         let pins = RegistryLock::parse(&super::read_lock(directory)?)?;
-        self.check_mods(&pins)?;
         self.allowed.check_pins(&pins)?;
         let mut fetch = cargo("fetch");
         fetch.arg("--locked");

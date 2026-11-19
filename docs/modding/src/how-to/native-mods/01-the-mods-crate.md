@@ -37,7 +37,13 @@ The game's own packages never change because of a mod. The game ships prebuilt, 
 packages are compiled for the mod and linked into the mod's library, so a package both use exists
 twice: the features and dependency versions of the mod's copy are the mod's own. What a build checks
 is that every registry package it compiles is pinned, by version and checksum, in the game's lock or
-in the mod's.
+in the lock of a mod in the build.
+
+All native mods of an instance compile in one Cargo workspace, which resolves one version of a
+package for every mod that uses it. When two mods' locks pin different versions that both their
+requirements allow, both mods are built on one of the two. So a mod may be built on another
+semver-compatible version of a dependency than the one its author locked; a requirement that must
+not move is written as an exact one (`dtoa = "=1.0.9"`).
 
 `native-lock` starts from the game's `Cargo.lock`, which it downloads once from the pinned game
 commit. A package the game also locks takes the game's version where the mod's requirements allow

@@ -5,11 +5,9 @@ Create a project, edit its JSON files, then build and run it.
 
 ## Create and package your mod
 
+Install the tool first ([Install the mod tool](../start/install-tool.md)).
+
 ```sh
-# A prebuilt binary for Linux x86_64/aarch64, macOS x86_64/arm64 or Windows x86_64:
-cargo binstall --git https://github.com/sunrise-org/sunrise cargo-sunrise-mod
-# Or build it from source, without cargo-binstall:
-cargo install --git https://github.com/sunrise-org/sunrise cargo-sunrise-mod
 cargo sunrise-mod new my-mod        # a content mod: manifest, one block with its model, loot and recipe
 cd my-mod
 cargo sunrise-mod run               # build my-mod.smod, then start the game with it turned on

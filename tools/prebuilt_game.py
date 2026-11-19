@@ -11,6 +11,8 @@ native trait mods against it with rustc alone, in seconds, without the game's so
                                                           # and surface.json, in DIST; for the client side also
                                                           # tool-<target>.tar.xz (cargo-sunrise-mod); --stage-tool the
                                                           # sunrise-stage `build` compiled, instead of compiling it
+    python3 tools/prebuilt_game.py tool DIST              # just this computer's tool-<target>.tar.xz, as `pack` makes it
+                                                          # (the rolling mod-tool release, tools/ci/mod_tool.py)
     python3 tools/prebuilt_game.py gather LEGS DIST       # the release folder from every packing leg's DIST, once
                                                           # their build data and surface are checked equal
     python3 tools/prebuilt_game.py index DIST [--nightly NAME] [--previous BUILD DIFF]  # DIST/sdk.json
@@ -727,16 +729,16 @@ def smoke(out: Path) -> None:
 
 # What `smoke` adds to the starter for `smoke_user` to call; never inlined, so the call crosses the libraries.
 SMOKE_LIBRARY_ITEM = """
-/// Called from `smoke_user`'s library.
+/// Called from `smoke_user`'s library. Named apart from the starter's own items (its private `greeting`).
 #[inline(never)]
-pub fn greeting() -> &'static str {
+pub fn library_name() -> &'static str {
     "smoke"
 }
 """
 SMOKE_USER_ITEM = """
 /// A call into `smoke`'s library.
-pub fn greeting_length() -> usize {
-    smoke::greeting().len()
+pub fn library_name_length() -> usize {
+    smoke::library_name().len()
 }
 """
 
@@ -917,6 +919,14 @@ def tool(target: str) -> Path:
     return folder
 
 
+def pack_tool(dist: Path) -> None:
+    """DIST/tool-<target>.tar.xz for this computer, the archive `pack` puts in an SDK: built and packed the same way."""
+    target = rustc_host()
+    dist.mkdir(parents=True, exist_ok=True)
+    tar_xz(tool(target), [".", TOOL_PROGRAM], dist / f"tool-{target}.tar.xz")
+    print(f"tool-{target}.tar.xz: {(dist / f'tool-{target}.tar.xz').stat().st_size} bytes")
+
+
 def members(archive: Path, names: tuple[str, ...]) -> dict[str, str]:
     """The SHA-256 of each of `names` that the `tar.xz` `archive` holds at its root, by name."""
     found = {}
@@ -1046,6 +1056,8 @@ def main() -> None:
     pack_parser.add_argument("--stage-tool", type=Path, help="the sunrise-stage binary to export the surface with")
     pack_parser.add_argument("--with-tool", action="store_true",
                              help="also pack the target's tool on a server leg (a server-only SDK no client leg completes)")
+    tool_parser = commands.add_parser("tool")
+    tool_parser.add_argument("dist", type=Path)
     gather_parser = commands.add_parser("gather")
     gather_parser.add_argument("legs", type=Path)
     gather_parser.add_argument("dist", type=Path)
@@ -1071,6 +1083,8 @@ def main() -> None:
         start(args.out.resolve())
     elif args.command == "pack":
         pack(args.out.resolve(), args.dist.resolve(), args.stage_tool, args.with_tool)
+    elif args.command == "tool":
+        pack_tool(args.dist.resolve())
     elif args.command == "gather":
         gather(args.legs.resolve(), args.dist.resolve())
     elif args.command == "index":
