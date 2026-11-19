@@ -1055,7 +1055,7 @@ impl Game<'_> {
         self.wings_geometry(
             chest,
             stack,
-            m.cape.as_deref(),
+            m.cape.as_deref().filter(|_| m.wings_cape),
             false,
             sunrise_client::mobs::render::base_transform(m, partial, camera),
             m.extra.elytra.angles(partial),

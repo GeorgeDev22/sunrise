@@ -147,6 +147,15 @@ pub trait Hooks: Sync {
     fn retry(&self) -> Option<connection::Retry> {
         None
     }
+
+    /// The OptiFine cape server to ask for players' capes, while they are wanted: the start of
+    /// its addresses, to which the engine adds `<name>.png`. Asked once a frame while players are
+    /// drawn. The first hook that answers is used; with none, no cape server is asked. The engine
+    /// asks only for valid player names, once each for the session, on its texture download
+    /// threads, and draws a player's OptiFine cape over their profile's.
+    fn optifine_capes(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// What [`Hooks::get_the_game`] answers. The texts are translation keys of the game's own strings
@@ -409,6 +418,11 @@ pub mod engine {
     pub fn retry() -> Option<connection::Retry> {
         all().iter().find_map(|hooks| hooks.retry())
     }
+
+    /// [`Hooks::optifine_capes`]: the first registered hook's answer.
+    pub fn optifine_capes() -> Option<&'static str> {
+        all().iter().find_map(|hooks| hooks.optifine_capes())
+    }
 }
 
 #[cfg(test)]
@@ -472,9 +486,13 @@ mod tests {
     struct Silent;
     impl Hooks for Silent {}
 
-    /// Registered after the recorder: answers for two servers, one the recorder answers too.
+    /// Registered after the recorder: answers for two servers, one the recorder answers too, and
+    /// names a cape server, which the recorder leaves.
     struct Later;
     impl Hooks for Later {
+        fn optifine_capes(&self) -> Option<&'static str> {
+            Some("http://capes.example/capes/")
+        }
         fn retry(&self) -> Option<connection::Retry> {
             Some(connection::Retry::Now(connection::Server::new(
                 "b", "P", false,
@@ -523,6 +541,10 @@ mod tests {
         assert_eq!(
             engine::get_the_game().map(|g| g.address),
             Some("https://example.org")
+        );
+        assert_eq!(
+            engine::optifine_capes(),
+            Some("http://capes.example/capes/")
         );
         // The first answer wins, a later hook answers what the first leaves, none gives vanilla.
         let first = engine::client_identity("first.example");

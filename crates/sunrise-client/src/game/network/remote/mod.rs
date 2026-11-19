@@ -5742,6 +5742,7 @@ impl Game<'_> {
         }) else {
             return;
         };
+        let optifine = self.optifine_capes(&level);
         // Only the skins drawn hold atlas slots: the level's players, not
         // every entry of a busy server's player list.
         // Build once: resolving each player must not scan every level entity.
@@ -5757,24 +5758,27 @@ impl Game<'_> {
                 continue;
             };
             let (skin, is_slim) = self.drawn_skin(uuid, skin_of(&skins, uuid));
-            let cape = capes.get(&uuid).filter(|c| self.again_skin(c)).cloned();
+            let (cape, wings_cape) = worn_cape(&optifine, &capes, uuid)
+                .filter(|(c, _)| self.again_skin(c))
+                .map_or((None, false), |(c, wings)| (Some(c.to_owned()), wings));
             let mob = &mut self.mobs[i];
             mob.skin = Some(skin);
             mob.slim = is_slim;
             mob.cape = cape;
+            mob.wings_cape = wings_cape;
         }
         if self.player_model.is_some() {
             let (skin, is_slim) = self.drawn_skin(own, skin_of(&skins, own));
             // Avatar.isModelPartShown(CAPE): the Skin Customization option.
-            let cape = capes
-                .get(&own)
+            let (cape, wings_cape) = worn_cape(&optifine, &capes, own)
                 .filter(|_| self.settings.file.bool("modelPart_cape"))
-                .filter(|c| self.again_skin(c))
-                .cloned();
+                .filter(|(c, _)| self.again_skin(c))
+                .map_or((None, false), |(c, wings)| (Some(c.to_owned()), wings));
             if let Some(mob) = self.player_model.as_mut() {
                 mob.skin = Some(skin);
                 mob.slim = is_slim;
                 mob.cape = cape;
+                mob.wings_cape = wings_cape;
             }
         }
         if let Some(r) = self.remote.as_mut()
@@ -5883,6 +5887,28 @@ impl Game<'_> {
             rect.v1 = (rect.v0 + rect.v1) / 2.0;
         }
         self.gui.atlas.sprites.insert(location, rect);
+    }
+
+    /// The OptiFine capes of the level's players and of the window's own, by
+    /// profile, from the cape server a hook names (`Hooks::optifine_capes`):
+    /// each one's atlas location and whether it dresses their elytra too.
+    /// Without one (the plain game, or the setting off) nothing is asked.
+    fn optifine_capes(&self, level: &[(u32, u128)]) -> HashMap<u128, (String, bool)> {
+        let (Some(server), Some(r)) = (sunrise_hooks::engine::optifine_capes(), &self.remote)
+        else {
+            return HashMap::new();
+        };
+        let mut downloads = self.skin_downloads.borrow_mut();
+        let others = level
+            .iter()
+            .map(|&(id, uuid)| (uuid, r.level_player_name(id as i32, &uuid)));
+        others
+            .chain(std::iter::once((r.profile, Some(r.profile_name.as_str()))))
+            .filter_map(|(uuid, name)| {
+                let (cape, wings) = downloads.optifine_cape(server, name?)?;
+                Some((uuid, (cape.to_owned(), wings)))
+            })
+            .collect()
     }
 
     /// Whether a downloaded skin or cape is in the atlas to draw, marking it
@@ -10562,6 +10588,18 @@ impl Remote {
 
 fn object_skin_changed(published: &HashMap<String, String>, key: &str, skin: &str) -> bool {
     published.get(key).is_none_or(|previous| previous != skin)
+}
+
+/// The cape the player `uuid` wears: their OptiFine cape from `optifine`, over
+/// their profile's from `capes` (`skins::worn_cape`), and whether it dresses
+/// their elytra too.
+fn worn_cape<'a>(
+    optifine: &'a HashMap<u128, (String, bool)>,
+    capes: &'a HashMap<u128, String>,
+    uuid: u128,
+) -> Option<(&'a str, bool)> {
+    let optifine = optifine.get(&uuid).map(|(c, wings)| (c.as_str(), *wings));
+    sunrise_client::skins::worn_cape(optifine, capes.get(&uuid).map(String::as_str))
 }
 
 /// The textures to resolve skins from: every list entry's, and for a player

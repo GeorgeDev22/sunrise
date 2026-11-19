@@ -1686,8 +1686,11 @@ pub struct Mob {
     /// `PlayerSkin.model` is `SLIM`: the player model with 3-pixel arms.
     pub slim: bool,
     /// `PlayerSkin.cape`: a player's cape texture, once every download of
-    /// its skin is ready.
+    /// its skin is ready, or their OptiFine cape (`skins::worn_cape`).
     pub cape: Option<String>,
+    /// Worn elytra wings draw `cape` (`WingsLayer`): every profile cape, and
+    /// an OptiFine cape whose picture reaches the elytra's part.
+    pub wings_cape: bool,
     /// A mannequin's `DATA_PROFILE` (ResolvableProfile): the profile's
     /// `textures` property resolves to `skin` like a player's.
     pub profile: Option<sunrise_protocol::entity_data::Profile>,
@@ -3720,6 +3723,7 @@ impl Mob {
             skin: None,
             slim: false,
             cape: None,
+            wings_cape: false,
             profile: None,
             random_textures: Default::default(),
             size_answer: None,
