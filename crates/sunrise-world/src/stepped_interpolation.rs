@@ -47,6 +47,13 @@ pub struct PosRot {
 }
 
 impl PosRot {
+    /// `Entity.setRot`, as `setPos`/`setRot` place an entity at a step: the
+    /// yaw kept within a turn (`yRot % 360.0F`), the pitch too and clamped to
+    /// ±90 (`setXRot`).
+    pub fn set_rot(&mut self, yaw: f32, pitch: f32) {
+        self.yaw = yaw % 360.0;
+        self.pitch = (pitch % 360.0 % 360.0).clamp(-90.0, 90.0);
+    }
     /// `PositionAndRotation.is`: the same rotation and `Vec3.equals`
     /// position (`Double.compare`, so -0.0 is not 0.0).
     fn is(&self, position: [f64; 3], yaw: f32, pitch: f32) -> bool {

@@ -7,12 +7,6 @@ use sunrise_world::stepped_interpolation::{
     Path, PosRot, Start, SteppedInterpolation, client_motion,
 };
 
-/// `Entity.setRot`: yaw and pitch wrapped, pitch clamped (`setXRot`).
-fn set_rot(entity: &mut PosRot, yaw: f32, pitch: f32) {
-    entity.yaw = yaw % 360.0;
-    entity.pitch = (pitch % 360.0 % 360.0).clamp(-90.0, 90.0);
-}
-
 pub fn main() {
     let args: Vec<String> = crate::args().collect();
     let input = std::fs::read_to_string(&args[1]).expect("input");
@@ -67,7 +61,7 @@ pub fn main() {
                 match handler.interpolate_to(entity, path, rotation) {
                     Start::Snap(at) => {
                         entity.position = at.position;
-                        set_rot(&mut entity, at.yaw, at.pitch);
+                        entity.set_rot(at.yaw, at.pitch);
                         "s"
                     }
                     Start::Unchanged => "k",
@@ -82,7 +76,7 @@ pub fn main() {
                 let what = match handler.interpolate() {
                     Some(at) => {
                         entity.position = at.position;
-                        set_rot(&mut entity, at.yaw, at.pitch);
+                        entity.set_rot(at.yaw, at.pitch);
                         "t"
                     }
                     None => "n",
