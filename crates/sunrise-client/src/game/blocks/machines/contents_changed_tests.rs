@@ -820,10 +820,10 @@ fn bookshelf_abort_restores_items_flags_and_last_slot_but_keeps_issued_effects()
                             assert!(entity.set_changed(host).unwrap());
                         }
                         _ => {
-                            let mut stack = sunrise_client::save::item_to_nbt(&ItemStack::new(
-                                "minecraft:book",
-                                1,
-                            ));
+                            let mut stack = sunrise_client::save::item_to_nbt(
+                                &ItemStack::new("minecraft:book", 1),
+                                &Default::default(),
+                            );
                             let Tag::Compound(fields) = &mut stack else {
                                 panic!("item is not a compound")
                             };

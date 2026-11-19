@@ -309,9 +309,9 @@ pub struct Hooks {
     pub pass_listens: fn(BlockStateId) -> bool,
     pub fall_listens: fn(BlockStateId) -> bool,
     pub bounce_listens: fn(BlockStateId) -> bool,
-    /// `Block.fallOn`: change `damage`, the fall damage `causeFallDamage` calculated, and
-    /// push the writes the part asks for.
-    pub fall_on: fn(&str, &mut DamageLevel<'_>, Contact<'_>, f64, &mut f32, &mut Vec<LandingWrite>),
+    /// `Block.fallOn`: change the distance and multiplier before calculating damage.
+    pub fall_on:
+        fn(&str, &mut DamageLevel<'_>, Contact<'_>, &mut f64, &mut f32, &mut Vec<LandingWrite>),
     /// `Block.bounceOn`: change `movement`, the movement the bounce leaves the entity.
     pub bounce_on:
         fn(&str, &mut DamageLevel<'_>, Contact<'_>, f64, &mut sunrise_core::geometry::Vec3),
@@ -442,32 +442,43 @@ pub fn fall_listens(state: BlockStateId) -> bool {
     HOOKS.get().is_some_and(|hooks| (hooks.fall_listens)(state))
 }
 
-/// `Block.fallOn`: the fall damage `damage` calculated for the entity that landed on
-/// `contact`'s block, after any part of that block changed it. A non-finite answer is
-/// ignored and a negative one is zero. The writes the part asked for are kept until the
-/// entity's batch ends. Nothing runs off the server or without a part.
-pub fn fall(level: &mut DamageLevel<'_>, contact: Contact<'_>, distance: f64, damage: f32) -> f32 {
+/// `Block.fallOn`: the fall inputs after the block Part's answer. Invalid numeric answers are ignored.
+/// Requested writes remain queued until the entity batch ends.
+pub fn fall(
+    level: &mut DamageLevel<'_>,
+    contact: Contact<'_>,
+    distance: f64,
+    multiplier: f32,
+) -> (f64, f32) {
     let (Some(dimension), Some(hooks)) = (tick_level("fall"), HOOKS.get()) else {
-        return damage;
+        return (distance, multiplier);
     };
     if !(hooks.fall_listens)(contact.state) {
-        return damage;
+        return (distance, multiplier);
     }
-    let mut answer = damage;
+    let mut answer_distance = distance;
+    let mut answer = multiplier;
     let mut writes = Vec::new();
     (hooks.fall_on)(
         dimension,
         level,
         contact,
-        distance,
+        &mut answer_distance,
         &mut answer,
         &mut writes,
     );
     landed(contact.state, contact.position, writes);
-    accepted_damage(answer, damage)
+    (
+        if answer_distance.is_finite() {
+            answer_distance
+        } else {
+            distance
+        },
+        accepted_damage(answer, multiplier),
+    )
 }
 
-/// A part's fall damage answer: negative is zero, and a non-finite one is ignored.
+/// A part's multiplier answer: negative is zero, and a non-finite one is ignored.
 fn accepted_damage(answer: f32, kept: f32) -> f32 {
     if answer.is_finite() {
         answer.max(0.0)

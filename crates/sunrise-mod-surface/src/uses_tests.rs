@@ -736,6 +736,77 @@ fn how_a_struct_is_built_is_read_from_literals_and_patterns() {
 }
 
 #[test]
+fn a_variant_of_the_mods_own_enum_is_not_a_literal_of_an_api_struct_of_the_same_name() {
+    let built = |source: &str, id: &str| entry(&scan_on(wider(), source), id).built;
+    let own =
+        "use mod_api::{Pos, Settings};\nenum Shape { Pos(i32, i32), Settings { height: i32 } }\n";
+    // Constructed and matched, the variants are the enum's, though the API's types share their names.
+    assert_eq!(
+        built(
+            &format!(
+                "{own}fn t(s: Shape) {{ let a = Shape::Pos(1, 2); let b = Shape::Settings {{ height: 1 }}; match s {{ Shape::Pos(x, y) => {{}} Shape::Settings {{ height }} => {{}} }} }}"
+            ),
+            "type:Pos"
+        ),
+        Some(Built::None)
+    );
+    assert_eq!(
+        built(
+            &format!(
+                "{own}fn t(s: Shape) {{ let b = Shape::Settings {{ height: 1 }}; match s {{ Shape::Settings {{ height }} => {{}} _ => {{}} }} }}"
+            ),
+            "type:Settings"
+        ),
+        Some(Built::None)
+    );
+    // An API enum's variant likewise is not the struct of its name, as a pattern, a call or a unit value.
+    assert_eq!(
+        built(
+            "use mod_api::{Item, TextHover};\nfn t(h: TextHover) { match h { TextHover::Item { .. } => {} _ => {} } let a = TextHover::Item; }",
+            "type:Item"
+        ),
+        Some(Built::None)
+    );
+    assert_eq!(
+        built(
+            &format!("{own}fn t() {{ let a = Shape::Pos; }}"),
+            "type:Pos"
+        ),
+        Some(Built::None)
+    );
+    // A qualifier bound to the API's crate or a module of it is a path, not a type, whatever its name.
+    assert_eq!(
+        built(
+            "use mod_api as Pos;\nfn t() { let a = Pos::Settings { height: 1 }; }",
+            "type:Settings"
+        ),
+        Some(Built::Full)
+    );
+    assert_eq!(
+        built(
+            "use mod_api as Pos;\nstruct Pos;\nfn t() { let a = Pos::Settings { height: 1 }; }",
+            "type:Settings"
+        ),
+        Some(Built::Full)
+    );
+    // The API's own literals are still read, written out, imported, or through a module's path.
+    assert_eq!(
+        built(
+            "use mod_api::Pos;\nenum Shape { Pos(i32, i32) }\nfn t() { let a = Shape::Pos(1, 2); let b = Pos(3, 4); }",
+            "type:Pos"
+        ),
+        Some(Built::Full)
+    );
+    assert_eq!(
+        built(
+            "enum Shape { Settings { height: i32 } }\nfn t() { let a = mod_api::Settings { height: 1 }; }",
+            "type:Settings"
+        ),
+        Some(Built::Full)
+    );
+}
+
+#[test]
 fn a_type_that_gains_an_impl_fits_and_one_that_loses_one_is_named() {
     let uses = scan_on(wider(), "fn f(s: &Settings) {}");
     assert_eq!(entry(&uses, "type:Settings").impls, ["Clone", "Default"]);

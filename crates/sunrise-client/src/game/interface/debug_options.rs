@@ -136,7 +136,7 @@ impl Game<'_> {
             Screen::Creative => {
                 self.pad_clear_focus();
                 self.carried = None;
-                self.set_screen(Screen::Playing);
+                self.set_screen_with(Screen::Playing, |g| g.close_creative_menu());
                 self.capture(true);
             }
             Screen::Mod => self.close_mod_screen(),
@@ -545,8 +545,7 @@ fn debug_options_interrupts(screen: Screen, playing_overlay: bool) -> bool {
         | Screen::Dead
         | Screen::Win
         | Screen::DebugOptions
-        | Screen::HudEditor
-        | Screen::Studio => false,
+        | Screen::HudEditor => false,
     }
 }
 
@@ -668,6 +667,7 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn title_debug_overlay_draws_without_a_level() {
+        use mod_api::prelude::ScreensClientHost;
         use sunrise_client::debug_keys::KeyAction;
         let mut resources = None;
         let mut game = title_game(&mut resources);
@@ -678,6 +678,7 @@ mod tests {
             game.debug,
             "the ordinary F3 toggle already reaches the title"
         );
+        assert!(ScreensClientHost::debug_overlay_visible(&game));
         let mut overlay = HudBatch::new([1280, 720], game.settings.gui_scale_inputs());
         game.draw_debug_overlay_under(&mut overlay, [1280, 720]);
         assert!(
@@ -693,6 +694,15 @@ mod tests {
         game.debug_key(KeyCode::F3, KeyAction::Press);
         game.debug_key(KeyCode::F3, KeyAction::Release);
         assert!(!game.debug);
+        game.debug_entries.set_status("fps", Status::AlwaysOn);
+        assert!(ScreensClientHost::debug_overlay_visible(&game));
+
+        // With no screen open, the hidden HUD suppresses even an always-on entry.
+        game.title = None;
+        game.screen = Screen::Playing;
+        assert!(!ScreensClientHost::debug_overlay_visible(&game));
+        game.ui.hide_gui = false;
+        assert!(ScreensClientHost::debug_overlay_visible(&game));
     }
 
     #[test]

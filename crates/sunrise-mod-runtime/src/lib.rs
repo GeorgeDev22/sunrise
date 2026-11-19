@@ -4,6 +4,10 @@
 /// Payload ingress deadlines must exceed this so a load call cannot exhaust a queued payload.
 pub const MAX_GUEST_CALL_BUDGET_MILLIS: u64 = 30_000;
 
+/// Longest general entity type key (`mod:name`), in bytes: what registration accepts is what the
+/// spawn that introduces a row to a client (`sunrise:general_entity`) can carry.
+pub const MAX_GENERAL_ENTITY_KEY: usize = 256;
+
 pub mod attachments;
 pub mod byte_channel;
 /// A level's capability generations, which kept capabilities compare (#3446).

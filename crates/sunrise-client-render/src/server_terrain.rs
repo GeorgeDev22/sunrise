@@ -13,8 +13,9 @@ use crate::{
     blocks::BlockFacts,
     bluemap::{BlueMap, Found},
     chunk::Chunk,
+    columns::Surface,
     fast_hash::FxHashMap,
-    lod::{Column, Span, Spans, Surface, state_kinds, summarize},
+    lod::{Column, Span, Spans, state_kinds, summarize},
     streaming::{LodDetail, LodSampler, LodSource},
 };
 use std::{

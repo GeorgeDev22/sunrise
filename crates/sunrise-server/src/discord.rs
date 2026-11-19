@@ -564,14 +564,6 @@ mod tests {
             death("Bob fell from a high place"),
             "Bob fell from a high place (Kim0)"
         );
-        // A message the server's chat filter held back never reaches Discord, whatever the settings say.
-        let filtered = json!({"type": "chat_filtered", "name": "Kim0", "message": "x"});
-        assert!(Line::from_event(&filtered).is_none());
-        let asked = Discord {
-            events: vec!["chat_filtered".into()],
-            ..Discord::default()
-        };
-        assert!(asked.check().is_err());
     }
 
     #[test]

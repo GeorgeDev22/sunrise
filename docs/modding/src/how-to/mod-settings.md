@@ -52,6 +52,8 @@ and wasm. Bulk paths are relative to your implicit mod root: `tiles/overworld/0.
 are refused. Writes replace the whole file atomically, never exposing partial contents. Sunrise's own per-file
 limits are `DATA_FILE_MAX` (64 MiB) for both bulk areas and `CONFIG_FILE_MAX` (4 MiB) for config files.
 Oversized files and unavailable operations return typed errors, rather than partially writing.
+`remove` deletes one file under the same confinement and returns whether it was there; it refuses a folder
+with `ConfigFileError::NotAFile` and never removes one.
 
 Walk a folder with `list(&folder, after, limit)`: start with `after = None`, then pass the last returned entry's
 name as the exclusive cursor. Names are lexicographically ordered; each page has at most `limit` entries.

@@ -124,6 +124,22 @@ with `menu_quick_move` is asked the pickup rule before that hook. A click asks o
 take, the all-or-nothing check and a shift-click the parts leave to the game reuse that answer, so the server and
 the client's prediction ask the same number of times.
 
+## Crafted-by processing for held stacks
+
+After delivering an item into a menu slot or onto the cursor, server-side code can use the
+held `place`, the caller's transaction `tx`, and the actual crafted count `amount` (`i32`):
+
+```rust,ignore
+place.on_crafted_by(host, tx, amount)?;
+```
+
+The operation applies vanilla crafted-by processing to the held stack: it awards the crafted
+statistic, applies item-specific post-processing such as a filled map's pending scale or lock,
+and runs the normal stat hook. The statistic and any newly materialized map data are committed
+with the caller's transaction. A stack not held in a menu slot or cursor is refused with
+`CraftedByError::NotHeld`. This operation does **not** perform the separate
+`recipe_crafted` criterion ([tracking](https://github.com/sunrise-org/sunrise/issues/1977)).
+
 ## Keeping a block menu open
 
 The server closes a player's block menu when `AbstractContainerMenu.stillValid` says no: by default when the
@@ -165,6 +181,11 @@ read on either side; `slot` and `carried` return an outer `None` when the handle
 unavailable and `Some(None)` for an empty slot. Each read checks the world epoch and menu generation,
 so a handle cannot read a replacement, reopened or respawned menu. These methods do not click or
 change slots.
+
+Server hooks can also read the acting player's supported menu through
+`player.container_menu(host)`. Inventory, equipment, cursor and ender contents come from
+that player's current turn state, not the temporarily swapped-out record. The unsupported
+menu kinds, hidden-slot refusal and stale-generation checks still apply.
 
 Mutable client hooks can submit a vanilla click with
 `menu.click(host, &[mod_api::MenuClick::QuickMove { slot }])`. The slot is the same menu-order
@@ -222,7 +243,7 @@ host.transaction(|host, tx| {
 })
 ```
 
-`menu_clicked` and `menu_quick_move` (contract version 2) each run as one action: what a listener writes
+`menu_clicked` (contract version 2) and `menu_quick_move` (contract version 3, with an optional remainder where `None` empties the clicked slot) each run as one action: what a listener writes
 through the `Host` stays when it returns and is undone with the rest of the action when a listener fails. A
 `menu_quick_move` answer that is invalid, or a `Host` write to a player's inventory, cursor or menu storage,
 refuses the whole click instead of falling back to the game's routing. `menu_clicked` hears the raw slot, button
@@ -317,6 +338,10 @@ if let Some(window) = window {
     }
 }
 ```
+
+The open and the backing can sit in the hook that reacts to the player, such as the backpack's own use. The menu
+handle resolves and the backing is set during the action; only mirroring the backed slots to the client waits until
+the action is over, later in the same tick.
 
 A vanilla menu and a menu no mod backed never take this path: their slots keep the backing they had.
 

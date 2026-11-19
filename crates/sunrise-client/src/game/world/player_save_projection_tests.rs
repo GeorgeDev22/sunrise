@@ -83,7 +83,7 @@ fn actual_player_save_tracks_mutable_body_and_keeps_guest_context() {
         let live = game.player_nbt().unwrap();
         check(&live, 37, true, "live nondefault beats raw", &mut failures);
         check(
-            &game.level.player_tag(),
+            &game.level.player_tag(&Default::default()),
             37,
             true,
             "actual saved writer",
@@ -107,7 +107,7 @@ fn actual_player_save_tracks_mutable_body_and_keeps_guest_context() {
         game.player = None;
         game.sync_level();
         check(
-            &game.level.player_tag(),
+            &game.level.player_tag(&Default::default()),
             99,
             false,
             "no body raw retention",
@@ -206,7 +206,7 @@ fn actual_player_save_tracks_mutable_body_and_keeps_guest_context() {
         assert_eq!(game.player.as_ref().unwrap().impulse.reset_grace_time, 37);
         assert!(game.player.as_ref().unwrap().spawn_extra_particles_on_fall);
         // Read the real writer before another sync can hide a context leak.
-        let restored = game.level.player_tag();
+        let restored = game.level.player_tag(&Default::default());
         assert_eq!(
             restored.get("h157_marker"),
             Some(&Tag::String("owner".into()))
@@ -223,7 +223,7 @@ fn actual_player_save_tracks_mutable_body_and_keeps_guest_context() {
         assert_eq!(guest.motion.as_ref().unwrap().impulse.reset_grace_time, 7);
         playerdata::store(guest, &mut saved_guest, None);
         check(
-            &saved_guest.player_tag(),
+            &saved_guest.player_tag(&Default::default()),
             7,
             false,
             "guest store reads its live body",

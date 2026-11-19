@@ -46,7 +46,8 @@ fn load(types: &crate::mobs::MobTypes, tag: &Tag) -> Mob {
 
 /// The saved memory: None when absent, else its value and time to live.
 fn saved_memory(m: &Mob, raw: Option<&Tag>) -> Option<(Option<Tag>, Option<i64>)> {
-    let tag = crate::entity_nbt::mob_to_nbt(m, [95, 0, 0, 1], raw, None, |_| None);
+    let tag =
+        crate::entity_nbt::mob_to_nbt(m, [95, 0, 0, 1], raw, None, |_| None, &Default::default());
     let liked = tag
         .get("Brain")
         .and_then(|b| b.get("memories"))

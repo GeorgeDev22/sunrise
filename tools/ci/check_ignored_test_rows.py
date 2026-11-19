@@ -3,11 +3,12 @@
 
 Fails on a malformed row, a test listed in two files, a folder with no rows or with a file other than `*.txt`
 and README.md, and a file at the retired single-list path. The shared reader validates both `needs`
-and `needs-plain` fixture rows; neither is a known failure. Every `daily` row must name a package of a workspace (the game's or the launcher's) and
+and `needs-plain` fixture rows; neither is a known failure. Every `daily` row must name a package of a workspace (the game's) and
 one of its test targets, and some leg of the daily run's matrix must run it: its package's shard, or the `daily-rows`
 leg (tools/ci/ignored_shards.py), so no moved test runs nowhere. A row whose reason names an input only one job
 builds (ignored_tests.DAILY_INPUTS: `wasm-fixture`) runs in that job instead, which a workflow must call with
-`--needs VARIABLE`. Builds only the source-inventory helper,
+`--needs VARIABLE`. A `windows` row must name a Windows-only integration test in the game workspace and runs
+in the Windows job instead. Builds only the source-inventory helper,
 not the game or SDK.
 
 Every `#[ignore]`d test that no daily shard runs (rowless_problems) has a row of some mark: `daily`, a known
@@ -26,6 +27,7 @@ attribute and a row per target; both rows find it. The limit: rows carry no file
 name. Two marked functions of one name in one package are satisfied by one row naming either; the daily run, which
 runs each row by its exact path, still fails a row whose test does not run.
 """
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -33,7 +35,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools.ci import ignored_inventory, ignored_shards, ignored_tests, rust_tests
 
+sys.path.insert(0, str(Path(__file__).with_name("vendor") / "pyyaml-6.0.3.zip"))
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
+WINDOWS_WORKFLOW = ".github/workflows/windows-runtime-leases.yml"
 ADD_ROW = ("add its row: `python3 tools/ci/move_to_daily.py apply LIST` (its docstring has the list format), or write "
            "`PACKAGE TEST TARGET daily REASON` into tools/ci/ignored-tests/daily-PACKAGE-TOPIC.txt")
 
@@ -43,12 +49,17 @@ def daily_problems(rows, targets, matrix):
     problems = []
     groups = ignored_tests.daily_rows_groups(rows)
     workflows = "\n".join(path.read_text() for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")))
+    windows_wired = not any(row.reason == ignored_tests.WINDOWS_REASON for row in rows) or windows_daily_runs(ROOT)
     for row in rows:
         where = f"{row.file}: {row.package} {row.test}"
         if row.package not in targets:
             problems.append(f"{where}: {row.package} is not a workspace package")
         elif row.reference not in targets[row.package]:
             problems.append(f"{where}: {row.package} has no target {row.reference}")
+        elif row.reason == ignored_tests.WINDOWS_REASON:
+            if not windows_wired:
+                problems.append(f"{where}: daily.yml must call {WINDOWS_WORKFLOW}'s runtime-leases job and run "
+                                "ignored_tests.py --windows-rows --run there")
         elif variable := ignored_tests.DAILY_INPUTS.get(row.reason):
             if f"--needs {variable}" not in workflows:
                 problems.append(f"{where}: no workflow runs the tests that need {variable} (ignored_tests.py --needs)")
@@ -61,8 +72,71 @@ def daily_problems(rows, targets, matrix):
     return problems
 
 
+def windows_daily_runs(root):
+    """Verify the daily's named call and the enabled step whose verdict the summary reads."""
+    daily_path = root / ".github/workflows/daily.yml"
+    windows_path = root / WINDOWS_WORKFLOW
+    if not daily_path.is_file() or not windows_path.is_file():
+        return False
+    # BaseLoader preserves Actions' unquoted `on` key rather than treating it as a YAML 1.1 boolean.
+    daily = yaml.load(daily_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader) or {}
+    windows = yaml.load(windows_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader) or {}
+    events = windows.get("on") or ()
+    if not (events == "workflow_call" if isinstance(events, str) else "workflow_call" in events):
+        return False
+    call = (daily.get("jobs") or {}).get("windows-runtime-leases") or {}
+    if call.get("uses") != f"./{WINDOWS_WORKFLOW}":
+        return False
+    # Recognize the daily's non-skipped resolve path and the commit it passes; do not guess whether arbitrary
+    # expressions are true. Likewise the called job either is unconditional or accepts a nonempty commit.
+    enabled = (None, "true", "${{ true }}")
+    if call.get("if") not in (*enabled, "needs.resolve.outputs.skip == 'false'"):
+        return False
+    job = (windows.get("jobs") or {}).get("runtime-leases") or {}
+    if (job.get("if") not in enabled and
+            (job.get("if") != "inputs.commit != '' || github.event_name == 'workflow_dispatch'" or
+             call.get("with", {}).get("commit") != "${{ needs.resolve.outputs.commit }}")):
+        return False
+    if job.get("runs-on") != "windows-latest" or job.get("needs"):
+        return False
+    default_cwd = next((cwd for scope in (job, windows)
+                        if (cwd := scope.get("defaults", {}).get("run", {}).get("working-directory"))), ".")
+    return any(step.get("if") in enabled and step.get("working-directory", default_cwd) == "." and re.fullmatch(
+        r"python3?\s+tools/ci/ignored_tests\.py\s+--windows-rows\s+--run\s+--report\s+\S+",
+        step.get("run", "").strip()) for step in job.get("steps", ()))
+
+
+def windows_target_problems(rows, root=ROOT):
+    """Only an actual game-workspace tests/NAME.rs crate root gated by Windows can leave the Linux legs."""
+    windows = [row for row in rows if row.reason == ignored_tests.WINDOWS_REASON]
+    if not windows:
+        return []
+    members = ignored_shards.workspace_members()
+    roots = {(package, target): path for package, target, path, _ in ignored_inventory.target_roots(root)}
+    problems = []
+    for row in windows:
+        where = f"{row.file}: {row.package} {row.test}"
+        if row.package not in members:
+            continue  # daily_problems already diagnoses unknown packages
+        member, workspace = members[row.package]
+        if workspace != ".":
+            problems.append(f"{where}: `windows` is only supported in the game workspace, not {workspace}")
+        elif not row.reference.startswith("test:"):
+            problems.append(f"{where}: `windows` requires a Cargo integration test target (test:NAME)")
+        else:
+            expected = (Path(member) / "tests" / f"{row.reference.removeprefix('test:')}.rs").as_posix()
+            path = root / expected
+            if roots.get((row.package, row.reference)) != expected or not path.is_file():
+                problems.append(f"{where}: `windows` requires the Cargo target root to be {expected}")
+            elif not re.match(r"\s*#!\s*\[\s*cfg\s*\(\s*windows\s*\)\s*\]",
+                              rust_tests.blank(path.read_text(encoding="utf-8-sig"))):
+                problems.append(f"{where}: `windows` requires {expected} to start with #![cfg(windows)] "
+                                "after any comments")
+    return problems
+
+
 def source_packages():
-    """Each member's source folder, in every workspace (the launcher's too) -> the packages whose sources it holds
+    """Each member's source folder, in every workspace -> the packages whose sources it holds
     (the deepest folder wins, and crates/sunrise-client also builds sunrise-client-lib:
     tools/ci/ignored_shards.py SHARED_SOURCES)."""
     return {member: set(ignored_shards.SHARED_SOURCES.get(Path(member).name, (name,))) | {name}
@@ -147,6 +221,7 @@ if __name__ == "__main__":
     daily = [row for row in rows if row.mark == "daily"]
     problems = daily_problems(daily, ignored_shards.workspace_targets(),
                               [*ignored_shards.expand(ignored_shards.SHARDS), *ignored_shards.DAILY_ROWS_LEGS.values()])
+    problems += windows_target_problems(daily)
     ignored = ignored_functions()
     functions = [(path, line, name, packages) for path, line, name, packages, _, daily in ignored if daily]
     problems += source_problems(daily, functions)

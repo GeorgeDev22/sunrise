@@ -38,7 +38,7 @@ mod tests {
         packets::configuration::{RegistryTags, TagEntry, UpdateTags},
     };
 
-    fn client() -> Game<'static> {
+    fn client<'a>(resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>) -> Game<'a> {
         let root = std::path::PathBuf::from(
             std::env::var_os("SUNRISE_TEST_RESOURCES")
                 .expect("set SUNRISE_TEST_RESOURCES to prepared resources"),
@@ -60,7 +60,7 @@ mod tests {
         let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
         options.resources = root.clone();
         options.execution_role = ExecutionRole::Client;
-        let res: &'static _ = Box::leak(Box::new(loaded.resources));
+        let res = &*resources.insert(loaded.resources);
         let mut game = Game::new(
             res,
             loaded.pack,
@@ -83,7 +83,8 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn a_servers_block_and_item_tags_replace_the_games() {
-        let mut game = client();
+        let mut resources = None;
+        let mut game = client(&mut resources);
         assert!(!game.items().block_tags["minecraft:climbable"].contains("minecraft:stone"));
         let builtin = game.remote.as_ref().unwrap().builtin.clone();
         let id = |registry: &str, name: &str| builtin.get(registry).unwrap().id(name).unwrap();

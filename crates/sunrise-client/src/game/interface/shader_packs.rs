@@ -109,11 +109,10 @@ pub(crate) struct PickedPack {
 impl PickedPack {
     /// What it asks of the renderer's frame.
     pub(crate) fn frame(self) -> sunrise_client::gfx::FrameRequest {
-        sunrise_client::gfx::FrameRequest {
-            linear_pack: self.linear.is_some(),
-            linear_blend: self.linear == Some(sunrise_shader_api::Blend::Linear),
-            hdr_float: self.hdr_float,
-        }
+        sunrise_client::gfx::FrameRequest::new()
+            .with_linear_pack(self.linear.is_some())
+            .with_linear_blend(self.linear == Some(sunrise_shader_api::Blend::Linear))
+            .with_hdr_float(self.hdr_float)
     }
 }
 
@@ -473,7 +472,7 @@ impl Game<'_> {
             blindness: f32::from(u8::from(self.potions.effects.get("blindness").is_some())),
             eye_light: [i32::from(light & 15), i32::from(light >> 4)],
             hide_gui: self.ui.hide_gui,
-            brightness: self.settings.gamma,
+            brightness: self.settings.gamma as f32,
             biome: info.map_or(-1, |b| {
                 let names = world_biomes!(self).list.iter().map(|b| b.name.as_str());
                 sunrise_shaders::biome_pack_id(&b.name, names)
@@ -537,7 +536,7 @@ impl Game<'_> {
             riding,
             feet_in_water: p.fluids.was_touching_water,
             swimming: p.pose == sunrise_client::pose::Pose::Swimming,
-            burning: p.fire_ticks > 0 && !spectator,
+            burning: p.is_on_fire() && !spectator,
             hurt: p.health.hurt_animation_time > 0,
             invisible,
             sneaking: p.pose == sunrise_client::pose::Pose::Crouching,
@@ -1142,10 +1141,10 @@ mod native_pack_tests {
         remember(&path, fingerprint(&path), Some(Api::V0_2));
         let shape = picked_pack_shape(&settings);
         assert_eq!(shape.linear, switch.then_some(Blend::Linear));
-        assert_eq!(shape.frame().linear_blend, switch);
+        assert_eq!(shape.frame().linear_blend(), switch);
         std::fs::write(&manifest, text).unwrap();
         remember(&path, fingerprint(&path), Some(Api::V0_2));
-        assert!(!picked_pack_shape(&settings).frame().linear_blend);
+        assert!(!picked_pack_shape(&settings).frame().linear_blend());
         settings.mods.disabled.insert("frame_owner".into());
         let shape = picked_pack_shape(&settings);
         assert_eq!(shape.linear, None);

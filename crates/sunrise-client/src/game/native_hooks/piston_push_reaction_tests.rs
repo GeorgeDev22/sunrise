@@ -1038,7 +1038,12 @@ fn piston_push_reaction_position_state_opens_ticks_and_saves() {
                     &game.world.block_names,
                 );
                 game.attach_save_data(&mut batch[0]);
-                let encoded = sunrise_client::save::encode(&batch[0], registry, game.res.biomes());
+                let encoded = sunrise_client::save::encode(
+                    &batch[0],
+                    registry,
+                    game.res.biomes(),
+                    &Default::default(),
+                );
                 let bytes =
                     sunrise_core::nbt::write_named(&encoded, sunrise_core::nbt::Limits::saved())
                         .unwrap();

@@ -81,9 +81,22 @@ impl Game<'_> {
                     .map(|((x, y, z), map)| (Holder::BlockEntity([x, y, z]), map.synced())),
             );
         }
+        // A general row is shown on a client once its first snapshot arrives with it
+        // (`remote/general.rs`), so it gets one even with nothing synced, as a player does.
+        let general = |holder: &Holder| match holder {
+            Holder::Entity(id) => self
+                .resident_entities
+                .general
+                .rows
+                .iter()
+                .any(|row| row.id == *id),
+            _ => false,
+        };
         holders
             .into_iter()
-            .filter(|(holder, changes)| !changes.is_empty() || matches!(holder, Holder::Player(_)))
+            .filter(|(holder, changes)| {
+                !changes.is_empty() || matches!(holder, Holder::Player(_)) || general(holder)
+            })
             .map(|(holder, changes)| Message {
                 holder,
                 replace: true,
@@ -103,8 +116,21 @@ impl Game<'_> {
             return;
         };
         let snapshots = std::mem::take(&mut host.hub.attachment_snapshots);
+        // Colliders: the changes first, to those who already track the entity; the players who
+        // just started to are sent the whole collider below instead.
+        let fresh = Self::fresh_collider_pairs(
+            &snapshots
+                .iter()
+                .map(|s| (s.player, s.holder))
+                .collect::<Vec<_>>(),
+        );
+        self.flush_collider_sync(&fresh);
         for snapshot in snapshots {
             let AttachmentSnapshot { player, holder } = snapshot;
+            let collider_entity = match holder {
+                Holder::Entity(id) => Some(id),
+                _ => None,
+            };
             let Some(host) = self.lan.as_mut() else {
                 return;
             };
@@ -112,7 +138,11 @@ impl Game<'_> {
             let Some(guest) = hub.online_players().find(|g| g.uuid == player) else {
                 continue;
             };
-            if !reads_attachment_sync(guest) {
+            // Each channel is its own: a peer with only the collider channel still gets the
+            // collider.
+            let reads = reads_attachment_sync(guest);
+            let reads_collider = collider_entity.is_some() && guest.negotiated_collider_sync();
+            if !reads && !reads_collider {
                 continue;
             }
             if guest.dimension != hub.config.dimension {
@@ -128,7 +158,11 @@ impl Game<'_> {
                     .map_or(holder, |g| Holder::Player(g.uuid)),
                 _ => holder,
             };
-            let messages = self.attachment_snapshot(holder);
+            let messages = if reads {
+                self.attachment_snapshot(holder)
+            } else {
+                Vec::new()
+            };
             let sender = self
                 .lan
                 .as_ref()
@@ -137,6 +171,9 @@ impl Game<'_> {
             if let Some(sender) = sender {
                 for message in &messages {
                     self.send_attachment_sync(std::slice::from_ref(&sender), message);
+                }
+                if let (true, Some(id)) = (reads_collider, collider_entity) {
+                    self.send_collider_snapshot(&sender, id);
                 }
             }
         }
@@ -257,6 +294,9 @@ impl Game<'_> {
         for change in message.changes {
             map.apply_sync(change);
         }
+        if let (true, Holder::Entity(id)) = (message.replace, message.holder) {
+            remote.general.snapshot_arrived(id as i32);
+        }
         self.bind_remote_attachment(message.holder);
     }
 
@@ -302,6 +342,9 @@ impl Game<'_> {
     }
 }
 
+#[cfg(test)]
+#[path = "attachment_sync/general_snapshot_tests.rs"]
+mod general_snapshot_tests;
 #[cfg(test)]
 #[path = "attachment_sync/route_cases_tests.rs"]
 mod route_cases_tests;

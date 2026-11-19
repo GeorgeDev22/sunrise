@@ -42,11 +42,11 @@ struct Channel {
     looping: bool,
     at: [f32; 3],
     relative: bool,
-    /// Whose sounds these are: 0 the game's, another splitscreen player's (`Audio::share`).
+    /// Sound owner: 0 for the primary backend; other ids come from `Audio::share`.
     owner: u8,
     /// Its world (`Mixer::world_id`; 0 none).
     world: u32,
-    /// The sound file it started and when, to tell another player's copy of it.
+    /// The sound file and start time, used to spot copies from other backends.
     started: Option<(String, std::time::Instant)>,
     /// Its sound event plays clearly through a mod's muffle (`Audio::muffle`).
     unmuffled: bool,
@@ -79,14 +79,25 @@ impl Muffle {
     fn apply(&mut self, bus: &[f32], data: &mut [f32], channels: usize, rate: u32) {
         let rate = rate as f32;
         let glide = 1.0 - (-1.0 / (MUFFLE_GLIDE * rate)).exp();
+        // The filter coefficient only depends on `lowpass`, which glides every frame but sits
+        // still once it has reached its target: reuse the last one while it hasn't moved, so a
+        // settled muffle pays for `powf` and `exp` once per buffer rather than once per frame.
+        // NaN never equals, so the first frame always computes.
+        let mut coefficient = (f32::NAN, 0.0f32);
         for (frame, muffled) in data.chunks_mut(channels).zip(bus.chunks(channels)) {
             for (current, target) in self.current.iter_mut().zip(self.target) {
                 *current += (target - *current) * glide;
             }
             let [amount, lowpass] = self.current;
             let gain = 1.0 - amount;
-            let cutoff = OPEN_CUTOFF * (MUFFLED_CUTOFF / OPEN_CUTOFF).powf(lowpass);
-            let a = 1.0 - (-std::f32::consts::TAU * cutoff / rate).exp();
+            if coefficient.0 != lowpass {
+                let cutoff = OPEN_CUTOFF * (MUFFLED_CUTOFF / OPEN_CUTOFF).powf(lowpass);
+                coefficient = (
+                    lowpass,
+                    1.0 - (-std::f32::consts::TAU * cutoff / rate).exp(),
+                );
+            }
+            let a = coefficient.1;
             for ((out, s), stage) in frame.iter_mut().zip(muffled).zip(&mut self.stages) {
                 stage[0] += (s - stage[0]) * a;
                 stage[1] += (stage[0] - stage[1]) * a;
@@ -102,7 +113,7 @@ struct Mixer {
     listener: [f64; 3],
     listener_yaw: f32,
     listener_pitch: f32,
-    /// Splitscreen: the other players' cameras (position, yaw, pitch) by owner. A world sound is
+    /// Additional listeners' cameras (position, yaw, pitch) by owner. A world sound is
     /// heard from the nearest camera, and panned half as wide while several share the speakers.
     listeners: HashMap<u8, ([f64; 3], f32, f32)>,
     /// Each camera's world by owner, as ids: the callback compares and copies integers.
@@ -345,10 +356,10 @@ pub struct MixerBackend {
     /// Whose channels these are (`Channel::owner`).
     owner: u8,
     world: u32,
-    /// How many other players share this output: alone, a sound never looks for its copy.
+    /// Number of additional backends sharing the output. With none, there's no duplicate check.
     shares: Arc<std::sync::atomic::AtomicUsize>,
 }
-/// A splitscreen player's backend leaving: its camera and sounds go with it.
+/// Dropping a shared backend removes its camera and sounds.
 impl Drop for MixerBackend {
     fn drop(&mut self) {
         if self.owner == 0 {
@@ -364,11 +375,10 @@ impl Drop for MixerBackend {
         }
     }
 }
-/// Splitscreen: each shared backend's channel ids start at a block of their own, never handed out
-/// again, so a player in a seat used before never reuses an id a departed one's decoder may
-/// still attach to. The game's own backend counts from 0, as before.
+/// Each shared backend gets its own block of channel ids. Blocks are never reused, so a pending
+/// decode for a dropped backend cannot attach to a new one. The primary backend counts from 0.
 static SHARED_CHANNELS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// Two players' copies of one sound: started within this of each other.
+/// Maximum time between copies of a sound started by different backends.
 const SAME_SOUND: std::time::Duration = std::time::Duration::from_millis(150);
 /// Decoded interleaved samples, their rate and channel count (`None`: the file did not load).
 type Samples = Option<(Arc<Vec<f32>>, u32, u16)>;
@@ -613,22 +623,22 @@ fn decode(resource: &Resource) -> Option<(Vec<f32>, u32, u16)> {
     }
     (channels != 0).then_some((samples, rate, channels))
 }
-/// A sound file without its variant number (`mob/creeper/say2.ogg` is `mob/creeper/say`): each
-/// player's game picks its own variant of the same event.
+/// A sound file without its variant number (`mob/creeper/say2.ogg` is `mob/creeper/say`):
+/// each client can pick its own variant of the same event.
 // ponytail: variants named by a trailing number, as vanilla's are; the event name if a pack breaks it.
 fn variantless(key: &str) -> &str {
     key.trim_end_matches(".ogg")
         .trim_end_matches(|c: char| c.is_ascii_digit())
 }
 impl MixerBackend {
-    /// Splitscreen: another player's game started this same sound here just now (both clients
-    /// heard it); this copy stays stopped, the first is heard from the nearest camera.
+    /// Another backend sharing this output started the same sound here just now: this copy
+    /// stays stopped, and the first is heard from the nearest camera.
     ///
     /// A copy is recognised only by its file (without the variant), world, place and time: the
-    /// games pick variants on their own and play many sounds client-side (steps, digging), so
+    /// clients pick variants on their own and play many sounds locally (steps, digging), so
     /// nothing marks two copies of one event. Two different events alike in all four (two
-    /// players' steps on grass, side by side, within 150 ms) are heard once. That is accepted:
-    /// at that distance and timing they sound like one; a doubled sound is the louder fault.
+    /// footsteps on grass, side by side, within 150 ms) are heard once. At that distance and
+    /// timing they sound like one; a doubled sound is the louder fault.
     fn duplicate(&self, channel: ChannelId, (namespace, path): (&str, &str)) -> bool {
         // Alone: nobody else's copy, and no lock taken for it.
         if self.shares.load(std::sync::atomic::Ordering::Relaxed) == 0 {
@@ -637,7 +647,7 @@ impl MixerBackend {
         let Ok(mut m) = self.mixer.lock() else {
             return false;
         };
-        // Alone (no other player's camera), or a sound by the listener (a click, music): its own.
+        // Relative sounds (clicks, music) belong only to their listener.
         let Some(c) = m.channels.get(&channel).filter(|c| !c.relative) else {
             return false;
         };
@@ -895,7 +905,7 @@ fn mix(mixer: &mut Mixer, data: &mut [f32], channels: usize, rate: u32) {
         ];
         (forward, up, right)
     };
-    // Every camera hearing (splitscreen: the other players' too), in the mixer's own buffer.
+    // Every active listener's camera, in the mixer's scratch buffer.
     mixer.cameras.clear();
     mixer.cameras.extend(
         std::iter::once((
@@ -1635,8 +1645,8 @@ impl Audio {
             }
         }
     }
-    /// Splitscreen: another player's sounds on this output, heard from its camera too
-    /// (`owner`: 1 to 255, its own). Dropped, its camera and sounds go.
+    /// Share this output with another listener and its independent sound engine.
+    /// Give it a unique nonzero `owner`. Dropping it removes its camera and sounds.
     pub fn share(&self, owner: u8) -> Self {
         assert_ne!(owner, 0, "shared audio owners must be nonzero");
         self.backend
@@ -1672,7 +1682,7 @@ impl Audio {
             stopped: Default::default(),
             preview: Default::default(),
             muffle: None,
-            // The device belongs to the first player's output, which looks after it.
+            // The primary backend owns and maintains the output device.
             #[cfg(feature = "audio")]
             default_seen: self.default_seen.clone(),
             #[cfg(feature = "audio")]
@@ -1710,8 +1720,7 @@ impl Audio {
     /// found.
     #[cfg(feature = "audio")]
     fn should_change_device(&mut self) -> bool {
-        // A splitscreen share plays through the first player's output: it leaves the device,
-        // and the mixer's lost flag, to that output.
+        // Only the primary backend manages the shared output device and its lost flag.
         if self.backend.owner != 0 {
             return false;
         }
@@ -1841,8 +1850,8 @@ impl Audio {
     /// away and `lowpass` (0 to 1) dulling it, from untouched to a 300 Hz low-pass, fading in a
     /// straight line to none over `ticks` client ticks; the sound events in `exempt` (namespaced,
     /// `mymod:ear.ringing`) play clearly through it, those already playing too. It replaces any
-    /// muffle in place; `ticks` 0 or no strength ends it. The output's, so in splitscreen every
-    /// player hears it. False for an amount or strength outside 0 to 1.
+    /// muffle in place; `ticks` 0 or no strength ends it. It affects the shared output.
+    /// False for an amount or strength outside 0 to 1.
     pub fn muffle(&mut self, amount: f32, lowpass: f32, ticks: u32, exempt: &[&str]) -> bool {
         if !(0.0..=1.0).contains(&amount) || !(0.0..=1.0).contains(&lowpass) {
             return false;
@@ -2860,8 +2869,8 @@ mod tests {
     }
 
     #[test]
-    fn splitscreen_sounds_are_heard_from_the_nearest_camera() {
-        // P1 far away, a second player beside the source: heard at full gain, centred.
+    fn shared_sounds_are_heard_from_the_nearest_camera() {
+        // The primary listener is far away; the nearer listener hears full, centred gain.
         let mut m = Mixer {
             listener: [100.0, 0.0, 0.0],
             ..Mixer::default()
@@ -2875,7 +2884,7 @@ mod tests {
             data[0] > 0.5 && (data[0] - data[1]).abs() < 1e-4,
             "{data:?}"
         );
-        // Alone, P1 would not hear it: 100 blocks past its 16.
+        // The primary listener alone is beyond the 16-block range.
         m.listeners.clear();
         let mut data = [0.0; 2];
         mix(&mut m, &mut data, 2, 48_000);
@@ -2983,9 +2992,9 @@ mod tests {
     }
 
     #[test]
-    fn another_players_copy_of_a_sound_is_dropped() {
+    fn a_shared_backends_copy_of_a_sound_is_dropped() {
         let mixer = Arc::new(Mutex::new(Mixer::default()));
-        // One other player shares the output.
+        // One additional backend shares the output.
         let shares = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let backend = |owner| MixerBackend {
             mixer: mixer.clone(),
@@ -2998,8 +3007,8 @@ mod tests {
             world: 0,
             shares: shares.clone(),
         };
-        let (mut p1, mut p2) = (backend(0), backend(1));
-        // P2 is listening (its camera is in the mixer), so two players share the speakers.
+        let (mut primary, mut shared) = (backend(0), backend(1));
+        // The second listener is active, so the backends share the speakers.
         mixer
             .lock()
             .unwrap()
@@ -3010,17 +3019,17 @@ mod tests {
             b.set_position(id, at);
             !b.duplicate(id, ("minecraft", "mob/creeper/say1.ogg"))
         };
-        assert!(started(&mut p1, [5.0, 64.0, 5.0]));
-        // P2's client got the same sound at the same place: one copy plays.
-        assert!(!started(&mut p2, [5.2, 64.0, 5.0]));
-        // Elsewhere, or P1's own second one, it is a sound of its own.
-        assert!(started(&mut p2, [40.0, 64.0, 5.0]));
-        assert!(started(&mut p1, [5.0, 64.0, 5.0]));
+        assert!(started(&mut primary, [5.0, 64.0, 5.0]));
+        // The shared backend got the same sound at the same place: one copy plays.
+        assert!(!started(&mut shared, [5.2, 64.0, 5.0]));
+        // A sound elsewhere, or repeated by the same backend, still plays.
+        assert!(started(&mut shared, [40.0, 64.0, 5.0]));
+        assert!(started(&mut primary, [5.0, 64.0, 5.0]));
         // Equal coordinates in another dimension describe a different sound.
-        p2.world = mixer.lock().unwrap().world_id("nether");
-        assert!(started(&mut p2, [5.0, 64.0, 5.0]));
-        // P2 leaving takes its sounds.
-        drop(p2);
+        shared.world = mixer.lock().unwrap().world_id("nether");
+        assert!(started(&mut shared, [5.0, 64.0, 5.0]));
+        // Dropping the shared backend also removes its sounds.
+        drop(shared);
         assert!(
             mixer
                 .lock()
@@ -3117,6 +3126,40 @@ mod tests {
             heard(6000.0, [0.5, 1.0], true),
             heard(6000.0, [0.0; 2], false)
         );
+    }
+
+    #[test]
+    fn a_muffles_low_pass_matches_a_per_frame_reference() {
+        // The coefficient is reused while the glide hasn't moved `lowpass`; the output must
+        // still equal recomputing it every frame, through the glide and once settled.
+        let rate = 48_000u32;
+        let input: Vec<f32> = (0..2 * 4800)
+            .map(|i| ((i / 2) as f32 * 0.37).sin() * 0.5)
+            .collect();
+        let mut muffle = Muffle {
+            target: [0.3, 0.8],
+            ..Default::default()
+        };
+        let glide = 1.0 - (-1.0 / (MUFFLE_GLIDE * rate as f32)).exp();
+        let (mut current, mut stages) = ([0.0f32; 2], [[0.0f32; 2]; 2]);
+        for _ in 0..3 {
+            let mut got = vec![0.0f32; input.len()];
+            muffle.apply(&input, &mut got, 2, rate);
+            let mut want = vec![0.0f32; input.len()];
+            for (frame, heard) in want.chunks_mut(2).zip(input.chunks(2)) {
+                for (c, t) in current.iter_mut().zip([0.3f32, 0.8]) {
+                    *c += (t - *c) * glide;
+                }
+                let cutoff = 20_000.0f32 * (300.0f32 / 20_000.0).powf(current[1]);
+                let a = 1.0 - (-std::f32::consts::TAU * cutoff / rate as f32).exp();
+                for ((out, s), stage) in frame.iter_mut().zip(heard).zip(&mut stages) {
+                    stage[0] += (s - stage[0]) * a;
+                    stage[1] += (stage[0] - stage[1]) * a;
+                    *out += (s + (stage[1] - s) * current[1]) * (1.0 - current[0]);
+                }
+            }
+            assert_eq!(got, want);
+        }
     }
 
     #[test]

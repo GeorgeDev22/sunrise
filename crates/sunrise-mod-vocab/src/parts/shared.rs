@@ -1,4 +1,5 @@
 //! Shared table state, cross-kind registration and common test fixtures only.
+use super::blocks::BlockHookParts;
 use super::*;
 use std::cell::Cell;
 use std::sync::{PoisonError, RwLock, atomic::AtomicU64};
@@ -61,13 +62,14 @@ pub struct Parts {
     pub(crate) settings: Vec<(&'static str, crate::SettingSpec)>,
     /// Block parts, and block entity parts as the block parts they also are.
     pub(crate) blocks: HashMap<Box<str>, Vec<Attached<dyn BlockPart>>>,
-    /// Block entity parts by block, for the hooks asked by block (`block_entity`, `screen`).
+    /// Block entity parts by block, for the hooks asked by block (`block_entity`).
     pub(crate) block_entities: HashMap<Box<str>, Vec<Attached<dyn BlockEntityPart>>>,
     /// Block entity parts by block entity type, for the hooks asked by the entity
     /// (`block_entity_tick`, `menu_button`): its type id need not be its block's id.
     pub(crate) block_entity_kinds: HashMap<Box<str>, Vec<Attached<dyn BlockEntityPart>>>,
     pub(crate) items: HashMap<Box<str>, Vec<Attached<dyn ItemPart>>>,
     pub(crate) menus: HashMap<Box<str>, Vec<Attached<dyn MenuPart>>>,
+    pub(crate) effects: HashMap<Box<str>, Vec<Attached<dyn MobEffectPart>>>,
     pub(crate) fluids: HashMap<Box<str>, Vec<Attached<dyn FluidPart>>>,
     /// Entity parts by entity type id (`minecraft:zombie`, `mymod:robot`), for the goal
     /// registration at every `Mob` construction and the scoped hooks the entity
@@ -123,11 +125,12 @@ pub struct Parts {
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct HookParts {
     pub(crate) blocks: HashMap<Box<str>, Vec<Attached<dyn BlockPart>>>,
-    pub(crate) block_keys: HashMap<crate::BlockKey, Vec<Attached<dyn BlockPart>>>,
+    pub(crate) block_keys: HashMap<crate::BlockKey, BlockHookParts>,
     pub(crate) block_entities: HashMap<Box<str>, Vec<Attached<dyn BlockEntityPart>>>,
     pub(crate) block_entity_kinds: HashMap<Box<str>, Vec<Attached<dyn BlockEntityPart>>>,
     pub(crate) items: HashMap<Box<str>, Vec<Attached<dyn ItemPart>>>,
     pub(crate) menus: HashMap<Box<str>, Vec<Attached<dyn MenuPart>>>,
+    pub(crate) effects: HashMap<Box<str>, Vec<Attached<dyn MobEffectPart>>>,
     pub(crate) fluids: HashMap<Box<str>, Vec<Attached<dyn FluidPart>>>,
     pub(crate) entities: HashMap<Box<str>, Vec<Attached<dyn EntityPart>>>,
 }
@@ -449,7 +452,7 @@ pub fn prepare_parts(
             .iter()
             .map(|(name, attached)| {
                 crate::content::registry_keys::block_key(name)
-                    .map(|key| (key, attached.clone()))
+                    .map(|key| (key, BlockHookParts::new(name, attached)))
                     .ok_or_else(|| {
                         ResolvePartsError::Parts(vec![format!(
                             "block metadata unavailable for {name}"
@@ -573,6 +576,7 @@ impl Parts {
         index!(block_entity_kinds, block_entity_subscribed);
         index!(items, item_subscribed);
         index!(menus, menu_subscribed);
+        index!(effects, effect_subscribed);
         index!(fluids, fluid_subscribed);
         index!(entities, entity_subscribed);
     }

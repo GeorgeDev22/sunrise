@@ -26,7 +26,7 @@ fn run() {
     let inventory = [
         PackageInfo::new(
             manifest.id.clone(),
-            manifest.version.clone(),
+            manifest.version.to_string(),
             PackageKind::Code,
             Side::Both,
             vec![manifest.id.clone()],
@@ -54,7 +54,7 @@ fn run() {
     loaded.initialize(&inventory).unwrap();
     api_values::install_test_platform();
     mod_platform::__private::install_packages(&inventory, &[]);
-    mods::install_registration_data(&root).unwrap();
+    mods::install_registration_data(&root, Default::default()).unwrap();
     let entries = std::mem::take(&mut loaded.mods);
     mod_platform::testing::with_mods(entries.into(), || {
         mod_platform::__private::part_tests::install_parts_fixture(mod_api::__private::mods())

@@ -23,6 +23,7 @@ fn frame(id: u32, pos: [i32; 3], facing: u8) -> ItemFrame {
         fixed: false,
         invisible: false,
         check_interval: 0,
+        ticks: 0,
         attachment_lifetime: Default::default(),
         join: Default::default(),
         custom_name: None,

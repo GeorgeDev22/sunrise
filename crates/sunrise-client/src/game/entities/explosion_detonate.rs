@@ -647,6 +647,7 @@ mod tests {
             fixed: false,
             invisible: false,
             check_interval: 0,
+            ticks: 0,
             custom_name: None,
             random: LegacyRandom::new(1),
         });
@@ -660,6 +661,7 @@ mod tests {
             width: 1,
             height: 1,
             check_interval: 0,
+            ticks: 0,
         });
         game.cushions.push(Cushion {
             attachment_lifetime: Default::default(),

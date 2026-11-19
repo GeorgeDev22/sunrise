@@ -108,7 +108,7 @@ fn break_progress_waits_for_commit_but_explicit_block_updates_survive_abort() {
         })
         .unwrap();
         assert_eq!(
-            game.destroying.get(&-7).map(|c| (c.0, c.1)),
+            game.destroying.get(&-7).map(|c| (c.pos, c.stage)),
             Some(([1, 64, 1], 3))
         );
         assert_eq!(game.world.block_log.as_ref().unwrap(), &vec![(2, 64, 2)]);

@@ -1,8 +1,12 @@
 //! Engine-owned mod block entity storage and revision tracking.
 use super::published_shapes::{PublishedShapes, SHAPES_KEY};
-use std::sync::Arc;
-use sunrise_core::nbt::{Compound, Tag};
+use std::sync::{Arc, LazyLock};
+use sunrise_client_core::block_entity_nbt::saved_item_slot;
+use sunrise_core::nbt::{Compound, JavaString, Tag};
 use sunrise_items::items::ItemStack;
+
+static ITEMS: LazyLock<JavaString> = LazyLock::new(|| "Items".into());
+
 /// A mod's block entity, read and changed through its fields
 /// (`ModBlockEntityFields`) as a struct's: `entity.nbt`. Each change goes
 /// through `DerefMut` and gives it a new `revision`, so a client tells
@@ -28,8 +32,8 @@ pub struct ModBlockEntity {
     pub(crate) shapes_cleared: bool,
 }
 /// What a `ModBlockEntity` can change: its saved compound without `id`,
-/// `x`, `y`, `z` and `Items`, its item slots
-/// (`Items`) when its block has a container (`ModContainer`), and the data
+/// `x`, `y`, `z` or modeled `Items` rows, its item slots
+/// when its block has a container (`ModContainer`), and the data
 /// slots its menu shows (`ContainerData`: a furnace menu's flame and arrow),
 /// which the mod sets and nothing saves.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -38,6 +42,19 @@ pub struct ModBlockEntityFields {
     pub nbt: Compound,
     pub items: Vec<Option<ItemStack>>,
     pub data: Vec<i32>,
+}
+
+impl ModBlockEntityFields {
+    /// The retained `Items` rows are their own ownership record. A modeled
+    /// stack taking a slot drops its pending saved row from the same snapshot.
+    fn claim_modeled_item_rows(&mut self) {
+        if let Some(Tag::List(rows)) = self.nbt.get_mut(&*ITEMS) {
+            rows.retain(|row| {
+                saved_item_slot(row)
+                    .is_none_or(|slot| self.items.get(slot).is_none_or(Option::is_none))
+            });
+        }
+    }
 }
 /// Which contents a `ModBlockEntity` has had: one per entity made (a clone
 /// is another), counted on by each change. Equal revisions, equal contents.
@@ -62,12 +79,30 @@ impl ModRevision {
 impl ModBlockEntity {
     /// Apply a validated callback snapshot in place, keeping this entity's identity.
     /// The game passes the snapshot's original write count, including no-op writes.
-    pub fn apply_snapshot(&mut self, fields: ModBlockEntityFields, changes: u64) {
+    pub fn apply_snapshot(&mut self, mut fields: ModBlockEntityFields, changes: u64) {
+        fields.claim_modeled_item_rows();
         self.fields = fields;
         self.revision.changes = changes;
     }
 
-    pub fn new(id: String, fields: ModBlockEntityFields) -> Self {
+    pub fn has_opaque_item_slot(&self, slot: usize) -> bool {
+        matches!(self.nbt.get(&*ITEMS), Some(Tag::List(rows)) if
+            rows.iter().any(|row| saved_item_slot(row) == Some(slot)))
+    }
+
+    /// A write (including an explicit clear) supersedes raw rows for this index.
+    pub fn item_slot_mut(&mut self, slot: usize) -> Option<&mut Option<ItemStack>> {
+        if slot >= self.items.len() {
+            return None;
+        }
+        if let Some(Tag::List(rows)) = self.fields.nbt.get_mut(&*ITEMS) {
+            rows.retain(|row| saved_item_slot(row) != Some(slot));
+        }
+        self.items.get_mut(slot)
+    }
+
+    pub fn new(id: String, mut fields: ModBlockEntityFields) -> Self {
+        fields.claim_modeled_item_rows();
         let numeric_id = sunrise_client_core::block_entity_types::numeric_id(&id);
         Self::with_numeric_id(id, numeric_id, fields)
     }

@@ -20,6 +20,7 @@ my_mod.smod
 ├── icon.png                # optional
 ├── assets/my_mod/
 ├── data/my_mod/
+├── runtime/                # code mods only, optional
 ├── Cargo.toml              # code mods only
 ├── src/lib.rs              # code mods only
 └── mod.wasm                # wasm mods only
@@ -30,6 +31,8 @@ my_mod.smod
   against the pinned prebuilt game; mixins compile into a separate function-replacement patch library. The game itself does not compile. Its resources load through the same content reader as a content mod's.
 - **Wasm code:** `mod.wasm` at the top, declared by `[wasm]`, with the `Cargo.toml` and `src/` it was built from
   (a converted mod records `built_with` instead and carries no source). The game runs it with no rebuild.
+- **Runtime files:** a native or wasm package may carry a `runtime/` folder of data its code opens beside
+  itself, listed in a top-level `[runtime]` table (below). A content mod has none.
 - Inconsistent code declarations and files refuse the package. `mod.wasm` anywhere else, undeclared, or
   declared but missing, refuses it; so does any other executable file.
 
@@ -41,16 +44,21 @@ folders are unsupported.
 
 ## `sunrise-mod.toml`
 
-The shared [manifest fields](../how-to/content-mods.md#the-manifest) include `id`, `name`, `version`, `api = "0.2"`
-and `capabilities = ["registries"]`. The content API is checked for exact equality. Unknown fields
-refuse the manifest. Native mods may declare top-level `internals`, an array of tables with
+The shared [manifest fields](../how-to/content-mods.md#the-manifest) include `id`, `name`, and `version`.
+`version` is semver (`MAJOR.MINOR.PATCH`, with an optional pre-release and build metadata such as
+`3.6.30+refabricated`); an omitted minor or patch is padded (`1` is `1.0.0`, `1.2` is `1.2.0`).
+A non-semver version is refused when the manifest is read, naming the value.
+
+`cargo sunrise-mod build` puts `api = "0.2"` and `capabilities = ["registries"]` into the package. A manifest
+that writes either field must give that value; any other value is refused, naming both. Unknown fields refuse the
+manifest, naming the nearest valid key when one is close. Native mods may declare top-level `internals`, an array of tables with
 `path`, optional `hash`, and `kind` when a path names several member kinds. Without `hash`, the build uses the fingerprint from the pinned game’s catalog. An explicitly empty `hash` is refused. Native code adds `[native]`:
 
 | Field | Type | Rule |
 | --- | --- | --- |
 | `game` | string | not empty, the Minecraft version (`"26.3"`) |
 | `sunrise` | string | the exact Sunrise commit, 40 lowercase hex characters |
-| `mixins` | string | the exact horizon-mixins commit, 40 lowercase hex characters |
+| `mixins` | string, optional | a horizon-mixins commit, 40 lowercase hex characters; when mixins are used it must match the pinned SDK. If omitted, `build` writes the SDK's revision into the package. See [The pin](sdk/03-in-a-project.md#the-pin). |
 | `module` | array of tables | optional support modules, written as `[[native.module]]` |
 
 API points use top-level declarations.
@@ -68,7 +76,7 @@ file that receives it, a `name` that is a Rust module identifier, and a `source`
 
 `[[inject]]` only fills compiled slots and never compiles game code. Native source edits
 use `[[native.mixin]]` with `id`, `target`, uppercase `kind`, `helper` and the other
-horizon-mixins options ([Mixins](../concepts/native-route/2-mixins.md)). `[[native.loop]]`, `[[native.bridge]]` and `[[native.module]]` complete the route; `[[native.state]]` is refused. See [The native route](../concepts/native-route.md) for every table, its fields and its refusals.
+horizon-mixins options ([Mixins](../concepts/native-route/2-mixins.md)). This package reads only `id`, `target`, `kind` and `helper` of a row (and refuses `hook` and `hook_version`) and forwards every other key to the tool as written; the tool then refuses a key it does not know, so an unknown key on a mixin row fails at build time, not when the manifest is read. The same holds for the keys of `[[native.bridge]]` and `[[native.state]]` rows. An `OVERWRITE` row must carry the tool's `fingerprint`. `[[native.loop]]`, `[[native.bridge]]` and `[[native.module]]` complete the route; `[[native.state]]` is refused. See [The native route](../concepts/native-route.md) for every table, its fields and its refusals.
 
 A wasm mod adds `[wasm]` instead, written by `cargo sunrise-mod build --wasm`
 ([Building to `mod.wasm`](../how-to/wasm-mods.md)):
@@ -82,6 +90,35 @@ A wasm mod adds `[wasm]` instead, written by `cargo sunrise-mod build --wasm`
 
 At load `mod.wasm` must start with `\0asm`, be at most 64 MiB and match `sha512`; each failure refuses the
 package with its reason.
+
+### `[runtime]`: data files beside the code
+
+A native or a wasm mod whose code runs a large precompiled artefact (a script bundle, an interpreter image,
+a baked lookup table) puts the bytes in a `runtime/` folder and lists each file with its SHA-512:
+
+```toml
+[runtime]
+"tables/nav.bin" = "<128 lowercase hex characters>"
+"image" = "<128 lowercase hex characters>"
+```
+
+Each key is a plain relative path below `runtime/` (the rules of every package path: no `..`, no backslash
+or colon, no symlink). Any file type is allowed; a runtime file is data, never loaded as code by the game.
+Runtime files are not pack data: no datapack or resource pack can replace them and no reload touches them.
+
+| Rule | Refusal |
+| --- | --- |
+| Every file of `runtime/` is listed | `runtime/<name>: not listed in [runtime]` |
+| Every listed file exists | `[runtime] lists <name>, but the package has no runtime/<name>` |
+| Each file matches its SHA-512 | `runtime/<name> doesn't match its [runtime] sha512` |
+| At most 256 files | `…over the 256-file runtime cap` |
+| At most 64 MiB a file | `runtime/<name> is over 64 MiB, the per-file runtime cap` |
+| At most 256 MiB in all | `runtime/ is over 256 MiB, the package's runtime total cap` |
+| A content mod has none | `a content mod has no code, so no [runtime]` |
+
+The hashes are checked once, when the package opens: at install, at a dedicated server's or a game's start
+(also for a folder edited by hand), and by `native-build` and `cargo sunrise-mod` packing. The package is
+refused by name; nothing else is skipped.
 
 A wasm mod or library may declare the memory it expects its dependency group to have, as top-level
 `wasm_memory_mib`: an integer from 1 to 4096 (wasm32's 4 GiB), in MiB. The group gets the largest value any
@@ -191,16 +228,16 @@ earlier recipe at the same id. A jar may use any namespace. Only its passive
 `assets/` and `data/` participate: Java classes and the jar's own pack metadata are
 not loaded.
 
-Original jars stay in `<game home>/jars/<sha512>.jar`; no bytes are copied into a
-mod. The launcher checks and supplies exact files, and the existing ZIP readers
-write only the decoded resource cache. The complete ordered reference list,
+The game reads exact originals from `<game home>/jars/<sha512>.jar`; no bytes are copied into a mod.
+For development, [`cargo sunrise-mod run`](../how-to/content-mods.md#java-jars-as-external-assets) checks and
+stages these files in its own game home. The ZIP readers write only the decoded resource cache.
+The complete ordered reference list,
 including version, contributes to the composed root's stamp, so changing it
 rebuilds on the next resource load. Server `/reload` uses the accepted inputs of
 that composed root, not another package scan.
 
-**Unavailable originals.** Launcher preparation refuses before a native build or
-game launch and names all requiring mods, the original jar and its expected
-cache path. Direct game resource or world loading with a missing native
+**Unavailable originals.** `cargo sunrise-mod run` refuses before starting the game and names the mod,
+the original jar and its expected cache path. Direct game resource or world loading with a missing native
 requirement fails as a whole; it never publishes code without the matching data.
 A missing input during `/reload` reports the typed failure to the command source
 and keeps the previous data and composed root. Content-only mods have no code to
@@ -231,7 +268,7 @@ the mod list. The scaffold does not create a default icon.
 | What | Limit |
 | --- | --- |
 | A registry file, as downloaded | 64 MiB |
-| Selected native source files, excluding the manifest, icon and resources | 511 files, 64 MiB unpacked in total |
+| Selected native source files, excluding the manifest, icon and resources | 65,536 files, 64 MiB unpacked in total |
 | Content files | 65,536 files, 16 MiB each, 512 MiB in total |
 | `sunrise-mod.toml` | 32 MiB |
 | `icon.png` | 256 KiB encoded, 512 × 512 pixels |

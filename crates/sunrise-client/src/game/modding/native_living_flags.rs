@@ -188,7 +188,7 @@ impl Game<'_> {
                 let slept = mobs.iter_mut().find(|m| m.id == id).is_some_and(|m| {
                     let slept = villager::start_sleeping(m, pos, &w, &mut events);
                     if slept {
-                        m.position = at;
+                        sunrise_client::mobs::living::teleports::set_pos(m, at);
                     }
                     slept
                 });
@@ -499,6 +499,7 @@ pub(in crate::game) mod tests {
                 None,
                 Some(game.pack.assets.registry),
                 |_| None,
+                &Default::default(),
             );
             let restored = sunrise_client::entity_nbt::mob_from_nbt(
                 &tag,
@@ -528,6 +529,7 @@ pub(in crate::game) mod tests {
                 None,
                 Some(game.pack.assets.registry),
                 |_| None,
+                &Default::default(),
             );
             let restored = sunrise_client::entity_nbt::mob_from_nbt(
                 &tag,
@@ -1236,6 +1238,7 @@ pub(in crate::game) mod tests {
                     None,
                     Some(game.pack.assets.registry),
                     |_| None,
+                    &Default::default(),
                 );
                 assert!(!game.living_start_sleeping(living, pos), "{pos:?}");
                 assert_eq!(
@@ -1244,7 +1247,8 @@ pub(in crate::game) mod tests {
                         [1, 2, 3, 4],
                         None,
                         Some(game.pack.assets.registry),
-                        |_| None
+                        |_| None,
+                        &Default::default()
                     ),
                     before
                 );

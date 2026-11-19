@@ -281,6 +281,7 @@ struct ItemRules<'a>(
     &'a sunrise_client::enchant::Enchantments,
     Option<&'a dyn sunrise_client::menu::SlotRules>,
     Option<&'a sunrise_client::menu::StackedOutcome>,
+    Vec<sunrise_client::containers::ModContainerInsertRule>,
 );
 impl Rules for ItemRules<'_> {
     fn items(&self) -> &sunrise_client::items::Items {
@@ -297,6 +298,18 @@ impl Rules for ItemRules<'_> {
     }
     fn stacked(&self) -> Option<&sunrise_client::menu::StackedOutcome> {
         self.3
+    }
+    fn mod_container_insert_rule(
+        &self,
+        slot: usize,
+        current: Option<&sunrise_client::items::ItemStack>,
+        offered: &sunrise_client::items::ItemStack,
+    ) -> bool {
+        sunrise_client::containers::mod_container_insert_allowed(
+            self.4.get(slot).copied().unwrap_or_default(),
+            current,
+            offered,
+        )
     }
 }
 
@@ -1762,7 +1775,7 @@ mod tests {
                 let picked = guest.inventory[guest.selected].as_ref().unwrap();
                 assert_eq!(&*picked.item, "minecraft:diamond");
                 let Some(sunrise_core::nbt::Tag::Compound(components)) =
-                    sunrise_client::item_data::encode_components(picked)
+                    sunrise_client::item_data::component_snapshot(picked)
                 else {
                     panic!("the chest's data is on the diamond");
                 };
@@ -1980,6 +1993,7 @@ mod tests {
                 progress: 0.5,
                 per_tick: 0.0,
                 ticks: 8,
+                crack: None,
             }),
             destroy_pos: Some(pos),
             dig_start: 1000,
@@ -3311,6 +3325,10 @@ mod crack_feedback_tests;
 #[cfg(test)]
 #[path = "tests/menu_still_valid_tests.rs"]
 mod menu_still_valid_tests;
+
+#[cfg(test)]
+#[path = "tests/player_entity_tick_tests.rs"]
+mod player_entity_tick_tests;
 
 #[cfg(test)]
 #[path = "tests/projectile_lifecycle_tests.rs"]

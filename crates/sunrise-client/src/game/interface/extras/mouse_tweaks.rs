@@ -17,7 +17,7 @@
 //!   other side. Down over a result slot takes one craft or the whole furnace
 //!   output to the inventory; nothing ever goes into a result slot.
 //!
-//! Sorting, which clicks through `tweak_click` too, is in `sorting.rs`.
+//! Sorting, which clicks through `slot_click` too, is in `sorting.rs`.
 use crate::game::{Creative, Game, Screen};
 use sunrise_client::{containers::BlockEntity, items::ItemStack, menu::Input};
 
@@ -53,6 +53,8 @@ struct Drag {
     held: Option<ItemStack>,
     /// The drag replaced vanilla's: its release clicks nothing.
     active: bool,
+    /// `physical_presses` at the press that started it: a later press is another drag.
+    press: u64,
     visited: Vec<usize>,
 }
 
@@ -71,41 +73,6 @@ impl Game<'_> {
         } else {
             matches!(self.container_kind(), None | Some(BlockEntity::Chest(_)))
         }
-    }
-    /// One ordinary click on a game slot. False when nothing took it.
-    pub(in crate::game) fn tweak_click(&mut self, slot: usize, button: i32, input: Input) -> bool {
-        if self.remote.is_some() {
-            return self.remote_menu_ops(&[(Some(slot), button, input)]);
-        }
-        if !self.click_open_inventory(Some(slot), button, input) {
-            return false;
-        }
-        if let Some(key) = self.container {
-            self.container_changed(key);
-        }
-        true
-    }
-    /// Puts the hand's stack (`right`: one of it) in `slot`, as a one-slot
-    /// drag (`QUICK_CRAFT`) and not a click: a server that has the hand empty
-    /// (the stack it was to come from just burned as fuel) ignores a drag, but
-    /// a click would pick up what's in `slot`.
-    fn tweak_put(&mut self, slot: usize, right: bool) -> bool {
-        let kind = i32::from(right) << 2;
-        let ops = [
-            (None, kind, Input::QuickCraft),
-            (Some(slot), kind | 1, Input::QuickCraft),
-            (None, kind | 2, Input::QuickCraft),
-        ];
-        if self.remote.is_some() {
-            return self.remote_menu_ops(&ops);
-        }
-        if !self.menu_ops(&ops) {
-            return false;
-        }
-        if let Some(key) = self.container {
-            self.container_changed(key);
-        }
-        true
     }
     /// A press on `slot`: true when the tweaks took it (a right-drag
     /// placing), else vanilla's press runs and the tweaks watch the drag.
@@ -134,6 +101,7 @@ impl Game<'_> {
                 held,
                 active: true,
                 visited: vec![slot],
+                press: self.physical_presses,
             };
             self.tweak_place(&mut drag, slot);
             self.inv_drag = None;
@@ -147,6 +115,7 @@ impl Game<'_> {
                 held,
                 active: false,
                 visited: vec![slot],
+                press: self.physical_presses,
             });
         }
         false
@@ -156,7 +125,7 @@ impl Game<'_> {
         let Some(held) = drag.held.clone() else {
             return;
         };
-        if self.tweak_takes_one(slot, &held) && self.tweak_put(slot, true) {
+        if self.slot_takes_one(slot, &held) && self.slot_put(slot, true) {
             drag.held = (held.count > 1).then(|| ItemStack {
                 count: held.count - 1,
                 ..held
@@ -169,6 +138,15 @@ impl Game<'_> {
         let Some(mut drag) = self.tweaks.drag.take() else {
             return false;
         };
+        // A drag whose button went up unseen (another handler took its release, or the next press) is over.
+        let button = if drag.right {
+            winit::event::MouseButton::Right
+        } else {
+            winit::event::MouseButton::Left
+        };
+        if !self.physical_buttons.contains(&button) || drag.press != self.physical_presses {
+            return false;
+        }
         let active = drag.active;
         let entered =
             slot.filter(|s| *s != 200 && *s < Creative::DISPLAY && !drag.visited.contains(s));
@@ -191,10 +169,10 @@ impl Game<'_> {
                         self.inv_clicks.skip_release();
                     }
                     if shift {
-                        self.tweak_click(slot, 0, Input::QuickMove);
+                        self.slot_click(slot, 0, Input::QuickMove);
                     } else if held.count + s.count <= self.max_stack(&s)
-                        && self.tweak_click(slot, 0, Input::Pickup)
-                        && self.tweak_click(slot, 0, Input::Pickup)
+                        && self.slot_click(slot, 0, Input::Pickup)
+                        && self.slot_click(slot, 0, Input::Pickup)
                     {
                         // Put the hand's stack in the slot, then take it all.
                         drag.held = Some(ItemStack {
@@ -205,7 +183,7 @@ impl Game<'_> {
                 }
             } else if shift && stack.is_some() {
                 drag.active = true;
-                self.tweak_click(slot, 0, Input::QuickMove);
+                self.slot_click(slot, 0, Input::QuickMove);
             }
         }
         let owned = drag.active || active;
@@ -246,31 +224,6 @@ impl Game<'_> {
         });
         result
     }
-    /// `slot` takes one more of `stack`, by the open menu's rules.
-    fn tweak_takes_one(&mut self, slot: usize, stack: &ItemStack) -> bool {
-        let mut takes = false;
-        self.menu_session(|menu, env, to_menu| {
-            takes = to_menu(slot).is_some_and(|i| menu.takes_one(env, i, stack));
-            Some(false)
-        });
-        takes
-    }
-    /// Where vanilla's quick move would put `slot`'s items, tried on a copy
-    /// of the menu that's dropped (`Some(false)` keeps nothing).
-    fn tweak_landing(&mut self, slot: usize) -> Vec<usize> {
-        let slots = self.slots();
-        let mut landing = Vec::new();
-        self.menu_session(|menu, env, to_menu| {
-            let from = to_menu(slot)?;
-            landing = menu
-                .quick_move_landing(env, from)
-                .into_iter()
-                .filter_map(|i| slots.iter().copied().find(|&g| to_menu(g) == Some(i)))
-                .collect();
-            Some(false)
-        });
-        landing
-    }
     /// The slots across from `slot`: a container's or crafting grid's face
     /// the inventory (hotbar first, from the right), the inventory's face
     /// them; without one, hotbar and main inventory trade.
@@ -297,22 +250,22 @@ impl Game<'_> {
         let Some(stack) = self.slot_view(slot) else {
             return;
         };
-        let landing = self.tweak_landing(slot);
+        let landing = self.slot_landing(slot);
         let Some(&target) = landing.first() else {
             return;
         };
         if self.tweak_result(slot) {
-            if self.tweak_click(slot, 0, Input::Pickup) {
+            if self.slot_click(slot, 0, Input::Pickup) {
                 for target in landing {
-                    self.tweak_put(target, false);
+                    self.slot_put(target, false);
                 }
             }
             return;
         }
-        if self.tweak_click(slot, 0, Input::Pickup) {
-            self.tweak_put(target, true);
+        if self.slot_click(slot, 0, Input::Pickup) {
+            self.slot_put(target, true);
             if stack.count > 1 {
-                self.tweak_put(slot, false);
+                self.slot_put(slot, false);
             }
         }
     }
@@ -322,7 +275,7 @@ impl Game<'_> {
         let Some(stack) = self.slot_view(slot) else {
             return;
         };
-        if !self.tweak_takes_one(slot, &stack) {
+        if !self.slot_takes_one(slot, &stack) {
             return;
         }
         let mut source = None;
@@ -338,11 +291,52 @@ impl Game<'_> {
         let Some((source, count)) = source else {
             return;
         };
-        if self.tweak_click(source, 0, Input::Pickup) {
-            self.tweak_put(slot, true);
+        if self.slot_click(source, 0, Input::Pickup) {
+            self.slot_put(slot, true);
             if count > 1 {
-                self.tweak_put(source, false);
+                self.slot_put(source, false);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::game_tests::tests::server_game;
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_drag_whose_button_went_up_or_was_pressed_again_unseen_moves_nothing_and_ends() {
+        let mut resources = None;
+        let mut game = server_game(&mut resources);
+        game.screen = Screen::Inventory;
+        let stone = ItemStack::new("minecraft:stone", 5);
+        game.carried = Some(stone.clone());
+        game.tweaks.drag = Some(Drag {
+            right: true,
+            held: Some(stone.clone()),
+            active: true,
+            visited: vec![9],
+            press: game.physical_presses,
+        });
+        // No button is held: another handler took the release this drag never heard.
+        assert!(!game.tweak_drag_move(Some(10)));
+        assert!(game.tweaks.drag.is_none());
+        // Held again, but by a newer press that another handler took: still over.
+        game.tweaks.drag = Some(Drag {
+            right: true,
+            held: Some(stone.clone()),
+            active: true,
+            visited: vec![9],
+            press: game.physical_presses,
+        });
+        game.physical_buttons
+            .insert(winit::event::MouseButton::Right);
+        game.physical_presses += 1;
+        assert!(!game.tweak_drag_move(Some(10)));
+        assert!(game.tweaks.drag.is_none());
+        assert!(game.inventory[10].is_none());
+        assert_eq!(game.carried, Some(stone));
     }
 }

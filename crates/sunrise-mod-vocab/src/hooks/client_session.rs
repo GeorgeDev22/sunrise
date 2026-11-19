@@ -11,10 +11,10 @@ integrated world's display name, or `None` for an external connection (the game
 retains the player name, not a server display name). Its `address` is absent for
 memory connections; friend-invite secrets are redacted. `integrated_local`
 means this window actually owns that integrated server, not that the address
-looks like localhost. A splitscreen guest does not own the server.
+looks like localhost.
 `save_folder` gives the owning window the integrated save's folder name as a
 key for local data. It survives display-name changes and is scoped to the game
-instance. It is absent for external connections and splitscreen guests.
+instance. It is absent when this window does not own the server.
 
 `client_language()` reads the applied language, not a pending options choice.
 Use the existing `ClientHost::is_paused()` for the applied pause state.

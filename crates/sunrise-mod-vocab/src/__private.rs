@@ -53,6 +53,37 @@ pub fn set_mod_enabled(id: &str, on: bool) -> bool {
     crate::set_mod_enabled(id, on)
 }
 
+/// Index the `(namespace, mod ID)` pairs admitted to the startup registries.
+pub fn install_content_owners<'a>(owners: impl IntoIterator<Item = (&'a str, &'a str)>) {
+    crate::runtime::install_content_owners(owners);
+}
+
+/// Whether the engine has bound content ownership for the installed dispatch.
+pub fn content_owners_published() -> bool {
+    crate::runtime::content_owners_published()
+}
+
+/// Whether the declaring package of this content is switched off.
+pub fn content_owner_disabled(id: &str) -> bool {
+    crate::runtime::content_owner_disabled(id)
+}
+
+/// Whether any installed mod is off; computed only at load/toggle time.
+pub fn any_mod_disabled() -> bool {
+    crate::runtime::any_mod_disabled()
+}
+
+/// Whether a block's owner has a disabled Part subscribed to this hook.
+/// The scheduler uses the same pre-indexed table as dispatch, before consuming a tick.
+pub fn block_hook_inert(hook: HookId, state: BlockState) -> bool {
+    let table = crate::parts(hook, "block_hook_inert");
+    table
+        .for_hook(hook)
+        .and_then(|table| table.block_entry(state))
+        .and_then(|entry| entry.disabled_owner_slot())
+        .is_some()
+}
+
 /// Resolve a listener's owner once at load, for dispatch through [`mod_index_on`].
 pub fn mod_index(id: &str) -> Option<usize> {
     crate::mods().iter().position(|entry| entry.id == id)
@@ -91,6 +122,11 @@ pub fn entity_part_hooked(hook: HookId, name: &'static str, kind: &str) -> bool 
     crate::parts::parts(hook, name)
         .for_hook(hook)
         .is_some_and(|table| !table.entity(|| Some(kind)).is_empty())
+}
+
+/// Identity for one scoped creative tab event, constructed by the game.
+pub fn creative_tab_edit(id: u64) -> crate::CreativeTabEdit {
+    crate::CreativeTabEdit::of(id)
 }
 
 /// A read backend wrapper for a host the game builds narrowed: the mob tick's
@@ -209,6 +245,10 @@ pub mod built {
             quads: Vec::new(),
         }
     }
+    /// What a mod may still create of its dynamic textures: `images` and `bytes` of pixels left.
+    pub fn dynamic_texture_budget(images: u32, bytes: u64) -> crate::DynamicTextureBudget {
+        crate::DynamicTextureBudget { images, bytes }
+    }
     /// Wrap a slot of the baked model store's published generation.
     pub fn baked_model_key(generation: u64, slot: u32) -> crate::BakedModelKey {
         crate::BakedModelKey(generation, slot)
@@ -257,6 +297,10 @@ pub mod game {
     /// A scoreboard objective handle the game names.
     pub fn objective_ref(epoch: WorldEpoch, id: u64) -> ObjectiveRef {
         ObjectiveRef { epoch, id }
+    }
+    /// A scoreboard team handle the game names.
+    pub fn team_ref(epoch: WorldEpoch, id: u64) -> TeamRef {
+        TeamRef { epoch, id }
     }
     /// A chunk handle the game names.
     pub fn chunk_ref(level: LevelRef, pos: [i32; 2]) -> ChunkRef {
@@ -395,6 +439,21 @@ pub mod game {
         type Fields<'a> = ObjectiveRefFields;
         fn fields(&self) -> ObjectiveRefFields {
             ObjectiveRefFields {
+                epoch: self.epoch,
+                id: self.id,
+            }
+        }
+    }
+
+    #[non_exhaustive]
+    pub struct TeamRefFields {
+        pub epoch: WorldEpoch,
+        pub id: u64,
+    }
+    impl Fields for TeamRef {
+        type Fields<'a> = TeamRefFields;
+        fn fields(&self) -> TeamRefFields {
+            TeamRefFields {
                 epoch: self.epoch,
                 id: self.id,
             }

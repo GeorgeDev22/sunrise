@@ -79,8 +79,6 @@ mod tests {
                     let context = reader.context();
                     mod_api::dispatch_modify_default_components(&context, item, components);
                 },
-                loot_function: |_, _, _, _, _| {},
-                loot_condition: |_, _, _, _, _| {},
             },
         );
     }

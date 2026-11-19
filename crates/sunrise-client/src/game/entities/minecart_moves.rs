@@ -2,6 +2,7 @@
 //! the move gate (#2414) — in its own module so `minecarts.rs` keeps its size.
 use super::Game;
 use super::minecarts::{CartKind, Minecart};
+use crate::game::collision_source::Mover;
 use sunrise_client::collisions::SceneCollisions;
 use sunrise_core::geometry::Vec3;
 impl Game<'_> {
@@ -36,7 +37,7 @@ impl Game<'_> {
         let entities = if delta.length_squared() == 0.0 {
             Vec::new()
         } else {
-            self.cart_entity_collisions(c)
+            self.entity_collisions(Mover::Cart(c))
         };
         let mut scene = sunrise_client::collisions::EntityCollisions {
             blocks: scene,

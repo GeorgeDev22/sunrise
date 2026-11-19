@@ -28,6 +28,9 @@ which cannot declare `[native]` tables. Data kept on one entity or block is an
 | `[[native.module]]` | add a module of your own code inside a game source file, for your mixin code to share | [Support modules](native-route/5-support-modules.md) |
 | `[[native.state]]` | add a field to a game type: refused, use an attachment | [Native state](native-route/6-native-state.md) |
 
+A mod that embeds a wasm engine links the game's own wasmtime instead of bringing one:
+[The game's wasmtime](native-route/8-wasmtime.md).
+
 Every row of these tables has an `id`. No two rows of one mod share an `id`, counting `[[inject]]` rows too.
 
 ## It is tied to one game build

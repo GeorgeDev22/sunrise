@@ -241,6 +241,9 @@ impl Game<'_> {
         phase: sunrise_client::screen_draw::RenderPhase,
     ) {
         use sunrise_client::screen_draw::RenderPhase;
+        if matches!(phase, RenderPhase::Foreground) {
+            self.draw_container_hooks(batch);
+        }
         let hook = match phase {
             RenderPhase::Background => mod_api::HookId::ScreenRenderBackground,
             RenderPhase::Foreground => mod_api::HookId::ScreenRenderForeground,

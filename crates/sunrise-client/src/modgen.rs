@@ -436,8 +436,14 @@ mod tests {
         .unwrap();
         let chunk = chunk(&terrain, 3, -2);
         let tables = crate::save::SaveTables::new(&assets);
-        let saved =
-            crate::save::encode_with(&chunk, assets.registry, &biomes, Some(&tables), shape);
+        let saved = crate::save::encode_with(
+            &chunk,
+            assets.registry,
+            &biomes,
+            Some(&tables),
+            shape,
+            &Default::default(),
+        );
         let back = crate::save::decode_with(
             &saved,
             assets.registry,

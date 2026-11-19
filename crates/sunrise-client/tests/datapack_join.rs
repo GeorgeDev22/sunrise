@@ -120,6 +120,7 @@ impl Host {
             &sunrise_protocol::registry::Builtin::default(),
             &[],
             &[],
+            Default::default(),
         );
         let config = HubConfig {
             allow_flight: false,

@@ -32,6 +32,7 @@ use sunrise_client::join_seq::{
         table::{EntityLookup, Location, SourceEntity},
     },
 };
+use sunrise_client::spans::time as span;
 use sunrise_client::{
     Result,
     block_entity_anim::BlockEntityAnims,
@@ -450,9 +451,24 @@ pub(super) struct Levels {
     requested_saves: Vec<Dim>,
     /// The levels mods opened while the server runs, and the requests waiting to be applied.
     pub(super) runtime: super::runtime_levels::RuntimeTable,
+    /// The entities that travelled to another level lately: the id each had, to the id it
+    /// arrived with and when. A kill credit recorded under the old id follows it there.
+    travels: HashMap<u32, (u32, i64)>,
 }
 
 impl Levels {
+    /// Note that the entity `from` arrived in another level as `to` at `now`. A kill credit
+    /// lasts a hundred ticks, so a travel older than that names nothing still credited.
+    pub(in crate::game) fn note_travel(&mut self, from: u32, to: u32, now: i64) {
+        self.travels.retain(|_, &mut (_, at)| now - at <= 100);
+        self.travels.insert(from, (to, now));
+    }
+
+    /// The id the entity `from` arrived with in another level, if it travelled lately.
+    pub(in crate::game) fn travelled(&self, from: u32) -> Option<u32> {
+        self.travels.get(&from).map(|&(to, _)| to)
+    }
+
     /// Queue `dim` to be saved at the start of the next server tick; a level already queued is
     /// not queued twice.
     pub(in crate::game) fn request_save(&mut self, dim: Dim) {
@@ -479,6 +495,12 @@ impl Levels {
         self.heard_open.clear();
         self.requested_saves.clear();
         self.runtime.clear();
+    }
+
+    pub(super) fn abort_parked_generation(&mut self) {
+        for level in self.parked.values_mut() {
+            level.streaming.abort_generation();
+        }
     }
 
     /// A parked level, without opening or loading it.
@@ -793,6 +815,7 @@ impl Game<'_> {
             let save = SaveDir::new(
                 sunrise_client::save::dimension_dir(&self.world_root, dim.id()),
                 self.level_shapes.get(dim.id()),
+                None,
             );
             if !save.load_portal_tickets().is_empty() {
                 self.enter_level(dim)?;
@@ -967,7 +990,7 @@ impl Game<'_> {
             p.world.watched = std::mem::take(&mut self.world.watched);
             self.swap_level(&mut p);
             // The tracked entities go with their level: a level's moves, read before its tick
-            // describes its entities again, would otherwise meet the last level's (the anticheat
+            // describes its entities again, would otherwise meet the last level's (a move
             // missed the boat under a player while anyone was in another dimension).
             let states = self.lan.as_mut().map(|h| &mut h.states);
             if let Some(states) = states {
@@ -1110,6 +1133,8 @@ impl Game<'_> {
             }
         };
         self.journal_arrival(id);
+        let level = self.dim;
+        self.entity_attachments.move_collider(id, level);
         if self.uuid_admission_refused(self.persist.uuids.get(&id).copied()) {
             self.persist.off_level.insert(id, object);
             return;
@@ -1164,6 +1189,8 @@ impl Game<'_> {
     }
 
     fn tick_server_body(&mut self, paused: bool) -> Result<()> {
+        // A panic something caught left a game that carried on: its record ends with the tick.
+        self.interrupted_turns.clear();
         // `tickRateManager.tick()` once per server tick, before any level
         // (each `ServerLevel.tick` only reads `runsNormally`), and the native
         // `ServerTickStart` before that level work (NeoForge's
@@ -1240,23 +1267,43 @@ impl Game<'_> {
             });
             sunrise_client::spans::time("update_world", || self.update_world());
             let tick_span = sunrise_client::spans::guard("level_tick");
-            result = sunrise_client::block_contact::in_level(
-                self.tick,
-                (self.serving.is_some() || self.options.dedicated.is_some()).then_some(dim.id()),
-                || {
-                    if paused {
-                        self.tick_lan(true);
-                        Ok(())
-                    } else if k == 0 {
-                        self.tick()
-                    } else {
-                        let running = running.unwrap_or_else(|| self.clock.world_runs());
-                        // ClientLevel.tick: the sky flash fades in a frozen level too.
-                        self.tick_weather_effects();
-                        self.tick_world(running)
-                    }
-                },
-            );
+            // This level's moving colliders, solid to its movers for this tick only.
+            let colliders = self.placed_moving_colliders();
+            let parts = self.collision_parts();
+            let history = self
+                .collider_history(&colliders)
+                .map(sunrise_client_render::moving_colliders::HistoryScope::enter);
+            result = sunrise_client_render::moving_colliders::in_level(colliders.clone(), || {
+                sunrise_client::block_contact::in_level(
+                    self.tick,
+                    (self.serving.is_some() || self.options.dedicated.is_some())
+                        .then_some(dim.id()),
+                    || {
+                        if paused {
+                            self.tick_lan(true);
+                            Ok(())
+                        } else if k == 0 {
+                            self.tick_server_first()
+                        } else {
+                            let running = running.unwrap_or_else(|| self.clock.world_runs());
+                            // ClientLevel.tick: the sky flash fades in a frozen level too.
+                            self.tick_weather_effects();
+                            self.tick_world(running)
+                        }
+                    },
+                )
+            });
+            drop(history);
+            // Then the bodies standing on a collider that moved are carried with it.
+            if result.is_ok() && !paused {
+                sunrise_client::block_contact::in_level(
+                    self.tick,
+                    (self.serving.is_some() || self.options.dedicated.is_some())
+                        .then_some(dim.id()),
+                    || self.carry_pass(&colliders),
+                );
+            }
+            drop(parts);
             drop(tick_span);
             self.drain_entity_inside();
             if result.is_err() {
@@ -1265,6 +1312,8 @@ impl Game<'_> {
             if observe_level && let Some(level) = self.level(dim.id()) {
                 self.native_level_tick_post(level);
             }
+            #[cfg(feature = "state-digest")]
+            self.state_digest_tick(dim, running);
             sunrise_client::spans::time("server_debug", || self.publish_server_debug(dim));
             // An entity that crossed into a level that already ticked this
             // server tick is in it when the tick ends (`addDuringTeleport`).
@@ -1525,6 +1574,7 @@ impl Game<'_> {
         // Its entities' attachments are saved with them; they leave memory too.
         for id in self.persist.uuids.keys() {
             self.entity_attachments.remove(id);
+            self.entity_attachments.remove_collider(*id);
         }
         self.enter_level(back)?;
         self.levels.parked.remove(&dim);
@@ -1678,7 +1728,9 @@ mod tests {
 
     /// A game on the prepared resources in `SUNRISE_TEST_RESOURCES`, with no
     /// world opened and commands allowed.
-    fn prepared_game() -> Game<'static> {
+    fn prepared_game<'a>(
+        resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>,
+    ) -> Game<'a> {
         use crate::game::{Audio, Options, Progress, Settings, load_resources};
         let root = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
@@ -1699,7 +1751,7 @@ mod tests {
         options.resources = root.clone();
         options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
         // The game keeps its resources for the whole test.
-        let resources: &'static _ = Box::leak(Box::new(loaded.resources));
+        let resources = &*resources.insert(loaded.resources);
         let mut game = Game::new(
             resources,
             loaded.pack,
@@ -1723,7 +1775,8 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn worldborder_add_extends_a_change_in_flight() {
-        let mut game = prepared_game();
+        let mut resources = None;
+        let mut game = prepared_game(&mut resources);
         assert!(game.run_command("worldborder set 100 1000"));
         assert_eq!(game.border.remaining_ticks(), 1000);
         // Part way through the change, where the size is between its ends.
@@ -1748,7 +1801,8 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn each_level_keeps_its_own_world_border() {
-        let mut game = prepared_game();
+        let mut resources = None;
+        let mut game = prepared_game(&mut resources);
         assert!(game.run_command("worldborder set 1000"));
         assert!(game.run_command("execute in minecraft:the_nether run worldborder set 100"));
         assert_eq!(game.dim, Dim::Overworld);
@@ -2125,6 +2179,7 @@ mod tests {
         let save = sunrise_client::save::SaveDir::new(
             sunrise_client::save::dimension_dir(&world, "minecraft:overworld"),
             sunrise_client::chunk::LevelShape::OVERWORLD,
+            Some(Default::default()),
         );
         let blending = |x, z| {
             save.raw_chunk(x, z)
@@ -2267,5 +2322,81 @@ mod request_save_tests {
         assert_eq!(levels.requested_saves, [Dim::Nether, Dim::End]);
         levels.clear();
         assert!(levels.requested_saves.is_empty());
+    }
+}
+
+impl Game<'_> {
+    /// `Game::tick` as a server runs it for its first level: no window lead, which only the window's `Game` has.
+    pub(super) fn tick_server_first(&mut self) -> Result<()> {
+        self.expire_client_cracks();
+        if self.agent.hold_server {
+            return Ok(());
+        }
+        self.abort_open_transactions();
+        self.update_interaction_ranges();
+        self.tick_first_level()
+    }
+
+    /// A server's tick of its first level: the clock, functions, autosave and weather it owns, then the level.
+    pub(super) fn tick_first_level(&mut self) -> Result<()> {
+        // Only a server ticks its own world from here: its players are guests, swapped in for
+        // their turns (`as_guest`), and the window's player is a client of it.
+        self.ticks += 1;
+        self.repro_tick();
+        // `/tick freeze` stops the world but not the player.
+        let running = match self.level_pass.running {
+            Some(running) => running,
+            None => self.clock.world_runs(),
+        };
+        span("mods_inventory_ticks", || self.native_inventory_ticks());
+        if running {
+            // `MinecraftServer.tickChildren`: `commandFunctions` runs before
+            // any level ticks, so a tick function reads the game time and the
+            // day clock from before this tick. Vanilla's SavedData is loaded
+            // long before this point; the lazy scoreboard/storage read has to
+            // be done by then too, or a load tag writes over what it restores.
+            self.load_scoreboard();
+            span("tick_functions", || self.tick_functions());
+            self.world.game_time += 1;
+            if self
+                .ui
+                .rules
+                .bool_at(sunrise_client::gamerules::vanilla::ADVANCE_WEATHER)
+            {
+                self.world.weather.tick_timers(&mut self.world.random);
+            }
+            self.world.weather.tick_levels();
+        } else if self.clock.still() {
+            // Under `SUNRISE_STILL` a frozen world's rain and thunder sit at their levels, as a
+            // shader pack's smoothed values do, so `/weather rain` shows full rain without
+            // stepping the world (and its mobs) through the fade.
+            self.world.weather.settle_levels();
+        }
+        // ClientLevel.tick: the sky flash fades in a frozen level too.
+        self.tick_weather_effects();
+        let _ = span("player_autosaves", || self.finish_player_autosaves(false));
+        // MinecraftServer.tickServer's countdown, then autoSave: three
+        // hundred seconds of ticks at the rate the server runs at now.
+        self.ticks_until_autosave -= 1;
+        self.autosaving = self.ticks_until_autosave <= 0;
+        if let Some(serving) = &self.serving {
+            serving.set_saving(self.autosaving);
+        }
+        if self.autosaving {
+            span("autosave", || self.save_game_with(false))?;
+            self.ticks_until_autosave = self.next_autosave_interval();
+            if let Some(serving) = &self.serving {
+                serving.set_saving(false);
+            }
+        }
+        if running {
+            self.advance_clock();
+            // `ServerLevel.tickTime`, once the clock has moved on.
+            span("scheduled_functions", || self.run_scheduled_functions());
+        }
+        self.tick_totem();
+        self.update_totem_ready();
+        span("tick_command_extras", || self.tick_command_extras());
+        self.tick_world(running)
     }
 }

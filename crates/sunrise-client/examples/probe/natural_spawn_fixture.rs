@@ -538,7 +538,7 @@ pub fn main() -> sunrise_client::Result<()> {
         &facts,
     );
     let defaults = sunrise_world::item_defaults::read(root)?;
-    let items = Items::tags_only(root, &PackOverlay::NONE, &defaults)?;
+    let items = Items::catalog(root, &PackOverlay::NONE, &defaults)?;
     // Trial spawner rewards: the loot tables and the configs.
     let loot = if input.contains("mode=trial") || input.contains("mode=vault") {
         sunrise_client::mobs::trial_spawner::load_registry(root);
@@ -806,7 +806,14 @@ pub fn main() -> sunrise_client::Result<()> {
             trial_case(&world, registry, loot, &get, &mut random, &mut log)?;
         } else if mode == "vault" {
             let loot = loot.as_ref().ok_or("no loot tables")?;
-            vault_case(world.players.clone(), loot, &get, &mut random, &mut log)?;
+            vault_case(
+                world.players.clone(),
+                loot,
+                &get,
+                &mut random,
+                &mut log,
+                &items,
+            )?;
         } else if mode == "gen" {
             let mut gen_random = LegacyRandom::new(get("gseed", "0").parse()?);
             // The level random of the spawn predicates: no creature's predicate
@@ -1309,6 +1316,7 @@ fn vault_case(
     get: &dyn Fn(&str, &'static str) -> String,
     random: &mut LegacyRandom,
     log: &mut Vec<String>,
+    items: &Items,
 ) -> sunrise_client::Result<()> {
     let v: Vec<i32> = get("spos", "0,0,0")
         .split(',')
@@ -1379,7 +1387,7 @@ fn vault_case(
         vault.server_tick(&world, random, pos, state, ominous, &mut roll, &mut events);
         vault_events(&mut events, &mut state, ominous, tick, center, &vault, log);
     }
-    let saved = vault.save();
+    let saved = vault.save(items);
     let config = saved
         .iter()
         .find(|(k, _)| *k == "config")

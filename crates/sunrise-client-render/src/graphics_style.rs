@@ -347,7 +347,7 @@ pub fn cycler(
     };
     scrolling_label(batch, atlas, value, [x + 9.0, ty, w - 18.0], (y, h), color);
 }
-/// A screen's title, centred at the top (split-screen profiles).
+/// A screen's title, centred at the top.
 pub fn title(batch: &mut HudBatch, atlas: &HudAtlas, text: &Text) {
     let w = batch.width;
     ui::centered_text(batch, atlas, text, 0.0, 12.0, w, u32::MAX);

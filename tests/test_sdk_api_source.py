@@ -157,6 +157,69 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(refused.exception.code, "E_FEATURES")
 
 
+class RootTests(unittest.TestCase):
+    """`check_root`: each API root is judged by a consumer that depends on it."""
+    REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
+
+    def metadata(self):
+        return {"packages": [package("sunrise-mod-api"), package("sunrise-wasmtime"),
+                             package("serde", source=self.REGISTRY), package("wasmtime", source=self.REGISTRY)],
+                "resolve": {"nodes": [node("sunrise-mod-api", ("serde", None)),
+                                      node("sunrise-wasmtime", ("wasmtime", None)), node("serde"), node("wasmtime")]}}
+
+    GAME = "\n".join(["0sunrise-mod-host v0.1.0|", "1serde v0.1.0|derive", "1wasmtime v0.1.0|cranelift,std"])
+    STARTER = "\n".join(["0mod-starter v0.1.0|", "1serde v0.1.0|derive"])
+    NATIVE = "\n".join(["0mod-starter-wasmtime v0.1.0|", "1serde v0.1.0|derive", "1wasmtime v0.1.0|cranelift,std"])
+
+    def check(self, root, consumer):
+        return api_source.check_root(self.metadata(), self.metadata(), root, self.GAME, consumer, "consumer")
+
+    def test_an_api_only_starter_is_judged_on_the_api_closure_alone(self):
+        self.assertEqual(self.check("sunrise-mod-api", self.STARTER), 2)
+
+    def test_the_wasmtime_root_needs_a_consumer_that_depends_on_it(self):
+        self.assertEqual(self.check("sunrise-wasmtime", self.NATIVE), 2)
+        with self.assertRaises(Refusal) as refused:
+            self.check("sunrise-wasmtime", self.STARTER)
+        self.assertEqual(refused.exception.code, "E_FEATURES")
+        self.assertIn("wasmtime 0.1.0: game ['cranelift', 'std'], ours None", str(refused.exception))
+        with self.assertRaises(Refusal) as refused:
+            self.check("sunrise-wasmtime", self.NATIVE.replace("cranelift,std", "std"))
+        self.assertEqual(refused.exception.code, "E_FEATURES")
+
+
+    def test_a_root_the_games_other_crates_widen_may_resolve_fewer_packages_but_never_more(self):
+        wider = self.metadata()
+        wider["packages"].append(package("subtle", source=self.REGISTRY))
+        wider["resolve"]["nodes"].append(node("subtle"))
+        next(n for n in wider["resolve"]["nodes"] if n["id"] == "wasmtime")["deps"].append(
+            {"pkg": "subtle", "dep_kinds": [{"kind": None}]})
+        game = "\n".join([self.GAME, "1subtle v0.1.0|"])
+        args = ("sunrise-wasmtime", game, self.NATIVE, "consumer")
+        self.assertEqual(api_source.check_root(wider, self.metadata(), *args, exact=False), 2)
+        # Wasmtime itself is exact: a feature the game lacks fails, and so does one the game has that it misses.
+        for consumer in (self.NATIVE.replace("cranelift,std", "cranelift,std,wat"),
+                         self.NATIVE.replace("cranelift,std", "std")):
+            with self.subTest(consumer), self.assertRaises(Refusal) as refused:
+                api_source.check_root(wider, self.metadata(), "sunrise-wasmtime", game, consumer, "consumer",
+                                      exact=False)
+            self.assertEqual(refused.exception.code, "E_FEATURES")
+        # A transitive crate may have fewer features than the game's, never more.
+        loose = self.NATIVE + "\n1subtle v0.1.0|"
+        self.assertEqual(api_source.check_root(wider, self.metadata(), "sunrise-wasmtime", game, loose, "consumer",
+                                               exact=False), 2)
+        with self.assertRaises(Refusal) as refused:
+            api_source.check_root(wider, self.metadata(), "sunrise-wasmtime", game,
+                                  self.NATIVE + "\n1subtle v0.1.0|extra", "consumer", exact=False)
+        self.assertEqual(refused.exception.code, "E_FEATURES")
+        with self.assertRaises(Refusal) as refused:
+            api_source.check_root(wider, self.metadata(), *args)
+        self.assertEqual(refused.exception.code, "E_CLOSURE")
+        with self.assertRaises(Refusal) as refused:
+            api_source.check_root(self.metadata(), wider, *args, exact=False)
+        self.assertEqual(refused.exception.code, "E_CLOSURE")
+
+
 class FeatureTests(unittest.TestCase):
     TREE = "\n".join([
         "0sunrise-mod-host v0.1.0 (/w/crates/sunrise-mod-host)|",

@@ -37,6 +37,12 @@ use sunrise_core::geometry::Vec3;
 use sunrise_core::nbt::Tag;
 use sunrise_protocol::{connection::Pipe, packets::configuration::ClientInformation};
 
+impl Game<'_> {
+    pub(in crate::game) fn set_sent_sneak_for_test(&mut self) {
+        self.remote.as_mut().unwrap().last_input |= super::SHIFT_INPUT;
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
     Phase(UsePhase, LogicalSide),
@@ -293,6 +299,7 @@ fn with_interaction_game_at(
             game.options.execution_role = ExecutionRole::Client;
             let (client, server) = Pipe::pair();
             game.connect_local(client, "InteractionTest").unwrap();
+            game.remote.as_mut().unwrap().logged_in = true;
             Some(server)
         } else {
             game.options.dedicated = Some(Vec::new());
@@ -1035,12 +1042,19 @@ fn air_event_skips_the_item_and_consuming_results_end_the_click() {
                     .get("minecraft:zombie")
                     .unwrap()
                     .clone();
-                game.mobs.push(sunrise_client::mobs::Mob::new(
-                    42,
-                    kind,
-                    Vec3::new(0.5, 64.0, 5.5),
-                    0.0,
-                ));
+                if client {
+                    game.spawn_entity(42, &kind.id, [0.5, 64.0, 5.5], [0.0; 3]);
+                } else {
+                    game.mobs.push(sunrise_client::mobs::Mob::new(
+                        42,
+                        kind,
+                        Vec3::new(0.5, 64.0, 5.5),
+                        0.0,
+                    ));
+                }
+                if client {
+                    game.refresh_client_pick(1.0);
+                }
                 assert!(game.entity_targeted());
                 assert!(
                     game.right_click_item(Hand::Main, &ItemStack::new("minecraft:stick", 1))
@@ -1816,5 +1830,36 @@ fn a_server_client_keeps_a_bundle_use_until_the_server_completes_it() {
                 )]
             );
         });
+    });
+}
+
+/// `SolidBucketItem.useOn`: a powder snow bucket placed on a block leaves an empty bucket in the
+/// hand that placed it, on the server and in the client's own prediction, so the client's next
+/// click in the same tick uses the bucket (`use_item`) as vanilla's does.
+#[test]
+#[ignore = "daily"]
+fn a_placed_powder_snow_bucket_leaves_a_bucket_in_hand_on_both_sides() {
+    mod_platform::testing::with_mods(Vec::new().into(), || {
+        for client in [false, true] {
+            with_interaction_game(client, |game| {
+                game.set_mode_id(0);
+                let stone = game
+                    .pack
+                    .assets
+                    .registry
+                    .default_state("minecraft:stone")
+                    .unwrap();
+                game.world.set(0, 64, 0, stone).unwrap();
+                game.forced_hit = Some(hit());
+                game.inventory[game.selected] =
+                    Some(ItemStack::new("minecraft:powder_snow_bucket", 1));
+                use_block(game, client);
+                assert_eq!(
+                    game.inventory[game.selected].as_ref().map(|s| &*s.item),
+                    Some("minecraft:bucket"),
+                    "client={client}"
+                );
+            });
+        }
     });
 }

@@ -30,6 +30,17 @@ impl JavaString {
     pub fn to_string_lossy(&self) -> String {
         String::from_utf16_lossy(&self.0)
     }
+    /// Encoded byte length for Java's `DataOutput.writeUTF`, including each surrogate separately.
+    pub fn modified_utf8_len(&self) -> usize {
+        self.0
+            .iter()
+            .map(|&unit| match unit {
+                1..=127 => 1,
+                0..=2047 => 2,
+                _ => 3,
+            })
+            .sum()
+    }
 }
 
 pub type Compound = BTreeMap<JavaString, Tag>;
@@ -890,16 +901,7 @@ impl Writer {
         self.put(&len.to_be_bytes())
     }
     fn string(&mut self, string: &JavaString) -> Result<(), Error> {
-        let len: usize = string
-            .0
-            .iter()
-            .map(|&c| match c {
-                1..=127 => 1,
-                0..=2047 => 2,
-                _ => 3,
-            })
-            .sum();
-        let Ok(len) = u16::try_from(len) else {
+        let Ok(len) = u16::try_from(string.modified_utf8_len()) else {
             if self.empty_long_strings {
                 return self.put(&0u16.to_be_bytes());
             }

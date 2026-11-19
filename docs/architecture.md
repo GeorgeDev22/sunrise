@@ -11,6 +11,8 @@ The gameplay library re-exports the reusable API, keeping existing mod targets u
 Gameplay tests run in its library test target, separately from the reusable library's tests.
 There is no copy of gameplay in the executable's test target. Tools and probes depend only
 on the reusable library, so gameplay edits do not invalidate their builds.
+Gameplay is moving out of it (#2210): `sunrise-gameplay` takes the server side (vanilla's logical side) and
+`sunrise-client-gameplay` the client-only side, each module leaving a shim at its old path in `game/`.
 
 Paths: `L/` = `crates/sunrise-client/src/`, `G/` = `crates/sunrise-client/src/game/`, `W/` =
 `crates/sunrise-world/src/`, `K/` = `crates/sunrise-client-core/src/`, `C/` = `crates/sunrise-command/src/`,
@@ -27,16 +29,16 @@ command above to inspect the selection rather than relying on historical counts.
 
 | # | Area (commits) | Files | Checks |
 |---|---|---|---|
-| 1 | Game loop, tick order, frame pacing (554) | `L/game.rs` (`fn tick`, `fn tick_world`, `fn render`), `G/runtime/window_handler.rs` (`about_to_wait`), `L/clock.rs`, `N/window.rs`, `R/spans.rs` | game_loop, frame_limiter, interaction_input, tick |
+| 1 | Game loop, tick order, frame pacing (554) | `L/game.rs` (`fn tick`, `fn render`), `G/world/level_tick.rs` (`fn tick_world`), `G/runtime/window_handler.rs` (`about_to_wait`), `L/clock.rs`, `N/window.rs`, `R/spans.rs` | game_loop, frame_limiter, interaction_input, tick |
 | 2 | Mobs in the game loop, spawning (166) | `G/creatures.rs`, `G/natural_spawning.rs`, `L/mobs/spawning.rs`, `L/mobs/spawn_rules.rs`, `L/mobs/spawn_selection.rs`, `L/mobs/finalize.rs`, `G/spawner.rs`, `G/trial_spawner.rs` | natural_spawn, spawn_rules, finalize_spawn, spawner, trial_spawner, mob_ai |
 | 3 | World save and load (163) | `L/save.rs`, `G/saving.rs`, `G/persist.rs` (entities), `L/entity_nbt.rs`, `K/block_entity_nbt.rs`, `W/region.rs`, `crates/sunrise-core/src/nbt.rs` | save_roundtrip, world_reopen, world, datafix |
 | 4 | World generation (153) | `W/worldgen.rs`, `W/worldgen/` (`generator*.rs`, `feature_graph.rs`, `structure/`, `placement/`), `L/vanillagen.rs` | chunk_generation, worldgen, server_world_gen, world_spawn, feature_graph, feature_placement, decoration and the other worldgen harnesses |
 | 5 | Multiplayer client, packets in (145) | `G/remote.rs` (`fn handle_packet`, `fn tick_remote`), `G/remote_*.rs`, `L/net.rs` | dedicated_server, server_entities, lan_e2e (all) |
 | 6 | Agent control, sunrise-ctl (145) | `L/control.rs`, `L/bin/sunrise-ctl/`, `G/control.rs`, `G/agent.rs`, `G/events.rs`, `G/ui_control.rs` | `python3 tools/agent_control_e2e.py`; `cargo test -p sunrise-client-lib --bin sunrise-ctl` |
-| 7 | CI and release (134) | `.github/workflows/` (`ci.yml`, `parity.yml`, `release.yml`, `launcher.yml`), `tools/ci/`, `tools/parity.py`, `tools/pr_ready.py` | `python3 -m unittest discover -s tests`; actionlint (`.github/actionlint.yaml`) |
+| 7 | CI and release (134) | `.github/workflows/` (`ci.yml`, `parity.yml`, `release.yml`), `tools/ci/`, `tools/parity.py`, `tools/pr_ready.py` | `python3 -m unittest discover -s tests`; actionlint (`.github/actionlint.yaml`) |
 | 8 | LAN host: connections, play state, tracking (133) | `L/lan/` (`conn.rs`, `hub.rs` + `hub/`, `chunks.rs`, `entity.rs`, `tracking.rs`, `guest.rs`, `playerdata.rs`), `G/lan.rs` | lan, lan_e2e (all), `cargo test -p sunrise-client --test lan_bot` |
 | 9 | Renderer core (132) | `R/gfx.rs` (`Renderer::new`, `Renderer::render`), `R/gfx/` (cull, occlusion, translucency, upload, timing, lod) | client_graphics, culling_rays, translucency; `sunrise-client --benchmark standard` |
-| 10 | Launcher (124) | `launcher/src/` (`main.rs`, `backend.rs`, `cli.rs`, `mcp.rs`, `servers_page.rs`) | `cd launcher && cargo test`; `python3 tools/launcher_mcp_e2e.py` |
+| 10 | Launcher (124) | [sunrise-org/sunrise-launcher](https://github.com/sunrise-org/sunrise-launcher): `src/` (`main.rs`, `backend.rs`, `cli.rs`, `mcp.rs`, `servers_page.rs`) | `cargo test` in that repository |
 | 11 | Mob types and species (117) | `L/mobs.rs`, `L/mobs/species.rs`, `L/mobs/data.rs`, `L/mobs/living.rs`, `L/mobs/drops.rs`, `L/mobs/gear.rs` | mob_attributes, entity_attribute, entity_death_loot, mob_ai |
 | 12 | Guests' actions on a server (98) | `G/network/lan_actions/` (`turns.rs`: `fn as_guest`, `tick.rs`: `fn tick_guests`), `G/lan_{attributes,pvp,chat,crafting,stations,trading,mount_menu,waypoints}.rs` | server_player_combat, server_player_damage, server_player_targets, lan_e2e (all) |
 | 13 | Modpack porting, mod content (97) | `crates/sunrise-port-pack/`, `L/mod_content.rs`, `tools/port_*.py` | `cargo test -p sunrise-port-pack`; `python3 tools/mod_port_harness.py` |
@@ -55,7 +57,7 @@ command above to inspect the selection rather than relying on historical counts.
 | 26 | Crafting and the recipe book (59) | `L/crafting.rs`, `L/recipe_book.rs`, `L/recipe_book_screen.rs`, `G/recipe_book.rs`, `G/machines.rs`, `G/machines/crafter.rs` | recipe, recipe_book, recipe_book_view, place_recipe, ghost_recipe, crafter |
 | 27 | Vehicles and mounts (54) | `G/boats.rs`, `G/boat_passengers.rs`, `G/minecarts.rs`, `G/mounts.rs`, `G/mount_menu.rs`, `G/llamas.rs`, `G/passengers.rs` | server_entities, lan_e2e boats minecarts riding mounts |
 | 28 | Villagers, trading, raids (50) | `L/mobs/villager*.rs`, `L/merchant.rs`, `G/trading.rs`, `G/villagers.rs`, `L/raid.rs`, `G/raids.rs`, `L/gossip.rs` | trading, raid, mob_ai |
-| 29 | Title, worlds, startup (49) | `L/title.rs` + `L/title/`, `G/startup_menu.rs`, `R/title_edition.rs`, `G/loading_window.rs` (the first renderer, `start_game`), `G/resource_load.rs` (the startup resource load) | world_options; `cargo test -p sunrise-client --lib title` |
+| 29 | Title, worlds, startup (49) | `L/title.rs` + `L/title/`, `G/startup_menu.rs`, `G/loading_window.rs` (the first renderer, `start_game`), `G/resource_load.rs` (the startup resource load) | world_options; `cargo test -p sunrise-client --lib title` |
 | 30 | Dedicated server, sunrise-server (48) | `G/dedicated.rs`, `G/dedicated/status.rs`, `crates/sunrise-server/`, `crates/sunrise-server-files/` | dedicated_server, server_files, user_cache, online_mode, server_ops_feedback |
 | 31 | Particles and client effects (46) | `R/particles.rs`, `G/render_tick.rs`, `G/level_particles.rs`, `L/animate_tick.rs` | particle_providers, block_particles, entity_particles, emitter_particles, marker_particles |
 | 32 | Bosses and the End (45) | `G/dragon.rs`, `G/wither.rs`, `G/end.rs` | server_dragon, forced_end, end_podium, end_gateway |
@@ -82,5 +84,5 @@ same live TNT do not clear the flag, as in 26.3.
 Construction/join callback regressions also cover nested spawns and logically
 removed incoming or neighbouring items, before the native removal sweep.
 
-Controller glyphs (`R/pad_glyph.rs`, drawn by the gameplay guide, notices, splitscreen prompts and declared
+Controller glyphs (`R/pad_glyph.rs`, drawn by the gameplay guide, notices and declared
 buttons) are part of the same kit: [ui-kit.md](ui-kit.md) says how to ask for one and how to test it.

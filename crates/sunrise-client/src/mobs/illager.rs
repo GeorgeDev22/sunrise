@@ -428,12 +428,13 @@ fn cast_fangs(m: &mut Mob, cx: &mut Cx) {
     }
 }
 /// `createSpellEntity`: the first block below `max_y` whose up face is
-/// sturdy, standing on the top of whatever collision shape is in the way.
+/// sturdy, standing on the top of whatever collision shape is in the way
+/// ([`super::MobWorld::collision_top`]: a published shape's, #1710).
 ///
 /// The floor test is `BlockState.isFaceSturdy(.., UP)`, not a full cube: a
 /// soul sand or mud block is 14/16 high and still supports a fang, where
 /// requiring a full collision shape drops the fang into the block.
-fn fang_floor(w: &super::MobWorld, x: f64, z: f64, min_y: f64, max_y: f64) -> Option<f64> {
+pub fn fang_floor(w: &super::MobWorld, x: f64, z: f64, min_y: f64, max_y: f64) -> Option<f64> {
     let (bx, bz) = (x.floor() as i32, z.floor() as i32);
     let mut y = max_y.floor() as i32;
     while y >= min_y.floor() as i32 - 1 {
@@ -443,7 +444,7 @@ fn fang_floor(w: &super::MobWorld, x: f64, z: f64, min_y: f64, max_y: f64) -> Op
             let top = if w.facts.is_air(here) {
                 0.0
             } else {
-                f64::from(w.data.state(here).top)
+                w.collision_top(bx, y, bz)
             };
             return Some(f64::from(y) + top);
         }
@@ -1124,7 +1125,8 @@ mod tests {
         );
         // `Vindicator.addAdditionalSaveData` writes the flag, false or true.
         let types = [("minecraft:vindicator".into(), m.kind.clone())].into();
-        let saved = crate::entity_nbt::mob_to_nbt(&m, [0; 4], None, None, |_| None);
+        let saved =
+            crate::entity_nbt::mob_to_nbt(&m, [0; 4], None, None, |_| None, &Default::default());
         assert_eq!(saved.get("Johnny"), Some(&Tag::Byte(1)));
         let back = crate::entity_nbt::mob_from_nbt(&saved, &types, 2, None).unwrap();
         assert_eq!(i8::from(back.extra.johnny), 1, "the reloaded flag");
@@ -1149,7 +1151,14 @@ mod tests {
         if let Tag::Compound(c) = &mut silent {
             c.insert("Johnny".into(), Tag::Byte(0));
         }
-        let saved = crate::entity_nbt::mob_to_nbt(&loaded, [0; 4], Some(&silent), None, |_| None);
+        let saved = crate::entity_nbt::mob_to_nbt(
+            &loaded,
+            [0; 4],
+            Some(&silent),
+            None,
+            |_| None,
+            &Default::default(),
+        );
         assert_eq!(saved.get("Johnny"), None);
     }
     /// `EvokerWololoSpellGoal` finds blue sheep with

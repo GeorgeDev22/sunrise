@@ -741,7 +741,7 @@ pub fn process_cape(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The cape the launcher gives an offline name (`SUNRISE_OFFLINE_CAPE`, a
-/// PNG's path; launcher/src/skins.rs), read once as `process_cape` lays it out.
+/// PNG's path), read once as `process_cape` lays it out.
 pub fn offline_cape() -> Option<&'static [u8]> {
     static CAPE: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
     CAPE.get_or_init(|| {
@@ -759,7 +759,7 @@ pub fn offline_cape() -> Option<&'static [u8]> {
 
 /// The skin the launcher gives an offline name (`SUNRISE_OFFLINE_SKIN`, a
 /// PNG's path, and `SUNRISE_OFFLINE_SKIN_MODEL`, `classic` or `slim`;
-/// launcher/src/skins.rs): its 64x64 RGBA as `process_legacy_skin` lays it
+/// the launcher sets both): its 64x64 RGBA as `process_legacy_skin` lays it
 /// out, and whether it is slim. Read once.
 pub fn offline_skin() -> Option<&'static (Vec<u8>, bool)> {
     static SKIN: std::sync::OnceLock<Option<(Vec<u8>, bool)>> = std::sync::OnceLock::new();
@@ -987,14 +987,11 @@ const BOUNDS: Bounds = Bounds {
 /// without end; the disk cache holds everything it drops.
 const MAX_SKIN_IMAGES: usize = 1024;
 impl Downloader {
-    /// The decoded 64×64 RGBA image an atlas location holds, when it is
-    /// still in memory (3D skin layers builds its geometry from it, and the
-    /// disk cache backs whatever was dropped).
+    /// The decoded 64×64 RGBA image an atlas location holds, when it is still in memory (Realms).
     pub fn image(&self, location: &str) -> Option<&[u8]> {
         self.images.get(location).map(Vec::as_slice)
     }
-    /// Keeps a decoded image under `location` for the images read back later
-    /// (a launcher's offline skin, which skips `queue`).
+    /// Keeps the launcher's offline cape for `again`, as it skips `queue`.
     pub fn remember_image(&mut self, location: &str, rgba: &[u8]) {
         self.remember(location.to_owned(), rgba.to_vec());
     }

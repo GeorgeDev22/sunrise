@@ -45,7 +45,7 @@ fn run() {
     let manifest = Package::read(&path).unwrap().manifest;
     let info = PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         mod_api::PackageKind::Code,
         mod_api::Side::Both,
         vec![manifest.id.clone()],
@@ -116,6 +116,7 @@ fn run() {
                         inputs: vec![0],
                         outputs: vec![0],
                         faces: std::array::from_fn(|_| vec![0]),
+                        insert_rules: Vec::new(),
                         menu: None,
                     }),
                 )]

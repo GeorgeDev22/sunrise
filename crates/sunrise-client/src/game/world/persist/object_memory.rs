@@ -901,6 +901,7 @@ impl Game<'_> {
             self.persist.raw.get(&id),
             Some(self.pack.assets.registry),
             |other| self.persist.uuid_of(other),
+            self.res.items(),
         );
         self.put_last_hurt_by_mob(self.mob_at(object), &mut tag);
         if sunrise_client::mobs::camel::is_camel(self.mob_at(object).species())

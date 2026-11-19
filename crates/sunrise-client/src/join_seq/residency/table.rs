@@ -247,6 +247,15 @@ impl EntityTable {
         self.uuids.candidate(dimension, uuid, after)
     }
 
+    /// The UUID an admitted entity is indexed under in its level: its known
+    /// UUID or the one saved for it.
+    pub fn resident_uuid(&mut self, id: u32) -> Option<[i32; 4]> {
+        self.drain();
+        let id = NonZeroU32::new(id)?;
+        let row = *self.rows.get(&id)?;
+        self.uuids.key(id, row).map(|(_, uuid)| uuid)
+    }
+
     /// Candidates in lookup insertion order, independent of family and runtime id.
     /// Extraction/restoration preserves order; removal and re-admission moves to the end.
     /// Dragon parts are not members of vanilla's entity lookup.

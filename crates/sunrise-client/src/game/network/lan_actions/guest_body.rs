@@ -64,7 +64,6 @@ impl Game<'_> {
     /// regeneration and the food tick (ServerPlayer.doTick). Their hurt
     /// sounds are heard at the guest.
     pub(super) fn guest_server_tick(&mut self, conn: u32, body: bool) {
-        self.guest_replay(conn);
         self.guest_vehicle_tick(conn);
         // The last move's fall stands in for the server's delta movement.
         let Some(host) = self.lan.as_mut() else {
@@ -156,6 +155,8 @@ impl Game<'_> {
                 return (Vec::new(), None);
             };
             player.fluids.boat = boat;
+            // The supporting-block scan for this tick's moves reads the boots.
+            player.leather_boots = leather_boots;
             let mut w = MotionWorld {
                 entities: &[],
                 player,
@@ -248,7 +249,6 @@ impl Game<'_> {
             // lit campfires and grown sweet berry bushes hurt (#1305).
             w.player.shift_key_down = sneaking;
             let _ = w.player.set_sleeping(sleeping);
-            w.player.leather_boots = leather_boots;
             w.player.freeze_immune = freeze_immune;
             w.player.burn_from_stepping_immune = burn_immune;
             let _ = w.server_block_damage(start);

@@ -318,7 +318,7 @@ impl Menu {
             if let Some(mut taken) = taken {
                 self.on_take(env, target, &mut taken);
                 if !self.inventory_add(env, &mut taken) {
-                    self.drop_stack(&taken);
+                    self.drop_stack(&taken, env.items);
                 }
             }
         } else {

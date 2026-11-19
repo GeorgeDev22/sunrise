@@ -288,3 +288,82 @@ fn posed_parts_are_the_poses_the_draw_made_and_change_nothing() {
     assert_eq!(gpu(&layered, nose), gpu(&layered, Default::default()) - 12);
     super::villager_client::install(&table, &Default::default());
 }
+
+#[test]
+fn equipment_model_override_draws_with_body_poses_and_inventory_does_not_dispatch_it() {
+    struct Source {
+        data: MobData,
+        model: std::sync::Arc<Part>,
+        calls: std::cell::Cell<usize>,
+    }
+    impl RenderDataSource for Source {
+        fn mob_data(&self) -> &MobData {
+            &self.data
+        }
+        fn equipment_layers(&self, _: &Mob) -> Vec<Layer> {
+            self.calls.set(self.calls.get() + 1);
+            let mut layer = Layer::equipment(
+                "no_vanilla_layer",
+                "test:equipment",
+                0xFFFFFFFF,
+                ARMOR_GLINT,
+            );
+            layer.equipment_model = Some(self.model.clone());
+            vec![layer]
+        }
+        fn equipment_inventory(&self, _: &Mob) -> Vec<Layer> {
+            Vec::new()
+        }
+    }
+    let (mob, data) = humanoid_zombie();
+    let source = Source {
+        model: mob.kind.model.clone(),
+        data,
+        calls: std::cell::Cell::new(0),
+    };
+    let uv = [0.25, 0.25, 0.5, 0.5];
+    let atlas = |name: &str| {
+        Some(if name == "test:equipment" {
+            uv
+        } else {
+            [0.0, 0.0, 1.0, 1.0]
+        })
+    };
+    assert!(
+        !drawn_textures(&mob, &source)
+            .iter()
+            .any(|name| name == "test:equipment")
+    );
+    assert_eq!(
+        source.calls.get(),
+        0,
+        "inventory must not invoke frame providers"
+    );
+    let mut actual = Vec::new();
+    render_with(
+        &mob,
+        0.5,
+        glam::DVec3::ZERO,
+        &atlas,
+        0xF0F0,
+        &source,
+        &[],
+        &mut actual,
+    );
+    let mut expected = Vec::new();
+    render_with(
+        &mob,
+        0.5,
+        glam::DVec3::ZERO,
+        &atlas,
+        0xF0F0,
+        &source.data,
+        &[(&source.model, uv, 0xFFFFFFFF, ARMOR_GLINT, false)],
+        &mut expected,
+    );
+    assert_eq!(source.calls.get(), 1);
+    assert_eq!(
+        bytemuck::cast_slice::<_, u8>(&actual),
+        bytemuck::cast_slice::<_, u8>(&expected)
+    );
+}

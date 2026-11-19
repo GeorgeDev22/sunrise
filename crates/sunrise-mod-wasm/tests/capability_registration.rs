@@ -77,6 +77,13 @@ fn with_guest(conflict: Option<&str>, f: impl FnOnce() + Send) {
         let mut mods = vec![ModEntry::new("earlier_capabilities", Box::new(Earlier))];
         mods.extend(loaded.mods);
         mods.push(ModEntry::new("later_capabilities", Box::new(Later)));
+        // Registration runs in its own phase, as in the game: the guest declares a general entity
+        // type, which any other phase refuses (that traps the guest and stops its group).
+        // The phase lives in the game backend that `initialize` installs: a scope opened before it
+        // would write a fallback the guest's registrar never reads.
+        mod_api::__private::initialize().unwrap();
+        let _registration =
+            mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::Registration);
         mod_api::testing::with_mods(mods.into(), f);
     });
 }

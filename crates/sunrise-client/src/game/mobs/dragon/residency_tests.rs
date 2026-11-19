@@ -41,7 +41,7 @@ fn singleton_dragon_load_keeps_state_and_reserves_nine_ids() {
         let mut saved = Dragon::new(Vec3::new(2.0, 90.0, 3.0), 25.0, 0);
         saved.health = 73.0;
         let uuid = [17, 0, 0, 3];
-        let tag = saved.to_nbt(uuid, None);
+        let tag = saved.to_nbt(uuid, None, &Default::default());
         let before = game.next_entity;
         game.load_dragon(tag.clone(), Some(uuid));
         let dragon = game.dragon.as_ref().unwrap();

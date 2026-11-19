@@ -11,7 +11,7 @@ use crate::registry::Registry;
 pub enum Place {
     /// A button on the Sunrise Settings page, after the engine's own pages.
     SunriseSettings,
-    /// A full-width button of the pause menu, above Options (under Splitscreen's settings). The
+    /// A full-width button of the pause menu, above Options. The
     /// pause menu has it only when a page registered there.
     Pause,
     /// A section of Sunrise Settings' Extras page, with no entry: its rows join the page's group

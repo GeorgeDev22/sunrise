@@ -64,6 +64,7 @@ fn run(mode: Option<u8>) -> (Vec<(String, u32)>, usize, i32, u32, i64, bool) {
             game.save = Arc::new(sunrise_client::save::SaveDir::new(
                 scratch.path().join("save"),
                 sunrise_client::save::LevelShape::OVERWORLD,
+                Some(Default::default()),
             ));
             game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
             game.lan_acting_uuid = Some(7);

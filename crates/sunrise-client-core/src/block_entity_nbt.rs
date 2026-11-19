@@ -14,6 +14,13 @@
 //! survive and only what the game changed is replaced.
 use sunrise_core::nbt::{Compound, Tag};
 
+/// The unsigned-byte slot addressed by a saved `Items` row, if it names one.
+pub fn saved_item_slot(entry: &Tag) -> Option<usize> {
+    crate::nbt_value::number(entry.get("Slot"))
+        .filter(|slot| (-128..=255).contains(slot))
+        .map(|slot| usize::from(slot as u8))
+}
+
 fn string(s: &str) -> Tag {
     Tag::String(s.into())
 }
@@ -81,6 +88,7 @@ pub fn gateway_exit(tag: &Tag) -> Option<[i32; 3]> {
 struct Fields<'a> {
     input: &'a Tag,
     out: Compound,
+    stack: &'a dyn Fn(&Tag) -> Option<Tag>,
 }
 impl<'a> Fields<'a> {
     /// Every key of `tag` but the metadata the tail of `canonical` writes.
@@ -177,7 +185,7 @@ impl<'a> Fields<'a> {
     }
     /// `ContainerHelper.loadAllItems` + `saveAllItems`.
     fn items(&mut self, size: usize, also_when_empty: bool) {
-        let items = items(self.input.get("Items"), size);
+        let items = items(self.input.get("Items"), size, self.stack);
         if !items.is_empty() || also_when_empty {
             self.put("Items", Tag::List(items));
         }
@@ -190,7 +198,7 @@ impl<'a> Fields<'a> {
     }
     /// An optional `ItemStack` (`RecordItem`, `Book`, `item`).
     fn item(&mut self, key: &str) -> bool {
-        match self.input.get(key).and_then(stack) {
+        match self.input.get(key).and_then(self.stack) {
             Some(item) => {
                 self.put(key, item);
                 true
@@ -257,7 +265,7 @@ fn template(tag: &Tag) -> Option<Tag> {
     }
 }
 /// `ItemStackWithSlot` entries of a container of `size` slots, by ascending slot.
-fn items(tag: Option<&Tag>, size: usize) -> Vec<Tag> {
+fn items(tag: Option<&Tag>, size: usize, stack: &dyn Fn(&Tag) -> Option<Tag>) -> Vec<Tag> {
     let mut slots: Vec<Option<Tag>> = vec![None; size];
     if let Some(Tag::List(list)) = tag {
         for entry in list {
@@ -409,11 +417,18 @@ pub fn is_known_type(id: &str) -> bool {
 /// entity compound with `id`, `x`, `y`, `z`); None for an unknown type or a tag
 /// without a position.
 pub fn canonical(tag: &Tag) -> Option<Tag> {
+    canonical_with_stack(tag, &stack)
+}
+
+/// Canonical block entity fields with the caller's saved-stack codec.
+/// Only actual stack fields use this codec; templates and opaque metadata stay intact.
+pub fn canonical_with_stack(tag: &Tag, stack: &dyn Fn(&Tag) -> Option<Tag>) -> Option<Tag> {
     let id = id(tag)?;
     let (x, y, z) = (int(tag.get("x"))?, int(tag.get("y"))?, int(tag.get("z"))?);
     let mut f = Fields {
         input: tag,
         out: Compound::new(),
+        stack,
     };
     // A mod's type: its own fields as loaded (`saveAdditional`), the
     // position, and its component patch only when it has one, as a mod block

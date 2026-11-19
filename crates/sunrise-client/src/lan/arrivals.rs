@@ -463,7 +463,7 @@ pub fn export_record(
     }
     let id = freeze.then(new_handover_id).transpose()?;
     let g = &hub.guests[i];
-    let tag = super::playerdata::player_tag(g);
+    let tag = super::playerdata::player_tag(g, &hub.encoder.items);
     let bytes = write_named(
         &NamedTag {
             name: "".into(),
@@ -891,6 +891,7 @@ mod hub_tests {
             &sunrise_protocol::registry::Builtin::default(),
             &[],
             &[],
+            Default::default(),
         );
         let config = HubConfig {
             default_game_mode: 0,
@@ -2397,8 +2398,8 @@ mod hub_tests {
         assert!(g.placed && !g.held && g.handover.is_none());
         // The whole player: the compound a save would write is the same one.
         assert_eq!(
-            crate::lan::playerdata::player_tag(g),
-            crate::lan::playerdata::player_tag(&source.guests[i])
+            crate::lan::playerdata::player_tag(g, &Default::default()),
+            crate::lan::playerdata::player_tag(&source.guests[i], &Default::default())
         );
         assert_eq!(g.position, [10.5, 70.0, -3.25]);
         assert_eq!((g.xp_level, g.food, g.game_mode, g.selected), (7, 12, 1, 3));
@@ -2505,14 +2506,14 @@ mod hub_tests {
             "announce not a bool",
             serde_json::json!({ "record": record, "announce": "yes" }),
         ));
-        let before = crate::lan::playerdata::player_tag(&hub.guests[1]);
+        let before = crate::lan::playerdata::player_tag(&hub.guests[1], &Default::default());
         for (what, request) in &cases {
             let error = import_player(&mut hub, UUID_N, request).expect_err(what);
             assert!(!error.is_empty(), "{what}");
             let g = &hub.guests[1];
             assert!(g.held && !g.placed, "{what}: the player must still be held");
             assert_eq!(
-                crate::lan::playerdata::player_tag(g),
+                crate::lan::playerdata::player_tag(g, &Default::default()),
                 before,
                 "{what}: nothing may change"
             );
@@ -2963,7 +2964,7 @@ mod hub_tests {
             (body.fall_distance, body.velocity),
             (2.5, [0.25, 0.0, -0.125])
         );
-        let tag = crate::lan::playerdata::player_tag(g);
+        let tag = crate::lan::playerdata::player_tag(g, &Default::default());
         assert_eq!(number(tag.get("SunriseTest")), Some(7));
         assert_eq!(number(tag.get("Air")), Some(40));
         assert_eq!(number(tag.get("Fire")), Some(100));
@@ -3042,12 +3043,12 @@ mod hub_tests {
             source.guests.update(i, spoil);
             let record = super::export_record(&mut source, i, true, Default::default()).unwrap();
             let (_, mut hub, seen, _mine) = held_in_a_second_hub();
-            let before = crate::lan::playerdata::player_tag(&hub.guests[1]);
+            let before = crate::lan::playerdata::player_tag(&hub.guests[1], &Default::default());
             let error = import_player(&mut hub, UUID_N, &serde_json::json!({ "record": record }))
                 .expect_err(what);
             assert!(error.starts_with("the record"), "{what}: {error}");
             assert_eq!(
-                crate::lan::playerdata::player_tag(&hub.guests[1]),
+                crate::lan::playerdata::player_tag(&hub.guests[1], &Default::default()),
                 before,
                 "{what}"
             );
@@ -3404,7 +3405,7 @@ mod hub_tests {
     #[test]
     fn a_place_that_is_not_one_is_refused_and_nothing_changes() {
         let (record, mut hub, mine) = held_with_a_record_at([10.5, 70.0, -3.25], Some((0, 0)));
-        let before = crate::lan::playerdata::player_tag(&hub.guests[0]);
+        let before = crate::lan::playerdata::player_tag(&hub.guests[0], &Default::default());
         let place = hub.guests[0].position;
         let with = |extra: serde_json::Value| {
             let mut r = serde_json::json!({ "record": record.clone(), "place": false });
@@ -3462,7 +3463,7 @@ mod hub_tests {
             );
             assert_eq!(g.position, place, "{what}");
             assert_eq!(
-                crate::lan::playerdata::player_tag(g),
+                crate::lan::playerdata::player_tag(g, &Default::default()),
                 before,
                 "{what}: nothing may change"
             );

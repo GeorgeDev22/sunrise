@@ -3,12 +3,16 @@ import contextlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from tools.ci import ignored_tests
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class PolicyFiles(unittest.TestCase):
@@ -118,6 +122,61 @@ class PolicyFiles(unittest.TestCase):
             ])
         self.assertEqual([row.test for row in ignored_tests.daily_rows()], ["c::slow"])
 
+    def test_a_windows_row_is_listed_for_the_windows_job_and_for_no_linux_leg(self):
+        self.write("daily-pkg.txt", "pkg a::slow lib daily slow\n"
+                                    "pkg z::windows_only test:hidden daily windows # #![cfg(windows)]\n"
+                                    "pkg b::windows_too test:hidden daily windows\n")
+        self.assertEqual([row.test for row in ignored_tests.daily_rows()], ["a::slow"])
+        self.assertEqual(ignored_tests.daily_rows_groups(ignored_tests.daily_rows()), {("pkg", "lib"): ["a::slow"]})
+        self.assertEqual([(row.package, row.reference, row.test) for row in ignored_tests.windows_rows()],
+                         [("pkg", "test:hidden", "b::windows_too"), ("pkg", "test:hidden", "z::windows_only")])
+
+    def test_windows_rows_on_the_command_line_prints_the_rows_and_runs_no_shard(self):
+        done = subprocess.run([sys.executable, str(ROOT / "tools/ci/ignored_tests.py"), "--windows-rows"],
+                              capture_output=True, text=True, cwd=ROOT)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        # The committed rows: the subprocess reads the real folder, not this test's scratch one.
+        with patch.object(ignored_tests, "POLICY", ROOT / "tools/ci/ignored-tests"):
+            expected = "".join(f"{row.package} {row.reference} {row.test}\n" for row in ignored_tests.windows_rows())
+        self.assertEqual(done.stdout, expected)
+
+    def test_windows_rows_report_pass_missing_panic_and_nonzero_exit(self):
+        self.write("daily-pkg.txt", "pkg a::one test:exports daily windows\n"
+                                    "pkg b::missing test:exports daily windows\n"
+                                    "pkg c::panics test:exports daily windows\n"
+                                    "pkg d::crash test:exports daily windows\n"
+                                    "pkg e::linux lib daily slow\n")
+        source = "crates/pkg/tests/exports.rs"
+        outcomes = [
+            (0, "test a::one ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n"),
+            (0, "test result: ok. 0 passed; 0 failed; 0 ignored;\n"),
+            (101, "test c::panics ... FAILED\n"
+                  "thread 'c::panics' (42) panicked at crates\\pkg\\tests\\exports.rs:2:3:\n"
+                  "a payload that must not be published\n"
+                  "test result: FAILED. 0 passed; 1 failed; 0 ignored;\n"),
+            (101, "test d::crash ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n"),
+        ]
+        with patch.object(ignored_tests.subprocess, "Popen") as popen, \
+                patch.object(ignored_tests, "tracked_rust_paths", return_value={source}), \
+                patch.object(ignored_tests, "source_lines", return_value=("fn test() {", "assert!(false);", "}")), \
+                patch.object(ignored_tests.os, "sep", "\\"), contextlib.redirect_stdout(io.StringIO()) as log:
+            popen.side_effect = [unittest.mock.Mock(stdout=io.StringIO(output), wait=lambda code=code: code)
+                                 for code, output in outcomes]
+            report = Path(self.folder.parent) / "report.json"
+            self.assertEqual(ignored_tests.run_windows_rows(report), 1)
+        self.assertEqual([call.args[0] for call in popen.call_args_list], [
+            ["cargo", "test", "--no-fail-fast", "--release", "--locked", "-p", "pkg", "--test", "exports",
+             "--", "--ignored", "--exact", test] for test in ("a::one", "b::missing", "c::panics", "d::crash")
+        ])
+        verdict = json.loads(report.read_text())
+        self.assertEqual(verdict["passed"], [{"package": "pkg", "test": "a::one"}])
+        self.assertEqual([(item["test"], item["kind"], item["panic"]) for item in verdict["problems"]],
+                         [("b::missing", "no-longer-runs", None), ("c::panics", "failed", f"{source}:2:3")])
+        self.assertEqual(verdict["incomplete"], [{"shard": "pkg", "reason": "failed without a failed test",
+                                                  "cargo_exit": 101}])
+        for output in (report.read_text(), log.getvalue()):
+            self.assertNotIn("a payload that must not be published", output)
+
     def test_an_unset_variable_runs_nothing(self):
         self.write("wasm-fixture.txt", "pkg a::one VAR needs\n")
         with patch.dict(os.environ), patch.object(ignored_tests.subprocess, "Popen") as popen:
@@ -160,6 +219,57 @@ class PolicyFiles(unittest.TestCase):
             "::error::expected 1 passing test from: cargo test -j3 -p pkg-lib --lib -- --exact b::two",
             "::error::expected 1 passing test from: cargo test -j3 -p pkg --lib -- --ignored --exact c::three",
         ])
+
+    def test_a_needs_test_the_workspace_build_made_runs_from_its_executable(self):
+        self.write("wasm-fixture.txt", "pkg a::one VAR needs\npkg-lib b::two VAR needs-plain\n")
+        one_pass = "test result: ok. 1 passed; 0 failed; 0 ignored;\n"
+        ran, commands = [], []
+
+        def run_binaries(package, executables, arguments, env):
+            ran.append((package, executables, arguments))
+            return subprocess.CompletedProcess([], 0, one_pass)
+
+        class Process:
+            def __init__(self, command, **_):
+                commands.append(command)
+                self.stdout = io.StringIO(one_pass)
+
+            def wait(self):
+                return 0
+
+        with patch.dict(os.environ, {"VAR": "fixture"}), patch.object(ignored_tests.subprocess, "Popen", Process), \
+                patch.object(ignored_tests, "run_binaries", run_binaries), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ignored_tests.run_one_process_each("VAR", jobs=3, binaries={("pkg", "lib"): "/t/pkg-1"}), 0)
+        # Built: its executable, with the test's own selection; not built (pkg-lib): cargo, as before.
+        self.assertEqual(ran, [("pkg", {"lib": "/t/pkg-1"}, ["--ignored", "--exact", "a::one"])])
+        self.assertEqual(commands, [["cargo", "test", "-j3", "-p", "pkg-lib", "--lib", "--", "--exact", "b::two"]])
+
+    def test_prebuilt_runs_the_named_targets_and_refuses_what_the_build_did_not_make(self):
+        self.assertEqual(ignored_tests.cargo_targets(
+            ["-p", "pkg", "--features", "x", "--lib", "--test", "it", "--no-fail-fast", "--", "name", "--ignored"]),
+            ("pkg", ["lib", "test:it"], ["name", "--ignored"]))
+        built = Path(self.folder.parent) / "built.json"
+        built.write_text(json.dumps({"pkg lib": "/t/pkg-1", "pkg test:it": "/t/it-2"}))
+        ran = []
+        with patch.object(ignored_tests, "run_binaries",
+                          lambda package, executables, arguments, env: ran.append((package, executables, arguments))
+                          or subprocess.CompletedProcess([], 101, "test result: FAILED.\n")), \
+                contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertEqual(ignored_tests.run_prebuilt(str(built), ["-p", "pkg", "--test", "it", "--", "x"]), 101)
+            self.assertEqual(ignored_tests.run_prebuilt(str(built), ["-p", "pkg", "--test", "gone"]), 101)
+            self.assertEqual(ignored_tests.run_prebuilt(str(built) + ".missing", ["-p", "pkg", "--lib"]), 101)
+        self.assertEqual(ran, [("pkg", {"test:it": "/t/it-2"}, ["x"])])
+        self.assertIn("no test executable for pkg test:gone", log.getvalue())
+        # A filter that matched no test (renamed, or behind a feature the build left off) fails, naming it.
+        with patch.object(ignored_tests, "run_binaries", lambda *args: subprocess.CompletedProcess(
+                [], 0, "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out\n")), \
+                contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertEqual(ignored_tests.run_prebuilt(str(built), ["-p", "pkg", "--lib", "--", "guest_pool_"]), 101)
+        self.assertIn("no test of pkg lib ran with guest_pool_", log.getvalue())
+        with patch.object(ignored_tests, "run_binaries", lambda *args: subprocess.CompletedProcess(
+                [], 0, "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out\n")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ignored_tests.run_prebuilt(str(built), ["-p", "pkg", "--lib", "--", "guest_pool_"]), 0)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ use super::{
         reduced,
     },
 };
+use crate::items::BlockTagFlags;
 use std::f32::consts::PI;
 use sunrise_core::geometry::trig::Mth;
 use sunrise_core::{
@@ -1226,9 +1227,9 @@ impl Goal for CatTempt {
         }
     }
 }
-fn has_tag(w: &MobWorld, p: [i32; 3], tag: &str) -> bool {
-    let name = w.facts.get(w.world.block(p[0], p[1], p[2])).name.clone();
-    w.block_tags.get(tag).is_some_and(|t| t.contains(&*name))
+/// Whether the block at `p` carries `flag` ([`BlockTagFlags`]).
+fn has_flag(w: &MobWorld, p: [i32; 3], flag: u16) -> bool {
+    w.block_flag(p[0], p[1], p[2], flag)
 }
 fn empty_above(w: &MobWorld, p: [i32; 3]) -> bool {
     w.facts
@@ -1318,7 +1319,7 @@ impl Goal for CatRelaxOnOwner {
             p.position.y.floor() as i32,
             p.position.z.floor() as i32,
         ];
-        if !has_tag(w, at, "minecraft:cats_can_lie_on") {
+        if !has_flag(w, at, BlockTagFlags::CATS_CAN_LIE_ON) {
             return false;
         }
         // The bed's foot: against `BedBlock.FACING`.
@@ -1407,11 +1408,9 @@ fn give_morning_gift(m: &mut Mob, cx: &mut Cx) {
     let x = at[0] + m.random.next_int_bound(11).unwrap_or(5) - 5;
     let y = at[1] + m.random.next_int_bound(5).unwrap_or(2) - 2;
     let z = at[2] + m.random.next_int_bound(11).unwrap_or(5) - 5;
-    let tagged = |p: [i32; 3], tag| has_tag(w, p, tag);
+    let tagged = |p: [i32; 3]| has_flag(w, p, BlockTagFlags::ENTITIES_CAN_TELEPORT_TO);
     let mut ground = y - 1;
-    while ground > w.world.bottom_y()
-        && !tagged([x, ground, z], "minecraft:entities_can_teleport_to")
-    {
+    while ground > w.world.bottom_y() && !tagged([x, ground, z]) {
         ground -= 1;
     }
     if w.world.loaded(x, z) && ground > w.world.bottom_y() {
@@ -1425,7 +1424,7 @@ fn give_morning_gift(m: &mut Mob, cx: &mut Cx) {
                 f64::from(z) + half,
             ),
         );
-        let dangerous = |p| tagged(p, "minecraft:dangerous_for_teleportation");
+        let dangerous = |p| has_flag(w, p, BlockTagFlags::DANGEROUS_FOR_TELEPORTATION);
         let in_box = |f: &dyn Fn([i32; 3]) -> bool| {
             (b.min(Axis::X).floor() as i32..=b.max(Axis::X).floor() as i32).any(|bx| {
                 (b.min(Axis::Y).floor() as i32..=b.max(Axis::Y).floor() as i32).any(|by| {
@@ -1463,7 +1462,7 @@ fn give_morning_gift(m: &mut Mob, cx: &mut Cx) {
 #[derive(Clone, Debug)]
 struct CatLieOnBlock(super::goals::MoveToBlock);
 fn can_lie_on(w: &MobWorld, p: [i32; 3]) -> bool {
-    empty_above(w, p) && has_tag(w, p, "minecraft:cats_can_lie_on")
+    empty_above(w, p) && has_flag(w, p, BlockTagFlags::CATS_CAN_LIE_ON)
 }
 impl Goal for CatLieOnBlock {
     goal_clone!();
@@ -1499,7 +1498,7 @@ impl Goal for CatLieOnBlock {
 #[derive(Clone, Debug)]
 struct CatSitOnBlock(super::goals::MoveToBlock);
 fn can_sit_on(w: &MobWorld, p: [i32; 3]) -> bool {
-    if !empty_above(w, p) || !has_tag(w, p, "minecraft:cats_can_sit_on") {
+    if !empty_above(w, p) || !has_flag(w, p, BlockTagFlags::CATS_CAN_SIT_ON) {
         return false;
     }
     let f = w.facts.get(w.world.block(p[0], p[1], p[2]));

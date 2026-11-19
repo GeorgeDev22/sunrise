@@ -2,8 +2,12 @@
 //! Mods in the game (`docs/modding/src/how-to/content-mods.md`): content mods' blocks, items, data and
 //! assets (`content_root`), and the Mods page's rows. Code mods are native (`native_hooks.rs`)
 //! or wasm (`sunrise-mod-wasm`, loaded at startup); any other executable file is refused.
-use super::{Game, execution_role::ExecutionRole, registration_capability_coverage as coverage};
+use super::{
+    Game, execution_role::ExecutionRole, owner_link::OwnerRequest,
+    registration_capability_coverage as coverage,
+};
 mod menu_books;
+pub(in crate::game) mod runtime_files;
 mod standalone;
 use mod_api::__private::game::*;
 use mod_api::RegistrationContext;
@@ -224,19 +228,14 @@ fn builtin_registry_names(root: &Path) -> sunrise_client::Result<BTreeMap<String
 }
 
 /// Capture registration's stable registries, settings and stock capability type owners.
-pub(super) fn install_registration_data(root: &Path) -> sunrise_client::Result<()> {
+pub(super) fn install_registration_data(
+    root: &Path,
+    runtime_files: BTreeMap<String, Arc<dyn mod_api::RuntimeFileSource>>,
+) -> sunrise_client::Result<()> {
     let packages = mod_api::__private::loaded_mods();
     let directory = Game::game_dir();
-    #[cfg(unix)]
-    let directory = {
-        use std::os::unix::ffi::OsStrExt;
-        mod_api::InstanceDirectory::Unix(directory.as_os_str().as_bytes().to_vec())
-    };
-    #[cfg(windows)]
-    let directory = {
-        use std::os::windows::ffi::OsStrExt;
-        mod_api::InstanceDirectory::Windows(directory.as_os_str().encode_wide().collect())
-    };
+    let directory = mod_api::InstanceDirectory::from_path(&directory)
+        .expect("the host's paths have an encoding the mod API carries");
     (sunrise_engine_slots::platform()?.install_registration_data)(
         mod_api::__private::RegistrationData::new(
             builtin_registry_names(root)?,
@@ -247,7 +246,8 @@ pub(super) fn install_registration_data(root: &Path) -> sunrise_client::Result<(
             directory,
             crate::entry::runtime_environment::get().clone(),
         )
-        .with_capability_coverage(coverage::builtin, coverage::block_entity),
+        .with_capability_coverage(coverage::builtin, coverage::block_entity)
+        .with_runtime_files(runtime_files),
     );
     Ok(())
 }
@@ -690,6 +690,32 @@ pub(super) struct ContentOverlay {
     pub(super) content_mods: Vec<sunrise_client::save::level_mods::ModRecord>,
 }
 
+/// A package's primary namespace is not an alias another layer can acquire.
+fn refuse_primary_namespace_claims(
+    manifests: &[&sunrise_mod_package::Manifest],
+) -> sunrise_client::Result<()> {
+    let mut primary: std::collections::HashSet<&str> = manifests
+        .iter()
+        .map(|manifest| manifest.id.as_str())
+        .collect();
+    for id in mod_api::__private::installed_code_ids() {
+        primary.insert(id);
+    }
+    for manifest in manifests {
+        if let Some(namespace) = manifest
+            .namespaces
+            .iter()
+            .find(|ns| primary.contains(ns.as_str()))
+        {
+            return Err(format!(
+                "mod {} claims namespace {namespace}, which is the primary namespace of mod {namespace}; turn one of them off",
+                manifest.id,
+            ).into());
+        }
+    }
+    Ok(())
+}
+
 /// Builds the content overlay: every enabled or dev content mod's files
 /// merged over `root`. Registration of what the mods declare is
 /// [`content_root`]'s step.
@@ -699,7 +725,6 @@ pub(super) fn content_overlay(
     jar_store: &std::path::Path,
 ) -> sunrise_client::Result<ContentOverlay> {
     use sunrise_client::mod_content::{self, ContentMod};
-    let here = std::env::current_dir().unwrap_or_default();
     let original_base = root.to_owned();
 
     let requirements = collect_jar_requirements(
@@ -731,7 +756,15 @@ pub(super) fn content_overlay(
             .native
             .built()
             .iter()
-            .map(|m| announced_entry(m.id, m.version, m.side))
+            .map(|m| {
+                let runtime = sources
+                    .native
+                    .packages()
+                    .iter()
+                    .find(|p| p.manifest.id == m.id)
+                    .and_then(|p| p.manifest.runtime.as_ref());
+                announced_entry(m.id, m.version, m.side, runtime)
+            })
             .collect()
     } else {
         Vec::new()
@@ -765,6 +798,7 @@ pub(super) fn content_overlay(
         })
         .collect();
     let manifests: Vec<_> = packages.iter().map(|source| source.manifest).collect();
+    refuse_primary_namespace_claims(&manifests)?;
     let overrides = sunrise_mod_package::dependencies::Overrides::read(&sources.overrides_dir)?;
     let resolution = sunrise_mod_package::dependencies::resolve_manifests(
         &manifests,
@@ -818,10 +852,15 @@ pub(super) fn content_overlay(
             Ok(_) if source.content_only => {
                 content_mods.push(sunrise_client::save::level_mods::ModRecord {
                     id: m.id.clone(),
-                    version: m.version.clone(),
+                    version: m.version.to_string(),
                 });
                 if announce {
-                    announced.push(announced_entry(&m.id, &m.version, m.side));
+                    announced.push(announced_entry(
+                        &m.id,
+                        &m.version.to_string(),
+                        m.side,
+                        m.runtime.as_ref(),
+                    ));
                 }
             }
             Ok(_) => {}
@@ -891,7 +930,7 @@ pub(super) fn content_overlay(
         &overrides,
     )
     .map_err(|error| error.to_string())?;
-    let cache = here.join(".sunrise-cache");
+    let cache = sunrise_client::logging::cache_dir();
     // Content admission and the live code-dispatch boundary jointly determine
     // what loaded. Namespaces and raw startup metadata cannot answer this.
     let inventory = sources.enabled_inventory(|id| mods.iter().any(|loaded| loaded.id == id));
@@ -1031,6 +1070,10 @@ pub(in crate::game) fn content_root(
         |id| sunrise_client_core::potions::effect(id).map(|def| def.index),
     )
     .map_err(|errors| errors.join("\n"))?;
+    mod_api::__private::validate_effect_part_owners(|id| {
+        sunrise_client_core::potions::effect(id)?.owner
+    })
+    .map_err(|errors| errors.join("\n"))?;
     let behavior: serde_json::Value =
         sunrise_world::json_file::read(&overlay.root.prepared().join("block-behaviours.json"))?;
     let fluids = behavior["fluids"]
@@ -1057,6 +1100,15 @@ pub(in crate::game) fn content_root(
     register_iterated_registries(overlay.root.prepared())?;
     sunrise_client::mod_content::set_fluid_looks(&overlay.mods);
     sunrise_client::mod_content::set_fluid_interactions(&overlay.mods);
+    // Freeze ownership with the startup registries, before preparing Parts. Pack and data
+    // reloads can change layers but cannot replace the registered blocks and block entity types.
+    mod_api::__private::install_content_owners(overlay.mods.iter().flat_map(|layer| {
+        layer
+            .content
+            .namespaces
+            .iter()
+            .map(|namespace| (namespace.as_str(), layer.id.as_str()))
+    }));
     Ok(overlay.root)
 }
 
@@ -1215,6 +1267,7 @@ fn announced_entry(
     id: &str,
     version: &str,
     side: mod_api::Side,
+    runtime: Option<&sunrise_mod_package::manifest::RuntimeTable>,
 ) -> sunrise_protocol::mod_list::Entry {
     use mod_api::Side;
     use sunrise_protocol::mod_list;
@@ -1227,6 +1280,7 @@ fn announced_entry(
             // `Side` is open to new kinds; until the list carries one, such a mod stays local.
             _ => mod_list::Side::Client,
         },
+        runtime: runtime.map(sunrise_mod_package::manifest::RuntimeTable::digest),
     }
 }
 
@@ -1238,24 +1292,33 @@ fn announced_entry(
 fn register_mob_effects(mods: &[sunrise_client::mod_content::ContentMod]) {
     use sunrise_client::brewing::{self, Category};
     use sunrise_mod_package::content::EffectCategory;
-    let effects = sunrise_client::mod_content::mob_effects(mods);
+    let mut effects: Vec<_> = mods
+        .iter()
+        .flat_map(|m| m.content.effects.iter().map(move |effect| (&m.id, effect)))
+        .collect();
+    effects.sort_by(|(_, a), (_, b)| a.id.cmp(&b.id));
     if effects.is_empty() {
         return;
     }
-    let ids: Vec<String> = effects.iter().map(|e| e.id.clone()).collect();
-    let set = brewing::register_mod_effects(effects.into_iter().map(|e| {
+    let ids: Vec<_> = effects
+        .iter()
+        .map(|(owner, e)| (e.id.clone(), owner.to_string()))
+        .collect();
+    let set = brewing::register_mod_effects(effects.into_iter().map(|(owner, e)| {
         let category = match e.category {
             EffectCategory::Beneficial => Category::Beneficial,
             EffectCategory::Harmful => Category::Harmful,
             EffectCategory::Neutral => Category::Neutral,
         };
-        (e.id.clone(), e.color, category, e.sort_order)
+        (e.id.clone(), e.color, category, e.sort_order, owner.clone())
     }));
     if !set
         && brewing::mod_effects()
             .iter()
-            .map(|e| e.id)
-            .ne(ids.iter().map(String::as_str))
+            .map(|e| (e.id, e.owner))
+            .ne(ids
+                .iter()
+                .map(|(id, owner)| (id.as_str(), Some(owner.as_str()))))
     {
         log::warn!("Sunrise: the mods' mob effects changed; restart the game to use them");
     }
@@ -1450,6 +1513,17 @@ pub(super) struct PreparedLoopContext {
     audio: Option<sunrise_world::native_load_context::LoopContext>,
     /// A server's context for the features it generates (`alter_ground`).
     worldgen: Option<sunrise_world::native_load_context::WorldgenContext>,
+}
+
+/// What a live content mod switch changes on the server (`Game::apply_mods_reload`).
+pub(super) struct ModsReload {
+    root: PathBuf,
+    data_source: sunrise_assets::resource_source::ResourceSource,
+    data_changes: sunrise_assets::resource_source::ResourceSource,
+    additional_data: Arc<[Arc<sunrise_client::datapack::DataPack>]>,
+    enabled: std::collections::BTreeSet<String>,
+    selected: Arc<[sunrise_mod_package::selection::SelectedPackage]>,
+    refused: Arc<Mutex<Vec<MissingJar>>>,
 }
 
 impl Game<'_> {
@@ -1699,42 +1773,45 @@ impl Game<'_> {
         if !applied {
             return;
         }
-        let root = self.options.resources.clone();
-        let data_source = self.pack.data_source.clone();
-        let data_changes = self.pack.data_changes.clone();
-        let additional_data = self.pack.additional_data.clone();
-        let enabled = self.applied_mods();
-        let selected = self.mods.selected.clone();
-        let refused = self.mods.refused.clone();
-        let reload = move |g: &mut Game<'_>| {
-            let at = std::time::Instant::now();
-            g.options.resources = root;
-            g.pack.data_source = data_source;
-            g.pack.data_changes = data_changes;
-            g.pack.additional_data = additional_data;
-            g.settings.mods.enabled = enabled.clone();
-            g.mods.applied = Some(enabled);
-            g.mods.selected = selected;
-            g.mods.refused = refused;
-            g.mods.data_switched = true;
-            if g.world_root.as_os_str().is_empty() {
-                return;
-            }
-            if let Err(error) = g.reload_datapacks(true, &g.level.enabled_features.clone()) {
-                log::warn!("Sunrise: content mods data reload failed: {error}");
-                return;
-            }
-            log::info!(
-                "Sunrise: content mods switched live: server data reloaded in {} ms",
-                at.elapsed().as_millis()
-            );
+        let reload = ModsReload {
+            root: self.options.resources.clone(),
+            data_source: self.pack.data_source.clone(),
+            data_changes: self.pack.data_changes.clone(),
+            additional_data: self.pack.additional_data.clone(),
+            enabled: self.applied_mods(),
+            selected: self.mods.selected.clone(),
+            refused: self.mods.refused.clone(),
         };
         log::info!("Sunrise: content mods switched live: resources reloaded in {resources_ms} ms");
         if let Some(server) = &self.integrated {
-            server.post(reload);
+            server.tell(OwnerRequest::ReloadMods(Box::new(reload)));
         } else if self.remote.is_none() {
-            reload(self);
+            self.apply_mods_reload(reload);
         }
+    }
+    /// The server's side of a live switch: the data packs reload from the new root.
+    pub(super) fn apply_mods_reload(&mut self, reload: ModsReload) {
+        let at = std::time::Instant::now();
+        self.options.resources = reload.root;
+        self.pack.data_source = reload.data_source;
+        self.pack.data_changes = reload.data_changes;
+        self.pack.additional_data = reload.additional_data;
+        self.settings.mods.enabled = reload.enabled.clone();
+        self.mods.applied = Some(reload.enabled);
+        self.mods.selected = reload.selected;
+        self.mods.refused = reload.refused;
+        self.mods.data_switched = true;
+        if self.world_root.as_os_str().is_empty() {
+            return;
+        }
+        if let Err(error) = self.reload_datapacks(true, &self.level.enabled_features.clone()) {
+            log::warn!("Sunrise: content mods data reload failed: {error}");
+            return;
+        }
+        log::info!(
+            "Sunrise: content mods switched live: server data reloaded in {} ms",
+            at.elapsed().as_millis()
+        );
     }
     /// Apply the player's switches at the canonical native and wasm dispatch boundary.
     pub(super) fn sync_native_switches(&self) {
@@ -2014,6 +2091,26 @@ mod tests {
     use sunrise_mod_package::runtime::Runtime;
 
     #[test]
+    fn a_package_cannot_claim_another_packages_primary_namespace() {
+        let manifest = |id, aliases| {
+            sunrise_mod_package::Manifest::parse(&format!(
+                "id='{id}'\nname='{id}'\nversion='1.0.0'\napi='0.2'\ncapabilities=['registries']\nnamespaces=[{aliases}]"
+            ))
+            .unwrap()
+        };
+        let owner = manifest("owner", "");
+        let claimant = manifest("claimant", "'owner'");
+        for layers in [[&owner, &claimant], [&claimant, &owner]] {
+            assert_eq!(
+                refuse_primary_namespace_claims(&layers)
+                    .unwrap_err()
+                    .to_string(),
+                "mod claimant claims namespace owner, which is the primary namespace of mod owner; turn one of them off"
+            );
+        }
+    }
+
+    #[test]
     fn only_clients_collect_registered_keys() {
         let declared = [(
             "sample",
@@ -2066,8 +2163,8 @@ mod tests {
     }
 
     /// Runs `test` again in a child process whose working directory is its own
-    /// empty folder: the overlay's `.sunrise-cache` lives under the working
-    /// directory, so children sharing one (the temp dir) race on that cache.
+    /// empty folder: the overlay's `.sunrise-cache` lives under the home, set here to
+    /// the working directory, so children sharing one (the temp dir) race on that cache.
     fn run_in_child(test: &str, mode: &str) {
         let cwd = std::env::temp_dir().join(format!(
             "sunrise-game-mods-cwd-{}-{mode}",
@@ -2077,6 +2174,7 @@ mod tests {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .current_dir(&cwd)
             .args(["--include-ignored", "--exact", test, "--nocapture"])
+            .env("SUNRISE_HOME", &cwd)
             .env(mode, "1")
             .status()
             .unwrap();
@@ -2111,8 +2209,16 @@ mod tests {
             Mob::new(2, ghoul.clone(), at, 0.0),
         );
         assert_eq!(ghoul.health, 40.0);
-        let saved =
-            |m: &Mob| sunrise_client::entity_nbt::mob_to_nbt(m, [0, 0, 0, 2], None, None, |_| None);
+        let saved = |m: &Mob| {
+            sunrise_client::entity_nbt::mob_to_nbt(
+                m,
+                [0, 0, 0, 2],
+                None,
+                None,
+                |_| None,
+                &Default::default(),
+            )
+        };
         let keys = |tag: &sunrise_core::nbt::Tag| -> Vec<String> {
             let sunrise_core::nbt::Tag::Compound(map) = tag else {
                 panic!("a mob saves a compound");
@@ -2174,8 +2280,14 @@ mod tests {
                 Species::Parrot => pet.extra.variant = 2,
                 _ => pet.extra.color = if species == Species::Wolf { 14 } else { 3 },
             }
-            let tag =
-                sunrise_client::entity_nbt::mob_to_nbt(&pet, [0, 0, 0, 1], None, None, |_| None);
+            let tag = sunrise_client::entity_nbt::mob_to_nbt(
+                &pet,
+                [0, 0, 0, 1],
+                None,
+                None,
+                |_| None,
+                &Default::default(),
+            );
             let get = |key: &str| tag.get(key).cloned();
             assert_eq!(
                 get("id"),
@@ -2632,8 +2744,16 @@ mod tests {
         let trader = Mob::new(1, types["minecraft:wandering_trader"].clone(), at, 0.0);
         let merchant = Mob::new(2, merchant.clone(), at, 0.0);
         assert!(merchant.ai.goals.has("Float") && trader.ai.goals.has("Float"));
-        let saved =
-            |m: &Mob| sunrise_client::entity_nbt::mob_to_nbt(m, [0, 0, 0, 2], None, None, |_| None);
+        let saved = |m: &Mob| {
+            sunrise_client::entity_nbt::mob_to_nbt(
+                m,
+                [0, 0, 0, 2],
+                None,
+                None,
+                |_| None,
+                &Default::default(),
+            )
+        };
         let keys = |tag: &Tag| -> Vec<String> {
             let Tag::Compound(map) = tag else {
                 panic!("a mob saves a compound");
@@ -3165,7 +3285,8 @@ mod tests {
             "test:effect".to_owned(),
             0,
             brewing::Category::Neutral,
-            None
+            None,
+            "test-potions".into()
         )]));
     }
 }

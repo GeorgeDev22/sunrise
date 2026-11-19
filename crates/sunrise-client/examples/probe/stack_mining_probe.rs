@@ -44,7 +44,7 @@ pub fn main() -> Result<()> {
         let restored = if stack.count == 0 || id == "minecraft:air" {
             stack.clone()
         } else {
-            item_nbt::item_from_nbt(&item_nbt::item_to_nbt(&stack)).unwrap()
+            item_nbt::item_from_nbt(&item_nbt::item_to_nbt(&stack, &items)).unwrap()
         };
         writeln!(
             out,

@@ -2,13 +2,19 @@
 pub use mod_vocab::testing::*;
 
 /// Run with these mods and their controller and pose registrations on this thread.
-/// Nested scopes and unwinding restore the preceding immutable lookup tables.
+/// The registration probe starts without frozen test Parts. The body can see explicitly
+/// installed Parts from its caller; any replacement is restored on scope exit or unwind.
 pub fn with_mods<R>(mods: crate::Mods, f: impl FnOnce() -> R) -> R {
     crate::__private::initialize().expect("test registration requires the mod API runtime");
-    let (controllers, poses) = crate::parts::registered_controllers(&mods);
-    mod_vocab::testing::with_controller_tables(controllers, poses, || {
-        mod_vocab::testing::with_dispatch(mods, f)
-    })
+    mod_vocab::testing::with_parts_registration_probe(
+        mods,
+        crate::parts::registered_controllers,
+        |mods, (controllers, poses)| {
+            mod_vocab::testing::with_controller_tables(controllers, poses, || {
+                mod_vocab::testing::with_dispatch(mods, f)
+            })
+        },
+    )
 }
 
 /// Install explicit raw serializer/type pairs for resource-loader fixtures.
@@ -41,4 +47,27 @@ pub fn with_recipe_types<R>(ids: &[&'static str], f: impl FnOnce() -> R) -> R {
         crate::__private::part_tests::install_parts_fixture(&entries()).unwrap();
         f()
     })
+}
+
+#[cfg(test)]
+#[test]
+fn a_mod_scope_does_not_freeze_the_next_scopes_registration() {
+    struct Stat;
+    #[mod_api::__subscriptions]
+    impl crate::Hooks for Stat {
+        fn register(&self, r: &mut dyn crate::Registrar, _: &crate::RegistrationContext) {
+            r.register_custom_stat("steps").unwrap();
+        }
+    }
+
+    for id in ["first", "second"] {
+        let mods: crate::Mods = vec![crate::ModEntry::new(id, Box::new(Stat))].into();
+        with_mods(mods.clone(), || {
+            crate::__private::part_tests::install_parts_fixture(&mods).unwrap();
+            assert_eq!(
+                mod_vocab::__private::custom_stat_declarations(),
+                [format!("{id}:steps")]
+            );
+        });
+    }
 }

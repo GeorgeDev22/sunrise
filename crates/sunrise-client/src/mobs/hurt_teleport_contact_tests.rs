@@ -5,7 +5,7 @@ use sunrise_world::registry::BlockRegistry;
 
 /// A stone floor over the loaded 2x2 chunks (so a teleport finds ground),
 /// `under` below the mob's spot and `at` in it.
-fn build(
+pub(super) fn build(
     under: &'static str,
     at: &'static str,
 ) -> impl FnOnce(&mut crate::world::World, &BlockRegistry) {
@@ -32,7 +32,7 @@ fn build(
     }
 }
 
-fn enderman(types: &crate::mobs::MobTypes, seed: i64) -> Mob {
+pub(super) fn enderman(types: &crate::mobs::MobTypes, seed: i64) -> Mob {
     let kind = Arc::new(types.types["minecraft:enderman"].clone());
     let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
     register(&mut m);
@@ -124,7 +124,7 @@ fn a_burning_teleport_does_not_take_the_old_spots_fire_along() {
 
 /// How many generator steps (`next(bits)` calls: `next_double` is two)
 /// `start` took to reach `end`.
-fn steps(
+pub(super) fn steps(
     start: &sunrise_core::random::LegacyRandom,
     end: &sunrise_core::random::LegacyRandom,
 ) -> u32 {
@@ -408,4 +408,550 @@ fn a_solid_waterlogged_neighbor_does_not_penalize_a_dry_walk_node() {
             "vanilla data is missing"
         );
     }
+}
+
+/// #1697: `Enderman.hurtServer` teleports inside every hurt. The freezing hurt
+/// (`LivingEntity.aiStep`), cramming (`pushEntities`) and a mod part's queued
+/// hurt (`applyEffectsFromBlocks`) each settle it at once: the enderman lands,
+/// and draws, as the hurt dealt with its teleport.
+#[test]
+#[ignore = "daily"]
+fn freezing_cramming_and_a_mod_hurt_each_teleport_inside_the_hurt() {
+    use crate::mobs::Seen;
+    use sunrise_core::random::RandomSource as _;
+    let world = |world: &mut crate::world::World, registry: &BlockRegistry| {
+        build("minecraft:stone", "minecraft:powder_snow")(world, registry);
+        let air = registry.default_state("minecraft:air").unwrap();
+        world.set(8, 64, 8, air).unwrap();
+    };
+    assert!(
+        with_built_test_world(&[], world, |w, types| {
+            let mut landed = [0; 3];
+            for seed in 0..40 {
+                // Freezing: fully frozen in powder snow, on the 40-tick beat.
+                let mut m = enderman(types, seed);
+                m.ticks_frozen = crate::motion::PlayerMotion::TICKS_REQUIRED_TO_FREEZE;
+                m.age = 40;
+                let mut expected = m.clone();
+                hurt(
+                    &mut expected,
+                    w,
+                    &mut Vec::new(),
+                    1.0,
+                    Damage::of(DamageKind::Freeze),
+                );
+                // The block walk's FREEZE effect for the snow it stands in.
+                m.in_powder_snow = true;
+                freeze_tick(
+                    &mut m,
+                    w,
+                    &mut crate::health::TestLevel::new(0).level(),
+                    &mut Vec::new(),
+                );
+                assert_eq!(m.position, expected.position, "freezing, seed {seed}");
+                assert_eq!(
+                    m.random.state(),
+                    expected.random.state(),
+                    "freezing, seed {seed}"
+                );
+                landed[0] += usize::from(m.position != Vec3::new(0.5, 64.0, 0.5));
+
+                // A mod part's queued hurt.
+                let mut m = enderman(types, seed);
+                m.position = Vec3::new(8.5, 64.0, 8.5);
+                let mut expected = m.clone();
+                hurt(
+                    &mut expected,
+                    w,
+                    &mut Vec::new(),
+                    2.0,
+                    Damage::of(DamageKind::Generic),
+                );
+                apply_entity_write(
+                    &mut m,
+                    w,
+                    &mut crate::health::TestLevel::new(0).level(),
+                    &mut Vec::new(),
+                    mod_api::EntityWrite::Hurt {
+                        source: None,
+                        amount: 2.0,
+                    },
+                );
+                assert_eq!(m.position, expected.position, "mod hurt, seed {seed}");
+                assert_eq!(
+                    m.random.state(),
+                    expected.random.state(),
+                    "mod hurt, seed {seed}"
+                );
+                landed[1] += usize::from(m.position != Vec3::new(8.5, 64.0, 8.5));
+
+                // Cramming: three pushable pigs around it, `maxEntityCramming` 3.
+                let pig = |id: u32, x: f64| {
+                    let kind = std::sync::Arc::new(types.types["minecraft:pig"].clone());
+                    let mut p = Mob::new(id, kind, Vec3::new(x, 64.0, 8.5), 0.0);
+                    p.no_ai = true;
+                    p.no_gravity = true;
+                    p
+                };
+                let crowd = [pig(11, 8.6), pig(12, 8.7), pig(13, 8.8)];
+                let seen: Vec<Seen> = crowd
+                    .iter()
+                    .map(|o| o.seen(None, &crate::items::Items::empty()))
+                    .collect();
+                let crowded = MobWorld {
+                    others: &seen,
+                    max_entity_cramming: 3,
+                    // The crowd is read from `others`, not the world's empty index.
+                    others_grid: None,
+                    ..w.clone()
+                };
+                // Spread seeds: small consecutive ones share their first `nextInt(4)`.
+                let mut m = enderman(types, seed * 104_729 + 1_234_567);
+                m.position = Vec3::new(8.5, 64.0, 8.5);
+                let mut expected = m.clone();
+                // `nextInt(4) == 0`: the quarter that hurts.
+                if expected.random.next_int_bound(4).unwrap() != 0 {
+                    continue;
+                }
+                hurt(
+                    &mut expected,
+                    &crowded,
+                    &mut Vec::new(),
+                    6.0,
+                    Damage::of(DamageKind::Cramming),
+                );
+                push_entities(
+                    &mut m,
+                    &crowded,
+                    &mut crate::health::TestLevel::new(0).level(),
+                    &mut Vec::new(),
+                );
+                assert_eq!(
+                    m.last_damage.map(|(d, _)| d.kind),
+                    Some(DamageKind::Cramming)
+                );
+                assert_eq!(m.position, expected.position, "cramming, seed {seed}");
+                assert_eq!(
+                    m.random.state(),
+                    expected.random.state(),
+                    "cramming, seed {seed}"
+                );
+                landed[2] += usize::from(m.position != Vec3::new(8.5, 64.0, 8.5));
+            }
+            assert!(
+                landed.iter().all(|n| *n > 0),
+                "each hurt lands a teleport: {landed:?}"
+            );
+        }),
+        "vanilla data is missing"
+    );
+}
+
+/// #1697: two hurts in one tick each teleport inside their own hurt, in the
+/// order Sunrise deals them, as the two hurts dealt one after the other:
+/// cramming then the water's hurt (`LivingEntity.aiStep` order), a mod part's
+/// queued hurt then freezing (`applyEffectsFromBlocks`, then the freeze hurt).
+/// Without each settle, the two marks would merge into one try.
+#[test]
+#[ignore = "daily"]
+fn two_hurts_in_a_tick_each_teleport_inside_their_own_hurt() {
+    use crate::mobs::Seen;
+    use sunrise_core::random::RandomSource as _;
+    let world = |world: &mut crate::world::World, registry: &BlockRegistry| {
+        build("minecraft:stone", "minecraft:powder_snow")(world, registry);
+        let air = registry.default_state("minecraft:air").unwrap();
+        world.set(8, 64, 8, air).unwrap();
+    };
+    assert!(
+        with_built_test_world(&[], world, |w, types| {
+            let pig = |id: u32, x: f64| {
+                let kind = std::sync::Arc::new(types.types["minecraft:pig"].clone());
+                let mut p = Mob::new(id, kind, Vec3::new(x, 64.0, 8.5), 0.0);
+                p.no_ai = true;
+                p.no_gravity = true;
+                p
+            };
+            let crowd = [pig(11, 8.6), pig(12, 8.7), pig(13, 8.8)];
+            let seen: Vec<Seen> = crowd
+                .iter()
+                .map(|o| o.seen(None, &crate::items::Items::empty()))
+                .collect();
+            let crowded = MobWorld {
+                others: &seen,
+                max_entity_cramming: 3,
+                others_grid: None,
+                ..w.clone()
+            };
+            let mut landed = [0; 2];
+            for seed in 0..40 {
+                // Cramming, then the water's hurt, in a crowd and in water.
+                let mut m = enderman(types, seed * 104_729 + 1_234_567);
+                m.position = Vec3::new(8.5, 64.0, 8.5);
+                m.fluids.in_water = true;
+                let mut expected = m.clone();
+                if expected.random.next_int_bound(4).unwrap() == 0 {
+                    let kinds = [(6.0, DamageKind::Cramming), (1.0, DamageKind::Drown)];
+                    for (amount, kind) in kinds {
+                        hurt(
+                            &mut expected,
+                            &crowded,
+                            &mut Vec::new(),
+                            amount,
+                            Damage::of(kind),
+                        );
+                    }
+                    let mut level = crate::health::TestLevel::new(0);
+                    let mut events = Vec::new();
+                    push_entities(&mut m, &crowded, &mut level.level(), &mut events);
+                    hurt_by_water(&mut m, &crowded, &mut level.level(), &mut events);
+                    assert_eq!(
+                        m.position, expected.position,
+                        "cramming and water, seed {seed}"
+                    );
+                    assert_eq!(
+                        m.random.state(),
+                        expected.random.state(),
+                        "cramming and water, seed {seed}"
+                    );
+                    landed[0] += usize::from(m.position != Vec3::new(8.5, 64.0, 8.5));
+                }
+
+                // A mod part's queued hurt, then freezing in powder snow.
+                let mut m = enderman(types, seed);
+                m.ticks_frozen = crate::motion::PlayerMotion::TICKS_REQUIRED_TO_FREEZE;
+                m.age = 40;
+                let mut expected = m.clone();
+                for (amount, kind) in [(2.0, DamageKind::Generic), (1.0, DamageKind::Freeze)] {
+                    hurt(&mut expected, w, &mut Vec::new(), amount, Damage::of(kind));
+                }
+                // `isInPowderSnow`, as the tick's block walk sets it before the hurts.
+                m.in_powder_snow = true;
+                let mut level = crate::health::TestLevel::new(0);
+                let mut events = Vec::new();
+                apply_entity_write(
+                    &mut m,
+                    w,
+                    &mut level.level(),
+                    &mut events,
+                    mod_api::EntityWrite::Hurt {
+                        source: None,
+                        amount: 2.0,
+                    },
+                );
+                freeze_tick(&mut m, w, &mut level.level(), &mut events);
+                assert_eq!(
+                    m.position, expected.position,
+                    "mod hurt and freezing, seed {seed}"
+                );
+                assert_eq!(
+                    m.random.state(),
+                    expected.random.state(),
+                    "mod hurt and freezing, seed {seed}"
+                );
+                landed[1] += usize::from(m.position != Vec3::new(0.5, 64.0, 0.5));
+            }
+            assert!(landed.iter().all(|n| *n > 0), "both pairs land: {landed:?}");
+        }),
+        "vanilla data is missing"
+    );
+}
+
+/// #1697: a cactus's hurt (`CactusBlock.entityInside`, in the block walk)
+/// teleports inside the hurt, as magma's does; and a shulker crammed below half
+/// health makes `Shulker.hurtServer`'s low-health teleport inside the hurt.
+#[test]
+#[ignore = "daily"]
+fn a_cactus_hurt_and_a_crammed_shulker_teleport_inside_the_hurt() {
+    use crate::mobs::Seen;
+    use sunrise_core::random::RandomSource as _;
+    assert!(
+        with_built_test_world(
+            &[],
+            build("minecraft:sand", "minecraft:cactus"),
+            |w, types| {
+                let mut landed = [0; 2];
+                for seed in 0..40 {
+                    let mut m = enderman(types, seed);
+                    let mut expected = m.clone();
+                    hurt(
+                        &mut expected,
+                        w,
+                        &mut Vec::new(),
+                        1.0,
+                        Damage::of(DamageKind::Cactus),
+                    );
+                    let mut events = Vec::new();
+                    effects_from_blocks(
+                        &mut m,
+                        w,
+                        &mut crate::health::TestLevel::new(0).level(),
+                        &mut events,
+                    );
+                    assert_eq!(m.last_damage.map(|(d, _)| d.kind), Some(DamageKind::Cactus));
+                    assert_eq!(m.position, expected.position, "cactus, seed {seed}");
+                    assert_eq!(
+                        m.random.state(),
+                        expected.random.state(),
+                        "cactus, seed {seed}"
+                    );
+                    landed[0] += usize::from(m.position != Vec3::new(0.5, 64.0, 0.5));
+
+                    let shulker = |id: u32| {
+                        let kind = std::sync::Arc::new(types.types["minecraft:shulker"].clone());
+                        let mut s = Mob::new(id, kind, Vec3::new(8.5, 64.0, 8.5), 0.0);
+                        register(&mut s);
+                        s.random = sunrise_core::random::LegacyRandom::new(seed * 104_729 + 7);
+                        s.health = 10.0;
+                        s
+                    };
+                    let pig = |id: u32, x: f64| {
+                        let kind = std::sync::Arc::new(types.types["minecraft:pig"].clone());
+                        let mut p = Mob::new(id, kind, Vec3::new(x, 64.0, 8.5), 0.0);
+                        p.no_ai = true;
+                        p.no_gravity = true;
+                        p
+                    };
+                    let crowd = [pig(11, 8.6), pig(12, 8.7), pig(13, 8.8)];
+                    let seen: Vec<Seen> = crowd
+                        .iter()
+                        .map(|o| o.seen(None, &crate::items::Items::empty()))
+                        .collect();
+                    let crowded = MobWorld {
+                        others: &seen,
+                        max_entity_cramming: 3,
+                        others_grid: None,
+                        ..w.clone()
+                    };
+                    let mut s = shulker(1);
+                    let mut expected = s.clone();
+                    if expected.random.next_int_bound(4).unwrap() != 0 {
+                        continue;
+                    }
+                    hurt(
+                        &mut expected,
+                        &crowded,
+                        &mut Vec::new(),
+                        6.0,
+                        Damage::of(DamageKind::Cramming),
+                    );
+                    push_entities(
+                        &mut s,
+                        &crowded,
+                        &mut crate::health::TestLevel::new(0).level(),
+                        &mut Vec::new(),
+                    );
+                    assert_eq!(
+                        s.last_damage.map(|(d, _)| d.kind),
+                        Some(DamageKind::Cramming)
+                    );
+                    assert_eq!(s.position, expected.position, "shulker, seed {seed}");
+                    assert_eq!(
+                        s.random.state(),
+                        expected.random.state(),
+                        "shulker, seed {seed}"
+                    );
+                    landed[1] += usize::from(s.position != Vec3::new(8.5, 64.0, 8.5));
+                }
+                assert!(landed.iter().all(|n| *n > 0), "both land: {landed:?}");
+            },
+        ),
+        "vanilla data is missing"
+    );
+}
+
+/// The state `name` with `set` over its default properties.
+fn state_with(
+    registry: &BlockRegistry,
+    name: &str,
+    set: &[(&str, &str)],
+) -> sunrise_world::registry::BlockStateId {
+    let base = registry.default_state(name).unwrap();
+    let mut properties: std::collections::BTreeMap<String, String> = registry
+        .state(base)
+        .unwrap()
+        .properties
+        .clone()
+        .into_iter()
+        .collect();
+    for (k, v) in set {
+        properties.insert((*k).to_owned(), (*v).to_owned());
+    }
+    registry
+        .resolve(&sunrise_world::chunk::BlockState {
+            name: name.to_owned(),
+            properties: properties.into_iter().collect(),
+        })
+        .unwrap()
+}
+
+/// #1697: a lit campfire's and a grown sweet berry bush's hurts
+/// (`CampfireBlock.entityInside`, `SweetBerryBushBlock.entityInside`, in the
+/// block walk) teleport inside the hurt, as the cactus's and magma's do.
+#[test]
+#[ignore = "daily"]
+fn a_campfire_and_a_berry_bush_hurt_teleport_inside_the_hurt() {
+    for (block, set, kind, amount) in [
+        (
+            "minecraft:campfire",
+            &[("lit", "true")][..],
+            DamageKind::Campfire,
+            1.0,
+        ),
+        (
+            "minecraft:sweet_berry_bush",
+            &[("age", "1")][..],
+            DamageKind::SweetBerryBush,
+            1.0,
+        ),
+    ] {
+        let world = move |world: &mut crate::world::World, registry: &BlockRegistry| {
+            build("minecraft:grass_block", "minecraft:air")(world, registry);
+            world
+                .set(0, 64, 0, state_with(registry, block, set))
+                .unwrap();
+        };
+        assert!(
+            with_built_test_world(&[], world, |w, types| {
+                let mut landed = 0;
+                for seed in 0..40 {
+                    let mut m = enderman(types, seed);
+                    // A bush hurts a mob that moved this tick (`getKnownMovement`).
+                    m.previous = Vec3::new(0.49, 64.0, 0.5);
+                    let mut expected = m.clone();
+                    hurt(&mut expected, w, &mut Vec::new(), amount, Damage::of(kind));
+                    let mut events = Vec::new();
+                    effects_from_blocks(
+                        &mut m,
+                        w,
+                        &mut crate::health::TestLevel::new(0).level(),
+                        &mut events,
+                    );
+                    assert_eq!(m.last_damage.map(|(d, _)| d.kind), Some(kind), "{block}");
+                    assert_eq!(m.position, expected.position, "{block}, seed {seed}");
+                    assert_eq!(
+                        m.random.state(),
+                        expected.random.state(),
+                        "{block}, seed {seed}"
+                    );
+                    landed += usize::from(m.position != Vec3::new(0.5, 64.0, 0.5));
+                }
+                assert!(landed > 0, "{block}: some seed lands");
+            }),
+            "vanilla data is missing"
+        );
+    }
+}
+
+/// #1697, through the block walk and freezing (`walk_and_freeze`): an enderman
+/// fully frozen on the 40-tick beat whose box takes in a cactus and powder snow
+/// is hurt by the cactus during the block walk, which may teleport it out of
+/// the snow. `isInPowderSnow`, set by
+/// the walk's FREEZE effect, still holds: it stays fully frozen, and the
+/// freeze hurt (refused by the cooldown) still draws its teleport chance, as
+/// the two hurts dealt one after the other.
+#[test]
+#[ignore = "daily"]
+fn the_walks_powder_snow_outlasts_a_teleport_out_of_it() {
+    let world = |world: &mut crate::world::World, registry: &BlockRegistry| {
+        build("minecraft:sand", "minecraft:cactus")(world, registry);
+        let snow = registry.default_state("minecraft:powder_snow").unwrap();
+        world.set(1, 64, 0, snow).unwrap();
+    };
+    assert!(
+        with_built_test_world(&[], world, |w, types| {
+            let mut moved = 0;
+            for seed in 0..40 {
+                let mut m = enderman(types, seed);
+                // Its box (0.6 wide) spans the cactus at x 0 and the snow at x 1.
+                m.position = Vec3::new(1.0, 64.0, 0.5);
+                m.previous = m.position;
+                m.ticks_frozen = crate::motion::PlayerMotion::TICKS_REQUIRED_TO_FREEZE;
+                m.age = 40;
+                let start = m.random.clone();
+                let mut expected = m.clone();
+                for kind in [DamageKind::Cactus, DamageKind::Freeze] {
+                    hurt(&mut expected, w, &mut Vec::new(), 1.0, Damage::of(kind));
+                }
+                walk_and_freeze(
+                    &mut m,
+                    w,
+                    &mut crate::health::TestLevel::new(0).level(),
+                    &mut Vec::new(),
+                );
+                assert_eq!(m.last_damage.map(|(d, _)| d.kind), Some(DamageKind::Cactus));
+                assert_eq!(
+                    m.ticks_frozen,
+                    crate::motion::PlayerMotion::TICKS_REQUIRED_TO_FREEZE,
+                    "seed {seed}: still in the walk's powder snow"
+                );
+                assert_eq!(m.position, expected.position, "seed {seed}");
+                assert_eq!(
+                    steps(&start, &m.random),
+                    steps(&start, &expected.random),
+                    "seed {seed}: both hurts' draws"
+                );
+                moved += usize::from(m.position != Vec3::new(1.0, 64.0, 0.5));
+            }
+            assert!(moved > 0, "some seed teleports out of the snow");
+        }),
+        "vanilla data is missing"
+    );
+}
+
+/// `Entity.baseTick` clears `isInPowderSnow` (kept as `wasInPowderSnow`)
+/// before the block walk: a mob that was in powder snow last tick and stands
+/// on stone now thaws by 2.
+#[test]
+#[ignore = "daily"]
+fn powder_snow_from_last_tick_does_not_carry_over() {
+    assert!(
+        with_built_test_world(
+            &[],
+            build("minecraft:stone", "minecraft:air"),
+            |w, types| {
+                let mut m = enderman(types, 0);
+                m.previous = m.position;
+                m.in_powder_snow = true;
+                m.ticks_frozen = 100;
+                let mut level = crate::health::TestLevel::new(0);
+                base_tick(&mut m, w, &mut level.level(), &mut Vec::new());
+                assert!(m.was_in_powder_snow, "kept as wasInPowderSnow");
+                walk_and_freeze(&mut m, w, &mut level.level(), &mut Vec::new());
+                assert!(!m.in_powder_snow);
+                assert_eq!(m.ticks_frozen, 98);
+            },
+        ),
+        "vanilla data is missing"
+    );
+}
+
+/// For every mob, not only an enderman: `isInPowderSnow` follows the tick's
+/// path, as the block walk's FREEZE effect sets it. A zombie whose move this
+/// tick starts in powder snow and ends on stone is in powder snow this tick,
+/// so it freezes by one, where reading where it ended would thaw it.
+#[test]
+#[ignore = "daily"]
+fn a_move_through_powder_snow_freezes_a_zombie_that_ends_outside_it() {
+    let world = |world: &mut crate::world::World, registry: &BlockRegistry| {
+        build("minecraft:stone", "minecraft:air")(world, registry);
+        let snow = registry.default_state("minecraft:powder_snow").unwrap();
+        world.set(1, 64, 0, snow).unwrap();
+    };
+    assert!(
+        with_built_test_world(&[], world, |w, types| {
+            let kind = Arc::new(types.types["minecraft:zombie"].clone());
+            let mut m = Mob::new(5, kind, Vec3::new(3.5, 64.0, 0.5), 0.0);
+            m.previous = Vec3::new(1.5, 64.0, 0.5);
+            m.no_gravity = true;
+            walk_and_freeze(
+                &mut m,
+                w,
+                &mut crate::health::TestLevel::new(0).level(),
+                &mut Vec::new(),
+            );
+            assert!(m.in_powder_snow, "the move crossed powder snow");
+            assert_eq!(m.ticks_frozen, 1);
+        }),
+        "vanilla data is missing"
+    );
 }

@@ -636,7 +636,10 @@ mod tests {
         assert!(mob_ns > 0.0 && mob_ns < 50_000.0, "{mob_ns}");
     }
 
-    fn server_game(root: &Path) -> Game<'static> {
+    fn server_game<'a>(
+        resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>,
+        root: &Path,
+    ) -> Game<'a> {
         use super::super::super::{Audio, Options, Progress, Settings, load_resources};
         let settings = Settings::default();
         let loaded = load_resources(
@@ -656,7 +659,7 @@ mod tests {
         options.resources = root.to_path_buf();
         options.execution_role =
             super::super::super::execution_role::ExecutionRole::IntegratedServer;
-        let resources = Box::leak(Box::new(loaded.resources));
+        let resources = &*resources.insert(loaded.resources);
         Game::new(
             resources,
             loaded.pack,
@@ -679,7 +682,8 @@ mod tests {
         use sunrise_client::containers::BlockEntity;
         use sunrise_client::signs::{SignData, SignText};
         let root = PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
-        let mut game = server_game(&root);
+        let mut resources = None;
+        let mut game = server_game(&mut resources, &root);
         game.level.name = "SecretWorldName".into();
         game.level.seed = 8_675_309;
         game.options.player_name = Some("SteveSecret".into());
@@ -707,7 +711,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hz-privacy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut perf = server_perf::ServerPerf::new(0.0, 250.0);
-        let sunrise = server_perf::sunrise_options(12, 0, true);
+        let sunrise = server_perf::sunrise_options(12, 0);
         let plan = Plan {
             seconds: 2,
             samples: true,

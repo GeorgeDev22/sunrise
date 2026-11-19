@@ -53,10 +53,11 @@ pub trait DrawContext {
         unimplemented!("DrawContext::fill_gradient")
     }
     /// Part `src` (`[x, y, w, h]` in the sprite's own pixels) of sprite
-    /// `name` (vanilla's `gui/...`, or a content mod's GUI texture
-    /// `mymod:gui/...`), drawn stretched into `dst` (`[x, y, w, h]` in GUI
-    /// pixels), every texel multiplied by `tint` (`0xAARRGGBB`, a fluid's colour)
-    /// when there is one. False when there is no such sprite.
+    /// `name` (vanilla's `gui/...`, a content mod's GUI texture `mymod:gui/...`, or
+    /// a client mod's dynamic texture, `ClientRenderClientHost::create_dynamic_texture`),
+    /// drawn stretched into `dst` (`[x, y, w, h]` in GUI pixels), every texel multiplied by
+    /// `tint` (`0xAARRGGBB`, a fluid's colour) when there is one. False when there is
+    /// no such sprite.
     fn sprite(&mut self, name: &str, src: [f32; 4], dst: [f32; 4], tint: Option<u32>) -> bool {
         unimplemented!("DrawContext::sprite")
     }
@@ -69,6 +70,12 @@ pub trait DrawContext {
     /// (`0xFFFFFFFF` is opaque white). Fully transparent text draws nothing, as vanilla's.
     fn text(&mut self, text: &str, at: [f32; 2], argb: u32, shadow: bool) {
         unimplemented!("DrawContext::text")
+    }
+    /// `text` scaled by `scale` about `at`, its top-left corner: what a GUI pose of translate,
+    /// scale and translate back around `text` draws (`PoseStack.scale` in vanilla's HUD), without
+    /// a `gui_paint` buffer. `0.5` is the half-size line under a widget's label.
+    fn text_scaled(&mut self, text: &str, at: [f32; 2], scale: f32, argb: u32, shadow: bool) {
+        unimplemented!("DrawContext::text_scaled")
     }
     /// Stack drawing does not enforce resident count or damage maxima. Unknown
     /// item identities or unrepresentable component payloads still refuse drawing.

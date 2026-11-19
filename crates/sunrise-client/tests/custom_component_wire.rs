@@ -50,7 +50,7 @@ fn custom_components_survive_save_wire_and_nested_stacks() {
     item.data_mut()
         .set_other("!sample:mode", Some(Tag::Compound(Default::default())));
 
-    let saved = item_from_nbt(&item_to_nbt(&item)).unwrap();
+    let saved = item_from_nbt(&item_to_nbt(&item, &Default::default())).unwrap();
     assert!(item.same_item_same_components(&saved));
 
     let encode = |item: &ItemStack| {

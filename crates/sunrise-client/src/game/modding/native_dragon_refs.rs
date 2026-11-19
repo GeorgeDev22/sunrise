@@ -212,7 +212,11 @@ mod tests {
             assert_eq!(mob.persistence_required(game), Some(false));
             assert!(mob.set_persistence_required(game));
             assert_eq!(mob.persistence_required(game), Some(true));
-            let saved = game.dragon.as_ref().unwrap().to_nbt([0; 4], None);
+            let saved = game
+                .dragon
+                .as_ref()
+                .unwrap()
+                .to_nbt([0; 4], None, &Default::default());
             assert_eq!(saved.get("PersistenceRequired"), Some(&Tag::Byte(1)));
             assert!(Dragon::from_nbt(&saved, 0).unwrap().persistent);
             // `getBooleanOr` takes any nonzero number as true.
@@ -296,7 +300,11 @@ mod tests {
                 } else {
                     assert_eq!(synced, Some(&(16, serializer::INT, Value::Int(i as i32))));
                 }
-                let saved = game.dragon.as_ref().unwrap().to_nbt([0; 4], None);
+                let saved = game
+                    .dragon
+                    .as_ref()
+                    .unwrap()
+                    .to_nbt([0; 4], None, &Default::default());
                 assert_eq!(saved.get("DragonPhase"), Some(&Tag::Int(i as i32)));
                 let loaded = Dragon::from_nbt(&saved, 0).unwrap();
                 assert_eq!(loaded.native_phase(), phase);

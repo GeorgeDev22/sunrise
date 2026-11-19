@@ -30,6 +30,7 @@ fn a_guest_hovering_in_cave_air_is_kicked_for_flying() {
         &sunrise_protocol::registry::Builtin::default(),
         &[],
         &[],
+        Default::default(),
     );
     hub.guests.update(0, |g| {
         g.position = [0.5, 64.0, 0.5];

@@ -38,6 +38,8 @@ pub enum Drop {
 /// How the mob died.
 pub struct Death<'a> {
     pub loot: &'a LootData,
+    /// THIS_ENTITY's canonical live saved tag, if this caller can supply it.
+    pub this_nbt: Option<std::sync::Arc<sunrise_core::nbt::Tag>>,
     /// The killing `DamageSource`.
     pub damage: Option<LootDamage>,
     /// `LAST_DAMAGE_PLAYER`: the player who last hurt the mob, when they are
@@ -424,7 +426,10 @@ pub fn loot_entity(m: &Mob, vehicle: Option<LootEntity>) -> LootEntity {
     use Species as S;
     let s = m.species();
     let mut e = LootEntity::new(&m.kind.id);
-    e.on_fire = m.fire_ticks > 0 && !m.kind.flags.fire_immune;
+    if let Some(name) = m.custom_name_tag() {
+        e.components.insert("minecraft:custom_name".into(), name);
+    }
+    e.on_fire = m.is_on_fire();
     e.baby = m.is_baby();
     e.vehicle = vehicle.map(Box::new);
     if matches!(s, S::Slime | S::MagmaCube | S::SulfurCube) {
@@ -505,7 +510,11 @@ pub fn die(
             level_random,
         },
     );
-    finish_death(m, d, rolled, None)
+    let (mut out, skulls) = finish_death(m, d, rolled, None);
+    if let Some(reward) = experience_reward(m, d.player_killed, d.mob_drops) {
+        out.push(Drop::Experience(reward));
+    }
+    (out, skulls)
 }
 /// The first half of `die`: `dropFromLootTable`, which uses the world's
 /// random sequences, and what comes before it.
@@ -513,7 +522,8 @@ pub fn roll_death(m: &mut Mob, d: &Death, rolls: &mut dyn DeathRolls) -> Rolled 
     let mut out = Vec::new();
     let mut table_rolled = false;
     death_state(m);
-    let this = loot_entity(m, d.vehicle.clone());
+    let mut this = loot_entity(m, d.vehicle.clone());
+    this.nbt = d.this_nbt.clone();
     let mut skulls = false;
     // Creeper.killedEntity: a charged creeper's victim drops its head.
     if let Some(source) = d.damage.as_ref().and_then(|x| x.source.as_ref())
@@ -569,7 +579,7 @@ pub fn roll_death(m: &mut Mob, d: &Death, rolls: &mut dyn DeathRolls) -> Rolled 
 }
 /// The second half of `die`: `Mob.dropCustomDeathLoot` (each slot's chance,
 /// roll and clear, in order, with `choose` asked for a slot just before its
-/// roll), the species' extras and the experience.
+/// roll) and the species' extra item drops. Experience is independent of loot.
 pub fn finish_death(
     m: &mut Mob,
     d: &Death,
@@ -679,12 +689,15 @@ pub fn finish_death(
             m.extra.chested = false;
         }
     }
-    // dropExperience.
-    if killed_by_player && drops_experience(m) && d.mob_drops {
-        out.push(Drop::Experience(base_experience(m)));
-    }
     (out, skulls)
 }
+
+/// `LivingEntity.dropExperience`: eligibility and reward do not require a loot table.
+/// Called after equipment drops, which may change the mob's experience reward.
+pub fn experience_reward(m: &mut Mob, player_killed: bool, mob_drops: bool) -> Option<i32> {
+    (player_killed && drops_experience(m) && mob_drops).then(|| base_experience(m))
+}
+
 /// The loot parameters of the damage that killed `m`, as the equipment drop
 /// chance enchantments read them (no luck, no killing player).
 fn damage_context(this: LootEntity, d: &Death) -> EntityLootParams {
@@ -868,6 +881,7 @@ mod death_loot_table_tests {
         let loot = LootData::load(&root, &PackOverlay::new(&packs), &defaults).unwrap();
         let death = Death {
             loot: &loot,
+            this_nbt: None,
             damage: None,
             player: None,
             player_killed: false,
@@ -937,6 +951,7 @@ mod death_loot_table_tests {
         let _ = std::fs::remove_dir_all(&root);
         let death = Death {
             loot: &loot,
+            this_nbt: None,
             damage: None,
             player: None,
             player_killed: false,
@@ -980,6 +995,7 @@ mod death_loot_table_tests {
         let loot = LootData::load(&root, &PackOverlay::new(&[]), &defaults).unwrap();
         let death = Death {
             loot: &loot,
+            this_nbt: None,
             damage: None,
             player: Some(LootEntity::new("minecraft:player")),
             player_killed: true,
@@ -1119,6 +1135,7 @@ mod slot_tests {
         let loot = LootData::load(&root, &PackOverlay::default(), &defaults).unwrap();
         let death = |player_killed| Death {
             loot: &loot,
+            this_nbt: None,
             damage: None,
             player: None,
             player_killed,

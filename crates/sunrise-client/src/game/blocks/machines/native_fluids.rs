@@ -1160,6 +1160,7 @@ mod tests {
                     std::env::temp_dir()
                         .join(format!("sunrise-fluid-roundtrip-{}", std::process::id())),
                     sunrise_client::save::LevelShape::OVERWORLD,
+                    Some(Default::default()),
                 );
                 disk.enable_trusted_fluid_load();
                 disk.save(

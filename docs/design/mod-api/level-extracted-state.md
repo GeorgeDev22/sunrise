@@ -45,7 +45,7 @@ Paths below are relative to the repository at `731b0cae68`.
 
 This is a verified integration census, not a complete proof of every submission,
 reload or early-return route. Implementation must audit normal world rendering,
-screenshot sequences, split views, loading/title frames, device loss and deferred
+screenshot sequences, loading/title frames, device loss and deferred
 submission. Early loading returns inside `render_with` must not fire a world hook.
 
 ## Proposed contract

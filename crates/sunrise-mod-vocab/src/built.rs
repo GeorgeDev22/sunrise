@@ -484,6 +484,8 @@ pub struct EntityRenderState {
     pub living: Option<super::LivingRenderState>,
     pub tnt_fuse: Option<f32>,
     pub orb_value: Option<i32>,
+    pub painting: Option<PaintingRenderState>,
+    pub item_frame: Option<ItemFrameRenderState>,
 }
 impl From<EntityRenderState> for super::EntityRenderState {
     fn from(v: EntityRenderState) -> Self {
@@ -496,6 +498,8 @@ impl From<EntityRenderState> for super::EntityRenderState {
             living,
             tnt_fuse,
             orb_value,
+            painting,
+            item_frame,
         } = v;
         Self {
             id,
@@ -506,6 +510,8 @@ impl From<EntityRenderState> for super::EntityRenderState {
             living,
             tnt_fuse,
             orb_value,
+            painting: painting.map(Into::into),
+            item_frame: item_frame.map(Into::into),
         }
     }
 }
@@ -560,6 +566,57 @@ impl From<LivingRenderState> for super::LivingRenderState {
             has_red_overlay,
             pose,
             bed_orientation,
+        }
+    }
+}
+// exhaustive: the game builds it with a literal; mods only read it
+#[derive(sunrise_mod_api_macros::Wire)]
+pub struct PaintingRenderState {
+    pub facing: Direction,
+    pub width: i32,
+    pub height: i32,
+}
+impl From<PaintingRenderState> for super::PaintingRenderState {
+    fn from(v: PaintingRenderState) -> Self {
+        let PaintingRenderState {
+            facing,
+            width,
+            height,
+        } = v;
+        Self {
+            facing,
+            width,
+            height,
+        }
+    }
+}
+// exhaustive: the game builds it with a literal; mods only read it
+#[derive(sunrise_mod_api_macros::Wire)]
+pub struct ItemFrameRenderState {
+    pub facing: Direction,
+    pub glow: bool,
+    pub invisible: bool,
+    pub rotation: i8,
+    pub has_item: bool,
+    pub has_map: bool,
+}
+impl From<ItemFrameRenderState> for super::ItemFrameRenderState {
+    fn from(v: ItemFrameRenderState) -> Self {
+        let ItemFrameRenderState {
+            facing,
+            glow,
+            invisible,
+            rotation,
+            has_item,
+            has_map,
+        } = v;
+        Self {
+            facing,
+            glow,
+            invisible,
+            rotation,
+            has_item,
+            has_map,
         }
     }
 }

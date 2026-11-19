@@ -229,7 +229,7 @@ impl Game<'_> {
             let Some(g) = host.hub.guests.iter().find(|g| g.conn == conn) else {
                 continue;
             };
-            if !host.hub.here(g) {
+            if !host.hub.here(g) || self.player_tick_canceled(conn) {
                 continue;
             }
             if self.lan_mount_valid(g, mob) {

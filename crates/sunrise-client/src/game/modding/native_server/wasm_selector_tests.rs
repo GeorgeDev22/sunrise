@@ -22,7 +22,7 @@ fn wasm_selectors_resolve_in_game_and_refuse_before_guest_dispatch_on_guest_stac
     let manifest = Package::read(std::path::Path::new(&path)).unwrap().manifest;
     let info = mod_api::PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         mod_api::PackageKind::Code,
         mod_api::Side::Both,
         vec![manifest.id.clone()],
@@ -139,7 +139,7 @@ fn wasm_server_tick_messages_reach_dedicated_game_on_guest_stack() {
     let manifest = Package::read(std::path::Path::new(&path)).unwrap().manifest;
     let info = mod_api::PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         mod_api::PackageKind::Code,
         mod_api::Side::Both,
         vec![manifest.id.clone()],

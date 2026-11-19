@@ -1,8 +1,8 @@
 //! Repository tasks, run with `cargo run -p xtask -- TASK`.
 //!
-//! `package BINARY OUTDIR`: a playable Sunrise folder with the game binary, sunrise-ctl,
-//! sunrise-prepare and sunrise-server (built beside it: cargo build --release -p sunrise-game -p sunrise-client-lib
-//! --bins -p sunrise-prepare -p sunrise-server), the exporters sunrise-prepare compiles, its sources (the launcher compares
+//! `package BINARY OUTDIR`: a playable Sunrise folder with the game binary, sunrise-ctl, sunrise-perf,
+//! sunrise-prepare, sunrise-server and sunrise-port-pack (built beside it: cargo build --release -p sunrise-game -p sunrise-client-lib
+//! --bins -p sunrise-perf --bin sunrise-perf -p sunrise-prepare -p sunrise-server -p sunrise-port-pack), the exporters sunrise-prepare compiles, its sources (the launcher compares
 //! them to its own), and PLAY.txt. It holds none of Minecraft's files: players prepare those
 //! from their own copy. .github/workflows/release.yml makes the release folders with it.
 //!
@@ -51,7 +51,7 @@ const ARCHIVED: [&str; 6] = [
 ];
 
 // The programs that sit beside the client (sunrise-ctl, the command line and MCP server that play
-// the game; sunrise-prepare, which prepares the resources from the player's own Minecraft;
+// the game; sunrise-perf, which reads the game's .hzperf performance captures; sunrise-prepare, which prepares the resources from the player's own Minecraft;
 // sunrise-server, which hosts a server with the client as its engine, docs/server.md) and the
 // wasm runtime are listed, with the checkout's exporters, in the SDK's required inputs
 // (`sunrise_mod_package::sdk::inputs`): routes `package` and `package-server`.
@@ -142,9 +142,15 @@ fn perf_wasm() -> Result<(), String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let status = Command::new(&cargo)
         .current_dir(repo)
+        // The cdylib is asked for here, not in sunrise-perf's manifest: a cdylib's file name carries no hash, so every
+        // native build of the crate would write the same file and rebuild it, and all above it, whenever two builds
+        // in one target folder resolve it differently. LTO stays off, as it was while the manifest also asked for an
+        // rlib (Cargo skips LTO for such a crate): the page's wasm keeps its size.
         .args([
-            "build",
+            "rustc",
             "--release",
+            "--config",
+            "profile.release.lto=false",
             "--lib",
             "-p",
             "sunrise-perf",
@@ -152,9 +158,11 @@ fn perf_wasm() -> Result<(), String> {
             "wasm",
             "--target",
             "wasm32-unknown-unknown",
+            "--crate-type",
+            "cdylib",
         ])
         .status()
-        .map_err(|e| format!("{cargo} build: {e}"))?;
+        .map_err(|e| format!("{cargo} rustc: {e}"))?;
     if !status.success() {
         return Err(
             "the wasm build failed; `rustup target add wasm32-unknown-unknown` installs the target"
@@ -682,8 +690,10 @@ mod tests {
         for name in [
             "sunrise-client",
             "sunrise-ctl",
+            "sunrise-perf",
             "sunrise-prepare",
             "sunrise-server",
+            "sunrise-port-pack",
         ] {
             fs::write(bin.join(name), b"").unwrap();
         }

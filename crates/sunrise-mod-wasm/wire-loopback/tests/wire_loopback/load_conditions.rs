@@ -41,7 +41,9 @@ fn wire_loopback_load_conditions_native_and_guest_registrars_and_callbacks_agree
         mod_api::testing::with_mods(
             vec![mod_api::ModEntry::new("wire_test", hooks)].into(),
             || {
-                let mut registrar = mod_api::LoadConditionDeclarations::default();
+                let mut registrar = mod_api::LoadConditionDeclarations::new(
+                    sunrise_world::conditions::is_builtin_condition,
+                );
                 mod_api::dispatch_register_load_conditions(
                     &mod_api::RegistrationContext::new(),
                     &mut registrar,
@@ -61,22 +63,16 @@ fn wire_loopback_load_conditions_native_and_guest_registrars_and_callbacks_agree
                     })
                 );
                 assert!(!entries.contains_key(&Identifier::parse("wire_test:nope").unwrap()));
-                let owned = entries
-                    .iter()
-                    .map(|(id, (owner, _))| (id.namespace().to_owned(), owner.clone()))
-                    .collect();
                 let conditions = sunrise_world::conditions::LoadConditions::new(["wire_test"])
-                    .with_lookup(owned, move |name, raw| {
-                        let id = Identifier::parse(name).ok()?;
-                        let (_, handler) = entries.get(&id)?;
-                        let mut args = raw.as_object().cloned().unwrap();
-                        args.remove("type");
-                        Some(
+                    .with_lookup(entries.into_iter().map(|(id, (_, handler))| {
+                        (id.to_string(), move |raw: &serde_json::Value| {
+                            let mut args = raw.as_object().cloned().unwrap();
+                            args.remove("type");
                             handler
                                 .test(&serde_json::Value::Object(args))
-                                .map_err(|error| error.message),
-                        )
-                    });
+                                .map_err(|error| error.message)
+                        })
+                    }));
                 for kind in ["not", "and", "or"] {
                     for name in ["wire_test:nope", "othermod:thing"] {
                         let child = serde_json::json!({"type":name});
@@ -90,21 +86,11 @@ fn wire_loopback_load_conditions_native_and_guest_registrars_and_callbacks_agree
                             &serde_json::json!({"neoforge:conditions":[node]}),
                             &file
                         ));
-                        if name == "wire_test:nope" {
-                            let error = conditions.check_errors().unwrap_err();
-                            assert!(
-                                error.contains(&file)
-                                    && error.contains(name)
-                                    && error.contains("mod wire_test"),
-                                "{error}"
-                            );
-                        } else {
-                            assert!(
-                                conditions.foreign_errors().iter().any(|warning| warning
-                                    .contains(&file)
-                                    && warning.contains(name))
-                            );
-                        }
+                        let error = conditions.check_errors().unwrap_err();
+                        assert!(
+                            error.contains(&format!("{file}: unknown load conditions [{name}]")),
+                            "{error}"
+                        );
                     }
                 }
             },

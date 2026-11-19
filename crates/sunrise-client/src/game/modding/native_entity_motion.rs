@@ -199,7 +199,7 @@ impl Game<'_> {
     /// Whether the entity stands on a block (`Entity.onGround`). API
     /// 379.
     pub(super) fn entity_on_ground(&self, entity: EntityRef) -> Option<bool> {
-        let t = self.native_entity_target(entity)?;
+        let t = self.native_entity_read_target(entity)?;
         if let Some(p) = self.native_client_player(t) {
             return Some(p.ground.on_ground);
         }
@@ -213,7 +213,7 @@ impl Game<'_> {
     }
     /// The entity's box (`Entity.getBoundingBox`): its lowest and highest
     /// corner. Displays and markers have zero-sized physical boxes; interactions use
-    /// their saved dimensions. None for End crystals and the dragon; a dragon part's is its own. API 379.
+    /// their saved dimensions. End crystals have their 2 x 2 box. None for the dragon; a dragon part's is its own. API 379.
     pub(super) fn entity_bounding_box(&self, entity: EntityRef) -> Option<[[f64; 3]; 2]> {
         let t = self.native_entity_read_target(entity)?;
         if let Some(p) = self.native_client_player(t) {
@@ -238,10 +238,18 @@ impl Game<'_> {
                 let (dragon, part) = self.resident_dragon_part(id)?;
                 return Some(corners(dragon.part_geometry(part).1));
             }
+            Target::Crystal(id) => {
+                return Some(corners(self.crystals.iter().find(|c| c.id == id)?.bounds()));
+            }
+            Target::Cushion(id) => self.cushions.iter().find(|c| c.id == id)?.bounds(),
             Target::Frame(id) => self.item_frames.iter().find(|f| f.id == id)?.bounds(),
             Target::Painting(id) => self.paintings.iter().find(|p| p.id == id)?.bounds(),
             _ => return None,
         };
+        // A position that came off the wire can be NaN or infinite: no box.
+        if lo.iter().chain(&hi).any(|v| !v.is_finite()) {
+            return None;
+        }
         Some([lo, hi])
     }
     /// The height of the entity's eyes above its feet (`Entity.getEyeHeight`).

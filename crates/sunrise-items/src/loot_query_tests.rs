@@ -7,8 +7,45 @@ use serde_json::json;
 use std::rc::Rc;
 use sunrise_core::random::LegacyRandom;
 use sunrise_world::loot::query;
+struct QueryCodec;
+impl sunrise_world::loot::types::Registry for QueryCodec {
+    fn contains(&self, kind: &str, function: bool) -> bool {
+        !function && kind == "test:query"
+    }
+    fn validate(&self, _: &str, _: &Value, _: bool) -> std::result::Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+    fn conditional(&self, _: &str) -> bool {
+        true
+    }
+    fn apply(
+        &self,
+        _: &str,
+        _: &Value,
+        _: &sunrise_world::loot::LootContext<'_>,
+        _: &mut dyn sunrise_world::loot::types::RollRandom,
+        _: &dyn sunrise_world::loot::LootTags,
+        stack: &sunrise_world::loot::LootStack,
+    ) -> std::result::Result<sunrise_world::loot::LootStack, String> {
+        Ok(stack.clone())
+    }
+    fn test(
+        &self,
+        _: &str,
+        _: &Value,
+        ctx: &sunrise_world::loot::LootContext<'_>,
+        _: &mut dyn sunrise_world::loot::types::RollRandom,
+        _: &dyn sunrise_world::loot::LootTags,
+    ) -> std::result::Result<bool, String> {
+        OBSERVED_CONTEXT.with(|value| {
+            *value.borrow_mut() = Some((ctx.table_id().to_owned(), ctx.queried_stack.clone()))
+        });
+        Ok(true)
+    }
+}
 fn data(tables: Vec<(&str, Value)>) -> Items {
     let mut items = Items::for_tests(HashMap::new());
+    items.loot_types = sunrise_world::loot::types::Types::new(Arc::new(QueryCodec));
     items.loot = Arc::new(tables.into_iter().map(|(k, v)| (k.into(), v)).collect());
     items
 }
@@ -251,16 +288,6 @@ fn queried_context_and_ability_reach_native_adapter() {
             },
             loot_table_load: |_, _, _| {},
             modify_default_components: |_, _, _| {},
-            loot_function: |_, _, _, _, _| {},
-            loot_condition: |kind, _, ctx, holds, _| {
-                if kind == "test:query" {
-                    OBSERVED_CONTEXT.with(|v| {
-                        *v.borrow_mut() =
-                            Some((ctx.table_id().to_owned(), ctx.queried_stack.clone()))
-                    });
-                    *holds = true;
-                }
-            },
             loot_ability: |tool, ability, holds| {
                 OBSERVED_ABILITY
                     .with(|v| *v.borrow_mut() = Some((tool.item.clone(), ability.to_owned())));

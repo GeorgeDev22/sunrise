@@ -63,7 +63,11 @@ pub fn main() -> sunrise_client::Result<()> {
                     GhostTarget::Input => (0, false),
                     GhostTarget::Fuel => (1, false),
                 };
-                let stacks: Vec<String> = slot.items.iter().map(|s| canon_stack(Some(s))).collect();
+                let stacks: Vec<String> = slot
+                    .items
+                    .iter()
+                    .map(|s| canon_stack(Some(s), &items))
+                    .collect();
                 let _ = write!(
                     out,
                     "{index}{}={} ",

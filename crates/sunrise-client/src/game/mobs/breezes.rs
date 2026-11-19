@@ -107,7 +107,10 @@ mod tests {
     /// A game on the prepared resources with an empty chunk at (0, 0), the
     /// window's player (the camera the dust needs) and one breeze standing
     /// with its feet at `feet`.
-    fn game_with_breeze(feet: Vec3) -> Game<'static> {
+    fn game_with_breeze<'a>(
+        resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>,
+        feet: Vec3,
+    ) -> Game<'a> {
         let root = std::path::PathBuf::from(
             std::env::var_os("SUNRISE_TEST_RESOURCES")
                 .expect("set SUNRISE_TEST_RESOURCES to prepared resources"),
@@ -129,7 +132,7 @@ mod tests {
         let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
         options.resources = root.clone();
         options.execution_role = crate::game::execution_role::ExecutionRole::Client;
-        let res: &'static _ = Box::leak(Box::new(loaded.resources));
+        let res = &*resources.insert(loaded.resources);
         let mut game = Game::new(
             res,
             loaded.pack,
@@ -164,7 +167,8 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn the_dust_of_a_breeze_on_a_fence_keeps_the_client_level_random() {
-        let mut game = game_with_breeze(Vec3::new(8.5, 65.5, 8.5));
+        let mut resources = None;
+        let mut game = game_with_breeze(&mut resources, Vec3::new(8.5, 65.5, 8.5));
         let registry = &game.pack.assets.registry;
         let stone = registry.default_state("minecraft:stone").unwrap();
         let fence = registry.default_state("minecraft:oak_fence").unwrap();
@@ -198,7 +202,8 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn the_dust_of_a_breeze_on_a_full_block_keeps_the_client_level_random() {
-        let mut game = game_with_breeze(Vec3::new(8.5, 64.0, 8.5));
+        let mut resources = None;
+        let mut game = game_with_breeze(&mut resources, Vec3::new(8.5, 64.0, 8.5));
         let stone = game
             .pack
             .assets
@@ -227,7 +232,8 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn the_ground_of_a_breeze_is_the_fence_wall_or_gate_it_stands_on() {
-        let mut game = game_with_breeze(Vec3::new(8.5, 65.5, 8.5));
+        let mut resources = None;
+        let mut game = game_with_breeze(&mut resources, Vec3::new(8.5, 65.5, 8.5));
         let registry = &game.pack.assets.registry;
         let stone = registry.default_state("minecraft:stone").unwrap();
         game.world.set(8, 63, 8, stone).unwrap();

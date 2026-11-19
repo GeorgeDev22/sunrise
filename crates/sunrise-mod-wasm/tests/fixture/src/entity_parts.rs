@@ -66,6 +66,12 @@ impl EntityPart for Counter {
 
 /// Declares the fixture's general entity type and attaches the counter part.
 pub fn register(registrar: &mut dyn Registrar) {
+    // The attachment types the part reads and writes: a package uses only the types it declared.
+    for name in ["entity_counter", "entity_trap_after"] {
+        registrar
+            .register_attachment_type(&format!("wasm_fixture:{name}"), false)
+            .unwrap();
+    }
     registrar
         .declare_general_entity(
             "robot",

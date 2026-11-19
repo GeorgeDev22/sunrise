@@ -1514,7 +1514,7 @@ mod tests {
             b.anger_end = 500;
             b.angry_at = Some(Who::Player);
         }
-        let saved = mob_to_nbt(&m, [1, 2, 3, 4], None, None, |_| None);
+        let saved = mob_to_nbt(&m, [1, 2, 3, 4], None, None, |_| None, &Default::default());
         assert_eq!(
             saved.get("angry_at"),
             Some(&Tag::IntArray(player_uuid().to_vec())),
@@ -1528,7 +1528,14 @@ mod tests {
         // `storeNullable`: a calm bee writes no `angry_at`, even over a
         // compound that still names one.
         let calm = bee();
-        let saved = mob_to_nbt(&calm, [1, 2, 3, 4], Some(&saved), None, |_| None);
+        let saved = mob_to_nbt(
+            &calm,
+            [1, 2, 3, 4],
+            Some(&saved),
+            None,
+            |_| None,
+            &Default::default(),
+        );
         assert_eq!(saved.get("angry_at"), None, "no target, no key");
     }
 }

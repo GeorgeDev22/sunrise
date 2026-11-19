@@ -21,7 +21,7 @@ impl Game<'_> {
             attributes: &self.motion.attributes,
             movement: &self.motion.blocks,
             collision: self.collision,
-            suffocation: self.mob_suffocation(),
+            suffocation: self.level_suffocation(),
             data: self.res.mob_data(),
             controlling_player_movement: None,
             nearest_player: player.as_ref().filter(|p| !p.spectator).map(|p| p.position),
@@ -47,6 +47,7 @@ impl Game<'_> {
             thundering: weather && thunder > 0.9,
             level: self.level_key(),
             block_tags: &self.items().block_tags,
+            block_tag_flags: self.items().block_tag_flags.bits(),
             landing: &self.motion.landing,
             biomes: world_biomes!(self),
             mob_griefing: self

@@ -62,7 +62,7 @@ impl RecipeBookLayout {
                 .slots
                 .iter()
                 .flatten()
-                .any(|pos| pos.iter().any(|n| !n.is_finite()))
+                .any(|slot| slot.position.iter().any(|n| !n.is_finite()))
         {
             return Err("screen dimensions, inventory coordinates and slot geometry must be finite and fit the menu bound".into());
         }

@@ -26,7 +26,6 @@ sunrise-client-lib	lib	save::tests::native_saved_ids_must_match_the_declared_blo
 sunrise-client-lib	lib	structure_blocks::tests::declared_structure_entities_keep_template_payload_not_template_type	crates/sunrise-client/src/structure_blocks.rs:347	child-process
 sunrise-client-lib	lib	telemetry::tests::benchmark_reports_need_their_own_consent_and_go_dated_to_the_day	crates/sunrise-client/src/telemetry.rs:402	child-process
 sunrise-client-lib	test:lan_bot	a_synced_mod_block_entity_reaches_the_chunks_players_once_a_tick	crates/sunrise-client/tests/lan_bot.rs:1616	child-process
-sunrise-client-render	lib	split_ui::tests::locale_switch_and_pack_overrides_keep_the_same_draft	crates/sunrise-client-render/src/split_ui.rs:1570	child-process
 sunrise-command	lib	item::tests::block_entity_data_takes_a_type_a_mod_declared	crates/sunrise-command/src/item.rs:896	child-process
 sunrise-game	test:compile_child	real_executable_refuses_malformed_hidden_requests	crates/sunrise-game/tests/compile_child.rs:3	child-process
 sunrise-game	test:dedicated_walk	a_dedicated_server_keeps_ticking_while_a_player_walks	crates/sunrise-game/tests/dedicated_walk.rs:88	child-process

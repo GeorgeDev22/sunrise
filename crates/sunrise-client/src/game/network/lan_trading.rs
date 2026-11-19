@@ -36,6 +36,17 @@ fn uuid_words(uuid: u128) -> [i32; 4] {
     ]
 }
 
+/// A villager whose profession the world's table cannot resolve (its mod is
+/// gone): its trades skip the result processing and its screen closes.
+fn opaque_villager(
+    professions: &sunrise_client::mobs::villager::ResolvedProfessions,
+    species: sunrise_client::mobs::Species,
+    profession: &sunrise_client::mobs::villager::ProfessionState,
+) -> bool {
+    species == sunrise_client::mobs::Species::Villager
+        && professions.state_index(profession).is_none()
+}
+
 /// How a merchant menu op runs: as it is, only looking (the menu as a click finds it, kept
 /// nowhere), or as a decision asks (the slot rules its plan kept and the mods' answer).
 enum MerchantRun<'a> {
@@ -401,8 +412,11 @@ impl Game<'_> {
             .mob
             .and_then(|id| self.mobs.iter().find(|m| m.id == id))
             .is_some_and(|m| {
-                m.species() == sunrise_client::mobs::Species::Villager
-                    && m.extra.profession.index().is_none()
+                opaque_villager(
+                    &self.stations().professions,
+                    m.species(),
+                    &m.extra.profession,
+                )
             });
         let offers_refreshed = session
             .events
@@ -594,8 +608,11 @@ impl Game<'_> {
     ) -> bool {
         self.mobs.iter().find(|m| m.id == id).is_some_and(|m| {
             m.alive()
-                && (m.species() != sunrise_client::mobs::Species::Villager
-                    || m.extra.profession.index().is_some())
+                && !opaque_villager(
+                    &self.stations().professions,
+                    m.species(),
+                    &m.extra.profession,
+                )
                 && guest_within_entity_range(g, &m.bounds(), 4.0)
         })
     }
@@ -616,7 +633,8 @@ impl Game<'_> {
                             .hub
                             .guests
                             .iter()
-                            .find(|g| g.conn == *conn && host.hub.here(g))?;
+                            .find(|g| g.conn == *conn && host.hub.here(g))
+                            .filter(|_| !self.player_tick_canceled(*conn))?;
                         (!self.lan_merchant_valid(g, id)).then_some((*conn, gm.window))
                     })
                     .collect()
@@ -992,6 +1010,7 @@ mod tests {
                 None,
                 Some(game.pack.assets.registry),
                 |_| None,
+                &Default::default(),
             );
             game.apply_entity_nbt(super::super::commands::Target::Mob(40), tag)
                 .unwrap();
@@ -1003,6 +1022,7 @@ mod tests {
                 None,
                 Some(game.pack.assets.registry),
                 |_| None,
+                &Default::default(),
             );
             if let Tag::Compound(data) = &mut tag {
                 data.insert(
@@ -1083,7 +1103,10 @@ mod tests {
                 ),
                 (
                     "Offers",
-                    sunrise_client::entity_nbt::offers_to_nbt(std::slice::from_ref(&replacement)),
+                    sunrise_client::entity_nbt::offers_to_nbt(
+                        std::slice::from_ref(&replacement),
+                        &Default::default(),
+                    ),
                 ),
                 ("Xp", Tag::Int(9)),
             ]);
@@ -1253,6 +1276,43 @@ mod tests {
                 Some("minecraft:swamp")
             );
         });
+    }
+
+    #[test]
+    fn a_registered_profession_trades_normally_and_an_unregistered_one_stays_opaque() {
+        use sunrise_client::mobs::{
+            Species,
+            villager::{ProfessionState, ResolvedProfessions},
+        };
+        let id = |s| mod_api::Identifier::parse(s).unwrap();
+        let engineer = mod_api::ProfessionDefinition {
+            workstations: vec![],
+            key: mod_api::ProfessionKey(id("test:engineer")),
+            held_poi: vec![mod_api::PoiKey(id("test:assembler"))],
+            acquirable_poi: vec![mod_api::PoiKey(id("test:assembler"))],
+            requested_items: vec![],
+            secondary_blocks: vec![],
+            work_sound: None,
+            trades: vec![(1, mod_api::TradeSetKey(id("test:engineer")))],
+        };
+        let table =
+            ResolvedProfessions::prepare(vec![("test".into(), engineer)], |_, _| true).unwrap();
+        let registered = table
+            .state(table.resolve("test:engineer").unwrap())
+            .unwrap();
+        assert!(matches!(registered, ProfessionState::Registered { .. }));
+        assert!(
+            !opaque_villager(&table, Species::Villager, &registered),
+            "a registered mod profession gets the normal trade processing"
+        );
+        let missing = ProfessionState::Unresolved("gone:smith".into());
+        assert!(opaque_villager(&table, Species::Villager, &missing));
+        assert!(!opaque_villager(
+            &table,
+            Species::Villager,
+            &ProfessionState::from_index(5)
+        ));
+        assert!(!opaque_villager(&table, Species::WanderingTrader, &missing));
     }
 
     /// What the `trade_select` observer saw: the villager and offer index it

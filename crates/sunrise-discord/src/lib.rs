@@ -89,12 +89,11 @@ const KEY: &str = "discordPresence";
 const LABEL: &str = "sunrise.extras.discord_presence";
 const ABOUT: &str = "sunrise.extras.discord_presence.tooltip";
 
-/// The switch (off until Sunrise has a Discord application). One presence per computer: the first splitscreen player's
-/// switch, in their settings, on their Extras page; the other players have none.
+/// The process-wide switch (off until Sunrise has a Discord application).
 static ON: AtomicBool = AtomicBool::new(false);
 
-/// Whether the player whose turn it is owns the switch: the first one.
-fn first_player() -> bool {
+/// Only the first local instance owns the process-wide setting.
+fn owns_switch() -> bool {
     hooks::seat() == 0
 }
 
@@ -132,7 +131,7 @@ impl Store for Setting {
         key == KEY
     }
     fn load(&self, _key: &str, value: &str) {
-        if !first_player() {
+        if !owns_switch() {
             return;
         }
         match value {
@@ -142,12 +141,12 @@ impl Store for Setting {
         }
     }
     fn save(&self, line: &mut dyn FnMut(&str, &str)) {
-        if first_player() {
+        if owns_switch() {
             line(KEY, if enabled() { "true" } else { "false" });
         }
     }
     fn is_default(&self) -> bool {
-        !enabled() || !first_player()
+        !enabled() || !owns_switch()
     }
 }
 
@@ -168,7 +167,7 @@ impl Page for Section {
         Place::Extras
     }
     fn rows(&self, rows: &mut Vec<Row>) {
-        if !first_player() {
+        if !owns_switch() {
             return;
         }
         rows.push(Row::Toggle {
@@ -177,7 +176,7 @@ impl Page for Section {
         });
     }
     fn act(&self, row: usize, act: Act) {
-        if row == 0 && first_player() && matches!(act, Act::Press | Act::PressBack) {
+        if row == 0 && owns_switch() && matches!(act, Act::Press | Act::PressBack) {
             set_enabled(!enabled());
         }
     }

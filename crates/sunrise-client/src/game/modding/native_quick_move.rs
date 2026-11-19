@@ -63,7 +63,7 @@ pub(super) fn quick_move_slot(
 fn settle(
     at: MenuSlot,
     handled: bool,
-    stack: ItemStack,
+    stack: Option<ItemStack>,
     before: &[Option<ItemStack>],
     items: &mut Vec<Option<ItemStack>>,
     inventory: &mut [Option<ItemStack>],
@@ -72,7 +72,7 @@ fn settle(
         before.clone_into(items);
         return;
     }
-    let left = (stack.count > 0).then_some(stack);
+    let left = stack;
     match at {
         MenuSlot::Container(k) => {
             if items.len() <= k {
@@ -218,9 +218,10 @@ impl Game<'_> {
             MenuSlot::Container(k) => m.items.get(k).cloned().flatten(),
             MenuSlot::Inventory(i) => self.inventory.get(i).cloned().flatten(),
         };
-        let Some(mut stack) = held.filter(|s| s.count > 0) else {
+        let Some(stack) = held.filter(|s| s.count > 0) else {
             return false;
         };
+        let mut stack = Some(stack);
         let mut taken = std::mem::take(&mut **m);
         let items = taken.items.clone();
         let mut handled = false;
@@ -260,13 +261,14 @@ impl Game<'_> {
             MenuSlot::Container(k) => m.items.get(k).cloned().flatten(),
             MenuSlot::Inventory(i) => self.inventory.get(i).cloned().flatten(),
         };
-        let Some(mut stack) = held.filter(|s| s.count > 0) else {
+        let Some(stack) = held.filter(|s| s.count > 0) else {
             return Fire::Nothing;
         };
         self.journal_block_entity(pos);
         let Some(BlockEntity::Mod(m)) = self.world.block_entities.get_mut(&pos) else {
             return Fire::Nothing;
         };
+        let mut stack = Some(stack);
         let mut taken = std::mem::take(&mut **m);
         let items = taken.items.clone();
         let mut handled = false;
@@ -305,7 +307,7 @@ impl Game<'_> {
         entity: &mut ModBlockEntity,
         container_slots: usize,
         slot: usize,
-        stack: &mut ItemStack,
+        stack: &mut Option<ItemStack>,
         handled: &mut bool,
     ) -> bool {
         use crate::game::api_values::{
@@ -533,7 +535,7 @@ struct Fired {
     at: MenuSlot,
     taken: ModBlockEntity,
     items: Vec<Option<ItemStack>>,
-    stack: ItemStack,
+    stack: Option<ItemStack>,
 }
 
 enum Fire {
@@ -630,7 +632,7 @@ mod tests {
         settle(
             MenuSlot::Inventory(0),
             true,
-            left.clone(),
+            Some(left.clone()),
             &before,
             &mut items,
             &mut inventory,
@@ -641,7 +643,7 @@ mod tests {
         settle(
             MenuSlot::Inventory(0),
             true,
-            stack("minecraft:cobblestone", 0),
+            None,
             &before,
             &mut items,
             &mut inventory,
@@ -664,7 +666,7 @@ mod tests {
         settle(
             MenuSlot::Container(0),
             true,
-            stack("minecraft:dirt", 0),
+            None,
             &before,
             &mut items,
             &mut inventory,
@@ -683,7 +685,7 @@ mod tests {
         settle(
             MenuSlot::Inventory(3),
             false,
-            stack("minecraft:dirt", 0),
+            None,
             &before,
             &mut items,
             &mut inventory,

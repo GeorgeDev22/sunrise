@@ -35,6 +35,9 @@ impl Installed {
             .chain(mine(owner, keys.menus.values().flatten(), |p| {
                 p.menu_subscribed()
             }))
+            .chain(mine(owner, keys.effects.values().flatten(), |p| {
+                p.effect_subscribed()
+            }))
             .chain(mine(owner, keys.fluids.values().flatten(), |p| {
                 p.fluid_subscribed()
             }))

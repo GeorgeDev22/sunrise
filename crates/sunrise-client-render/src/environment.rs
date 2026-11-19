@@ -49,7 +49,7 @@ pub struct Sky {
     pub star_brightness: f32,
     pub sunrise_color: [f32; 4],
     pub cloud_color: [f32; 4],
-    /// `gameplay/sky_light_level`, the server-side sky darkening.
+    /// Raw `gameplay/sky_light_level` (0 to 15), before conversion to sky darkening.
     pub sky_light_level: f32,
     /// Environmental fog (`visual/fog_start_distance` / `fog_end_distance`).
     pub fog_start: f32,
@@ -1155,7 +1155,7 @@ impl Environment {
             star_brightness: float("visual/star_brightness"),
             sunrise_color: argb("visual/sunrise_sunset_color"),
             cloud_color: argb("visual/cloud_color"),
-            sky_light_level: float("gameplay/sky_light_level") / 15.0,
+            sky_light_level: float("gameplay/sky_light_level"),
             fog_start: float("visual/fog_start_distance"),
             fog_end: float("visual/fog_end_distance"),
             cloud_fog_end: float("visual/cloud_fog_end_distance"),
@@ -1201,6 +1201,10 @@ mod tests {
                 ),
             )]));
             let environment = Environment::load(&source).unwrap();
+            assert_eq!(
+                environment.sample(&Sample::default()).sky_light_level,
+                level
+            );
             assert_eq!(sky_darken(&environment, 0, 0.0, 0.0), expected);
             assert!(Environment::load_dimension(&source, "missing").is_err());
         }

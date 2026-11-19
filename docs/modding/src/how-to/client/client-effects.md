@@ -9,6 +9,21 @@ Read `ClientHost::gui_options().advanced_item_tooltips` for the current
 setting on native and wasm; request a new snapshot after a toggle. This is separate
 from the advanced flag supplied to an individual tooltip request.
 
+## Showing an item's tooltip in your screen
+
+Call `ItemResource::tooltip(host, advanced, creative)` for the same item lines the
+inventory builds, including item parts, component appenders and `item_tooltip`
+edits. Use the GUI option above for `advanced`; set `creative` only for a creative
+tab's own slot. The request returns text elements, not images or a render request.
+Pass their text to `DrawContext::gui_tooltip` at your GUI cursor position. If a line
+has a separate RGBA colour, use its RGB channels as the fallback text style colour;
+`u32::MAX` means keep the text's own style.
+
+During item tooltip line construction, the request returns base lines without
+running line callbacks again. Outside line construction, including in gather or
+pre-render callbacks, the request runs line callbacks. It never gathers images or
+draws a tooltip.
+
 ## Adding tooltip lines
 
 Use `ItemPart::tooltip` for an attached item's own lines at the vanilla
@@ -80,7 +95,7 @@ meshed so far and nothing where a section is not meshed yet.
 - Both effects start at full strength and fade linearly over `ticks` client ticks. The fade waits while the game is paused.
 - The sound events in `exempt` remain clear, including ones already playing. Use this for the mod's ringing sound. Other sounds already playing, music and interface clicks are muffled too.
 
-A new call replaces the current muffle; `ticks` of 0 ends it immediately. The effect belongs to the sound output, so every splitscreen player hears it. The call refuses an amount or strength outside 0 to 1, more than 64 exempt events, or an exempt event that is not a namespaced sound ID, without changing the output. Server code cannot call this client-only service.
+A new call replaces the current muffle; `ticks` of 0 ends it immediately. The effect belongs to the client’s sound output. The call refuses an amount or strength outside 0 to 1, more than 64 exempt events, or an exempt event that is not a namespaced sound ID, without changing the output. Server code cannot call this client-only service.
 
 Play the accompanying sound through `ClientHost::play_local_sound` with a `SoundPlay`.
 

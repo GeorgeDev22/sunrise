@@ -6,6 +6,69 @@ through `RenderAssets::model` after resources are published. World render hooks 
 copies in a group. GUI scenes, mobs and kept/spinning renderers use their
 CPU routes; groups are a world-drawing facility, not another renderer.
 
+## Worn humanoid equipment
+
+An item attaches one `ClientItemExtensions` Part in
+`Hooks::register_client_item_extensions`, on the client at every resource load.
+The event's `extensions: &mut dyn ClientItemExtensionsRegistrar` registers the
+models, textures and item providers together. There is no startup provider
+registration path: request your `ItemKey` during ordinary registration, then
+attach its provider during this resource-load event.
+
+```rust,ignore
+let inner = event.extensions.register_model("mymod:inner_chest", &inner_tree)?;
+let outer = event.extensions.register_model("mymod:outer_chest", &outer_tree)?;
+let inner_texture = event.extensions.register_texture("mymod:entity/equipment/inner")?;
+let outer_texture = event.extensions.register_texture("mymod:entity/equipment/outer")?;
+event.extensions.client_item_extensions(item, Arc::new(ChestLayers {
+    models: [inner, outer],
+    textures: [inner_texture, outer_texture],
+}))?;
+```
+
+Trees are API-owned `ModelPart` trees, built directly or baked from a
+`LayerDefinition`. Register them once per resource load, never during a frame.
+Model names belong to the registering mod's namespace. Duplicate model names,
+non-finite geometry or poses, an unknown texture, an unknown item and two
+providers for one item refuse the resource-load registration by name. A duplicate
+item diagnostic names both providers. Disabling the owning mod stops its Part.
+A server-only package cannot declare this client registration hook.
+
+The worn stack must first pass the equippable component's asset and matching-slot
+checks, and the asset must have layers. Only the visible equipped item's provider
+is queried; random-texture inventory enumeration does not run frame callbacks.
+Every callback takes `&dyn ClientHost` and `&ItemStack`:
+
+1. `default_dye_color` runs once and returns packed ARGB, or zero when undyed.
+2. `armor_layer_tint_color` runs in asset layer order, with the layer and its index.
+   Exactly zero skips the layer, without calling its texture or model method.
+   The default is white for a nondyeable layer, or its dye/optional undyed colour
+   for a dyeable layer. Without either colour, a dyeable layer is skipped.
+3. `armor_texture` receives the layer type, layer and the resolved default texture
+   reference, including pack/CIT selection. A returned override is final for that
+   layer; it is not replaced by another random-texture or custom-model texture.
+4. `armor_layer_model` chooses the registered tree for that layer. Returning
+   `ArmorModelRef::VANILLA` keeps the original model. The humanoid pose is copied
+   onto the chosen tree, with only the current slot's parts visible.
+
+Per-layer model selection deliberately differs from NeoForge's one model per
+piece. It lets a chest item draw an inner shape with one texture and an outer
+shape with another, without painting both textures on both shapes. There are no
+additional per-piece `humanoid_armor_model` or `generic_armor_model` callbacks.
+The trim draws once on the last material layer actually drawn's tree; if no
+material drew, it uses vanilla's model. The trim does not call the model method
+again. Babies do not draw trims. Foil goes on the first drawn material when there
+is no trim, and on the trim otherwise.
+
+Model and texture references are scoped to the resource load. A stale reference
+returned during drawing uses vanilla's model or the supplied default texture,
+with one diagnostic per provider until reload, never a panic. A failed callback
+discards all of the piece's custom layers, draws the piece with vanilla behaviour,
+and disables that provider until reload, with one diagnostic. This includes refused
+or trapped wasm callbacks, even after an earlier layer succeeded. Native and
+wasm use the same Part, methods and handler tokens. Only references and layer
+values cross Wire during a frame: no geometry, rebakes or native-only escape path.
+
 ## Bake-time standalone forms
 
 `standalone_models` contract version 2 keeps `event.models: &mut Vec<String>` for plain

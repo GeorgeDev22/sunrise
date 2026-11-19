@@ -107,9 +107,7 @@ impl Game<'_> {
             self.detect_rate_spam(conn, true);
             return;
         }
-        if self.chat_filter_command(i, command) {
-            self.guest_command(conn, command, None);
-        }
+        self.guest_command(conn, command, None);
         self.detect_rate_spam(conn, true);
     }
 
@@ -145,9 +143,7 @@ impl Game<'_> {
         for event in events {
             self.lan_log_event(event);
         }
-        if let Some(signed) = signed
-            && self.chat_filter_command(i, &p.command)
-        {
+        if let Some(signed) = signed {
             self.guest_command(conn, &p.command, Some(signed));
         }
         // The lambda counts the command even when its arguments failed to decode.

@@ -186,11 +186,6 @@ impl Game<'_> {
     /// The window's `Client` and `Common` configs, once: after client setup
     /// and before its title, connection or ordinary runtime callbacks.
     pub(super) fn native_configs_client_start(&mut self) {
-        // Other local players share the process's client setup, not another
-        // Client/Common load or a second config watcher.
-        if self.options.split_guest {
-            return;
-        }
         if !self.native_configs.started {
             use mod_api::ConfigKind::{Client, Common};
             self.native_configs_load(&[Client, Common], None);
@@ -321,10 +316,6 @@ mod tests {
                     mod_api::__private::PhaseOwner::new(mod_api::__private::ModPhase::Setup);
                 game.native_configs_client_start();
                 game.native_configs_client_start();
-                game.options.split_guest = true;
-                game.native_configs = NativeConfigs::default();
-                game.native_configs_client_start();
-                game.options.split_guest = false;
                 game.options.execution_role =
                     crate::game::execution_role::ExecutionRole::IntegratedServer;
                 for world in ["phase-world-one", "phase-world-two"] {

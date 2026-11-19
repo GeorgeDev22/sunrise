@@ -132,13 +132,14 @@ pub(super) fn mismatches<'a>(
             }
             let current = loaded.iter().find(|m| m.id == saved.id);
             let differs = current.is_none_or(|current| {
-                match (
-                    sunrise_mod_package::dependencies::parse_version(&saved.version),
-                    sunrise_mod_package::dependencies::parse_version(&current.version),
-                ) {
-                    (Ok(saved), Ok(current)) => saved != current,
-                    _ => saved.version != current.version,
-                }
+                // A save is outside data: a version it holds that isn't semver (or a loaded mod
+                // whose version wasn't known) differs, unless it is the very same text.
+                let parse = |v: &str| sunrise_mod_package::manifest::parse_version(v).ok();
+                saved.version != current.version
+                    && match (parse(&saved.version), parse(&current.version)) {
+                        (Some(saved), Some(current)) => saved != current,
+                        _ => true,
+                    }
             });
             differs.then(|| mod_api::ModMismatch {
                 mod_id: saved.id.clone(),
@@ -620,7 +621,7 @@ mod tests {
         .unwrap();
         let mut level = Level::read(&dir).unwrap();
         assert_eq!(level.saved_mods, Some(vec![record("old", "0.1.0")]));
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         assert_eq!(
             Level::read(&dir).unwrap().saved_mods,
             Some(vec![record("old", "0.1.0")])

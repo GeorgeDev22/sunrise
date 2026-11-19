@@ -115,7 +115,13 @@ impl RayWorld for VisualRays<'_, '_> {
             return Ok(VoxelShape::block());
         }
         if name == "minecraft:snow" || name.ends_with("_fence") {
-            return ray_shape_from_boxes(&facts.outline);
+            let shape = ray_shape_from_boxes(&facts.outline)?;
+            let offset = if facts.outline_offset {
+                facts.offset_at(p.x, p.z)
+            } else {
+                [0.0; 3]
+            };
+            return Ok(shape.moved(Vec3::new(offset[0], offset[1], offset[2])));
         }
         self.inner.block_shape(state, p, RayBlockMode::Collider)
     }
@@ -341,7 +347,6 @@ impl Game<'_> {
             }
         };
         let mut view = self.view;
-        let pull = self.hooks_camera_distance(partial);
         let kind = self.camera_type;
 
         let context = CollisionContext::for_entity(
@@ -370,8 +375,7 @@ impl Game<'_> {
             &entity,
             partial,
             kind,
-            |distance| {
-                let mut distance = distance * pull;
+            |mut distance| {
                 self.native_camera_distance(partial, kind.is_mirrored(), &entity, &mut distance);
                 distance
             },
@@ -407,7 +411,7 @@ impl Game<'_> {
         super::camera_rotation(CameraType::FirstPerson, yaw, pitch)
     }
     /// The player as `Camera.alignWithEntity` sees it.
-    fn player_camera_entity(&mut self) -> Option<CameraEntity> {
+    pub(super) fn player_camera_entity(&mut self) -> Option<CameraEntity> {
         let (scale, distance) = {
             let p = self.player.as_mut()?;
             (
@@ -868,8 +872,6 @@ impl Game<'_> {
                 packed,
                 out,
             );
-            let world = sunrise_hooks::players::Pass::World;
-            self.own_layers_geometry(m, world, camera, alpha as f32, packed, out);
             self.player_elytra_geometry(m, chest, camera, alpha as f32, packed, out);
             self.spin_attack_geometry(m, camera, alpha as f32, packed, out);
             self.shoulder_parrots_geometry(m, camera, alpha as f32, packed, out);
@@ -994,8 +996,6 @@ impl Game<'_> {
             240 | 240 << 8,
             &mut verts,
         );
-        let picture = sunrise_hooks::players::Pass::Picture;
-        self.own_layers_geometry(&m, picture, camera, 1.0, 240 | 240 << 8, &mut verts);
         // `WingsLayer` draws through `RenderTypes.armorCutoutNoCull`: the
         // wings' faces show from both sides (the elytra texture is empty on
         // the face that looks at the body).
@@ -1016,7 +1016,7 @@ impl Game<'_> {
         let fire = self
             .player
             .as_ref()
-            .filter(|p| p.fire_ticks > 0 && !p.spectator)
+            .filter(|p| p.is_on_fire() && !p.spectator)
             .map(|p| (p.dimensions.width, p.dimensions.height));
         let glints = preview_glint_quads(&verts, gui, wings.clone(), self.glint_frame);
         let quads = player_preview_quads_no_cull(verts, gui, fire, &atlas.sprites, wings);
@@ -1112,7 +1112,7 @@ impl Game<'_> {
             return;
         };
         let assets = &self.armor_stand_assets;
-        let Some((texture, _)) = assets
+        let Some(layer) = assets
             .equipment
             .get(&asset)
             .and_then(|k| k.get("wings"))
@@ -1127,7 +1127,7 @@ impl Game<'_> {
             assets
                 .player
                 .get(if baby { "elytra_baby" } else { "elytra" }),
-            rect.or_else(|| sprites.get(texture)),
+            rect.or_else(|| sprites.get(&layer.texture)),
         ) else {
             return;
         };
@@ -1164,7 +1164,7 @@ impl Game<'_> {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 emissive
-                    .overlay(texture)
+                    .overlay(&layer.texture)
                     .and_then(|e| sprites.get(e))
                     .copied()
             })

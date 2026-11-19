@@ -194,6 +194,14 @@ impl<W: EntityMovementWorld<Error = io::Error>> EntityMovementWorld for EntityCo
         }
         border.collision_shape().map(Some).map_err(io::Error::other)
     }
+    fn moving_colliders(
+        &mut self,
+        entity: EntityIdentity,
+        bounds: Aabb,
+        out: &mut Vec<sunrise_core::geometry::oriented::OrientedCollider>,
+    ) -> io::Result<()> {
+        self.blocks.moving_colliders(entity, bounds, out)
+    }
 }
 impl<'a, W> EntityCollisions<'a, W>
 where
@@ -582,6 +590,16 @@ impl EntityMovementWorld for SceneCollisions<'_, '_> {
     }
     fn movement_border(&mut self, _: EntityIdentity, _: Aabb) -> io::Result<Option<VoxelShape>> {
         Ok(None)
+    }
+    /// The moving colliders the game placed for this pass: every mover resolves through here.
+    fn moving_colliders(
+        &mut self,
+        entity: EntityIdentity,
+        bounds: Aabb,
+        out: &mut Vec<sunrise_core::geometry::oriented::OrientedCollider>,
+    ) -> io::Result<()> {
+        crate::moving_colliders::near(entity, bounds, out);
+        Ok(())
     }
 }
 impl DynamicSupportWorld for SceneCollisions<'_, '_> {
@@ -1435,5 +1453,171 @@ mod published_shape_tests {
         );
         assert!(fall(&world, &binding).abs() < 1e-9);
         assert!(published_outline(&world, &binding, BlockStateId(1), [1, 64, 1]).is_none());
+    }
+
+    /// Parts for the tests: the answer of `rule` for each ask, counting them.
+    struct Rule<F: Fn(&CollisionContext<'_>, BlockPos) -> Option<VoxelShape>> {
+        asked: std::cell::Cell<usize>,
+        rule: F,
+    }
+    impl<F: Fn(&CollisionContext<'_>, BlockPos) -> Option<VoxelShape>>
+        sunrise_world::part_collision::PartShapes for Rule<F>
+    {
+        fn shape(
+            &self,
+            _: BlockStateId,
+            position: BlockPos,
+            context: &CollisionContext<'_>,
+            _: &mut dyn FnMut() -> &'static [&'static str],
+        ) -> Option<VoxelShape> {
+            self.asked.set(self.asked.get() + 1);
+            (self.rule)(context, position)
+        }
+    }
+    fn rule<F: Fn(&CollisionContext<'_>, BlockPos) -> Option<VoxelShape>>(
+        rule: F,
+    ) -> std::rc::Rc<Rule<F>> {
+        std::rc::Rc::new(Rule {
+            asked: Default::default(),
+            rule,
+        })
+    }
+    fn slab(top: f64) -> VoxelShape {
+        VoxelShape::from_box(Aabb::new(Vec3::ZERO, Vec3::new(1.0, top, 1.0))).unwrap()
+    }
+    /// How far the mover `id`, dropped onto the top face of the block at (6, 64, 1) and given
+    /// `context`, falls: the same drop as `fall`, onto the declared cube of state 2.
+    fn fall_onto_plain(
+        world: &World,
+        binding: &BlockCollisionRegistry<'_>,
+        id: u32,
+        context: CollisionContext<'_>,
+    ) -> f64 {
+        let body = Aabb::new(Vec3::new(6.2, 65.0, 1.2), Vec3::new(6.8, 66.8, 1.8));
+        let mut scene = SceneCollisions {
+            world,
+            binding,
+            subject: None,
+        };
+        -crate::moving_colliders::as_mover(id, || {
+            scene
+                .resolve_with_context(body, Vec3::new(0.0, -2.0, 0.0), 0.0, false, context)
+                .unwrap()
+        })
+        .y
+    }
+    fn plain_world() -> World {
+        let mut world = World::new(BlockStateId(0), 0);
+        world.chunks.insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        world.set(1, 64, 1, BlockStateId(1)).unwrap();
+        world.set(6, 64, 1, BlockStateId(2)).unwrap();
+        world
+    }
+    fn player(id: u64, y: f64, descending: bool) -> CollisionContext<'static> {
+        CollisionContext::for_entity(
+            CollisionEntity {
+                identity: EntityIdentity(id),
+                kind: sunrise_world::collision_context::EntityContextKind::Player,
+                y,
+                descending,
+                main_hand: None,
+            },
+            false,
+        )
+    }
+
+    #[test]
+    fn a_part_gives_the_entity_that_asks_its_own_shape() {
+        let registry = registry();
+        let binding = binding(&registry);
+        binding.set_part_states([BlockStateId(2)]);
+        let world = plain_world();
+        // Belt-like: the carried entity (7) gets the full block, anything else a clipped slab.
+        let parts = rule(|_, _| {
+            Some(if crate::moving_colliders::mover() == 7 {
+                VoxelShape::block()
+            } else {
+                slab(0.25)
+            })
+        });
+        let _in = sunrise_world::part_collision::InParts::enter(parts.clone());
+        assert!(fall_onto_plain(&world, &binding, 7, player(0, 65.0, false)).abs() < 1e-9);
+        assert!((fall_onto_plain(&world, &binding, 8, player(0, 65.0, false)) - 0.75).abs() < 1e-9);
+        assert!(parts.asked.get() > 0);
+        // The cell's cached shape stays the empty-context answer: a state that opts in is
+        // still scanned for in the cells around its own, and never counts as empty.
+        let block = binding.collision_block(BlockStateId(2)).unwrap();
+        assert!(block.large_collision_shape && !block.empty_shape);
+    }
+
+    #[test]
+    fn a_state_that_does_not_opt_in_is_never_asked() {
+        let registry = registry();
+        let binding = binding(&registry);
+        let world = plain_world();
+        let parts = rule(|_, _| Some(slab(0.25)));
+        // No part installed: the declared cube.
+        assert!(fall_onto_plain(&world, &binding, 7, player(0, 65.0, false)).abs() < 1e-9);
+        // Parts installed, the state not marked: the declared cube, and no ask.
+        {
+            let _in = sunrise_world::part_collision::InParts::enter(parts.clone());
+            assert!(fall_onto_plain(&world, &binding, 7, player(0, 65.0, false)).abs() < 1e-9);
+            assert_eq!(parts.asked.get(), 0);
+            let block = binding.collision_block(BlockStateId(2)).unwrap();
+            assert!(!block.large_collision_shape);
+        }
+        // Marked, then not: the marking is replaced, not added to.
+        binding.set_part_states([BlockStateId(2)]);
+        binding.set_part_states([]);
+        let _in = sunrise_world::part_collision::InParts::enter(parts.clone());
+        assert!(fall_onto_plain(&world, &binding, 7, player(0, 65.0, false)).abs() < 1e-9);
+        assert_eq!(parts.asked.get(), 0);
+        // Parts installed on this thread only: the guard puts the previous ones back.
+        drop(_in);
+        binding.set_part_states([BlockStateId(2)]);
+        assert!(fall_onto_plain(&world, &binding, 7, player(0, 65.0, false)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_part_reads_is_above_and_descending_as_powder_snow_does() {
+        let registry = registry();
+        let binding = binding(&registry);
+        binding.set_part_states([BlockStateId(2)]);
+        let world = plain_world();
+        let parts = rule(|context, position| {
+            Some(
+                if context.is_above(&VoxelShape::block(), position, false)
+                    && !context.is_descending()
+                {
+                    VoxelShape::block()
+                } else {
+                    VoxelShape::empty()
+                },
+            )
+        });
+        let _in = sunrise_world::part_collision::InParts::enter(parts);
+        // Above the block and upright: it holds the body. Descending, or below its top: it is
+        // empty and the body drops the whole 2 blocks.
+        assert!(fall_onto_plain(&world, &binding, 7, player(0, 65.0, false)).abs() < 1e-9);
+        assert!((fall_onto_plain(&world, &binding, 7, player(0, 65.0, true)) - 2.0).abs() < 1e-9);
+        assert!((fall_onto_plain(&world, &binding, 7, player(0, 64.5, false)) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn none_keeps_a_published_shape_and_some_replaces_it() {
+        let registry = registry();
+        let binding = binding(&registry);
+        binding.set_part_states([BlockStateId(1)]);
+        let mut world = plain_world();
+        publish(&mut world, (1, 64, 1), &[[0.0, 0.0, 0.0, 1.0, 0.25, 1.0]]);
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None::<VoxelShape>));
+        let given = answer.clone();
+        let parts = rule(move |_, _| given.borrow().clone());
+        let _in = sunrise_world::part_collision::InParts::enter(parts);
+        // `None`: the published slab stands.
+        assert!((fall(&world, &binding) - 0.75).abs() < 1e-9);
+        // `Some`: the cube replaces it for the query.
+        *answer.borrow_mut() = Some(VoxelShape::block());
+        assert!(fall(&world, &binding).abs() < 1e-9);
     }
 }

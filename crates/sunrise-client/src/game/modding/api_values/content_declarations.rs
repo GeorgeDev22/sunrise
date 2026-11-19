@@ -19,6 +19,25 @@ pub(in crate::game) fn push_reaction(
     }
 }
 
+impl TryIntoEngine<()> for mod_api::GateSound {
+    type Engine = engine::GateSound;
+    type Error = String;
+    fn try_into_engine(&self, _: &()) -> Result<Self::Engine, Self::Error> {
+        Ok(match self {
+            Self::All(sound) => engine::GateSound::All(sound.clone()),
+            Self::Sites {
+                on_use,
+                on_explosion,
+                on_redstone,
+            } => engine::GateSound::Sites {
+                on_use: on_use.clone(),
+                on_explosion: on_explosion.clone(),
+                on_redstone: on_redstone.clone(),
+            },
+        })
+    }
+}
+
 impl TryIntoEngine<()> for mod_api::BlockProperties {
     type Engine = engine::BlockProperties;
     type Error = String;
@@ -52,6 +71,18 @@ impl TryIntoEngine<()> for mod_api::BlockProperties {
                 .map(|value| push_reaction(value).0),
             occludes: self.occludes,
             destroy_overlay: self.destroy_overlay,
+            offset: self.offset.map(|mode| match mode {
+                mod_api::OffsetType::None => engine::OffsetType::None,
+                mod_api::OffsetType::Xz => engine::OffsetType::Xz,
+                mod_api::OffsetType::Xyz => engine::OffsetType::Xyz,
+            }),
+            max_horizontal_offset: self.max_horizontal_offset,
+            max_vertical_offset: self.max_vertical_offset,
+            instrument: self.instrument,
+            ignited_by_lava: self.ignited_by_lava,
+            replaceable: self.replaceable,
+            skip_same_block_faces: self.skip_same_block_faces,
+            vegetation: self.vegetation,
         })
     }
 }
@@ -120,6 +151,9 @@ impl TryIntoEngine<()> for mod_api::Block {
                 .map(|s| s.try_into_engine(&()))
                 .transpose()?,
             shapes_from_block_entity: self.shapes_from_block_entity,
+            context_collision: self.context_collision.map(|rule| match rule {
+                mod_api::ContextCollision::Scaffolding => engine::ContextCollision::Scaffolding,
+            }),
             state_properties: self
                 .state_properties
                 .iter()
@@ -139,8 +173,16 @@ impl TryIntoEngine<()> for mod_api::Block {
                 .collect(),
             default_state: self.default_state.clone(),
             item: self.item,
-            open_sound: self.open_sound.clone(),
-            close_sound: self.close_sound.clone(),
+            open_sound: self
+                .open_sound
+                .as_ref()
+                .map(|sound| sound.try_into_engine(&()))
+                .transpose()?,
+            close_sound: self
+                .close_sound
+                .as_ref()
+                .map(|sound| sound.try_into_engine(&()))
+                .transpose()?,
             block_item: self.block_item.clone(),
             components: component_patch("block", &self.id, &self.components)?,
             connects_to: self.connects_to.clone(),
@@ -397,6 +439,51 @@ mod tests {
     }
 
     #[test]
+    fn offset_declarations_share_json_values_and_admission_refusals() {
+        for (mode, json) in [
+            (mod_api::OffsetType::None, "NONE"),
+            (mod_api::OffsetType::Xz, "XZ"),
+            (mod_api::OffsetType::Xyz, "XYZ"),
+        ] {
+            let draft = BlockProperties {
+                offset: Some(mode),
+                max_horizontal_offset: Some(0.125),
+                max_vertical_offset: Some(0.1),
+                ..Default::default()
+            };
+            let expected: engine::BlockProperties = serde_json::from_str(&format!(
+                r#"{{"offset":"{json}","max_horizontal_offset":0.125,"max_vertical_offset":0.1}}"#
+            ))
+            .unwrap();
+            assert_eq!(draft.try_into_engine(&()).unwrap(), expected);
+        }
+        for (horizontal, vertical, key) in [
+            (f32::NAN, 0.0, "max_horizontal_offset"),
+            (f32::INFINITY, 0.0, "max_horizontal_offset"),
+            (-0.1, 0.0, "max_horizontal_offset"),
+            (0.3, 0.0, "max_horizontal_offset"),
+            (0.25, 0.3, "max_vertical_offset"),
+        ] {
+            let mut block = Block::new("test:offset", "minecraft:stone");
+            block.properties = BlockProperties {
+                offset: Some(mod_api::OffsetType::Xyz),
+                max_horizontal_offset: Some(horizontal),
+                max_vertical_offset: Some(vertical),
+                ..Default::default()
+            };
+            let mut content = sunrise_mod_package::Content::declared("test");
+            let error = content
+                .declare(&[block.try_into_engine(&()).unwrap()], &[])
+                .unwrap_err();
+            assert!(
+                error.contains("test:offset") && error.contains(key),
+                "{error}"
+            );
+            assert!(content.blocks.is_empty());
+        }
+    }
+
+    #[test]
     fn declaration_conversion_preserves_admission_outcomes() {
         // Independent old-path records: errors must match byte for byte, not just reject.
         for (id, template, light, hardness, item) in [
@@ -588,18 +675,25 @@ mod tests {
     }
 }
 
-pub(super) fn validate_decoded_effects(
+pub(super) fn validate_decoded_components(
     patch: Option<&mod_api::Tag>,
     stack: &sunrise_items::items::ItemStack,
 ) -> Result<(), mod_api::StackWriteError> {
-    // The component codec already decoded each supplied value. Check that admission
-    // succeeded rather than parsing untrusted component payloads a second time.
-    if let Some(patch) = patch
-        && ((patch.get("minecraft:consumable").is_some() && stack.consumable(None).is_none())
-            || (patch.get("minecraft:death_protection").is_some()
-                && stack.death_protection(None).is_none()))
+    // Use the admission results already produced by the component codec.
+    let Some(patch) = patch else { return Ok(()) };
+    if (patch.get("minecraft:consumable").is_some() && stack.consumable(None).is_none())
+        || (patch.get("minecraft:death_protection").is_some()
+            && stack.death_protection(None).is_none())
     {
         return Err(mod_api::StackWriteError::InvalidEffectPayload);
+    }
+    let id = "minecraft:villager_food";
+    if patch.get(id).is_some() && stack.villager_food(None).is_none() {
+        return Err(mod_api::StackWriteError::InvalidComponents {
+            reason: mod_api::StackError::InvalidComponent {
+                id: mod_api::ComponentId::new(id).expect("built-in component id"),
+            },
+        });
     }
     Ok(())
 }
@@ -609,6 +703,30 @@ mod effect_write_tests {
     use super::super::{TryIntoEngine, stack_limit_tests::catalog};
     use mod_api::{ItemStack, StackWriteError, Tag};
     use sunrise_core::nbt::JavaString;
+
+    #[test]
+    fn malformed_villager_food_refusal_names_the_component() {
+        let items = catalog();
+        let key = mod_api::__private::item_key("minecraft:stick").unwrap();
+        let mut draft = ItemStack::of(key);
+        let id = "minecraft:villager_food";
+        draft
+            .set_components(
+                [(
+                    JavaString::from(id),
+                    Tag::compound([("nutrition", Tag::Int(0))]),
+                )]
+                .into(),
+            )
+            .unwrap();
+        let Err(StackWriteError::InvalidComponents {
+            reason: mod_api::StackError::InvalidComponent { id: refused },
+        }) = draft.try_into_engine(&items)
+        else {
+            panic!("expected a named component refusal")
+        };
+        assert_eq!(refused.as_str(), id);
+    }
 
     #[test]
     fn malformed_effect_override_refuses_typed_stack_write() {

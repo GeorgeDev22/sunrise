@@ -13,8 +13,9 @@ use sunrise_protocol::packets::play::{self, Clientbound as C};
 
 /// A game with the player standing at 8.5 70 8.5 in a ticking chunk, with the
 /// positional sounds it plays recorded.
-fn standing_game() -> Game<'static> {
-    let resources = Box::leak(Box::new(None));
+fn standing_game<'a>(
+    resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>,
+) -> Game<'a> {
     let mut game = server_game(resources);
     let feet = Vec3::new(8.5, 70.0, 8.5);
     game.player = Some(sunrise_client::motion::PlayerMotion::new(game.motion, feet).unwrap());
@@ -45,7 +46,8 @@ fn sound(game: &mut Game<'_>, event: &str) -> (f32, f32) {
 #[test]
 #[ignore = "daily"]
 fn a_thrown_item_takes_the_throwers_random_not_the_levels() {
-    let mut game = standing_game();
+    let mut resources = None;
+    let mut game = standing_game(&mut resources);
     game.yaw = 0.0;
     game.pitch = 0.0;
     game.inventory[game.selected] = Some(ItemStack::new("minecraft:stone", 4));
@@ -75,7 +77,8 @@ fn a_thrown_item_takes_the_throwers_random_not_the_levels() {
 #[test]
 #[ignore = "daily"]
 fn a_death_scatter_takes_the_throwers_random_not_the_levels() {
-    let mut game = standing_game();
+    let mut resources = None;
+    let mut game = standing_game(&mut resources);
     game.inventory[0] = Some(ItemStack::new("minecraft:stone", 2));
     let level = game.world.random.state();
     game.drop_inventory(
@@ -104,7 +107,8 @@ fn a_death_scatter_takes_the_throwers_random_not_the_levels() {
 #[test]
 #[ignore = "daily"]
 fn a_pickup_pitch_is_not_drawn_from_the_levels_random() {
-    let mut game = standing_game();
+    let mut resources = None;
+    let mut game = standing_game(&mut resources);
     game.spawn_item(
         ItemStack::new("minecraft:stone", 2),
         [8.5, 70.0, 8.5],
@@ -140,7 +144,7 @@ fn a_pickup_pitch_is_not_drawn_from_the_levels_random() {
 
 /// A window joined to a server through memory, with the sounds it plays
 /// recorded: the client half of a pickup (`ClientPacketListener`).
-fn with_remote_game<R>(f: impl FnOnce(&mut Game<'_>) -> R) -> R {
+pub(in crate::game) fn with_remote_game<R>(f: impl FnOnce(&mut Game<'_>) -> R) -> R {
     let root = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
     let settings = Settings::default();
     let loaded = load_resources(
@@ -227,7 +231,8 @@ fn a_client_pickup_sound_takes_the_listeners_random() {
 #[test]
 #[ignore = "daily"]
 fn a_burning_items_sound_is_not_drawn_from_the_levels_random() {
-    let mut game = standing_game();
+    let mut resources = None;
+    let mut game = standing_game(&mut resources);
     let lava = game
         .pack
         .assets

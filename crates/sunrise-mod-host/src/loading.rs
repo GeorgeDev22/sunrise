@@ -8,6 +8,11 @@ pub fn main_with(
     built: &'static [mod_api::__private::native::BuiltMod],
     startup: sunrise_client::entry::Startup,
 ) {
+    // The stack policy follows the engine mods run on, and must be settled before any worker starts.
+    if let Err(error) = sunrise_mod_wasm::install_stack_policy() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
     sunrise_engine_slots::install_seal(mod_points::__private::seal)
         .expect("engine seal provider must be installed once before startup");
     // Platform instrumentation must precede registration and the first mod guard.
@@ -46,6 +51,7 @@ pub fn main_with(
     sunrise_client::entry::start(
         native,
         |native, launch| {
+            sunrise_mod_wasm::set_game_build(crate::GAME_BUILD_ID);
             let mut wasm =
                 sunrise_mod_wasm::load_installed(launch, &sunrise_client::logging::player_dir());
             let mut mods = mods;
@@ -133,7 +139,7 @@ pub fn main_with(
                     .filter(|&&i| code_ids.contains(manifests[i].id.as_str()))
                     .map(|&i| sunrise_client::save::level_mods::ModRecord {
                         id: manifests[i].id.clone(),
-                        version: manifests[i].version.clone(),
+                        version: manifests[i].version.to_string(),
                     })
                     .collect(),
             ));

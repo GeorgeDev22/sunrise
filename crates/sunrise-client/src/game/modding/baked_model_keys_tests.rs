@@ -37,8 +37,9 @@ impl Hooks for Reader {
     }
 }
 
-/// Stone's one model: six quads, read on the first load and again after a reload; the first
-/// load's key answers `StaleModel` afterwards and the untouched model reads the same.
+/// Stone's four weighted variants (26.3's blockstate lists four models, two of them turned half a
+/// way round), each a full cube of six quads: read on the first load and again after a reload; the
+/// first load's key answers `StaleModel` afterwards and the untouched model reads the same.
 #[test]
 #[ignore = "daily"]
 fn a_client_mod_reads_a_block_states_baked_models_once_per_load() {
@@ -59,7 +60,7 @@ fn a_client_mod_reads_a_block_states_baked_models_once_per_load() {
                 let Ok(keys) = &read.keys[0] else {
                     panic!("stone's keys: {:?}", read.keys);
                 };
-                assert_eq!(keys.len(), 1, "stone has one variant");
+                assert_eq!(keys.len(), 4, "stone has four weighted variants");
                 let Ok(view) = &read.views[0][0] else {
                     panic!("stone's model: {:?}", read.views);
                 };

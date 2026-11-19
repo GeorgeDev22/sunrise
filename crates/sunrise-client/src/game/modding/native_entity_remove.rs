@@ -402,7 +402,7 @@ mod tests {
             ));
             let _ = std::fs::remove_dir_all(&root);
             let shape = game.save.shape;
-            game.save = Arc::new(SaveDir::new(root.clone(), shape));
+            game.save = Arc::new(SaveDir::new(root.clone(), shape, Some(Default::default())));
             game.world
                 .chunks
                 .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
@@ -424,7 +424,9 @@ mod tests {
             game.persist.raw.insert(12, Tag::Compound(tag));
             game.save_entities(true).unwrap();
             assert_eq!(
-                SaveDir::new(root.clone(), shape).load_entities(0, 0).len(),
+                SaveDir::new(root.clone(), shape, None)
+                    .load_entities(0, 0)
+                    .len(),
                 1
             );
             let entity = game.entity(12).unwrap();
@@ -434,7 +436,7 @@ mod tests {
             assert!(!game.persist.raw.contains_key(&12));
             game.save_entities(true).unwrap();
             assert!(
-                SaveDir::new(root.clone(), shape)
+                SaveDir::new(root.clone(), shape, None)
                     .load_entities(0, 0)
                     .is_empty()
             );
@@ -545,6 +547,7 @@ mod tests {
                     fixed: false,
                     invisible: false,
                     check_interval: 0,
+                    ticks: 0,
                     custom_name: None,
                     random: sunrise_core::random::LegacyRandom::new(0),
                 });
@@ -559,6 +562,7 @@ mod tests {
                 width: 1,
                 height: 1,
                 check_interval: 0,
+                ticks: 0,
             });
             // East frame, west glow frame, north painting. Expected origins
             // are the hanging center plus 0.15 facing out and the 0.5 Y offset.

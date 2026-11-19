@@ -118,8 +118,9 @@ impl Game<'_> {
         // `DeathProtection.applyEffects`: the component's own `death_effects`,
         // read from the protector copy (the totem's clear-then-effects, or a
         // custom list; `death_protection={}` has none).
+        let user = self.consuming_player_entity();
         for effect in self.death_effects(&protector) {
-            self.apply_consume_effect(&protector, &effect, None);
+            self.apply_consume_effect(&protector, &effect, None, user);
         }
         Some(Body {
             protector: Some(protector),

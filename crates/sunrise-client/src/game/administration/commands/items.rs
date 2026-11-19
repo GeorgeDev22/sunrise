@@ -554,7 +554,7 @@ impl Game<'_> {
                 if m.items.len() < size {
                     m.items.resize(size, None);
                 }
-                m.items[i] = stack;
+                *m.item_slot_mut(i).unwrap() = stack;
             }
             Some(entity) => entity.slots_mut()[i] = stack,
             None => return false,
@@ -1133,18 +1133,20 @@ impl Game<'_> {
                                     Some(rest) => (true, rest),
                                     None => (false, k.as_str()),
                                 };
-                                let key = if key.contains(':') {
-                                    key.to_owned()
-                                } else {
-                                    format!("minecraft:{key}")
+                                let Ok(id) = sunrise_core::identifier::Identifier::parse(key)
+                                else {
+                                    continue;
                                 };
+                                let key =
+                                    sunrise_core::nbt::JavaString::from(id.to_string().as_str());
+                                let marker =
+                                    sunrise_core::nbt::JavaString::from(format!("!{id}").as_str());
+                                c.remove(&key);
+                                c.remove(&marker);
                                 if remove {
-                                    c.remove(&key.as_str().into());
+                                    c.insert(marker, Tag::Compound(Default::default()));
                                 } else {
-                                    c.insert(
-                                        key.as_str().into(),
-                                        sunrise_client::scoreboard::json_to_tag(v),
-                                    );
+                                    c.insert(key, sunrise_client::scoreboard::json_to_tag(v));
                                 }
                             }
                         });
@@ -1626,7 +1628,7 @@ impl Game<'_> {
 
 /// Edit a stack's components as their saved compound.
 fn edit_components(stack: &mut ItemStack, f: impl FnOnce(&mut sunrise_core::nbt::Compound)) {
-    let mut c = match sunrise_client::item_data::encode_components(stack) {
+    let mut c = match sunrise_client::item_data::component_snapshot(stack) {
         Some(Tag::Compound(c)) => c,
         _ => sunrise_core::nbt::Compound::new(),
     };
@@ -2743,6 +2745,41 @@ mod builtin_component_delivery_tests {
 }
 
 #[cfg(test)]
+mod component_modifier_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "daily"]
+    fn item_modify_removal_hides_the_prototype_and_a_set_clears_the_marker() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let stack = ItemStack::new("minecraft:bread", 1);
+            assert_eq!(stack.villager_food(game.items().get(&stack.item)), Some(4));
+            let mut random = sunrise_core::random::LegacyRandom::new(1);
+            let remove = serde_json::json!({"type":"minecraft:set_components", "components":{"!villager_food":{}}});
+            let removed = game
+                .apply_item_modifier(&remove, Some(stack), &mut random, None, [0.0; 3], 0)
+                .unwrap();
+            assert_eq!(removed.villager_food(game.items().get(&removed.item)), None);
+            let set = serde_json::json!({"type":"minecraft:set_components", "components":{"minecraft:villager_food":{"nutrition":7}}});
+            let result = game
+                .apply_item_modifier(&set, Some(removed), &mut random, None, [0.0; 3], 0)
+                .unwrap();
+            assert_eq!(
+                result.villager_food(game.items().get(&result.item)),
+                Some(7)
+            );
+            assert!(
+                result
+                    .data()
+                    .unwrap()
+                    .other("!minecraft:villager_food")
+                    .is_none()
+            );
+        });
+    }
+}
+
+#[cfg(test)]
 mod registered_slot_source_read_tests {
     use super::*;
     #[test]
@@ -3080,7 +3117,7 @@ mod set_custom_data_tests {
     fn merging_an_empty_tag_into_a_stack_without_custom_data_adds_no_component() {
         let mut stack = ItemStack::new("minecraft:stick", 1);
         set_custom_data(&mut stack, &Tag::Compound(Default::default()));
-        let saved = sunrise_client::item_data::encode_components(&stack);
+        let saved = sunrise_client::item_data::component_snapshot(&stack);
         assert!(saved.is_none_or(|c| c.get("minecraft:custom_data").is_none()));
     }
 }

@@ -193,7 +193,8 @@ impl Menu {
                         Some(crate::crafting::Recipe::Mod(_))
                     ) =>
             {
-                env.recipes.remainders(id, &grid, n, &|s| env.remainder(s))
+                env.recipes
+                    .remainders(env.loop_context, id, &grid, n, &|s| env.remainder(s))
             }
             Some(_) => grid
                 .iter()
@@ -219,7 +220,7 @@ impl Menu {
                     Some(_) => {
                         let mut left = replacement;
                         if !self.inventory_add(env, &mut left) {
-                            self.drop_stack(&left);
+                            self.drop_stack(&left, env.items);
                         }
                     }
                 }

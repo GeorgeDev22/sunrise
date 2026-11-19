@@ -9,7 +9,17 @@ for the root-exported trait:
   the mod calls back through the `held-<interface>` imports.
 
 The file's text is a short note on why the trait crosses; the filename is the
-machine-consumed identity. Duplicate roles and invalid names fail generation.
+machine-consumed identity. An export or held role may start with one refusal policy:
+
+- `refusal: unwind`: a missing, refused or trapped callback unwinds to its owner's
+  isolation boundary instead of manufacturing a default reply, including for references;
+- `refusal: error ErrorType::Variant`: return `Err(ErrorType::Variant(message))`,
+  where the root-exported constructor accepts a `String`. All methods of that role
+  must return a compatible `Result`.
+
+The message is `wasm call refused or trapped`, with `: <reason>` when available.
+Roles without a policy keep the normal return-type fallback. Policies belong to
+callback owners, not a generator list of trait names. Duplicate roles and invalid names fail generation.
 The generator resolves the name to a real public API trait and builds both sides
 of its call table. Adding, removing or renaming a role file reruns generation.
 

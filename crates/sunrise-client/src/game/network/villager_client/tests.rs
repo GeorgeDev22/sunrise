@@ -157,6 +157,7 @@ fn profession_hub(name: &str, vanilla_professions: bool) -> sunrise_client::lan:
         &sunrise_protocol::registry::Builtin::default(),
         &[],
         &[],
+        Default::default(),
     );
     let hub_config = hub::HubConfig {
         default_game_mode: 0,

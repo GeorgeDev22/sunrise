@@ -2,15 +2,30 @@
 //! kinds, ticking as `AbstractFurnaceBlockEntity.serverTick` with fuel times
 //! from the data-driven `context_int_provider`/`context_float_provider` files.
 
-pub use crate::chunk::block_entity::published_shapes::{PublishedShapes, SHAPES_KEY};
+pub use crate::chunk::block_entity::published_shapes::{CheckedShape, PublishedShapes, SHAPES_KEY};
 pub use crate::chunk::block_entity::{
     Banner, Beacon, BlockEntity, Brushable, Campfire, ChiseledBookshelf, Crafter, CreakingHeart,
     EndGateway, Furnace, FurnaceKind, Jukebox, Lectern, MOD_MENUS, ModBlockEntity,
-    ModBlockEntityFields, ModContainer, ModEnergyBuffer, ModFluidTanks, ModRevision, PotentSulfur,
-    Shelf, Skull, SkullSkin,
+    ModBlockEntityFields, ModContainer, ModContainerInsertRule, ModEnergyBuffer, ModFluidTanks,
+    ModRevision, PotentSulfur, Shelf, Skull, SkullSkin,
 };
 use crate::items::ItemStack;
 use std::collections::HashMap;
+
+/// Apply a mod container's typed insertion rule to the engine's item-stack representation.
+pub fn mod_container_insert_allowed(
+    rule: ModContainerInsertRule,
+    current: Option<&ItemStack>,
+    offered: &ItemStack,
+) -> bool {
+    match rule {
+        ModContainerInsertRule::Any => true,
+        ModContainerInsertRule::OnlyWhenEmpty => current.is_none(),
+        ModContainerInsertRule::SameKind => {
+            current.is_none_or(|held| held.same_item_same_components(offered))
+        }
+    }
+}
 
 /// a content mod's menu type (`data/<id>/sunrise/menu/`, vanilla's
 /// `MenuType`): its container slots, its data slots (`ContainerData`) and the
@@ -796,6 +811,25 @@ impl BlockEntity {
             | Self::CommandBlock(_)
             // Not a Container (only Clearable): hoppers don't reach in.
             | Self::Campfire(_) => &[],
+        }
+    }
+    /// An individual slot write claims just that slot from a mod's saved payload.
+    pub fn slot_mut(&mut self, slot: usize) -> Option<&mut Option<ItemStack>> {
+        match self {
+            Self::Mod(m) => m.item_slot_mut(slot),
+            other => other.slots_mut().get_mut(slot),
+        }
+    }
+    /// Write back an inventory projection, claiming a mod's opaque rows only at changed slots.
+    pub fn replace_slots(&mut self, slots: &[Option<ItemStack>]) {
+        if let Self::Mod(m) = self {
+            for (slot, stack) in slots.iter().enumerate() {
+                if m.items[slot] != *stack {
+                    *m.item_slot_mut(slot).unwrap() = stack.clone();
+                }
+            }
+        } else {
+            self.slots_mut().clone_from_slice(slots);
         }
     }
     pub fn slots_mut(&mut self) -> &mut [Option<ItemStack>] {

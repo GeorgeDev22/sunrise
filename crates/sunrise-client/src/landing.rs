@@ -310,8 +310,8 @@ impl MotionWorld<'_, '_, '_> {
         state: BlockStateId,
         position: BlockPos,
         distance: f64,
-        damage: f32,
-    ) -> f32 {
+        multiplier: f32,
+    ) -> (f64, f32) {
         crate::block_contact::fall(
             &mut crate::health::DamageLevel::of(
                 &mut *self.scene,
@@ -327,7 +327,7 @@ impl MotionWorld<'_, '_, '_> {
                 position,
             },
             distance,
-            damage,
+            multiplier,
         )
     }
     fn fall_event(&mut self, event: FallEvent) {
@@ -712,10 +712,13 @@ impl LivingFallWorld for FallCall<'_, '_, '_, '_> {
             .player
             .attribute("minecraft:fall_damage_multiplier")
     }
-    fn modify_fall_damage(&mut self, _distance: f64, damage: f32) -> Result<f32> {
-        Ok(self.contact.map_or(damage, |(state, position, distance)| {
-            self.world.mod_block_fall(state, position, distance, damage)
-        }))
+    fn modify_fall(&mut self, distance: f64, multiplier: f32) -> Result<(f64, f32)> {
+        Ok(self
+            .contact
+            .map_or((distance, multiplier), |(state, position, _)| {
+                self.world
+                    .mod_block_fall(state, position, distance, multiplier)
+            }))
     }
     fn fall_sound(&mut self, big: bool) -> Result<SceneSound> {
         self.world.living_fall_sound(big)

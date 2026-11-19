@@ -248,7 +248,11 @@ pub(in crate::game) mod tests {
                 std::time::SystemTime::now()
             ));
             std::fs::create_dir_all(&world).unwrap();
-            playerdata::save(&game.lan.as_ref().unwrap().hub.guests[0], &world);
+            playerdata::save(
+                &game.lan.as_ref().unwrap().hub.guests[0],
+                &world,
+                &Default::default(),
+            );
 
             // A fresh record of the same player never died until it loads.
             let mut fresh = new_guest(2, 123);

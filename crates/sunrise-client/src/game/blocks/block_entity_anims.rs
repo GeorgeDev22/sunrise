@@ -124,6 +124,10 @@ impl Game<'_> {
     }
     /// `container_opener_event` for a player who is not a spectator (a guest).
     pub(super) fn container_openers_changed(&mut self, key: (i32, i32, i32), open: bool) -> bool {
+        // Declared containers use their own counter, even on a lid-bearing template.
+        if self.mod_menu_at(key).is_some() {
+            return false;
+        }
         let pos = [key.0, key.1, key.2];
         let state = self.world.block(pos[0], pos[1], pos[2]).0;
         match self.be_anims.ticker(state) {
@@ -375,6 +379,12 @@ impl Game<'_> {
         }
     }
 
+    /// The server tickers of the bells and conduits, which a server runs in its block-entity pass.
+    pub(super) fn tick_block_entity_servers(&mut self) {
+        self.tick_conduit_servers();
+        self.tick_bell_servers();
+    }
+
     /// The client tickers of the loaded animated and mod block entities, once
     /// per client tick (`ClientLevel.tickBlockEntities`).
     pub(super) fn tick_block_entity_anims(&mut self) {
@@ -383,8 +393,7 @@ impl Game<'_> {
         // A server has no window, but its bells, gateways and conduits still run
         // their server tickers; a client of one only animates what it is sent.
         if self.remote.is_none() {
-            self.tick_conduit_servers();
-            self.tick_bell_servers();
+            self.tick_block_entity_servers();
         }
         let Some(r) = &self.renderer else {
             return;
@@ -1290,8 +1299,12 @@ mod conduit_target_tests {
         let uuid = server.persist.uuids[&drowned];
         let key = (CONDUIT[0], CONDUIT[1], CONDUIT[2]);
         // What `sendBlockUpdated` puts on the wire.
-        let tag = crate::lan::chunks::entity_tag(&server.world.block_entities[&key], false)
-            .expect("a conduit has an update tag");
+        let tag = crate::lan::chunks::entity_tag(
+            &server.world.block_entities[&key],
+            false,
+            &Default::default(),
+        )
+        .expect("a conduit has an update tag");
         assert_eq!(tag.get("Target"), Some(&Tag::IntArray(uuid.to_vec())));
         assert!(
             server.world.block_log.as_ref().unwrap().contains(&key),

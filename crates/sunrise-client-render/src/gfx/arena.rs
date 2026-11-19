@@ -1423,8 +1423,12 @@ mod tests {
         ] {
             let indices = matches!(part, Part::Indices);
             let stride = arena.stride;
-            // 64 quads a mesh: their vertices, or their sorted indices.
-            let len: u64 = if indices { 64 * 6 } else { 64 * 4 };
+            // 64 quads a mesh: their vertices, or their sorted indices' range.
+            let len: u64 = if indices {
+                super::super::translucency::index_words(64)
+            } else {
+                64 * 4
+            };
             let span = len.next_multiple_of(GRAIN);
             // Its range here at `at`; the other one names a page that is not there.
             let mesh = |at: (u32, u64), solid: u32, translucent: u32| SectionGpu {

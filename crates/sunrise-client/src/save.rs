@@ -15,15 +15,19 @@
 //! `level.dat`) are migrated on open.
 use crate::mod_chunk_tickets::{ModTicket, ModTickets, TicketOwner};
 mod backpressure;
-use backpressure::compress_records;
+use compression_pool::{CompressedWrite, compress_records};
 pub mod biome_regions;
 pub mod block_entity_encode;
 mod block_entity_order;
 mod far_regions;
+mod horizon_names;
+pub(crate) use horizon_names::adopt_in_player as adopt_horizon_player;
+#[cfg(test)]
+mod horizon_names_tests;
 pub mod level_mods;
 mod respawn;
 mod writes;
-use writes::{Outstanding, Writer};
+use writes::{Outstanding, QueuedWrite, Writer};
 
 use crate::{
     Result,
@@ -679,30 +683,20 @@ fn merge_block_entity(original: &Tag, loaded: &Tag, current: &Tag) -> Tag {
 /// chunk-only `keepPacked`, and with the fields Sunrise keeps outside its
 /// model: a container's `lock` (`LockCode`), from the tag it was loaded or set
 /// with.
-pub fn block_entity_data(
-    p: (i32, i32, i32),
-    e: &crate::containers::BlockEntity,
-    block: &str,
-    lock: Option<&Tag>,
-) -> Tag {
-    block_entity_data_tag(block_entity_encode::encode(p, e, block), lock)
-}
-
 /// Command-visible block-entity data, saved against loaded item prototypes.
-pub fn block_entity_data_with_items(
+pub fn block_entity_data(
     p: (i32, i32, i32),
     e: &crate::containers::BlockEntity,
     block: &str,
     lock: Option<&Tag>,
     items: &crate::items::Items,
 ) -> Tag {
-    block_entity_data_tag(
-        block_entity_encode::encode_with_items(p, e, block, items),
-        lock,
-    )
+    let tag = block_entity_encode::encode(p, e, block, items);
+    command_block_entity_data(tag, lock)
 }
 
-fn block_entity_data_tag(mut tag: Tag, lock: Option<&Tag>) -> Tag {
+/// Apply the command data view to an encoded block entity.
+pub fn command_block_entity_data(mut tag: Tag, lock: Option<&Tag>) -> Tag {
     if let Tag::Compound(map) = &mut tag {
         map.remove(&"keepPacked".into());
         if let Some(lock) = lock {
@@ -733,10 +727,10 @@ pub fn decode_end_gateway(tag: &Tag) -> crate::containers::EndGateway {
     }
 }
 /// A mod's block entity: its compound without `id` and the position, and
-/// its `Items` as slots (`ContainerHelper.loadAllItems`; the game sizes them
-/// to the block's container when it uses them). `Items` that do not re-encode
-/// exactly (compared in slot order) stay the mod's own.
+/// the `Items` rows that can be represented losslessly as modeled slots.
+/// The game sizes the modeled vector to its container when it uses it.
 fn decode_mod_block_entity(id: String, tag: &Tag) -> Option<crate::containers::ModBlockEntity> {
+    use crate::block_entity_nbt::saved_item_slot;
     let Tag::Compound(map) = tag else {
         return None;
     };
@@ -748,25 +742,35 @@ fn decode_mod_block_entity(id: String, tag: &Tag) -> Option<crate::containers::M
     let shapes = nbt
         .remove(&crate::containers::SHAPES_KEY.into())
         .and_then(|tag| crate::containers::PublishedShapes::from_tag(&tag));
-    // `Slot` is a byte: 256 slots at most.
-    let mut items = decode_items(nbt.get(&"Items".into()), 256);
-    // Compared in slot order, the order `encode_items` writes: vanilla loads by `Slot`.
-    let encoded = encode_items(&items);
-    let matches = match (nbt.get(&"Items".into()), &encoded) {
-        (Some(Tag::List(saved)), Tag::List(encoded)) => {
-            let mut saved: Vec<&Tag> = saved.iter().collect();
-            saved.sort_by_key(|entry| number(entry.get("Slot")).unwrap_or(0) as u8);
-            saved.into_iter().eq(encoded.iter())
+    let mut items = Vec::new();
+    let key = "Items".into();
+    if let Some(Tag::List(entries)) = nbt.get_mut(&key) {
+        let mut occurrences = [0u8; 256];
+        for slot in entries.iter().filter_map(saved_item_slot) {
+            occurrences[slot] = occurrences[slot].saturating_add(1);
         }
-        (saved, encoded) => saved == Some(encoded),
-    };
-    if matches {
-        nbt.remove(&"Items".into());
-        while items.last().is_some_and(Option::is_none) {
-            items.pop();
+        entries.retain(|raw| {
+            let Some(slot) = saved_item_slot(raw) else {
+                return true;
+            };
+            if occurrences[slot] == 1
+                && let Some(stack) = item_from_nbt(raw)
+                && let Tag::Compound(mut canonical) = Tag::from(&stack)
+            {
+                canonical.insert("Slot".into(), Tag::Byte(slot as i8));
+                if raw == &Tag::Compound(canonical) {
+                    if items.len() <= slot {
+                        items.resize(slot + 1, None);
+                    }
+                    items[slot] = Some(stack);
+                    return false;
+                }
+            }
+            true
+        });
+        if entries.is_empty() && !items.is_empty() {
+            nbt.remove(&key);
         }
-    } else {
-        items.clear();
     }
     let mut entity = crate::containers::ModBlockEntity::new(
         id,
@@ -1210,8 +1214,13 @@ fn nibbles(light: &Light, sky: bool) -> Vec<u8> {
     out
 }
 
-pub fn encode(chunk: &Chunk, registry: &BlockRegistry, biomes: &Biomes) -> NamedTag {
-    encode_with(chunk, registry, biomes, None, LevelShape::OVERWORLD)
+pub fn encode(
+    chunk: &Chunk,
+    registry: &BlockRegistry,
+    biomes: &Biomes,
+    items: &crate::items::Items,
+) -> NamedTag {
+    encode_with(chunk, registry, biomes, None, LevelShape::OVERWORLD, items)
 }
 /// A save's lookup of an old chunk's calculated blending data.
 pub type BlendingLookup = Box<dyn Fn(i32, i32) -> Option<Arc<BlendingData>> + Send + Sync>;
@@ -1226,8 +1235,9 @@ fn encode_saved(
     tables: Option<&SaveTables>,
     shape: LevelShape,
     blending: Option<&BlendingData>,
+    items: &crate::items::Items,
 ) -> NamedTag {
-    let mut root = encode_with(chunk, registry, biomes, tables, shape);
+    let mut root = encode_with(chunk, registry, biomes, tables, shape, items);
     if let Some(data) = blending {
         put_calculated_blending(&mut root, data);
     }
@@ -1266,6 +1276,19 @@ pub fn encode_with(
     biomes: &Biomes,
     tables: Option<&SaveTables>,
     shape: LevelShape,
+    items: &crate::items::Items,
+) -> NamedTag {
+    encode_full(chunk, registry, biomes, tables, shape, items, true)
+}
+
+fn encode_full(
+    chunk: &Chunk,
+    registry: &BlockRegistry,
+    biomes: &Biomes,
+    tables: Option<&SaveTables>,
+    shape: LevelShape,
+    items: &crate::items::Items,
+    apply_block_entity_edits: bool,
 ) -> NamedTag {
     let sky_light = shape.sky_light;
     let mut sections = Vec::new();
@@ -1363,7 +1386,13 @@ pub fn encode_with(
         .filter(|(_, e)| !block_entity_placeholder(e))
         .map(|(p, e)| {
             let block = block_name(p);
-            let mut current = block_entity_encode::encode(*p, e, &block);
+            let mut current = block_entity_encode::encode_with(*p, e, &block, items, |_, _| {
+                if apply_block_entity_edits {
+                    extras?.block_entity_save_edits.as_ref()?.get(p).cloned()
+                } else {
+                    None
+                }
+            });
             if let Some((_, name)) = chunk.block_names.iter().find(|(q, _)| q == p)
                 && let Tag::Compound(map) = &mut current
             {
@@ -1380,7 +1409,7 @@ pub fn encode_with(
                     let loaded = decode_block_entity(original).map_or_else(
                         || current.clone(),
                         |(q, e)| {
-                            let mut loaded = block_entity_encode::encode(q, &e, &block);
+                            let mut loaded = block_entity_encode::encode(q, &e, &block, items);
                             if !matches!(
                                 e,
                                 crate::containers::BlockEntity::Banner(_)
@@ -1403,7 +1432,14 @@ pub fn encode_with(
                 }
                 None => current,
             };
-            let mut saved = crate::block_entity_nbt::canonical(&merged).unwrap_or(merged);
+            // The source overlay may restore an unchanged stack's original patch.
+            // Apply the loaded catalog after merging, without rebuilding opaque metadata.
+            let mut saved = crate::block_entity_nbt::canonical_with_stack(&merged, &|tag| {
+                crate::block_entity_nbt::stack(tag)
+                    .and_then(|tag| item_from_nbt(&tag))
+                    .map(|stack| item_to_nbt(&stack, items))
+            })
+            .unwrap_or(merged);
             if let Some(limit) = extras
                 .and_then(|x| x.block_entity_sources.iter().find(|(q, _)| q == p))
                 .and_then(|(_, tag)| tag.get("sunrise:stack_limit"))
@@ -1431,7 +1467,7 @@ pub fn encode_with(
                 if let Some(pending) = extras.and_then(|x| x.pending_loot.get(p)) {
                     pending.write_tags(map);
                     if e.slots().iter().any(Option::is_some) {
-                        map.insert("Items".into(), encode_items(e.slots()));
+                        map.insert("Items".into(), encode_items(e.slots(), items));
                     }
                 }
             }
@@ -1758,8 +1794,9 @@ pub fn encode_proto(
     biomes: &Biomes,
     tables: Option<&SaveTables>,
     shape: LevelShape,
+    items: &crate::items::Items,
 ) -> NamedTag {
-    let mut root = encode_with(&proto.column, registry, biomes, tables, shape);
+    let mut root = encode_with(&proto.column, registry, biomes, tables, shape, items);
     let status = if proto.decorated {
         ChunkStatus::Features
     } else {
@@ -2048,38 +2085,85 @@ fn write_region_records(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as u32);
     let compressed = compress_records(records, timestamp);
-    let mut by_region: BTreeMap<(i32, i32), Vec<(ChunkPos, Option<ChunkRecord>)>> = BTreeMap::new();
-    for (&((x, z), _), record) in records.iter().zip(compressed) {
+    type RegionWrite<'a> = (ChunkPos, &'a Record, Option<CompressedWrite>);
+    let mut by_region: BTreeMap<(i32, i32), Vec<RegionWrite<'_>>> = BTreeMap::new();
+    for (&((x, z), source), record) in records.iter().zip(compressed) {
         let record = record?;
         by_region
             .entry((x >> 5, z >> 5))
             .or_default()
-            .push((ChunkPos::new(x, z), record));
+            .push((ChunkPos::new(x, z), source, record));
     }
     for ((rx, rz), list) in by_region {
         let path = region_path(root, folder, rx, rz);
         // Clearing chunks of a region that doesn't exist changes nothing.
-        let create = list.iter().any(|(_, r)| r.is_some());
+        let create = list.iter().any(|(_, _, r)| r.is_some());
         let Some(region) = cached_region(cache, (rx, rz), &path, create)? else {
             continue;
         };
-        let mut region = region.lock().map_err(|_| "region file poisoned")?;
+        // Keep far readers on the exact locked read path while writes and their
+        // flush are in progress, so they cannot use a stale kept header.
         let _writing = far_regions::writing(cache, (rx, rz));
+        let mut region = region.lock().map_err(|_| "region file poisoned")?;
         let mut changed = false;
-        for (pos, record) in &list {
+        for (pos, source, record) in list {
             match record {
                 Some(record) => {
-                    region.write(*pos, record)?;
+                    write_chunk_record(&mut region, pos, source, record)?;
                     changed = true;
                 }
-                None => changed |= region.clear(*pos, timestamp)?,
+                None => changed |= region.clear(pos, timestamp)?,
             }
         }
         if changed {
-            region.sync()?;
+            match region.sync_handle() {
+                Ok(handle) => {
+                    drop(region);
+                    handle.sync_data()?;
+                }
+                // Out of descriptors: flush under the lock as before rather than
+                // skip durability for this region and every region after it.
+                Err(_) => region.sync()?,
+            }
         }
     }
     Ok(())
+}
+
+fn write_chunk_record(
+    region: &mut RegionFile,
+    pos: ChunkPos,
+    source: &Record,
+    CompressedWrite { record, primary }: CompressedWrite,
+) -> std::io::Result<()> {
+    let error = match region.write(pos, &record) {
+        Ok(()) => {
+            if primary {
+                source.accept_block_entity_edits();
+            }
+            return Ok(());
+        }
+        Err(error) => error,
+    };
+    if !primary
+        || !error
+            .get_ref()
+            .is_some_and(|cause| cause.is::<sunrise_world::region::CompressedChunkLimit>())
+    {
+        return Err(error);
+    }
+    let (compression, timestamp) = (record.compression, record.timestamp);
+    drop(record);
+    let Some(stored) = source.without_block_entity_edits() else {
+        return Err(error);
+    };
+    log::warn!(
+        "block_entity_save_additional: discarding listener edits from chunk {},{}: {error}",
+        pos.x,
+        pos.z
+    );
+    let stored = ChunkRecord::from_nbt(&stored, compression, timestamp, Limits::saved())?;
+    region.write(pos, &stored)
 }
 
 /// `job(i)` for every `i` below `count`, in order, shared between this thread
@@ -2226,6 +2310,7 @@ fn upgrade_record<'a>(
     context: impl FnOnce() -> Option<&'a DatafixContext>,
 ) -> Result<()> {
     use sunrise_world::datafix::{self, schema::Ty};
+    horizon_names::adopt_in_record(folder, &mut record.tag);
     let default = if folder == Folder::Poi { 1945 } else { -1 };
     if number(record.tag.get("DataVersion")).unwrap_or(default) >= i64::from(DATA_VERSION) {
         return Ok(());
@@ -2251,7 +2336,7 @@ fn upgrade_record<'a>(
 /// Chunk and entity records waiting for the writer thread, by (entities?,
 /// x, z): reads see them before the region files do.
 type PendingWrites = Mutex<HashMap<(Folder, i32, i32), (u64, Record)>>;
-type WriteBatch = (Folder, Vec<((i32, i32), Record, u64)>);
+type WriteBatch = (Folder, Vec<QueuedWrite>);
 /// The region folders of a dimension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Folder {
@@ -2280,6 +2365,8 @@ impl Folder {
 /// read lazily by worker threads.
 pub struct SaveDir {
     pub root: PathBuf,
+    /// The loaded catalog for stack encoding; absent for metadata-only readers.
+    items: Option<Arc<crate::items::Items>>,
     regions: Arc<RegionCache>,
     entity_regions: Arc<RegionCache>,
     poi_regions: Arc<RegionCache>,
@@ -2390,8 +2477,14 @@ impl SaveDir {
     /// a warning, and the level opens without them (as vanilla's `SavedDataStorage` starts a
     /// saved data over when its file is broken), so the next save can't overwrite it.
     pub fn load_attachments(&self) -> sunrise_mod_runtime::attachments::Attachments {
-        let path = self.attachments_path();
-        let data = match try_read_dat(&path) {
+        let mut path = self.attachments_path();
+        let mut read = try_read_dat(&path);
+        if matches!(read, Err(DatIssue::Missing)) {
+            // A dimension Horizon saved: its file, written under Sunrise's name at the next save.
+            path = horizon_names::horizon_attachments_path(&self.root);
+            read = try_read_dat(&path);
+        }
+        let data = match read {
             Err(DatIssue::Missing) => return Default::default(),
             Ok(root) => match root.get("data") {
                 Some(Tag::Compound(data)) => Ok(data.clone()),
@@ -2419,7 +2512,11 @@ impl SaveDir {
     ) -> Result<()> {
         let path = self.attachments_path();
         let data = attachments.to_nbt();
-        if data.is_empty() && !path.exists() {
+        // Emptied after a Horizon file was read: an empty file under Sunrise's name keeps it unread.
+        if data.is_empty()
+            && !path.exists()
+            && !horizon_names::horizon_attachments_path(&self.root).exists()
+        {
             return Ok(());
         }
         write_dat(
@@ -2439,9 +2536,10 @@ impl SaveDir {
     }
 
     /// The saves of a level of `shape` at `root` (its dimension folder).
-    pub fn new(root: PathBuf, shape: LevelShape) -> Self {
+    pub fn new(root: PathBuf, shape: LevelShape, items: Option<Arc<crate::items::Items>>) -> Self {
         Self {
             root,
+            items,
             regions: Default::default(),
             entity_regions: Default::default(),
             poi_regions: Default::default(),
@@ -2459,6 +2557,11 @@ impl SaveDir {
             datafix_context: OnceLock::new(),
             blending_lookup: OnceLock::new(),
         }
+    }
+    fn items_for_save(&self) -> Result<&Arc<crate::items::Items>> {
+        self.items
+            .as_ref()
+            .ok_or_else(|| "cannot save chunks without a loaded item catalog".into())
     }
     /// Mark this as a server-owned world save, not a remote cache.
     pub fn enable_trusted_fluid_load(&mut self) {
@@ -2698,7 +2801,9 @@ impl SaveDir {
     }
     /// A record as saved: the pending write first, then the region file.
     fn read_record_raw(&self, folder: &str, x: i32, z: i32) -> Option<NamedTag> {
-        self.try_read_record_raw(folder, x, z).ok().flatten()
+        self.try_read_record_raw(folder, x, z, Record::tag_for_metadata)
+            .ok()
+            .flatten()
     }
     /// `read_record_raw`, telling a record that isn't there (`Ok(None)`) from a read that failed
     /// (`Err`, already reported): the second may succeed on a later read.
@@ -2707,6 +2812,7 @@ impl SaveDir {
         folder: &str,
         x: i32,
         z: i32,
+        read_pending: fn(&Record) -> Option<Arc<NamedTag>>,
     ) -> std::result::Result<Option<NamedTag>, ()> {
         let pending = self
             .pending
@@ -2715,7 +2821,7 @@ impl SaveDir {
             .get(&(Folder::of(folder), x, z))
             .map(|(_, r)| r.clone());
         if let Some(record) = pending {
-            return Ok(record.tag().map(|t| (*t).clone()));
+            return Ok(read_pending(&record).map(|t| (*t).clone()));
         }
         let cache = match Folder::of(folder) {
             Folder::Region => &self.regions,
@@ -2741,8 +2847,9 @@ impl SaveDir {
         folder: &str,
         x: i32,
         z: i32,
+        read_pending: fn(&Record) -> Option<Arc<NamedTag>>,
     ) -> std::result::Result<Option<NamedTag>, ()> {
-        let Some(mut record) = self.try_read_record_raw(folder, x, z)? else {
+        let Some(mut record) = self.try_read_record_raw(folder, x, z, read_pending)? else {
             return Ok(None);
         };
         match self.upgrade_record(Folder::of(folder), &mut record) {
@@ -2755,7 +2862,9 @@ impl SaveDir {
     }
     /// A record brought to the current version (`upgrade_record`).
     fn read_record(&self, folder: &str, x: i32, z: i32) -> Option<NamedTag> {
-        self.try_read_record(folder, x, z).ok().flatten()
+        self.try_read_record(folder, x, z, Record::tag_for_metadata)
+            .ok()
+            .flatten()
     }
     fn upgrade_record(&self, folder: Folder, record: &mut NamedTag) -> Result<()> {
         upgrade_record(folder, record, || {
@@ -2776,7 +2885,7 @@ impl SaveDir {
         registry: &BlockRegistry,
         biomes: &Biomes,
     ) -> std::result::Result<Option<Chunk>, ()> {
-        let Some(root) = self.try_read_record("region", x, z)? else {
+        let Some(root) = self.try_read_record("region", x, z, Record::tag)? else {
             return Ok(None);
         };
         let tables = self.tables.get().map(|t| &**t);
@@ -2835,6 +2944,7 @@ impl SaveDir {
     ) -> Result<()> {
         biomes.ensure_saveable()?;
         let encoding = Arc::new(Encoding {
+            items: self.items_for_save()?.clone(),
             registry,
             biomes: biomes.clone(),
             tables: self.tables.get().cloned(),
@@ -2869,7 +2979,8 @@ impl SaveDir {
         biomes: &Biomes,
     ) -> Result<usize> {
         biomes.ensure_saveable()?;
-        if let Some(result) = self.save_disk_sync(chunks, registry, biomes) {
+        let items = self.items_for_save()?;
+        if let Some(result) = self.save_disk_sync(chunks, registry, biomes, items) {
             return result;
         }
         let tables = self.tables.get().map(|t| &**t);
@@ -2886,6 +2997,7 @@ impl SaveDir {
                         tables,
                         self.shape,
                         blending.as_deref(),
+                        items,
                     )),
                 )
             })
@@ -3177,7 +3289,8 @@ pub fn world_gen_settings(world: &Path) -> Option<Tag> {
     })
 }
 include!("save/preset_saved.rs");
-pub use sunrise_client_core::uuid::{uuid_from_text, uuid_text};
+pub use sunrise_client_core::uuid::uuid_from_text;
+pub use sunrise_core::uuid::uuid_text;
 /// A random (version 4) UUID as vanilla's four-int form.
 ///
 /// Every call gets its own: the generator is seeded once from the clock and
@@ -3755,7 +3868,10 @@ impl Level {
                 .or_else(|| read_dat(&player_dir.join(format!("{name}.dat_old"))))
         });
         level.singleplayer_file = owner.is_some();
-        let player = owner.or_else(|| data.get("Player").cloned());
+        let mut player = owner.or_else(|| data.get("Player").cloned());
+        if let Some(player) = &mut player {
+            horizon_names::adopt_in_player(player);
+        }
         level.player_uuid = uuid_from_tag(player.as_ref().and_then(|p| p.get("UUID"))).or(uuid);
         let spawn = level
             .world_spawn
@@ -3898,7 +4014,7 @@ impl Level {
     /// The player compound: loaded data with current state written over it.
     /// `LivingEntity.addAdditionalSaveData` / `ServerPlayer.addAdditionalSaveData`:
     /// the live fall fields and the player's empty brain are saved too.
-    pub fn player_tag(&self) -> Tag {
+    pub fn player_tag(&self, items: &crate::items::Items) -> Tag {
         let mut p = compound_or_empty(self.player_extra.clone());
         // Keys rewritten from scratch.
         if let Tag::Compound(map) = &mut p {
@@ -3930,7 +4046,7 @@ impl Level {
             match *slot {
                 0..=35 => {
                     let mut entries = vec![("Slot", Tag::Byte(*slot as i8))];
-                    entries.extend(encode_item(&stack));
+                    entries.extend(encode_item(&stack, items));
                     inventory.push(Tag::compound(entries));
                 }
                 _ => {
@@ -4053,7 +4169,7 @@ impl Level {
             ),
             ("playerGameType", Tag::Int(self.mode())),
             ("Inventory", Tag::List(inventory)),
-            ("EnderItems", encode_items(&self.ender_items)),
+            ("EnderItems", encode_items(&self.ender_items, items)),
             ("recipeBook", self.recipe_book.write()),
             ("abilities", abilities),
             (
@@ -4072,7 +4188,7 @@ impl Level {
             .inventory
             .iter()
             .any(|(slot, _, count, _)| i32::from(*slot) == self.selected_slot && *count > 0);
-        match equipment.write() {
+        match equipment.write(items) {
             Some(tag) => entries.push(("equipment", tag)),
             None if holding => entries.push(("equipment", Tag::Compound(Default::default()))),
             None => {}
@@ -4160,13 +4276,20 @@ impl Level {
         p
     }
     /// Write every file; a world without a player UUID gets a random one.
-    pub fn write(&mut self, dir: &Path) -> Result<()> {
-        self.write_internal(dir, true, false)
+    pub fn write(&mut self, dir: &Path, items: &crate::items::Items) -> Result<()> {
+        self.write_internal(dir, Some(items), false, false)
     }
 
     /// Dedicated servers save connected players separately.
     pub fn write_without_player(&mut self, dir: &Path) -> Result<()> {
-        self.write_internal(dir, false, false)
+        self.write_internal(dir, None, false, false)
+    }
+
+    /// `level.dat` without a new player file: the single-player owner's file stays as last
+    /// saved, and a legacy `Data.Player` (before the first normal save the owner's only copy)
+    /// stays in `level.dat`.
+    pub fn write_keeping_player(&mut self, dir: &Path) -> Result<()> {
+        self.write_internal(dir, None, false, true)
     }
 
     /// The temporary world a Realms upload packs
@@ -4175,22 +4298,28 @@ impl Level {
     /// generation and game rules, and no player file or weather/clocks the server makes
     /// on its own. The caller writes the data packs and removes the folder.
     pub fn write_upload(&mut self, dir: &Path) -> Result<()> {
-        self.write_internal(dir, false, true)
+        self.write_internal(dir, None, true, false)
     }
 
     /// The player's file alone, `players/data/<singleplayer_uuid>.dat`
     /// (`PlayerDataStorage.save`): the one level.dat names.
-    pub fn write_player(&mut self, dir: &Path) -> Result<()> {
+    pub fn write_player(&mut self, dir: &Path, items: &crate::items::Items) -> Result<()> {
         let uuid = self.ensure_player_uuid();
         let player_file = dir
             .join("players")
             .join("data")
             .join(format!("{}.dat", uuid_text(uuid)));
         back_up_unreadable_player(&player_file);
-        write_dat(&player_file, self.player_tag())
+        write_dat(&player_file, self.player_tag(items))
     }
 
-    fn write_internal(&mut self, dir: &Path, write_player: bool, upload: bool) -> Result<()> {
+    fn write_internal(
+        &mut self,
+        dir: &Path,
+        items: Option<&crate::items::Items>,
+        upload: bool,
+        keep_legacy_player: bool,
+    ) -> Result<()> {
         fs::create_dir_all(dir)?;
         restore_level_dat(dir);
         let mut root = compound_or_empty(read_dat(&dir.join("level.dat")));
@@ -4198,6 +4327,9 @@ impl Level {
             .get("Data")
             .is_some_and(|d| d.get("Player").is_some() || d.get("WorldGenSettings").is_some());
         let mut data = compound_or_empty(root.get("Data").cloned());
+        let kept_player = keep_legacy_player
+            .then(|| data.get("Player").cloned())
+            .flatten();
         if let Tag::Compound(map) = &mut data {
             // Pre-26.3 keys now stored elsewhere (a legacy Sunrise level.dat).
             for key in [
@@ -4239,7 +4371,9 @@ impl Level {
         }
         // An upload's level.dat names no player (`createTag(null)`); every other file
         // names this world's own.
-        let uuid = (!upload).then(|| self.ensure_player_uuid());
+        // A keep-owner write names nothing new: the on-disk `singleplayer_uuid` (or its absence)
+        // stays, so reopening loads the same owner file as before.
+        let uuid = (!upload && !keep_legacy_player).then(|| self.ensure_player_uuid());
         // A new world's first spawn point is its world spawn.
         if self.world_spawn.is_none() {
             self.world_spawn = self.spawn.map(|s| {
@@ -4443,8 +4577,11 @@ impl Level {
             }
             write_saved_data(dir, "game_rules", rules)?;
         }
-        if write_player {
-            self.write_player(dir)?;
+        if let Some(items) = items {
+            self.write_player(dir, items)?;
+        }
+        if let Some(player) = kept_player {
+            put(&mut data, "Player", player);
         }
         put(&mut root, "Data", data);
         write_dat(&dir.join("level.dat"), root)?;
@@ -4582,7 +4719,7 @@ impl<G: ChunkGenerator> crate::streaming::LodSampler for SavedLodSampler<G> {
         }
         columns
     }
-    fn sample(&mut self, x: i32, z: i32) -> Option<crate::lod::Surface> {
+    fn sample(&mut self, x: i32, z: i32) -> Option<crate::columns::Surface> {
         self.column(x, z).surface
     }
     fn column(&mut self, x: i32, z: i32) -> crate::lod::Column {
@@ -4792,7 +4929,7 @@ fn decode_lod_surfaces(
                             if fluid {
                                 water[cell].get_or_insert((height, state));
                             } else {
-                                column.surface = Some(crate::lod::Surface {
+                                column.surface = Some(crate::columns::Surface {
                                     height,
                                     state,
                                     water: water[cell],
@@ -4932,7 +5069,12 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
         chunk.entities.extend(self.save.load_entities(x, z));
         Some(chunk)
     }
-    fn lod_surface(&self, worker: &mut G::Worker, x: i32, z: i32) -> Option<crate::lod::Surface> {
+    fn lod_surface(
+        &self,
+        worker: &mut G::Worker,
+        x: i32,
+        z: i32,
+    ) -> Option<crate::columns::Surface> {
         // Resident/visited summaries override this procedural fallback in the LOD cache.
         self.inner.lod_surface(worker, x, z)
     }
@@ -5177,6 +5319,7 @@ mod tests {
             (1, 2, 3),
             &BlockEntity::Chest(slots.clone()),
             "minecraft:chest",
+            &Default::default(),
         );
         assert!(
             chest.get("Items").is_some(),
@@ -5186,6 +5329,7 @@ mod tests {
             (1, 2, 3),
             &BlockEntity::Chest(slots),
             "minecraft:ender_chest",
+            &Default::default(),
         );
         assert_eq!(
             ender.get("id"),
@@ -5213,7 +5357,7 @@ mod tests {
             ..Default::default()
         };
         level.game_rules.insert("example:enabled".into(), 0);
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         assert_eq!(
             super::read_saved_data(&dir, "game_rules")
                 .unwrap()
@@ -5221,7 +5365,7 @@ mod tests {
             Some(&super::Tag::Byte(0))
         );
         let mut absent = super::Level::read(&dir).unwrap();
-        absent.write(&dir).unwrap();
+        absent.write(&dir, &Default::default()).unwrap();
         assert_eq!(
             super::read_saved_data(&dir, "game_rules")
                 .unwrap()
@@ -5230,7 +5374,7 @@ mod tests {
         );
         let mut returned = super::Level::read_with_registry(&dir, registry).unwrap();
         assert_eq!(returned.game_rules.get("example:enabled"), Some(&0));
-        returned.write(&dir).unwrap();
+        returned.write(&dir, &Default::default()).unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -5396,7 +5540,7 @@ mod tests {
         let bell = assets.registry.default_state("minecraft:bell").unwrap().0;
         let dir = std::env::temp_dir().join(format!("sunrise-poi-save-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD, Some(Default::default()));
         let _ = save.tables.set(Arc::new(SaveTables::new(&assets)));
         let mut chunk = Chunk::empty(0, 0);
         chunk.set(5, 71, 5, bell);
@@ -5413,7 +5557,7 @@ mod tests {
             .unwrap();
         save.flush().unwrap();
         assert_eq!(
-            sections(&SaveDir::new(dir.clone(), LevelShape::OVERWORLD)),
+            sections(&SaveDir::new(dir.clone(), LevelShape::OVERWORLD, None)),
             Some(0)
         );
         let _ = fs::remove_dir_all(&dir);
@@ -5461,7 +5605,7 @@ mod tests {
         };
         let dir =
             std::env::temp_dir().join(format!("sunrise-level-attachments-{}", std::process::id()));
-        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD, Some(Default::default()));
         let key = AttachmentType {
             namespace: "test",
             name: "counter",
@@ -5543,7 +5687,12 @@ mod tests {
                 Tag::List(vec![Tag::Compound(top.save().unwrap())]),
             ),
         ]);
-        let mut saved = encode(&Chunk::empty(-2, 3), assets.registry, &biomes);
+        let mut saved = encode(
+            &Chunk::empty(-2, 3),
+            assets.registry,
+            &biomes,
+            &Default::default(),
+        );
         let Some(Tag::Compound(structures)) = saved.tag.get_mut("structures") else {
             panic!("structures")
         };
@@ -5554,6 +5703,7 @@ mod tests {
         let save = Arc::new(SaveDir::new(
             std::env::temp_dir().join(format!("sunrise-saved-monument-{}", std::process::id())),
             LevelShape::OVERWORLD,
+            Some(Default::default()),
         ));
         save.pending
             .lock()
@@ -5621,7 +5771,12 @@ mod tests {
                 Tag::compound([("id", string("INVALID"))]),
             ),
         ]);
-        let mut saved = encode(&Chunk::empty(2, -3), assets.registry, &biomes);
+        let mut saved = encode(
+            &Chunk::empty(2, -3),
+            assets.registry,
+            &biomes,
+            &Default::default(),
+        );
         let Tag::Compound(root) = &mut saved.tag else {
             panic!("chunk root")
         };
@@ -5634,7 +5789,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(loaded.saved_structure_starts(), Some(expected));
-        let again = encode(&loaded, assets.registry, &biomes);
+        let again = encode(&loaded, assets.registry, &biomes, &Default::default());
         assert_eq!(
             again.tag.get("structures").and_then(|s| s.get("starts")),
             Some(&starts)
@@ -5642,6 +5797,7 @@ mod tests {
         let save = Arc::new(SaveDir::new(
             std::env::temp_dir().join(format!("sunrise-saved-starts-{}", std::process::id())),
             LevelShape::OVERWORLD,
+            Some(Default::default()),
         ));
         // A pending record is authoritative even before any region file exists.
         save.pending
@@ -5718,7 +5874,7 @@ mod tests {
             .push((pos, crate::containers::BlockEntity::Chest(vec![None; 27])));
         extras.block_entity_attachments.push((pos, block_data));
         chunk.saved = Some(Arc::new(extras));
-        let saved = encode(&chunk, assets.registry, &biomes);
+        let saved = encode(&chunk, assets.registry, &biomes, &Default::default());
         let mut loaded = decode(&saved, assets.registry, &biomes).expect("chunk");
         assert_eq!(
             key.get(
@@ -5775,6 +5931,7 @@ mod tests {
                 &biomes,
                 Some(&tables),
                 LevelShape::OVERWORLD,
+                &Default::default(),
             );
             let Some(Tag::List(list)) = saved.tag.get("block_entities") else {
                 panic!("no block entities");
@@ -5839,7 +5996,14 @@ mod tests {
         let mut chunk = Chunk::with_layout(0, 0, shape.column());
         chunk.set(0, -64, 0, stone.0);
         chunk.set(0, 2000, 0, stone.0);
-        let saved = encode_with(&chunk, assets.registry, &biomes, Some(&tables), shape);
+        let saved = encode_with(
+            &chunk,
+            assets.registry,
+            &biomes,
+            Some(&tables),
+            shape,
+            &Default::default(),
+        );
         assert_eq!(number(saved.tag.get("yPos")), Some(-4));
         let Some(Tag::List(sections)) = saved.tag.get("sections") else {
             panic!("no sections");
@@ -5954,6 +6118,7 @@ mod tests {
             &biomes,
             Some(&tables),
             LevelShape::NETHER,
+            &Default::default(),
         );
         assert_eq!(number(saved.tag.get("yPos")), Some(0));
         let Some(Tag::List(sections)) = saved.tag.get("sections") else {
@@ -5984,6 +6149,7 @@ mod tests {
             &biomes,
             Some(&tables),
             LevelShape::OVERWORLD,
+            &Default::default(),
         );
         assert_eq!(number(overworld.tag.get("yPos")), Some(-4));
     }
@@ -6009,11 +6175,15 @@ mod tests {
         lit.lit = true;
         let dir = std::env::temp_dir().join(format!("sunrise-far-save-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
-        let records =
-            [&lit, &dark].map(|c| ((c.x, c.z), Some(encode(c, assets.registry, &biomes))));
+        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD, Some(Default::default()));
+        let records = [&lit, &dark].map(|c| {
+            (
+                (c.x, c.z),
+                Some(encode(c, assets.registry, &biomes, &Default::default())),
+            )
+        });
         save.write_records("region", records.into(), true).unwrap();
-        let reopened = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let reopened = SaveDir::new(dir.clone(), LevelShape::OVERWORLD, Some(Default::default()));
         let far = reopened
             .load_far(4, -7, assets.registry, &biomes)
             .expect("saved with its light");
@@ -6086,7 +6256,7 @@ mod tests {
         chunk.set(12, 100, 2, end_stone.0);
         chunk.set(12, 101, 2, chorus.0);
         chunk.set(12, 102, 2, flower.0);
-        let mut saved = encode(&chunk, assets.registry, &biomes);
+        let mut saved = encode(&chunk, assets.registry, &biomes, &Default::default());
         put(
             &mut saved.tag,
             "block_entities",
@@ -6094,10 +6264,10 @@ mod tests {
         );
         let dir = std::env::temp_dir().join(format!("sunrise-lod-save-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD, Some(Default::default()));
         save.write_records("region", vec![((-2, 3), Some(saved))], true)
             .unwrap();
-        let reopened = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let reopened = SaveDir::new(dir.clone(), LevelShape::OVERWORLD, Some(Default::default()));
         let surfaces = reopened
             .lod_surfaces(-2, 3, &assets, &biomes)
             .expect("saved summary");
@@ -6167,7 +6337,7 @@ mod tests {
             reopened.regions.lock().unwrap().is_empty(),
             "far reads do not grow gameplay region cache"
         );
-        let mut proto = encode(&chunk, assets.registry, &biomes);
+        let mut proto = encode(&chunk, assets.registry, &biomes, &Default::default());
         put(
             &mut proto.tag,
             "Status",
@@ -6180,7 +6350,7 @@ mod tests {
             reopened.lod_surfaces(-3, 3, &assets, &biomes).is_none(),
             "unfinished proto saves must not suppress complete decoration"
         );
-        let nether = SaveDir::new(dir.clone(), LevelShape::NETHER);
+        let nether = SaveDir::new(dir.clone(), LevelShape::NETHER, Some(Default::default()));
         let dark = nether.lod_surfaces(-2, 3, &assets, &biomes).unwrap();
         assert!(
             dark.iter()
@@ -6190,7 +6360,7 @@ mod tests {
         );
         struct SavedOnly(Vec<crate::streaming::LodDetail>);
         impl crate::streaming::LodSampler for SavedOnly {
-            fn sample(&mut self, _: i32, _: i32) -> Option<crate::lod::Surface> {
+            fn sample(&mut self, _: i32, _: i32) -> Option<crate::columns::Surface> {
                 panic!("saved data must win")
             }
             fn request_detail(&mut self, chunks: &[(i32, i32)], _: [i32; 2]) {
@@ -6403,7 +6573,7 @@ mod tests {
         for section in 0..chunk.sections.len() as i32 {
             chunk.set(8, MIN_Y + section * 16 + 8, 8, dandelion.0);
         }
-        let saved = encode(&chunk, assets.registry, &biomes);
+        let saved = encode(&chunk, assets.registry, &biomes, &Default::default());
         let layout = LevelShape::OVERWORLD.column();
         let far = || decode_lod_surfaces(&saved, &assets, &biomes, layout, true);
         let columns = far().expect("far columns");
@@ -6471,7 +6641,9 @@ mod tests {
         let encode = |entries: &[((i32, i32, i32), BlockEntity)]| {
             entries
                 .iter()
-                .map(|(p, e)| block_entity_encode::encode(*p, e, "minecraft:chest"))
+                .map(|(p, e)| {
+                    block_entity_encode::encode(*p, e, "minecraft:chest", &Default::default())
+                })
                 .collect::<Vec<_>>()
         };
         for input in [&batch[..0], &batch[..1], &batch[..]] {
@@ -6544,7 +6716,8 @@ mod tests {
                 .pop()
                 .expect("one record")
                 .expect("an encoded record")
-                .expect("a chunk, not a deletion");
+                .expect("a chunk, not a deletion")
+                .record;
             assert_eq!(
                 written.compression,
                 Compression::selected(),
@@ -6588,7 +6761,7 @@ mod tests {
                 })
                 .transpose()
                 .unwrap();
-            let got = got.unwrap();
+            let got = got.unwrap().map(|r| r.record);
             assert_eq!(
                 got.as_ref().map(|r| (&r.compressed, r.timestamp)),
                 want.as_ref().map(|r| (&r.compressed, r.timestamp))
@@ -6631,7 +6804,8 @@ mod tests {
         let open_fds = || std::fs::read_dir("/dev/fd").map_or(0, |d| d.count());
         let dir = std::env::temp_dir().join(format!("sunrise-save-fds-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let save = super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let save =
+            super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD, Some(Default::default()));
         let before = open_fds();
         let held = super::cached_region(
             &save.regions,
@@ -6685,14 +6859,24 @@ mod tests {
     fn write_completion_polls_without_waiting_and_keeps_latest_snapshot() {
         let dir = std::env::temp_dir().join(format!("sunrise-save-poll-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let save = super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let save =
+            super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD, Some(Default::default()));
         let lock = super::SessionLock::acquire(&dir).unwrap();
         let path = save.region_path("entities", 0, 0);
         let region = super::cached_region(&save.entity_regions, (0, 0), &path, true)
             .unwrap()
             .unwrap();
-        // Hold the actual region lock, rather than relying on disk speed or sleeps.
-        let blocked = region.lock().unwrap();
+        let chunk_region = super::cached_region(
+            &save.regions,
+            (0, 0),
+            &save.region_path("region", 0, 0),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        // Hold the actual region locks, rather than relying on disk speed or sleeps. The
+        // writer takes the Region folder before Entities in a pass, so both are held.
+        let blocked = (region.lock().unwrap(), chunk_region.lock().unwrap());
         let entity = |version| Tag::compound([("version", Tag::Int(version))]);
         save.save_entities_later(vec![((1, 2), vec![entity(1)])])
             .unwrap();
@@ -6710,16 +6894,115 @@ mod tests {
         save.flush().unwrap();
         assert!(save.writes_finished().unwrap());
         assert_eq!(save.active_chunk_writes(), 0);
-        let reopened = super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let reopened =
+            super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD, Some(Default::default()));
         assert_eq!(reopened.load_entities(1, 2), vec![entity(2)]);
         save.save_entities_later(vec![((1, 2), vec![])]).unwrap();
         save.flush().unwrap();
         assert!(
-            super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD)
+            super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD, None)
                 .load_entities(1, 2)
                 .is_empty()
         );
         drop((reopened, save, lock));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_save_pass_resumes_at_the_write_watermark_instead_of_flushing() {
+        let dir =
+            std::env::temp_dir().join(format!("sunrise-save-watermark-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let save = std::sync::Arc::new(super::SaveDir::new(
+            dir.clone(),
+            super::LevelShape::OVERWORLD,
+            Some(Default::default()),
+        ));
+        let lock = super::SessionLock::acquire(&dir).unwrap();
+        // Hold the region lock so the writer stops there deterministically, rather
+        // than relying on disk speed or sleeps: it keeps the lock while it writes.
+        let region = super::cached_region(
+            &save.regions,
+            (0, 0),
+            &save.region_path("region", 0, 0),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        let blocked = region.lock().unwrap();
+        let record = |x: i32| ((x, 0), None);
+        save.write_records("region", (0..4).map(record).collect(), false)
+            .unwrap();
+        assert_eq!(save.active_chunk_writes(), 4);
+        assert!(!save.writes_finished().unwrap());
+        // The four queued records are at the watermark: a save pass resumes at
+        // once and leaves them to the writer. On its own thread so that a pass
+        // that waited like `flush` fails the test instead of hanging it.
+        let (resumed, resume_result) =
+            std::sync::mpsc::channel::<std::result::Result<(), String>>();
+        let resuming = {
+            let save = save.clone();
+            std::thread::spawn(move || {
+                resumed
+                    .send(
+                        save.wait_for_chunk_writes_below(4)
+                            .map_err(|e| e.to_string()),
+                    )
+                    .unwrap()
+            })
+        };
+        resume_result
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        resuming.join().unwrap();
+        assert_eq!(save.active_chunk_writes(), 4);
+        assert!(!save.writes_finished().unwrap());
+        // One below it, on that same queue, the wait does hold the caller, as a
+        // flush does: only releasing the lock below can wake either.
+        let (waited, wait_result) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
+        let waiting = {
+            let save = save.clone();
+            std::thread::spawn(move || {
+                waited
+                    .send(
+                        save.wait_for_chunk_writes_below(3)
+                            .map_err(|e| e.to_string()),
+                    )
+                    .unwrap()
+            })
+        };
+        let (flushed, flush_result) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
+        let flushing = {
+            let save = save.clone();
+            std::thread::spawn(move || {
+                flushed
+                    .send(save.flush().map_err(|e| e.to_string()))
+                    .unwrap()
+            })
+        };
+        let quiet = |rx: &std::sync::mpsc::Receiver<std::result::Result<(), String>>| {
+            matches!(
+                rx.recv_timeout(std::time::Duration::from_millis(200)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            )
+        };
+        assert!(quiet(&wait_result), "the wait returned below its watermark");
+        assert!(quiet(&flush_result), "flush returned while blocked");
+        drop(blocked);
+        wait_result
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        flush_result
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        flushing.join().unwrap();
+        waiting.join().unwrap();
+        assert!(save.writes_finished().unwrap());
+        assert_eq!(save.active_chunk_writes(), 0);
+        drop((save, lock));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6730,7 +7013,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // A file where a directory is needed causes a real writer I/O error.
         std::fs::write(dir.join("entities"), b"blocked").unwrap();
-        let save = super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let save =
+            super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD, Some(Default::default()));
         let entity = Tag::compound([("version", Tag::Int(3))]);
         save.save_entities_later(vec![((0, 0), vec![entity.clone()])])
             .unwrap();
@@ -6782,6 +7066,7 @@ mod tests {
             (7, 8, 9),
             &crate::containers::BlockEntity::Crafter(crafter),
             "minecraft:crafter",
+            &Default::default(),
         );
         let (pos, back) = decode_block_entity(&tag).expect("crafter");
         assert_eq!(pos, (7, 8, 9));
@@ -6807,6 +7092,7 @@ mod tests {
                 (0, 0, 0),
                 &crate::containers::BlockEntity::Crafter(crafter),
                 "minecraft:crafter",
+                &Default::default(),
             );
             let (_, back) = decode_block_entity(&tag).expect("crafter");
             let crate::containers::BlockEntity::Crafter(back) = back else {
@@ -6844,6 +7130,7 @@ mod tests {
             (3, 64, -2),
             &crate::containers::BlockEntity::Campfire(Box::new(c.clone())),
             "minecraft:soul_campfire",
+            &Default::default(),
         );
         // One block entity type for both campfires.
         assert_eq!(text(tag.get("id")).as_deref(), Some("minecraft:campfire"));
@@ -6855,7 +7142,8 @@ mod tests {
         assert_eq!(*back, c);
         // The update tag a server's clients get: the items alone.
         let campfire = crate::containers::BlockEntity::Campfire(Box::new(c));
-        let update = crate::lan::chunks::entity_tag(&campfire, false).expect("update tag");
+        let update = crate::lan::chunks::entity_tag(&campfire, false, &Default::default())
+            .expect("update tag");
         assert!(update.get("Items").is_some() && update.get("CookingTimes").is_none());
     }
     /// `LecternBlockEntity.loadAdditional`: `Page` is clamped to
@@ -6914,6 +7202,7 @@ mod tests {
             pos,
             &crate::containers::BlockEntity::Lectern(l),
             "minecraft:lectern",
+            &Default::default(),
         );
         assert_eq!(number(saved.get("Page")), Some(1));
     }
@@ -6932,7 +7221,13 @@ mod tests {
         // The command path keeps an empty inventory and the pending table/seed
         // for data get and saving. No loot resources are needed to keep that state.
         let pending = PendingContainerLoot::from_tag(&saved).unwrap();
-        let mut stored = block_entity_data((1, 2, 3), &chest, "minecraft:chest", None);
+        let mut stored = block_entity_data(
+            (1, 2, 3),
+            &chest,
+            "minecraft:chest",
+            None,
+            &Default::default(),
+        );
         let Tag::Compound(fields) = &mut stored else {
             panic!("compound");
         };
@@ -6975,7 +7270,8 @@ mod tests {
                 "{id}: loadAdditional ignores Items when a loot table loads"
             );
             let pending = PendingContainerLoot::from_tag(&saved).unwrap();
-            let mut stored = block_entity_data((1, 2, 3), &container, id, None);
+            let mut stored =
+                block_entity_data((1, 2, 3), &container, id, None, &Default::default());
             let Tag::Compound(fields) = &mut stored else {
                 panic!("compound");
             };
@@ -7038,10 +7334,17 @@ mod tests {
         assert_eq!(chest.slots().len(), 27);
         assert_eq!(pos, (1, 2, 3));
         // The encoded entity has no field to carry the lock...
-        let plain = block_entity_encode::encode(pos, &chest, "minecraft:chest");
+        let plain =
+            block_entity_encode::encode(pos, &chest, "minecraft:chest", &Default::default());
         assert!(plain.get("lock").is_none());
         // ...so `data get` puts back the one it was loaded with.
-        let data = block_entity_data(pos, &chest, "minecraft:chest", saved.get("lock"));
+        let data = block_entity_data(
+            pos,
+            &chest,
+            "minecraft:chest",
+            saved.get("lock"),
+            &Default::default(),
+        );
         let lock = sunrise_core::nbt::parse_snbt(r#"{items:"minecraft:gold_ingot"}"#)
             .unwrap()
             .0;
@@ -7062,7 +7365,7 @@ mod tests {
         };
         let next = spawner.next_data().and_then(|d| d.id());
         assert_eq!(next.as_deref(), Some("minecraft:zombie"));
-        let tag = block_entity_encode::encode(pos, &back, "minecraft:spawner");
+        let tag = block_entity_encode::encode(pos, &back, "minecraft:spawner", &Default::default());
         let (_, again) = decode_block_entity(&tag).expect("spawner again");
         let crate::containers::BlockEntity::Spawner(again) = again else {
             panic!("not a spawner");
@@ -7264,7 +7567,7 @@ mod tests {
         let batch = Compound::from([("effect".into(), Tag::Int(23))]);
         machine.set_client_update_fields(batch.clone());
         assert_eq!(
-            block_entity_encode::encode(pos, &entity, "test:machine"),
+            block_entity_encode::encode(pos, &entity, "test:machine", &Default::default()),
             saved
         );
         assert_eq!(machine.take_client_update_fields(), Some(batch));
@@ -7287,7 +7590,12 @@ mod tests {
         })
         .unwrap();
         bus.set_shapes(Some(std::sync::Arc::new(shapes)));
-        let saved = block_entity_encode::encode(pos, &BlockEntity::Mod(bus), "test:bus");
+        let saved = block_entity_encode::encode(
+            pos,
+            &BlockEntity::Mod(bus),
+            "test:bus",
+            &Default::default(),
+        );
         // Kept apart from the mod's own fields.
         let (_, back) = decode_block_entity(&saved).unwrap();
         let BlockEntity::Mod(back) = back else {
@@ -7316,6 +7624,74 @@ mod tests {
     }
 
     #[test]
+    fn mod_block_entity_items_claim_only_the_slots_written() {
+        use crate::{
+            containers::{BlockEntity, ModBlockEntity},
+            items::ItemStack,
+        };
+        let parse = |s| sunrise_core::nbt::parse_snbt(s).unwrap().0;
+        let saved = parse(
+            r#"{id:"test:machine",x:0,y:64,z:0,Items:[{Slot:0b,raw:"superseded"},{Slot:1b,raw:"retained"},{raw:"no slot"}]}"#,
+        );
+        let (pos, BlockEntity::Mod(mut data)) = decode_block_entity(&saved).unwrap() else {
+            panic!("expected mod block entity")
+        };
+        let encode = |data: &ModBlockEntity| {
+            block_entity_encode::encode(
+                pos,
+                &BlockEntity::Mod(Box::new(data.clone())),
+                "test:machine",
+                &Default::default(),
+            )
+        };
+        data.items.resize(2, None);
+        *data.item_slot_mut(0).unwrap() = Some(ItemStack::new("minecraft:stone", 2));
+        let encoded = encode(&data);
+        assert_eq!(
+            encoded.get("Items"),
+            Some(&parse(
+                r#"[{Slot:0b,id:"minecraft:stone",count:2},{Slot:1b,raw:"retained"},{raw:"no slot"}]"#
+            ))
+        );
+        let (_, BlockEntity::Mod(reloaded)) = decode_block_entity(&encoded).unwrap() else {
+            panic!("expected mod block entity")
+        };
+        assert_eq!(reloaded.items[0], data.items[0]);
+        assert_eq!(encode(&reloaded), encoded);
+        *data.item_slot_mut(0).unwrap() = None;
+        // A tick reply replacing the mutable fields, including shrinking the
+        // modeled vector to zero, cannot restore the old saved row for slot 0.
+        let mut snapshot = (**data).clone();
+        snapshot.items.clear();
+        let revision = data.revision().changes() + 1;
+        data.apply_snapshot(snapshot, revision);
+        assert_eq!(
+            encode(&data).get("Items"),
+            Some(&parse(r#"[{Slot:1b,raw:"retained"},{raw:"no slot"}]"#))
+        );
+        data.items.resize(2, None);
+        *data.item_slot_mut(1).unwrap() = None;
+        assert_eq!(
+            encode(&data).get("Items"),
+            Some(&parse(r#"[{raw:"no slot"}]"#))
+        );
+        let (_, BlockEntity::Mod(mixed)) = decode_block_entity(&parse(
+            r#"{id:"test:machine",x:0,y:64,z:0,Items:[{Slot:0b,raw:"opaque"},{Slot:1b,id:"minecraft:stone",count:2}]}"#,
+        ))
+        .unwrap() else {
+            panic!("expected mod block entity")
+        };
+        assert_eq!(
+            mixed.items,
+            [None, Some(ItemStack::new("minecraft:stone", 2))]
+        );
+        data.nbt.insert("Items".into(), parse("{energy:5}"));
+        assert_eq!(encode(&data).get("Items"), Some(&parse("{energy:5}")));
+        data.nbt.remove(&"Items".into());
+        assert_eq!(encode(&data).get("Items"), None);
+    }
+
+    #[test]
     fn mod_block_entity_round_trips() {
         let saved = sunrise_core::nbt::parse_snbt(
             r#"{id:"gtmod:macerator",x:5,y:-60,z:12,energy:1200L,progress:7,Items:[{Slot:0b,id:"minecraft:iron_ore",count:3}]}"#,
@@ -7338,7 +7714,7 @@ mod tests {
         assert_eq!(m.items.len(), 1);
         assert_eq!(m.items[0].as_ref().map(|s| s.count), Some(3));
         assert_eq!(
-            block_entity_encode::encode(pos, &back, "gtmod:macerator"),
+            block_entity_encode::encode(pos, &back, "gtmod:macerator", &Default::default()),
             saved
         );
         // `Items` that are not an item list stay the mod's, as saved.
@@ -7359,7 +7735,7 @@ mod tests {
             };
             assert!(m.items.is_empty(), "{items}");
             assert_eq!(
-                block_entity_encode::encode(pos, &back, "gtmod:cable"),
+                block_entity_encode::encode(pos, &back, "gtmod:cable", &Default::default()),
                 saved,
                 "{items}"
             );
@@ -7392,28 +7768,35 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(
-            block_entity_encode::encode(pos, &back, "gtmod:macerator"),
+            block_entity_encode::encode(pos, &back, "gtmod:macerator", &Default::default()),
             reordered
         );
-        // Unordered lists the loader cannot read exactly stay the mod's, as saved.
-        for items in [
-            r#"Items:[{Slot:1b,id:"minecraft:stone",count:1,note:"mine"},{Slot:0b,id:"minecraft:stone",count:1}]"#,
-            r#"Items:[{Slot:1b,id:"minecraft:stone",count:1},{Slot:1b,id:"minecraft:dirt",count:1}]"#,
+        // A lossless slot is modeled even beside an opaque row. Duplicate
+        // slot indices stay opaque because the engine cannot model both stacks.
+        let duplicate = r#"Items:[{Slot:1b,id:"minecraft:stone",count:1},{Slot:1b,id:"minecraft:dirt",count:1}]"#;
+        let modeled = [Some(crate::items::ItemStack::new("minecraft:stone", 1))];
+        let parse = |items| {
+            sunrise_core::nbt::parse_snbt(&format!(r#"{{id:"gtmod:cable",x:0,y:0,z:0,{items}}}"#))
+                .unwrap()
+                .0
+        };
+        for (input, output, slots) in [
+            (
+                r#"Items:[{Slot:1b,id:"minecraft:stone",count:1,note:"mine"},{Slot:0b,id:"minecraft:stone",count:1}]"#,
+                r#"Items:[{Slot:0b,id:"minecraft:stone",count:1},{Slot:1b,id:"minecraft:stone",count:1,note:"mine"}]"#,
+                modeled.as_slice(),
+            ),
+            (duplicate, duplicate, &[]),
         ] {
-            let saved = sunrise_core::nbt::parse_snbt(&format!(
-                r#"{{id:"gtmod:cable",x:0,y:0,z:0,{items}}}"#
-            ))
-            .unwrap()
-            .0;
-            let (pos, back) = decode_block_entity(&saved).expect("mod block entity");
+            let (pos, back) = decode_block_entity(&parse(input)).expect("mod block entity");
             let crate::containers::BlockEntity::Mod(m) = &back else {
                 panic!("not a mod's");
             };
-            assert!(m.items.is_empty(), "{items}");
+            assert_eq!(m.items.as_slice(), slots, "{input}");
             assert_eq!(
-                block_entity_encode::encode(pos, &back, "gtmod:cable"),
-                saved,
-                "{items}"
+                block_entity_encode::encode(pos, &back, "gtmod:cable", &Default::default()),
+                parse(output),
+                "{input}"
             );
         }
         // Vanilla's types are never a mod's, modelled or not.
@@ -7456,6 +7839,7 @@ mod tests {
             (1, 2, 3),
             &entity,
             "minecraft:oxidized_copper_golem_statue",
+            &Default::default(),
         );
         assert_eq!(
             tag.get("id"),
@@ -7476,6 +7860,7 @@ mod tests {
             (1, 2, 3),
             &BlockEntity::CopperGolemStatue(Compound::new()),
             "minecraft:copper_golem_statue",
+            &Default::default(),
         ))
         .expect("canonical statue");
         let placed = crate::block_entity_item::place(&fresh, &patch, false);
@@ -7493,6 +7878,7 @@ mod tests {
             (1, 2, 3),
             &crate::containers::BlockEntity::Banner(banner.clone()),
             "minecraft:red_banner",
+            &Default::default(),
         );
         let (pos, back) = decode_block_entity(&tag).expect("banner");
         assert_eq!(pos, (1, 2, 3));
@@ -7577,7 +7963,11 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("sunrise-fluid-source-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let mut save = SaveDir::new(root.clone(), LevelShape::OVERWORLD);
+        let mut save = SaveDir::new(
+            root.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         save.enable_trusted_fluid_load();
         let record = |id: &str| NamedTag {
             name: "".into(),
@@ -7633,6 +8023,7 @@ mod tests {
                     (702, 100, 0),
                     &BlockEntity::EndGateway(gateway.clone()),
                     "minecraft:end_gateway",
+                    &Default::default(),
                 );
                 assert_eq!(
                     text(tag.get("id")).as_deref(),
@@ -7710,7 +8101,8 @@ mod tests {
             Some("minecraft:entity.player.hurt")
         );
         assert_eq!(back.id(), "minecraft:skull");
-        let tag = block_entity_encode::encode(pos, &back, "minecraft:player_head");
+        let tag =
+            block_entity_encode::encode(pos, &back, "minecraft:player_head", &Default::default());
         assert_eq!(
             crate::block_entity_nbt::id(&tag).as_deref(),
             Some("minecraft:skull")
@@ -7726,6 +8118,7 @@ mod tests {
             pos,
             &crate::containers::BlockEntity::Skull(crate::containers::Skull::default()),
             "minecraft:creeper_head",
+            &Default::default(),
         );
         let (_, decoded) = decode_block_entity(&plain).expect("plain skull");
         assert!(matches!(decoded, crate::containers::BlockEntity::Skull(_)));
@@ -7766,6 +8159,7 @@ mod tests {
             (3, 70, -5),
             &BlockEntity::CreakingHeart(Box::new(heart)),
             "minecraft:creaking_heart",
+            &Default::default(),
         );
         assert_eq!(
             tag.get("creaking"),
@@ -7783,6 +8177,7 @@ mod tests {
             (0, 0, 0),
             &BlockEntity::CreakingHeart(Box::default()),
             "minecraft:creaking_heart",
+            &Default::default(),
         );
         assert!(lonely.get("creaking").is_none());
     }
@@ -8037,7 +8432,7 @@ mod tests {
         assert_eq!(level.difficulty, "hard");
         assert_eq!(level.difficulty_id(), 3);
         // It survives the save, so the world comes back with it.
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         let back = Level::read(&dir).unwrap();
         assert_eq!(back.difficulty, "hard");
         assert_eq!(back.difficulty_id(), 3);
@@ -8067,7 +8462,7 @@ mod tests {
         };
 
         // Create a real player file using the existing singleplayer writer.
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         let uuid = level.player_uuid.unwrap();
         let player_file = dir
             .join("players")
@@ -8094,6 +8489,86 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A crash save that excludes the single-player owner writes `level.dat` without a new
+    /// player file and keeps a legacy `Data.Player`, the owner's only copy before a normal save.
+    #[test]
+    fn keeping_the_owner_writes_no_player_file_and_keeps_legacy_data_player() {
+        let dir = std::env::temp_dir().join(format!("sunrise-keep-owner-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut level = Level {
+            name: "Test".into(),
+            ..Level::default()
+        };
+        level.write_without_player(&dir).unwrap();
+        let legacy = Tag::compound([("Health", Tag::Float(7.0_f32.to_bits()))]);
+        let mut root = read_dat(&dir.join("level.dat")).unwrap();
+        let Tag::Compound(root_map) = &mut root else {
+            panic!("level.dat is a compound");
+        };
+        let Some(Tag::Compound(data)) = root_map.get_mut(&JavaString::from("Data")) else {
+            panic!("level.dat has Data");
+        };
+        data.insert(JavaString::from("Player"), legacy.clone());
+        write_dat(&dir.join("level.dat"), root).unwrap();
+
+        level.position = Some([1.0, 2.0, 3.0]);
+        level.day_time = 777;
+        level.write_keeping_player(&dir).unwrap();
+
+        let root = read_dat(&dir.join("level.dat")).unwrap();
+        assert_eq!(
+            root.get("Data").and_then(|d| d.get("Player")),
+            Some(&legacy)
+        );
+        assert!(!dir.join("players").join("data").exists());
+        assert_eq!(Level::read(&dir).unwrap().day_time, 777);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A keep-owner write leaves `singleplayer_uuid` as it was on disk, absent included:
+    /// naming the offline `Player` would make a reopen load another account's file.
+    #[test]
+    fn keeping_the_owner_keeps_the_on_disk_singleplayer_uuid() {
+        let dir = std::env::temp_dir().join(format!("sunrise-keep-uuid-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut level = Level {
+            name: "Test".into(),
+            ..Level::default()
+        };
+        let set_uuid = |uuid: Option<Tag>| {
+            let mut root = read_dat(&dir.join("level.dat")).unwrap();
+            let Tag::Compound(root_map) = &mut root else {
+                panic!("level.dat is a compound");
+            };
+            let Some(Tag::Compound(data)) = root_map.get_mut(&JavaString::from("Data")) else {
+                panic!("level.dat has Data");
+            };
+            match uuid {
+                Some(tag) => data.insert(JavaString::from("singleplayer_uuid"), tag),
+                None => data.remove(&JavaString::from("singleplayer_uuid")),
+            };
+            write_dat(&dir.join("level.dat"), root).unwrap();
+        };
+        let on_disk = || {
+            read_dat(&dir.join("level.dat"))
+                .unwrap()
+                .get("Data")
+                .and_then(|d| d.get("singleplayer_uuid"))
+                .cloned()
+        };
+        level.write_without_player(&dir).unwrap();
+
+        set_uuid(None);
+        level.write_keeping_player(&dir).unwrap();
+        assert_eq!(on_disk(), None, "a level.dat without a uuid keeps none");
+
+        let owner = Tag::IntArray(vec![1, 2, 3, 4]);
+        set_uuid(Some(owner.clone()));
+        level.write_keeping_player(&dir).unwrap();
+        assert_eq!(on_disk(), Some(owner), "a uuid stays the same");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_ends_clock_keeps_its_own_time() {
         let dir = std::env::temp_dir().join(format!("sunrise-end-clock-{}", std::process::id()));
@@ -8105,12 +8580,12 @@ mod tests {
             ..Level::default()
         };
         // A world without one starts the End's clock at its game time.
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         assert_eq!(Level::read(&dir).unwrap().end_clock, Some(5000));
         // Then it keeps its own count, apart from the game time and the day.
         level.time = 8000;
         level.end_clock = Some(321);
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         let back = Level::read(&dir).unwrap();
         assert_eq!(
             (back.time, back.day_time, back.end_clock),
@@ -8156,7 +8631,7 @@ mod tests {
         level
             .game_rules
             .insert("minecraft:keep_inventory".into(), 1);
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         let back = Level::read(&dir).unwrap();
         assert_eq!(back.name, "Test");
         assert_eq!(back.seed, -42);
@@ -8210,7 +8685,7 @@ mod tests {
             absorption: 2.0,
             ..back
         };
-        again.write(&dir).unwrap();
+        again.write(&dir, &Default::default()).unwrap();
         let third = Level::read(&dir).unwrap();
         assert_eq!(third.absorption, 2.0);
         assert!(matches!(
@@ -8230,7 +8705,7 @@ mod tests {
         dead.health = 0.0;
         dead.inventory.clear();
         dead.inventory_components.clear();
-        dead.write(&dir).unwrap();
+        dead.write(&dir, &Default::default()).unwrap();
         let dead = Level::read(&dir).unwrap();
         assert_eq!(dead.health, 0.0);
         assert!(dead.inventory.is_empty());
@@ -8305,7 +8780,7 @@ mod tests {
         assert_eq!(level.active_effects, [expected]);
         // Written back, the chain is the same compound.
         assert_eq!(
-            level.player_tag().get("active_effects"),
+            level.player_tag(&Default::default()).get("active_effects"),
             tag.get("active_effects")
         );
     }
@@ -8347,11 +8822,16 @@ mod tests {
             active_effects: vec![eff("minecraft:speed", 200, 1, false, true, true)],
             ..Level::default()
         };
-        let loaded = level.player_tag();
+        let loaded = level.player_tag(&Default::default());
         assert!(loaded.get("active_effects").is_some());
         level.player_extra = Some(loaded);
         level.active_effects.clear();
-        assert!(level.player_tag().get("active_effects").is_none());
+        assert!(
+            level
+                .player_tag(&Default::default())
+                .get("active_effects")
+                .is_none()
+        );
     }
 
     #[test]
@@ -8380,7 +8860,7 @@ mod tests {
                 player_extra: raw.clone(),
                 ..Level::default()
             };
-            let saved = level.player_tag();
+            let saved = level.player_tag(&Default::default());
             let Some(Tag::List(entries)) = saved.get("active_effects") else {
                 panic!("modeled live effects must be saved even without raw input")
             };
@@ -8433,7 +8913,7 @@ mod tests {
             active_effects: effects.clone(),
             ..Level::default()
         };
-        let tag = level.player_tag();
+        let tag = level.player_tag(&Default::default());
         let Tag::List(saved) = tag.get("active_effects").expect("active_effects") else {
             panic!("active_effects list");
         };
@@ -8468,12 +8948,12 @@ mod tests {
                 world_spawn: Some([0, 80, 0]),
                 ..Level::default()
             };
-            loaded.read_player(&level.player_tag());
+            loaded.read_player(&level.player_tag(&Default::default()));
             assert_eq!(loaded.respawn_elsewhere, Some(point));
             assert_eq!(loaded.spawn, Some([0.0, 80.0, 0.0]));
             assert_eq!(
-                loaded.player_tag().get("respawn"),
-                level.player_tag().get("respawn")
+                loaded.player_tag(&Default::default()).get("respawn"),
+                level.player_tag(&Default::default()).get("respawn")
             );
         }
     }
@@ -8485,7 +8965,7 @@ mod tests {
             flying: true,
             ..Level::default()
         };
-        let tag = level.player_tag();
+        let tag = level.player_tag(&Default::default());
         let flying_byte = tag
             .get("abilities")
             .and_then(|a| number(a.get("flying")))
@@ -8499,7 +8979,7 @@ mod tests {
         // Survival mode resets flying ability to 0 in save.
         level.creative = false;
         level.game_mode = 0;
-        let tag_survival = level.player_tag();
+        let tag_survival = level.player_tag(&Default::default());
         let flying_survival = tag_survival
             .get("abilities")
             .and_then(|a| number(a.get("flying")))
@@ -8526,10 +9006,16 @@ mod tests {
         level.read_player(&raw);
         level.player_extra = Some(raw);
         assert_eq!(level.root_vehicle, Some([1, 2, 3, 4]));
-        assert_eq!(level.player_tag().get("RootVehicle"), Some(&vehicle));
+        assert_eq!(
+            level.player_tag(&Default::default()).get("RootVehicle"),
+            Some(&vehicle)
+        );
         // Even saving before the vehicle is restored must not destroy it.
         level.root_vehicle = None;
-        assert_eq!(level.player_tag().get("RootVehicle"), Some(&vehicle));
+        assert_eq!(
+            level.player_tag(&Default::default()).get("RootVehicle"),
+            Some(&vehicle)
+        );
     }
 
     /// `RecipesUsed` is what a furnace owes in experience, so a save that drops it pays the
@@ -8542,8 +9028,12 @@ mod tests {
         };
         f.recipes_used
             .insert("minecraft:cooked_porkchop".to_owned(), 3);
-        let tag =
-            block_entity_encode::encode((1, 64, 2), &BlockEntity::Furnace(f), "minecraft:furnace");
+        let tag = block_entity_encode::encode(
+            (1, 64, 2),
+            &BlockEntity::Furnace(f),
+            "minecraft:furnace",
+            &Default::default(),
+        );
         let Some((_, BlockEntity::Furnace(back))) = decode_block_entity(&tag) else {
             panic!("a furnace back");
         };
@@ -8558,7 +9048,7 @@ mod tests {
             std::env::temp_dir().join(format!("sunrise-gamerules-level-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut level = super::Level::default();
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         // Rules changed while playing, then saved and loaded again.
         let mut rules = GameRules::load(&dir);
         assert_eq!(rules, GameRules::default());
@@ -8566,7 +9056,7 @@ mod tests {
         assert!(rules.set("advance_weather", Value::Bool(false)));
         assert!(rules.set("random_tick_speed", Value::Int(0)));
         level.game_rules = rules.by_name();
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         assert_eq!(GameRules::load(&dir), rules);
         let read = super::Level::read(&dir).unwrap();
         assert_eq!(read.game_rules, rules.by_name());
@@ -8583,7 +9073,7 @@ mod tests {
             ));
             let _ = std::fs::remove_dir_all(&dir);
             let mut level = super::Level::default();
-            level.write(&dir).unwrap();
+            level.write(&dir, &Default::default()).unwrap();
             if absent_mod {
                 let mut data = super::read_saved_data(&dir, "game_rules").unwrap();
                 super::put(&mut data, "absent:rule", super::Tag::Long(42));
@@ -8592,7 +9082,10 @@ mod tests {
             let mut before_level = super::read_dat(&dir.join("level.dat")).unwrap();
             let path = super::saved_data_path(&dir, "game_rules");
             let before_rules = std::fs::read(&path).unwrap();
-            super::Level::read(&dir).unwrap().write(&dir).unwrap();
+            super::Level::read(&dir)
+                .unwrap()
+                .write(&dir, &Default::default())
+                .unwrap();
             let mut after_level = super::read_dat(&dir.join("level.dat")).unwrap();
             for level in [&mut before_level, &mut after_level] {
                 if let super::Tag::Compound(root) = level
@@ -8618,7 +9111,7 @@ mod tests {
             rule_registry: first.clone(),
             ..Default::default()
         };
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         let loaded = super::Level::read_with_registry(&dir, first.clone()).unwrap();
         assert!(std::sync::Arc::ptr_eq(&loaded.rule_registry, &first));
         let next = super::Level::read_with_registry(&dir, second.clone()).unwrap();
@@ -8635,7 +9128,7 @@ mod tests {
             std::env::temp_dir().join(format!("sunrise-rule-defaults-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut level = super::Level::default();
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         let super::Tag::Compound(rules) = super::read_saved_data(&dir, "game_rules").unwrap()
         else {
             panic!("rule compound")
@@ -8662,7 +9155,7 @@ mod tests {
         level.enabled_features = [crate::gamerules::MINECART_IMPROVEMENTS.to_owned()].into();
         level.game_rules =
             crate::gamerules::GameRules::with_features(&level.enabled_features).by_name();
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         assert_eq!(
             super::read_saved_data(&dir, "game_rules")
                 .unwrap()
@@ -8676,7 +9169,9 @@ mod tests {
     fn legacy_bare_saved_rules_load_under_canonical_keys() {
         let dir = std::env::temp_dir().join(format!("sunrise-rule-legacy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        super::Level::default().write(&dir).unwrap();
+        super::Level::default()
+            .write(&dir, &Default::default())
+            .unwrap();
         super::write_saved_data(
             &dir,
             "game_rules",
@@ -8702,7 +9197,7 @@ mod tests {
             std::env::temp_dir().join(format!("sunrise-gamerules-unknown-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut level = super::Level::default();
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         super::write_saved_data(
             &dir,
             "game_rules",
@@ -8710,7 +9205,7 @@ mod tests {
         )
         .unwrap();
         level.game_rules.insert("minecraft:advance_time".into(), 0);
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         assert_eq!(
             super::read_saved_data(&dir, "game_rules")
                 .unwrap()
@@ -8732,8 +9227,12 @@ mod tests {
             .insert("iron_ingot_from_smelting_iron_ore".to_owned(), 2);
         f.recipes_used
             .insert("minecraft:iron_ingot_from_smelting_iron_ore".to_owned(), 3);
-        let tag =
-            block_entity_encode::encode((1, 64, 2), &BlockEntity::Furnace(f), "minecraft:furnace");
+        let tag = block_entity_encode::encode(
+            (1, 64, 2),
+            &BlockEntity::Furnace(f),
+            "minecraft:furnace",
+            &Default::default(),
+        );
         let Some((_, BlockEntity::Furnace(back))) = decode_block_entity(&tag) else {
             panic!("a furnace back");
         };
@@ -8760,7 +9259,7 @@ mod tests {
             .into(),
             ..Level::default()
         };
-        level.write(&dir).unwrap();
+        level.write(&dir, &Default::default()).unwrap();
         let back = Level::read(&dir).unwrap();
         assert_eq!(back.enabled_features, level.enabled_features);
         // The tag is in the file.
@@ -8774,7 +9273,7 @@ mod tests {
         // older file's fields.
         let dir2 = gen_world("enabled-features-vanilla");
         level.enabled_features = ["minecraft:vanilla".into()].into();
-        level.write(&dir2).unwrap();
+        level.write(&dir2, &Default::default()).unwrap();
         let raw = crate::save::read_level_dat(&dir2).unwrap();
         if let Tag::Compound(data) = &raw {
             let data = data.get(&JavaString::from("Data")).unwrap();
@@ -8988,7 +9487,11 @@ mod tests {
         use sunrise_mod_runtime::attachments::Attachments;
         let root = std::env::temp_dir().join(format!("sunrise-attach-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let save = SaveDir::new(root.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(
+            root.clone(),
+            LevelShape::OVERWORLD,
+            Some(Default::default()),
+        );
         let file = root.join("data/sunrise/attachments.dat");
         save.save_attachments(&Attachments::default()).unwrap();
         assert!(
@@ -9055,14 +9558,22 @@ mod tests {
             "minecraft:the_end",
         ];
         for (i, dim) in dimensions.iter().enumerate() {
-            let save = SaveDir::new(dimension_dir(&root, dim), LevelShape::OVERWORLD);
+            let save = SaveDir::new(
+                dimension_dir(&root, dim),
+                LevelShape::OVERWORLD,
+                Some(Default::default()),
+            );
             assert!(save.load_forced_chunks().is_empty());
             let forced = HashSet::from([(i as i32, -17), (-23, i as i32), (-1, -1)]);
             save.save_chunk_tickets(&forced, &[]).unwrap();
         }
         for (i, dim) in dimensions.iter().enumerate() {
             let path = dimension_dir(&root, dim);
-            let save = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+            let save = SaveDir::new(
+                path.clone(),
+                LevelShape::OVERWORLD,
+                Some(Default::default()),
+            );
             let mut forced = save.load_forced_chunks();
             assert_eq!(
                 forced,
@@ -9087,11 +9598,15 @@ mod tests {
             forced.remove(&(-1, -1));
             save.save_chunk_tickets(&forced, &[]).unwrap();
             drop(save);
-            let reopened = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
+            let reopened = SaveDir::new(
+                path.clone(),
+                LevelShape::OVERWORLD,
+                Some(Default::default()),
+            );
             assert_eq!(reopened.load_forced_chunks(), forced);
             reopened.save_chunk_tickets(&HashSet::new(), &[]).unwrap();
             assert!(
-                SaveDir::new(path.clone(), LevelShape::OVERWORLD)
+                SaveDir::new(path.clone(), LevelShape::OVERWORLD, None)
                     .load_forced_chunks()
                     .is_empty()
             );
@@ -9173,6 +9688,7 @@ mod tests {
         let save = SaveDir::new(
             super::dimension_dir(&world, "minecraft:overworld"),
             LevelShape::OVERWORLD,
+            Some(Default::default()),
         );
         // A 1.20.1 chunk (DataVersion 3465): 1.20.3 renamed its grass to short_grass.
         let section = Tag::compound([
@@ -9273,6 +9789,7 @@ mod tests {
         let nether = SaveDir::new(
             super::dimension_dir(&world, "minecraft:the_nether"),
             LevelShape::NETHER,
+            Some(Default::default()),
         );
         // A 1.20.1 Nether chunk: upgraded it has no `blending_data` (only Overworld
         // chunks blend) and the current DataVersion, so only the saved record says
@@ -9321,6 +9838,7 @@ mod tests {
         let overworld = SaveDir::new(
             super::dimension_dir(&world, "minecraft:overworld"),
             LevelShape::OVERWORLD,
+            Some(Default::default()),
         );
         write_old_record(
             &overworld,
@@ -9346,6 +9864,7 @@ mod tests {
         let save = SaveDir::new(
             super::dimension_dir(&world, "minecraft:overworld"),
             LevelShape::OVERWORLD,
+            Some(Default::default()),
         );
         // A 1.17.1 chunk (DataVersion 2730), its fields under `Level`: section 0 all stone.
         let section = Tag::compound([
@@ -9409,6 +9928,7 @@ mod tests {
         let save = SaveDir::new(
             super::dimension_dir(&world, "minecraft:overworld"),
             LevelShape::OVERWORLD,
+            Some(Default::default()),
         );
         let section = Tag::compound([
             ("Y", Tag::Byte(0)),
@@ -9850,6 +10370,7 @@ mod far_census {
         let save = Arc::new(SaveDir::new(
             world.join("dimensions/minecraft/overworld"),
             LevelShape::OVERWORLD,
+            Some(Default::default()),
         ));
         let generator = Arc::new(Persistent {
             inner: terrain,
@@ -9967,8 +10488,10 @@ mod jukebox_song_clock_tests {
             // `setSongWithoutPlaying`: a saved clock, unstarted; else no song.
             assert_eq!(j.playing, clock.is_some());
             assert_eq!(j.loaded_clock, clock.is_some());
-            let saved = block_entity_encode::encode(pos, &model, "minecraft:jukebox");
-            let command = block_entity_data(pos, &model, "minecraft:jukebox", None);
+            let saved =
+                block_entity_encode::encode(pos, &model, "minecraft:jukebox", &Default::default());
+            let command =
+                block_entity_data(pos, &model, "minecraft:jukebox", None, &Default::default());
             check(label, &saved, clock);
             check(label, &command, clock);
             if with_record {
@@ -9984,7 +10507,12 @@ mod jukebox_song_clock_tests {
                 };
                 j.playing = false;
                 // Decoded clock state, not this separate legacy flag, owns saving.
-                let saved = block_entity_encode::encode(pos, &detached, "minecraft:jukebox");
+                let saved = block_entity_encode::encode(
+                    pos,
+                    &detached,
+                    "minecraft:jukebox",
+                    &Default::default(),
+                );
                 check("clock independent of legacy playing", &saved, clock);
                 record_kept(&saved);
             }
@@ -9992,12 +10520,22 @@ mod jukebox_song_clock_tests {
         let empty = BlockEntity::Jukebox(Jukebox::default());
         check(
             "default modeled/no raw",
-            &block_entity_encode::encode((4, 200, 4), &empty, "minecraft:jukebox"),
+            &block_entity_encode::encode(
+                (4, 200, 4),
+                &empty,
+                "minecraft:jukebox",
+                &Default::default(),
+            ),
             None,
         );
         let raw = input(Some(41), true);
         let (pos, loaded_model) = decode_block_entity(&raw).unwrap();
-        let loaded = block_entity_encode::encode(pos, &loaded_model, "minecraft:jukebox");
+        let loaded = block_entity_encode::encode(
+            pos,
+            &loaded_model,
+            "minecraft:jukebox",
+            &Default::default(),
+        );
         let BlockEntity::Jukebox(j) = loaded_model else {
             unreachable!()
         };
@@ -10006,7 +10544,8 @@ mod jukebox_song_clock_tests {
             playing: true,
             ..Default::default()
         });
-        let current = block_entity_encode::encode(pos, &current, "minecraft:jukebox");
+        let current =
+            block_entity_encode::encode(pos, &current, "minecraft:jukebox", &Default::default());
         check("modeled record-only/no raw", &current, None);
         record_kept(&current);
         // The chunk writer uses this real overlay after encoding its model.
@@ -10086,7 +10625,7 @@ mod calculated_blending_save_tests {
         let dir = std::env::temp_dir().join(format!("sunrise-h077-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD, Some(Default::default()));
         let _ = save.tables.set(Arc::new(SaveTables::new(assets)));
         (dir, save)
     }
@@ -10143,6 +10682,7 @@ mod calculated_blending_save_tests {
         let owner = Arc::new(Owner(calculated(-4, 20)));
         hook(&save, (12, 0), &owner);
         let encoding = Arc::new(Encoding {
+            items: Default::default(),
             registry: assets.registry,
             biomes: biomes.clone(),
             tables: save.tables.get().cloned(),

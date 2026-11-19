@@ -14,6 +14,30 @@ use sunrise_core::{
     random::RandomSource,
 };
 
+/// `ProjectileUtil.rotateTowardsMovement`'s loops: `old` moved by whole
+/// turns of 360 until `new - old` lies in [-180, 180).
+///
+/// A loaded rotation is kept as saved, and a huge finite angle (1e30) would
+/// never move: 360 is below its float spacing, so vanilla's loops would never
+/// end. An angle more than 1024 turns away is first brought within one turn
+/// with `%` (Java's `frem`). Closer angles take the loops alone, bit for bit.
+/// A non-finite one, which `Entity.setYRot` and `setXRot` refuse on load, is
+/// taken as 0.
+fn shift_by_turns(mut old: f32, new: f32) -> f32 {
+    // Written so that a NaN or infinite distance is "far" too.
+    let near = (new - old).abs() < 360.0 * 1024.0;
+    if !near {
+        old = if old.is_finite() { old % 360.0 } else { 0.0 };
+    }
+    while new - old < -180.0 {
+        old -= 360.0;
+    }
+    while new - old >= 180.0 {
+        old += 360.0;
+    }
+    old
+}
+
 /// A new projectile entity's own random: vanilla seeds every entity's random
 /// unpredictably, and a projectile's spread (and an arrow's base damage) come
 /// from it, never from the shooter's random.
@@ -1097,13 +1121,14 @@ impl Projectile {
         stack.count = 1;
         self.item = Some(stack);
     }
-    fn update_rotation(&mut self) {
+    /// Faces the projectile along its velocity, as `Projectile.shoot` ends.
+    pub fn update_rotation(&mut self) {
         let v = self.velocity;
-        let sd = (v.x * v.x + v.z * v.z).sqrt();
-        use sunrise_core::geometry::trig::atan2;
-        // Projectile.shoot uses Mth.atan2 and widened float degree constants.
-        self.yaw = (atan2(v.x, v.z) * 180.0 / f64::from(std::f32::consts::PI)) as f32;
-        self.pitch = (atan2(v.y, sd) * 180.0 / f64::from(std::f32::consts::PI)) as f32;
+        use sunrise_core::geometry::trig::atan2_degrees;
+        // `Projectile.shoot`: `(float)(Mth.atan2(..) * 57.2957763671875D)`,
+        // one multiply by the folded `180.0F / (float)Math.PI`.
+        self.yaw = atan2_degrees(v.x, v.z);
+        self.pitch = atan2_degrees(v.y, v.horizontal_distance());
         // `Projectile.shoot` ends with `yRotO = getYRot(); xRotO = getXRot()`:
         // a freshly shot projectile interpolates from the rotation it was
         // aimed along, not from where it was created.
@@ -1120,20 +1145,16 @@ impl Projectile {
         let horizontal = (v.x * v.x + v.z * v.z).sqrt();
         let y_rot = sunrise_core::geometry::trig::atan2_degrees(v.z, v.x) + 90.0;
         let x_rot = sunrise_core::geometry::trig::atan2_degrees(horizontal, v.y) - 90.0;
+        // A motion whose squared lengths overflow gives no finite target:
+        // shifting by whole turns towards it would never end, so the turn is
+        // skipped and both rotations stay as they were.
+        if !x_rot.is_finite() || !y_rot.is_finite() {
+            return;
+        }
         // Shift the old angles by whole turns so the lerp takes the shortest
         // way; the shifted old angles are what rendering interpolates from.
-        while x_rot - self.previous_pitch < -180.0 {
-            self.previous_pitch -= 360.0;
-        }
-        while x_rot - self.previous_pitch >= 180.0 {
-            self.previous_pitch += 360.0;
-        }
-        while y_rot - self.previous_yaw < -180.0 {
-            self.previous_yaw -= 360.0;
-        }
-        while y_rot - self.previous_yaw >= 180.0 {
-            self.previous_yaw += 360.0;
-        }
+        self.previous_pitch = shift_by_turns(self.previous_pitch, x_rot);
+        self.previous_yaw = shift_by_turns(self.previous_yaw, y_rot);
         self.pitch = self.previous_pitch + t * (x_rot - self.previous_pitch);
         self.yaw = self.previous_yaw + t * (y_rot - self.previous_yaw);
     }
@@ -1843,13 +1864,15 @@ impl Projectile {
             );
         }
         self.position = to;
-        // Fireballs ease towards the motion (`ProjectileUtil.rotateTowardsMovement`);
-        // wind charges still face their motion at once; the thrown kinds turned
-        // in `tick` above.
-        if self.is_fireball() {
+        // `AbstractHurtingProjectile.tick` (fireballs, dragon fireballs, wither
+        // skulls and wind charges: `is_hurting` adds the wind charges) eases
+        // towards the motion with `ProjectileUtil.rotateTowardsMovement(this,
+        // 0.2F)`; a still one keeps its rotation. The thrown kinds and the
+        // experience bottle turned before the move and llama spit returned
+        // above, shulker bullets tick in `tick_bullet` and arrows and tridents
+        // in `arrows`.
+        if self.is_fireball() || self.is_hurting() {
             self.rotate_towards_movement(0.2);
-        } else if !self.turns_with_update_rotation() {
-            self.update_rotation();
         }
         // Entity.baseTick's updateFluidInteraction, after the move: the fluids
         // it touches now, and their currents push it.

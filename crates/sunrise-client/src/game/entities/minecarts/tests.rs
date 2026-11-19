@@ -228,7 +228,7 @@ use sunrise_core::nbt::Tag;
 
 fn saved_cart(kind: CartKind, extra: &[(&str, Tag)]) -> Tag {
     use sunrise_core::nbt::JavaString;
-    let mut tag = Minecart::new(1, kind, Vec3::ZERO).to_nbt([0; 4], None);
+    let mut tag = Minecart::new(1, kind, Vec3::ZERO).to_nbt([0; 4], None, &Default::default());
     if let Tag::Compound(map) = &mut tag {
         for (k, v) in extra {
             map.insert(JavaString::from(*k), v.clone());
@@ -267,7 +267,7 @@ fn custom_display_state_and_offset_roundtrip() {
     let cart = Minecart::from_nbt(&saved, 1, CartKind::Rideable).unwrap();
     assert_eq!(cart.custom_display, Some(state.clone()));
     assert_eq!(display_offset(&cart), 10.0);
-    let out = cart.to_nbt([0; 4], None);
+    let out = cart.to_nbt([0; 4], None, &Default::default());
     assert_eq!(out.get("DisplayState"), Some(&state));
     assert_eq!(out.get("DisplayOffset"), Some(&Tag::Int(10)));
 }
@@ -279,7 +279,7 @@ fn custom_display_state_and_offset_roundtrip() {
 fn data_merge_loads_into_a_live_cart() {
     let mut cart = Minecart::new(7, CartKind::Chest, Vec3::new(1.5, 64.0, 2.5));
     cart.hurt_time = 5;
-    let old = cart.to_nbt([0; 4], None);
+    let old = cart.to_nbt([0; 4], None, &Default::default());
     let (patch, _) = sunrise_core::nbt::parse_snbt(
             r#"{DisplayState:"minecraft:furnace",DisplayOffset:3,CustomName:"Cart",Pos:[1.5d,70.0d,2.5d]}"#,
         )
@@ -292,7 +292,7 @@ fn data_merge_loads_into_a_live_cart() {
     );
     assert_eq!(cart.position, Vec3::new(1.5, 70.0, 2.5));
     assert_eq!(display_offset(&cart), 3.0);
-    let out = cart.to_nbt([0; 4], Some(&merged));
+    let out = cart.to_nbt([0; 4], Some(&merged), &Default::default());
     assert_eq!(out.get("DisplayState"), patch.get("DisplayState"));
     assert_eq!(out.get("DisplayOffset"), Some(&Tag::Int(3)));
     assert_eq!(out.get("CustomName"), Some(&Tag::String("Cart".into())));
@@ -320,7 +320,10 @@ fn data_merge_of_a_name_keeps_the_carts_state() {
     let (patch, _) = sunrise_core::nbt::parse_snbt(r#"{CustomName:"x"}"#).unwrap();
     for cart in [furnace, tnt, hopper] {
         let mut merged_cart = cart.clone();
-        let merged = sunrise_client::data_cmd::merged(&cart.to_nbt([0; 4], None), &patch);
+        let merged = sunrise_client::data_cmd::merged(
+            &cart.to_nbt([0; 4], None, &Default::default()),
+            &patch,
+        );
         merged_cart.load(&merged).unwrap();
         assert_eq!(
             (
@@ -352,7 +355,7 @@ fn an_unreadable_display_state_is_dropped_and_not_saved() {
     forget_unreadable_display(&mut cart, |_| false);
     assert!(cart.custom_display.is_none());
     assert!(
-        cart.to_nbt([0; 4], Some(&saved))
+        cart.to_nbt([0; 4], Some(&saved), &Default::default())
             .get("DisplayState")
             .is_none()
     );
@@ -373,7 +376,7 @@ fn display_offset_is_not_saved_at_its_default() {
         let saved = saved_cart(kind, &[("DisplayOffset", Tag::Int(default))]);
         let cart = Minecart::from_nbt(&saved, 1, kind).unwrap();
         assert_eq!(display_offset(&cart), f64::from(default));
-        let out = cart.to_nbt([0; 4], Some(&saved));
+        let out = cart.to_nbt([0; 4], Some(&saved), &Default::default());
         assert!(out.get("DisplayOffset").is_none(), "{kind:?}");
         assert!(out.get("DisplayState").is_none(), "{kind:?}");
     }
@@ -381,7 +384,8 @@ fn display_offset_is_not_saved_at_its_default() {
     let saved = saved_cart(CartKind::Hopper, &[("DisplayOffset", Tag::Int(6))]);
     let cart = Minecart::from_nbt(&saved, 1, CartKind::Hopper).unwrap();
     assert_eq!(
-        cart.to_nbt([0; 4], None).get("DisplayOffset"),
+        cart.to_nbt([0; 4], None, &Default::default())
+            .get("DisplayOffset"),
         Some(&Tag::Int(6))
     );
     // And a chest cart saved with 6, the base default, keeps it too.
@@ -389,7 +393,8 @@ fn display_offset_is_not_saved_at_its_default() {
     let cart = Minecart::from_nbt(&saved, 1, CartKind::Chest).unwrap();
     assert_eq!(display_offset(&cart), 6.0);
     assert_eq!(
-        cart.to_nbt([0; 4], None).get("DisplayOffset"),
+        cart.to_nbt([0; 4], None, &Default::default())
+            .get("DisplayOffset"),
         Some(&Tag::Int(6))
     );
 }
@@ -449,7 +454,7 @@ fn a_spawner_cart_keeps_its_spawner_and_drops_a_minecart() {
     );
     // No raw tag to copy from: what comes out is the cart's own save.
     spawner.spawn_delay = 41;
-    let out = cart.to_nbt([0; 4], None);
+    let out = cart.to_nbt([0; 4], None, &Default::default());
     assert_eq!(out.get("Delay"), Some(&Tag::Short(41)));
     assert_eq!(out.get("MaxSpawnDelay"), Some(&Tag::Short(120)));
     assert_eq!(
@@ -514,11 +519,11 @@ fn a_cart_saves_as_never_ticked_until_it_ticks() {
         ("Fire", Tag::Short(0)),
     ]);
     let mut cart = Minecart::from_nbt(&generated, 1, CartKind::Chest).unwrap();
-    let saved = cart.to_nbt([0; 4], Some(&generated));
+    let saved = cart.to_nbt([0; 4], Some(&generated), &Default::default());
     assert_eq!(saved.get("HasTicked"), Some(&Tag::Byte(1)));
     assert_eq!(saved.get("Fire"), Some(&Tag::Short(0)));
     cart.first_tick = false;
-    let saved = cart.to_nbt([0; 4], Some(&generated));
+    let saved = cart.to_nbt([0; 4], Some(&generated), &Default::default());
     assert_eq!(saved.get("HasTicked"), Some(&Tag::Byte(0)));
     assert_eq!(saved.get("Fire"), Some(&Tag::Short(0)));
 }
@@ -547,7 +552,7 @@ fn a_command_cart_saves_its_base_command_block() {
     // readAdditionalSaveData syncs both values.
     assert_eq!(cart.synced_command, "say hi");
     assert_eq!(cart.synced_output, "[12:00:00] hi");
-    let out = cart.to_nbt([0; 4], Some(&saved));
+    let out = cart.to_nbt([0; 4], Some(&saved), &Default::default());
     assert_eq!(out.get("SuccessCount"), Some(&Tag::Int(0)));
     for key in ["Command", "TrackOutput", "LastOutput", "LastExecution"] {
         assert_eq!(out.get(key), saved.get(key), "{key}");
@@ -558,7 +563,7 @@ fn a_command_cart_saves_its_base_command_block() {
     // Untracked output drops the saved last output.
     let mut quiet = cart.clone();
     quiet.command.track_output = false;
-    let out = quiet.to_nbt([0; 4], Some(&saved));
+    let out = quiet.to_nbt([0; 4], Some(&saved), &Default::default());
     assert!(out.get("LastOutput").is_none());
     assert_eq!(out.get("TrackOutput"), Some(&Tag::Byte(0)));
 }
@@ -592,7 +597,7 @@ fn a_furnace_saves_its_push_without_y() {
     ]);
     let mut cart = Minecart::from_nbt(&generated, 1, CartKind::Furnace).unwrap();
     cart.push = Vec3::new(0.5, 0.7, 0.25);
-    let saved = cart.to_nbt([0; 4], Some(&generated));
+    let saved = cart.to_nbt([0; 4], Some(&generated), &Default::default());
     assert_eq!(saved.get("PushX"), Some(&Tag::Double(0.5f64.to_bits())));
     assert_eq!(saved.get("PushZ"), Some(&Tag::Double(0.25f64.to_bits())));
     let loaded = Minecart::from_nbt(&saved, 1, CartKind::Furnace).unwrap();
@@ -616,4 +621,34 @@ fn a_mounted_shulker_does_not_push_a_cart() {
     assert!(!pickup_instead_of_push(Species::Shulker, true, false));
     assert!(!takes_push_from_cart(Species::Shulker));
     assert!(takes_push_from_cart(Species::Cow));
+}
+
+/// `OldMinecartBehavior.tick` writes `onRails` every tick before the track
+/// move: a cart on a rail reads true after its tick, one off the track false.
+#[test]
+#[ignore = "daily"]
+fn an_old_behaviour_cart_writes_is_on_rails_each_tick() {
+    super::super::native_entity_refs::tests::with_game(|game| {
+        game.world.chunks.insert(
+            (0, 0),
+            std::sync::Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)),
+        );
+        let rail = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:rail")
+            .unwrap();
+        for z in 0..16 {
+            game.world.set(0, 64, z, rail).unwrap();
+        }
+        let mut on = Minecart::new(1, CartKind::Rideable, Vec3::new(0.5, 64.0625, 2.5));
+        let mut off = Minecart::new(2, CartKind::Rideable, Vec3::new(8.5, 80.0, 8.5));
+        on.first_tick = false;
+        off.on_rails = true;
+        game.tick_cart(&mut on, [0.0; 2], 0, &mut CartIndex::default());
+        game.tick_cart(&mut off, [0.0; 2], 0, &mut CartIndex::default());
+        assert!(on.on_rails);
+        assert!(!off.on_rails);
+    });
 }

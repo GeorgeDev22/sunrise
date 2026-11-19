@@ -51,7 +51,7 @@ returning decisions/records and never reaching upward into Game.
 
 World mobs, remote and own players must share this operation. Inventory/entity
 previews, spawner displays, first-person arms, projectiles, item/display entities,
-shadow views and screenshot/split-view entry paths require a full caller audit
+shadow views and screenshot entry paths require a full caller audit
 before implementation: the table is verified evidence for the named paths,
 not a claim those additional routes are covered. Recommend full-entity previews
 use view-scoped records; first-person arms remain a separate presentation unless

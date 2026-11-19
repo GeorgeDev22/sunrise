@@ -4,7 +4,7 @@
 //! it picks up (the end of `AbstractBoat.tick`), where they sit
 //! (`positionRider`, `clampRotation`) and how they get out.
 //! Saving them under the boat's `Passengers` lives in `persist.rs`.
-use super::{Game, boats::Boat, lan_mobs::guest_bounds};
+use super::{Game, boats::Boat, collision_source::Mover, lan_mobs::guest_bounds};
 use std::cell::{Cell, RefCell};
 use sunrise_client::{
     camera::wrap_degrees,
@@ -306,7 +306,7 @@ impl Game<'_> {
     }
     /// The players outside boat `id` that push and block it (living, not
     /// spectators), with the window player's team.
-    fn players_outside(&self, id: u32) -> Vec<(Aabb, bool)> {
+    pub(super) fn players_outside(&self, id: u32) -> Vec<(Aabb, bool)> {
         let mut out = Vec::new();
         if let Some(p) = self.player.as_ref()
             && self.riding != Some(id)
@@ -329,37 +329,21 @@ impl Game<'_> {
         }
         out
     }
-    /// `getEntityCollisions` of boat `id` within `area`, with
-    /// `AbstractBoat.canVehicleCollide`: the other boats, minecarts,
-    /// shulkers and pushable mobs and players, but not its own passengers.
-    pub(super) fn boat_obstacles(&self, id: u32, area: Aabb) -> Vec<Aabb> {
-        let mut out = Vec::new();
-        self.mobs_meeting(area, |j, m, b| {
-            if pushable(m) && (m.extra.mount.is_none() || self.mob_root_vehicle(j) != Some(id)) {
-                out.push(b);
-            }
-        });
-        out.extend(
-            self.boats
-                .iter()
-                .filter(|b| b.id != id)
-                .map(Boat::bounds)
-                .chain(self.carts.iter().map(|c| c.bounds()))
-                .chain(self.players_outside(id).into_iter().map(|(bb, _)| bb))
-                .filter(|bb| bb.intersects(area)),
-        );
-        out
-    }
     /// What boat `b` may run into this tick.
     pub(super) fn boat_move_obstacles(&self, b: &Boat) -> Vec<Aabb> {
         let reach = b.velocity.length() + 1.0;
-        self.boat_obstacles(b.id, b.bounds().inflate(Vec3::new(reach, reach, reach)))
+        self.entity_collisions(Mover::Boat {
+            id: b.id,
+            area: b.bounds().inflate(Vec3::new(reach, reach, reach)),
+        })
     }
     /// `noEntityCollision(boat, box)` for a new boat (`BoatItem.use`).
     pub(super) fn boat_entity_collision(&self, bb: Aabb) -> bool {
         // EntityGetter.getEntityCollisions: the box grown by 1e-7.
         let area = bb.inflate(Vec3::new(1.0e-7, 1.0e-7, 1.0e-7));
-        !self.boat_obstacles(u32::MAX, area).is_empty()
+        !self
+            .entity_collisions(Mover::Boat { id: u32::MAX, area })
+            .is_empty()
     }
 
     /// The end of `AbstractBoat.tick` on the server for boat `i`: each
@@ -635,7 +619,7 @@ impl Game<'_> {
                 let m = &mut self.mobs[j];
                 m.seated(id, offset, boat_box);
                 m.fluids.boat = Some((id, ridden));
-                m.position = at;
+                sunrise_client::mobs::living::teleports::set_pos(m, at);
                 m.previous = previous;
                 m.velocity = Vec3::ZERO;
                 m.fall_distance = 0.0;
@@ -793,8 +777,7 @@ impl Game<'_> {
             m.extra.mount = None;
             m.extra.passenger = false;
             m.extra.boarding_cooldown = BOARDING_COOLDOWN;
-            m.position = at;
-            m.previous = at;
+            sunrise_client::mobs::living::teleports::snap_to(m, at);
             self.snap_mob_passengers(rider);
         }
     }
@@ -967,7 +950,14 @@ mod tests {
                 .filter(|b| b.intersects(area))
                 .collect();
             met += walked.len();
-            assert_eq!(game.boat_obstacles(u32::MAX, area), walked, "round {round}");
+            assert_eq!(
+                game.entity_collisions(crate::game::collision_source::Mover::Boat {
+                    id: u32::MAX,
+                    area
+                }),
+                walked,
+                "round {round}"
+            );
             if round % 100 == 99 {
                 // The last comparisons ran against the grid: it stands, for the list as it is.
                 let fresh = |(stamp, _): &(ListStamp, SeenGrid)| *stamp == game.mobs.stamp();

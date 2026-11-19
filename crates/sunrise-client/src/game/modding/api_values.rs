@@ -480,7 +480,7 @@ pub(crate) trait TryIntoEngine<Context: ?Sized = Items> {
     fn try_into_engine(&self, context: &Context) -> Result<Self::Engine, Self::Error>;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StackReadError {
     UnknownItem,
     Empty,
@@ -878,7 +878,7 @@ fn encode_stack(
         damage: value.damage(),
         extra,
     };
-    content_declarations::validate_decoded_effects(patch.as_ref(), &stack)?;
+    content_declarations::validate_decoded_components(patch.as_ref(), &stack)?;
     Ok(stack)
 }
 
@@ -1648,6 +1648,11 @@ mod enchantment_boundary_tests {
 fn prepare_stack_boundary_tests() {
     install_stack_hooks();
     install_parts(&[]).unwrap();
+    resolve_stack_boundary_test_items();
+}
+
+#[cfg(test)]
+fn resolve_stack_boundary_test_items() {
     mod_api::__private::resolve_items([
         "minecraft:iron_sword",
         "minecraft:stick",
@@ -1888,7 +1893,7 @@ impl super::Game<'_> {
         entity: &mut crate::containers::ModBlockEntity,
         container_slots: usize,
         slot: usize,
-        stack: &mut EngineStack,
+        stack: &mut Option<EngineStack>,
         handled: &mut bool,
     ) {
         if !mod_api::__private::has_part_hook(mod_api::HookId::MenuQuickMove) {
@@ -1936,17 +1941,39 @@ impl super::GameLevel<'_> {
         pos: sunrise_core::position::BlockPos,
         state: sunrise_world::registry::BlockStateId,
         entity: &crate::containers::ModBlockEntity,
-        drops: &mut Vec<EngineStack>,
-    ) {
+    ) -> super::spill::RemovalOutputs {
+        let mut outputs = super::spill::RemovalOutputs::default();
         if !mod_api::__private::has_part_hook(mod_api::HookId::PreRemoveSideEffects) {
-            return;
+            return outputs;
         }
         let Ok(api) = entity.try_into_api() else {
-            return;
+            return outputs;
         };
-        let mut added = Vec::new();
-        self.native_pre_remove_side_effects(pos, state, &api, &mut added);
-        drops.extend(added);
+        self.native_pre_remove_side_effects(super::native_hooks::PreRemoveSideEffectsCall {
+            pos,
+            state,
+            entity: &api,
+            keep_contents: &mut outputs.keep_contents,
+            drops: &mut outputs.drops,
+            spawns: &mut outputs.spawns,
+            experience: &mut outputs.experience,
+        });
+        if outputs.drops.len() > 1024
+            || outputs.spawns.len() > 1024
+            || outputs.experience.len() > 1024
+            || outputs
+                .spawns
+                .iter()
+                .any(|(_, at)| at.iter().any(|v| !v.is_finite()))
+            || outputs
+                .experience
+                .iter()
+                .any(|(_, at)| at.iter().any(|v| !v.is_finite()))
+        {
+            log::warn!("pre_remove_side_effects outputs refused: limit or nonfinite position");
+            return Default::default();
+        }
+        outputs
     }
 }
 
@@ -2173,7 +2200,7 @@ mod stack_limit_tests {
         let engine = explicit.try_into_engine(&items).unwrap();
         assert!(engine.carries_component(None, "minecraft:damage"));
         assert_eq!(
-            sunrise_items::item_data::encode_components(&engine)
+            sunrise_items::item_data::component_snapshot(&engine)
                 .unwrap()
                 .get("minecraft:damage"),
             Some(&Tag::Int(0))
@@ -2367,8 +2394,8 @@ mod stack_limit_tests {
             );
             let back = api.try_into_engine(&items).unwrap();
             assert_eq!(
-                sunrise_items::item_data::encode_components(&original),
-                sunrise_items::item_data::encode_components(&back),
+                sunrise_items::item_data::component_snapshot(&original),
+                sunrise_items::item_data::component_snapshot(&back),
                 "write {patch:?}"
             );
             assert_eq!(original, back, "round trip {patch:?}");
@@ -2938,13 +2965,27 @@ mod game_rule_values;
 mod item_properties;
 #[path = "api_values/loot_values.rs"]
 pub(crate) mod loot_values;
-#[path = "api_values/particle_values.rs"]
-mod particle_values;
-pub(crate) use loot_values::{dispatch_loot_condition, dispatch_loot_function};
 #[path = "api_values/package_snapshot.rs"]
 mod package_snapshot;
+#[path = "api_values/particle_values.rs"]
+mod particle_values;
 pub(in crate::game) use package_snapshot::install_packages;
 #[path = "api_values/phase_values.rs"]
 mod phase_values;
 #[path = "api_values/small_values.rs"]
 mod small_values;
+
+impl TryIntoApi for (EngineStack, [f64; 3]) {
+    type Api = (ApiStack, [f64; 3]);
+    type Error = StackReadError;
+    fn try_into_api(&self) -> Result<Self::Api, Self::Error> {
+        Ok((self.0.try_into_api()?, self.1))
+    }
+}
+impl TryIntoEngine for (ApiStack, [f64; 3]) {
+    type Engine = (EngineStack, [f64; 3]);
+    type Error = StackWriteError;
+    fn try_into_engine(&self, items: &Items) -> Result<Self::Engine, Self::Error> {
+        Ok((self.0.try_into_engine(items)?, self.1))
+    }
+}

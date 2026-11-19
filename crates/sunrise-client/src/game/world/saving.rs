@@ -27,6 +27,8 @@ enum Stage {
 // is indivisible; check the time budget after each snapshot, not each batch.
 const SNAPSHOTS_PER_FRAME: usize = 16;
 const SNAPSHOT_BUDGET: Duration = Duration::from_millis(2);
+const CLOSING_SNAPSHOTS_PER_FRAME: usize = 256;
+const CLOSING_SNAPSHOT_BUDGET: Duration = Duration::from_millis(10);
 
 impl Game<'_> {
     /// Save the level's chunk tickets: `/forceload`'s in vanilla's `chunk_tickets.dat`, the
@@ -76,6 +78,7 @@ impl Game<'_> {
             if !quit {
                 return self.leave_server(None);
             }
+            self.connection_left(sunrise_hooks::connection::Left::Quit);
             self.client_logging_out();
             if let Some(mut remote) = self.remote.take() {
                 remote.session.disconnect();
@@ -137,18 +140,20 @@ impl Game<'_> {
     /// `true` means the window can exit. The session lock stays in Game until
     /// every snapshot has been queued and every writer has synced its files.
     pub(super) fn poll_closing_save(&mut self) -> Result<bool> {
-        // A subscribed chunk save waits for an open action savepoint to close and is
-        // retried on the next poll; after 30 seconds the save runs and reports its refusal.
-        if self
-            .pending_save
-            .as_ref()
-            .is_some_and(|save| save.started.elapsed() < Duration::from_secs(30))
-            && self.defer_chunk_disk_save()
-        {
+        let defers = self.pending_save.as_ref().is_some_and(|save| {
+            !matches!(save.stage, Stage::Server | Stage::Quit)
+                && save.started.elapsed() < Duration::from_secs(30)
+        });
+        if defers && self.defer_chunk_disk_save() {
             return Ok(false);
         }
         let Some(mut save) = self.pending_save.take() else {
             return Ok(false);
+        };
+        let (per_frame, budget) = if save.close {
+            (CLOSING_SNAPSHOTS_PER_FRAME, CLOSING_SNAPSHOT_BUDGET)
+        } else {
+            (SNAPSHOTS_PER_FRAME, SNAPSHOT_BUDGET)
         };
         let result = (|| -> Result<bool> {
             match &mut save.stage {
@@ -174,7 +179,7 @@ impl Game<'_> {
                     if save.started.elapsed() > Duration::from_secs(30) {
                         return Err("chunk generation did not finish before saving".into());
                     }
-                    let deadline = Instant::now() + Duration::from_millis(2);
+                    let deadline = Instant::now() + budget;
                     loop {
                         match self.streaming.prepare_poll_save(&mut self.world, deadline) {
                             sunrise_client::streaming::SaveStep::Pending => break,
@@ -197,7 +202,7 @@ impl Game<'_> {
                 }
                 Stage::Chunks(keys) => {
                     let started = Instant::now();
-                    for _ in 0..SNAPSHOTS_PER_FRAME {
+                    for _ in 0..per_frame {
                         let Some(&key) = keys.front() else { break };
                         let chunks = self.with_entities(self.world.chunks.get(&key));
                         self.native_full_chunk_snapshots(&chunks);
@@ -208,7 +213,7 @@ impl Game<'_> {
                         )?;
                         self.world.modified.remove(&key);
                         keys.pop_front();
-                        if started.elapsed() >= SNAPSHOT_BUDGET {
+                        if started.elapsed() >= budget {
                             break;
                         }
                     }
@@ -220,12 +225,12 @@ impl Game<'_> {
                 }
                 Stage::Entities(keys) => {
                     let started = Instant::now();
-                    for _ in 0..SNAPSHOTS_PER_FRAME {
+                    for _ in 0..per_frame {
                         let Some(&key) = keys.front() else { break };
                         let chunks = self.entity_chunks(&HashSet::from([key]), false);
                         self.save.save_entities_later(chunks)?;
                         keys.pop_front();
-                        if started.elapsed() >= SNAPSHOT_BUDGET {
+                        if started.elapsed() >= budget {
                             break;
                         }
                     }
@@ -290,6 +295,24 @@ impl Game<'_> {
             Some(Stage::Quit)
         ) {
             return Ok(());
+        }
+        let waiting = matches!(
+            self.pending_save.as_ref().map(|save| &save.stage),
+            Some(Stage::Server | Stage::Writes)
+        );
+        if waiting {
+            thread_local! {
+                static LAST_FRAME: std::cell::Cell<Option<Instant>> =
+                    const { std::cell::Cell::new(None) };
+            }
+            const FRAME: Duration = Duration::from_millis(33);
+            if let Some(last) = LAST_FRAME.with(|c| c.get()) {
+                let since = last.elapsed();
+                if since < FRAME {
+                    std::thread::sleep(FRAME - since);
+                }
+            }
+            LAST_FRAME.with(|c| c.set(Some(Instant::now())));
         }
         // disconnectWithSavingScreen: a GenericMessageScreen, its title and
         // no navigation.
@@ -406,13 +429,13 @@ impl Game<'_> {
         }
         let keys: Vec<_> = self.world.modified.iter().copied().collect();
         self.save.save_attachments(&self.world.attachments)?;
-        for key in &keys {
-            self.world.modified.remove(key);
-        }
         let chunks = self.with_entities(keys.iter().filter_map(|k| self.world.chunks.get(k)));
         self.native_full_chunk_snapshots(&chunks);
         self.save
             .save_later(&chunks, self.pack.assets.registry, world_biomes!(self))?;
+        for chunk in &chunks {
+            self.world.modified.remove(&(chunk.x, chunk.z));
+        }
         // Prepare entities while the chunk writer runs, then use one barrier.
         if !wait {
             self.world.modified.autosaved(&keys, Instant::now());

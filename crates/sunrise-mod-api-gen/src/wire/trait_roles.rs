@@ -10,10 +10,17 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Refusal {
+    Unwind,
+    Error(String),
+}
+
 struct Roles {
     imports: Vec<&'static str>,
     exports: Vec<&'static str>,
     held: Vec<&'static str>,
+    refusals: BTreeMap<String, Refusal>,
 }
 thread_local! {
     static CURRENT: Cell<Option<&'static Roles>> = const { Cell::new(None) };
@@ -21,7 +28,12 @@ thread_local! {
 // Method descriptors already retain static owner names. Intern each distinct
 // source surface once for the generation process; fixture roots can select
 // different surfaces concurrently without contaminating one another.
-type Key = (Vec<String>, Vec<String>, Vec<String>);
+type Key = (
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    BTreeMap<String, Refusal>,
+);
 static SURFACES: OnceLock<Mutex<BTreeMap<Key, &'static Roles>>> = OnceLock::new();
 
 /// The roles of one source surface, as discovered from its role files.
@@ -33,6 +45,7 @@ pub(super) struct Declared {
     pub held: Vec<String>,
     /// What cargo must watch: the role files and their folder.
     pub paths: Vec<PathBuf>,
+    pub refusals: BTreeMap<String, Refusal>,
 }
 
 fn current(pick: fn(&Roles) -> &[&'static str]) -> &'static [&'static str] {
@@ -47,16 +60,21 @@ pub(super) fn exports() -> &'static [&'static str] {
 pub(super) fn held() -> &'static [&'static str] {
     current(|roles| &roles.held)
 }
+pub(super) fn refusal(owner: &str) -> Option<&'static Refusal> {
+    CURRENT.with(|current| current.get().and_then(|roles| roles.refusals.get(owner)))
+}
+
 pub(super) fn select(declared: &Declared) {
     let mut surfaces = SURFACES.get_or_init(Mutex::default).lock().unwrap();
     let key = (
         declared.imports.clone(),
         declared.exports.clone(),
         declared.held.clone(),
+        declared.refusals.clone(),
     );
     let roles = *surfaces
         .entry(key)
-        .or_insert_with_key(|(imports, exports, held)| {
+        .or_insert_with_key(|(imports, exports, held, refusals)| {
             let intern = |names: &[String]| {
                 names
                     .iter()
@@ -67,6 +85,7 @@ pub(super) fn select(declared: &Declared) {
                 imports: intern(imports),
                 exports: intern(exports),
                 held: intern(held),
+                refusals: refusals.clone(),
             }))
         });
     CURRENT.with(|current| current.set(Some(roles)));
@@ -80,11 +99,13 @@ pub(super) fn declared(root: &Path) -> Result<Declared, String> {
     let mut imports = Vec::new();
     let mut exports = Vec::new();
     let mut held = Vec::new();
+    let mut refusals = BTreeMap::new();
     if !directory.exists() {
         return Ok(Declared {
             imports,
             exports,
             held,
+            refusals,
             paths: Vec::new(),
         });
     }
@@ -128,6 +149,32 @@ pub(super) fn declared(root: &Path) -> Result<Declared, String> {
                 path.display()
             ));
         }
+        let note = std::fs::read_to_string(path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        for policy in note
+            .lines()
+            .filter_map(|line| line.strip_prefix("refusal: "))
+        {
+            let policy = if policy == "unwind" {
+                Refusal::Unwind
+            } else if let Some(constructor) = policy.strip_prefix("error ") {
+                syn::parse_str::<syn::Path>(constructor).map_err(|error| {
+                    format!("{}: invalid refusal constructor: {error}", path.display())
+                })?;
+                Refusal::Error(constructor.to_owned())
+            } else {
+                return Err(format!(
+                    "{}: expected refusal: unwind or refusal: error <constructor>",
+                    path.display()
+                ));
+            };
+            if role == Some("import") || refusals.insert(name.to_owned(), policy).is_some() {
+                return Err(format!(
+                    "{}: refusal policy requires one declaration on an export or held role",
+                    path.display()
+                ));
+            }
+        }
         target.push(name.to_owned());
     }
     // Cargo must rerun when a new independent trait file is added or removed.
@@ -136,6 +183,7 @@ pub(super) fn declared(root: &Path) -> Result<Declared, String> {
         imports,
         exports,
         held,
+        refusals,
         paths,
     })
 }

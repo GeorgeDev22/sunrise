@@ -126,7 +126,8 @@ pub fn common(from: &Mob, to: &mut Mob, preserve_can_pick_up_loot: bool) {
         .get("minecraft:max_absorption")
         .unwrap_or(&0.0) as f32;
     to.absorption = from.absorption.clamp(0.0, maximum);
-    // addEffect for each: Absorption's onEffectStarted raises it again.
+    // addEffect for each: Absorption's onEffectStarted raises it again, and
+    // onEffectAdded stores each effect's attribute modifiers on the new mob.
     for effect in &from.extra.effects {
         to.add_effect(effect.id, effect.duration, effect.amplifier);
         // `new MobEffectInstance(effect)` copies its icon flag too.
@@ -137,14 +138,6 @@ pub fn common(from: &Mob, to: &mut Mob, preserve_can_pick_up_loot: bool) {
     to.extra.hidden_effects = from.extra.hidden_effects.clone();
     to.extra.effect_chains = from.extra.effect_chains.clone();
     to.extra.ambient_effects = from.extra.ambient_effects.clone();
-    if to
-        .extra
-        .effects
-        .iter()
-        .any(|e| e.id == "minecraft:health_boost")
-    {
-        super::finalize::health_boost_changed(to);
-    }
     if from.is_baby() {
         super::finalize::set_baby(to, true);
     }

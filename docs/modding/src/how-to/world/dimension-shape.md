@@ -166,6 +166,13 @@ goes back. Match it with a final `Custom(_)` arm. The game's own rules read the 
 too (water that evaporates, fast lava, infiniburn, piglin portals), and `player_respawn_position` may send a player to
 a `Custom` level.
 
+`crop_grow_post` version 2 always reports the growing plant's pre-growth state as
+`original_state`, including sugar cane and kelp or vine heads. This diverges from
+NeoForge. `state` is the current block at the reported position: the new cane or
+head for those plants. Age-only sugar cane steps emit no Post; a full-age stem
+still emits Post if no fruit was placed. Cactus and chorus report the plant's
+position, not the position above it used by Pre.
+
 ## Players, structures and chunk watchers
 
 `level.online_players(host)` lists the real online players in that server level, including

@@ -2,11 +2,11 @@ use super::*;
 
 impl HitLevel<'_> {
     /// `Block.fallOn`: entity `entity` of type `kind` landed on `state` at `pos` after falling
-    /// `distance` blocks. `damage` is the fall damage `causeFallDamage` calculated, before hurt
-    /// handling and the fall sounds: change it, and zero prevents both. A creative or
-    /// fall-immune entity is told with zero damage and keeps its immunity. Players and mobs
-    /// land here; dropped items also land with zero damage. Generated dispatch stages
-    /// every requested API LandingWrite before committing damage or the engine write
+    /// `distance` blocks. Writable distance and multiplier feed `causeFallDamage` before
+    /// sounds and hurt. A zero multiplier prevents both. A creative or
+    /// fall-immune entity keeps its immunity. Players and mobs
+    /// land here; dropped items also land with zero multiplier. Generated dispatch stages
+    /// every requested API LandingWrite before committing the fall inputs or the engine write
     /// queue; an invalid state refuses the whole callback's output.
     pub(in crate::game) fn native_fall_on(&mut self, call: super::fire::FallOnCall<'_>) {
         self.fire_fall_on(call);
@@ -33,7 +33,8 @@ mod landing_crossing_tests {
     impl BlockPart for LandingPart {
         fn fall_on(&self, _: &mut dyn LevelRandomHost, event: &mut FallOnEvent<'_>) {
             let (state, invalid) = self.0.lock().unwrap().unwrap();
-            event.damage = 99.0;
+            event.distance = 99.0;
+            event.damage_multiplier = 2.0;
             event.request(mod_api::LandingWrite::SetBlock(state));
             if invalid {
                 event.request(mod_api::LandingWrite::SetBlock(
@@ -74,7 +75,8 @@ mod landing_crossing_tests {
                     vec![sunrise_world::level::LandingWrite::DestroyBlock { drop: false }];
                 for invalid in [false, true] {
                     *part.0.lock().unwrap() = Some((state, invalid));
-                    let mut damage = 7.0;
+                    let mut distance = 5.0;
+                    let mut multiplier = 1.0;
                     let mut writes = original.clone();
                     let mut level = sunrise_client::health::TestLevel::new(0);
                     HitLevel(level.level()).native_fall_on(super::super::fire::FallOnCall {
@@ -83,15 +85,23 @@ mod landing_crossing_tests {
                         kind: "minecraft:player",
                         state: stone,
                         pos: BlockPos::new(1, 64, 1),
-                        distance: 5.0,
-                        damage: &mut damage,
+                        distance: &mut distance,
+                        damage_multiplier: &mut multiplier,
                         writes: &mut writes,
                     });
                     if invalid {
-                        assert_eq!(damage, 7.0, "invalid write must not commit sibling damage");
+                        assert_eq!(
+                            (distance, multiplier),
+                            (5.0, 1.0),
+                            "invalid write must not commit sibling inputs"
+                        );
                         assert_eq!(writes, original, "valid prefix must not reach engine queue");
                     } else {
-                        assert_eq!(damage, 99.0, "the real registered callback fired");
+                        assert_eq!(
+                            (distance, multiplier),
+                            (99.0, 2.0),
+                            "the real registered callback fired"
+                        );
                         assert_eq!(
                             writes,
                             vec![

@@ -27,26 +27,36 @@ pub const MAX_TOTAL: u64 = 512 << 20;
 /// `[a-z0-9_.-]`, none of them `.` or `..` (vanilla's resource-location
 /// characters, so the path means the same on every OS).
 pub fn check_path(name: &str) -> Result<(), String> {
-    let bad = || format!("{name:?} is not a plain assets/ or data/ path");
+    let plain_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || "_.-".contains(c);
     let mut parts = name.split('/');
-    if !matches!(parts.next(), Some("assets" | "data")) {
-        return Err(bad());
-    }
-    let mut count = 0;
-    for part in parts {
-        count += 1;
-        let chars_ok = part
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b));
-        if part.is_empty() || part == "." || part == ".." || !chars_ok {
-            return Err(bad());
-        }
-    }
+    let top = parts.next();
     // assets/<namespace>/<file> at least.
-    if count < 2 {
-        return Err(bad());
+    let named_ok = matches!(top, Some("assets" | "data"))
+        && parts.clone().count() >= 2
+        && parts
+            .clone()
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    if named_ok && parts.clone().all(|part| part.chars().all(plain_char)) {
+        return Ok(());
     }
-    Ok(())
+    let mut error = format!(
+        "{name:?} is not a plain assets/ or data/ path: after assets/ or data/, every part is made of a-z, 0-9, _, . and - (vanilla's resource-location characters, so the path means the same on every OS), and none is . or .."
+    );
+    if named_ok {
+        let fixed: Vec<String> = parts
+            .map(|part| {
+                part.to_ascii_lowercase()
+                    .chars()
+                    .map(|c| if plain_char(c) { c } else { '_' })
+                    .collect()
+            })
+            .collect();
+        error.push_str(&format!(
+            "; rename it {:?}",
+            format!("{}/{}", top.unwrap_or(""), fixed.join("/"))
+        ));
+    }
+    Err(error)
 }
 
 /// The shared resource namespace fence for folders and native archives.
@@ -64,7 +74,34 @@ pub(crate) fn check_namespace(name: &str, manifest: &Manifest) -> Result<(), Str
     // tags and atlases, and to the convention tags mods share.
     let shared = matches!(namespace, "minecraft" | "c");
     let atlas = top == "assets" && namespace == "minecraft" && rest.starts_with("atlases/");
-    let allowed = owned || (top == "data" && shared && rest.starts_with("tags/")) || atlas;
+    let mut extension = false;
+    if top == "data" && namespace == "sunrise" && rest.starts_with("tags/") {
+        let tag = rest
+            .strip_prefix("tags/")
+            .and_then(|s| s.strip_suffix(".json"));
+        if tag.is_some_and(|t| {
+            t.split_once('/')
+                .is_some_and(|(_, path)| path.starts_with("class/"))
+        }) {
+            return Err(format!(
+                "{name}: sunrise:class/* tags are generated; attach a part through block_part_tag instead"
+            ));
+        }
+        extension = tag
+            .and_then(|t| t.split_once('/'))
+            .is_some_and(|(registry, path)| {
+                crate::extension_tags::ALL.iter().any(|tag| {
+                    tag.registry == registry && tag.id.strip_prefix("sunrise:") == Some(path)
+                })
+            });
+        if !extension {
+            return Err(format!(
+                "{name}: not a declared Sunrise extension tag; see the SDK extension_tags list and the book's extension tags reference (mod professions use secondary_blocks)"
+            ));
+        }
+    }
+    let allowed =
+        owned || (top == "data" && shared && rest.starts_with("tags/")) || atlas || extension;
     if !allowed {
         return Err(format!(
             "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces), to vanilla and convention (c) tags, or to vanilla's atlases"
@@ -123,12 +160,113 @@ pub struct BlockProperties {
     #[serde(default, deserialize_with = "deserialize_push_reaction")]
     pub push_reaction: Option<PushReaction>,
     /// `false`: the block occludes nothing, so its neighbours' faces are drawn and light passes
-    /// it (`BlockBehaviour.Properties.noOcclusion`); unset or `true`: as its template.
+    /// it (`BlockBehaviour.Properties.noOcclusion`); `true`: occludes whatever the template
+    /// does, using the declared outline or the template's published occlusion shape. Unset
+    /// inherits the template.
     pub occludes: Option<bool>,
     /// `false`: the breaking crack (`destroy_stage_0..9`) is not drawn on the block, as for a
     /// block broken by use; unset or `true`, it is drawn. Only the overlay: the break and the
     /// destroy-progress packets are vanilla's.
     pub destroy_overlay: Option<bool>,
+    /// Per-column model offset and translation of declared outline, collision and interaction shapes.
+    /// Block-entity published shapes remain as published. Unset inherits the template.
+    #[serde(default, deserialize_with = "deserialize_offset")]
+    pub offset: Option<OffsetType>,
+    /// Maximum horizontal displacement, 0 to 0.25 (default 0.25 for an explicit offset mode).
+    #[serde(default, deserialize_with = "deserialize_horizontal_offset")]
+    pub max_horizontal_offset: Option<f32>,
+    /// Maximum downward displacement, 0 to 0.2 (default 0.2 for XYZ; XZ has no vertical offset).
+    #[serde(default, deserialize_with = "deserialize_vertical_offset")]
+    pub max_vertical_offset: Option<f32>,
+    /// Vanilla's note-block instrument constant; unset inherits the template.
+    #[serde(default, deserialize_with = "deserialize_instrument")]
+    pub instrument: Option<mod_vocab::NoteInstrument>,
+    /// Lava ignition flag. The per-position `ignited_by_lava` hook still answers first.
+    #[serde(default, deserialize_with = "deserialize_ignited_by_lava")]
+    pub ignited_by_lava: Option<bool>,
+    /// Whether placement and features may replace this block; the held-own-item rule still applies.
+    #[serde(default, deserialize_with = "deserialize_replaceable")]
+    pub replaceable: Option<bool>,
+    /// Skip faces against any state of this same block; false disables the template's render rule.
+    /// Leaf and ice graphics culling still follows the template class.
+    #[serde(default, deserialize_with = "deserialize_skip_same_block_faces")]
+    pub skip_same_block_faces: Option<bool>,
+    /// Opt into `VegetationBlock` survival independently of the template.
+    #[serde(default)]
+    pub vegetation: bool,
+}
+
+/// Vanilla's per-column offset mode (`BlockBehaviour.OffsetType`).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum OffsetType {
+    None,
+    Xz,
+    Xyz,
+}
+
+fn offset_float<'de, D: serde::Deserializer<'de>>(
+    d: D,
+    key: &str,
+) -> Result<Option<f32>, D::Error> {
+    Option::<f32>::deserialize(d).map_err(|e| serde::de::Error::custom(format!("{key}: {e}")))
+}
+fn deserialize_horizontal_offset<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<f32>, D::Error> {
+    offset_float(d, "max_horizontal_offset")
+}
+fn deserialize_vertical_offset<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<f32>, D::Error> {
+    offset_float(d, "max_vertical_offset")
+}
+fn deserialize_offset<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<OffsetType>, D::Error> {
+    Option::<OffsetType>::deserialize(d)
+        .map_err(|e| serde::de::Error::custom(format!("offset: {e}")))
+}
+
+fn deserialize_instrument<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<mod_vocab::NoteInstrument>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+        .map_err(|e| serde::de::Error::custom(format!("instrument: {e}")))?
+        .map(|name| {
+            mod_vocab::NoteInstrument::ALL
+                .into_iter()
+                .find(|instrument| instrument.name().to_ascii_uppercase() == name)
+                .ok_or_else(|| {
+                    serde::de::Error::custom(format!(
+                        "instrument: unknown NoteBlockInstrument constant {name}"
+                    ))
+                })
+        })
+        .transpose()
+}
+
+fn property_bool<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    key: &str,
+) -> Result<Option<bool>, D::Error> {
+    Option::<bool>::deserialize(deserializer)
+        .map_err(|e| serde::de::Error::custom(format!("{key}: {e}")))
+}
+fn deserialize_ignited_by_lava<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<bool>, D::Error> {
+    property_bool(d, "ignited_by_lava")
+}
+fn deserialize_replaceable<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<bool>, D::Error> {
+    property_bool(d, "replaceable")
+}
+fn deserialize_skip_same_block_faces<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<bool>, D::Error> {
+    property_bool(d, "skip_same_block_faces")
 }
 
 /// Vanilla's `PushReaction`, by its constant's name.
@@ -349,6 +487,17 @@ impl ShapeEntityKind {
     }
 }
 
+/// A vanilla block's context-dependent collision a block takes (`context_collision`), whatever
+/// its template.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextCollision {
+    /// Scaffolding's (`ScaffoldingBlock.getCollisionShape`): solid on top unless the entity is
+    /// descending, open below, and the bottom row's floor. Its states need scaffolding's
+    /// `distance` (0 to 7) and `bottom` properties, from the template or declared.
+    Scaffolding,
+}
+
 /// A state property a block declares on its own, beside its template's.
 /// A block's states become the template's states times these values, so a
 /// pipe can have a connection per side without a template that has one.
@@ -395,6 +544,7 @@ struct BlockFile {
     interaction_shapes: Option<BlockShapes>,
     #[serde(default)]
     shapes_from_block_entity: bool,
+    context_collision: Option<ContextCollision>,
     state_light: Option<StateLight>,
     #[serde(default)]
     state_properties: BTreeMap<String, StateProperty>,
@@ -416,10 +566,10 @@ struct BlockFile {
     base_block: Option<String>,
     #[serde(default = "yes")]
     item: bool,
-    #[serde(default)]
-    open_sound: Option<String>,
-    #[serde(default)]
-    close_sound: Option<String>,
+    #[serde(default, deserialize_with = "GateSound::deserialize_open")]
+    open_sound: Option<GateSound>,
+    #[serde(default, deserialize_with = "GateSound::deserialize_close")]
+    close_sound: Option<GateSound>,
     block_item: Option<String>,
     #[serde(default)]
     pick_item: Option<String>,
@@ -428,6 +578,33 @@ struct BlockFile {
 }
 fn yes() -> bool {
     true
+}
+
+/// A fence gate's sound event at every site, or only the named sites.
+/// Missing sites keep the template wood's sounds.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum GateSound {
+    All(String),
+    Sites {
+        #[serde(rename = "use")]
+        on_use: Option<String>,
+        #[serde(rename = "explosion")]
+        on_explosion: Option<String>,
+        #[serde(rename = "redstone")]
+        on_redstone: Option<String>,
+    },
+}
+
+impl GateSound {
+    fn deserialize_open<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Self>, D::Error> {
+        Option::<Self>::deserialize(d)
+            .map_err(|e| serde::de::Error::custom(format!("open_sound: {e}")))
+    }
+    fn deserialize_close<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Self>, D::Error> {
+        Option::<Self>::deserialize(d)
+            .map_err(|e| serde::de::Error::custom(format!("close_sound: {e}")))
+    }
 }
 
 /// A block the mod adds: a vanilla template's behaviour, states and shapes
@@ -452,6 +629,9 @@ pub struct Block {
     /// The block's block entity publishes its outline and collision shapes, which replace the
     /// declared ones until cleared. Needs a block entity type that owns the block.
     pub shapes_from_block_entity: bool,
+    /// A vanilla block's context collision it takes, over its shapes for entities that have
+    /// no `collision_context_shapes` of their own.
+    pub context_collision: Option<ContextCollision>,
     /// Per-state emission; takes precedence over `properties.light`.
     pub state_light: Option<StateLight>,
     /// State properties of its own, which its template does not have.
@@ -460,11 +640,13 @@ pub struct Block {
     pub default_state: BTreeMap<String, String>,
     /// Also add a block item with the same id.
     pub item: bool,
-    /// The sound event a fence gate plays opening, instead of its wood's
-    /// (`WoodType.fenceGateOpen`); needs a `*_fence_gate` template.
-    pub open_sound: Option<String>,
-    /// The sound event a fence gate plays closing (`WoodType.fenceGateClose`).
-    pub close_sound: Option<String>,
+    /// A fence gate's opening sounds (`WoodType.fenceGateOpen`). `All` replaces
+    /// every site; `Sites` keeps the template wood's sound for each missing site.
+    /// Needs a `*_fence_gate` template.
+    pub open_sound: Option<GateSound>,
+    /// A fence gate's closing sounds (`WoodType.fenceGateClose`), with the same
+    /// per-site fallback as `open_sound`.
+    pub close_sound: Option<GateSound>,
     /// The item this block is, for pick-block and `Block.asItem`, when
     /// it is not a block item of its own: an item of this mod or a vanilla
     /// one, checked to exist when the content loads. Needs `item` false.
@@ -729,10 +911,12 @@ pub const DYE_COLORS: [&str; 16] = [
 /// the vanilla entity types a mod's type may copy: thrown item
 /// projectiles (`ThrowableItemProjectile`), then living mobs
 /// ([`LIVING_TEMPLATES`]).
-pub const ENTITY_TEMPLATES: [&str; 7] = [
+pub const ENTITY_TEMPLATES: [&str; 9] = [
     "minecraft:snowball",
     "minecraft:cat",
+    "minecraft:drowned",
     "minecraft:parrot",
+    "minecraft:skeleton",
     "minecraft:villager",
     "minecraft:wandering_trader",
     "minecraft:wolf",
@@ -746,9 +930,15 @@ pub const ENTITY_TEMPLATES: [&str; 7] = [
 /// which a native mod can replace (`register_goals`); a villager's is its
 /// brain. The cat, the parrot and the wolf are the tameable ones
 /// (`TamableAnimal`): a type copying one tames, sits and follows its owner.
-pub const LIVING_TEMPLATES: [&str; 6] = [
+/// The skeleton is the ranged one (`AbstractSkeleton`): a type copying it
+/// draws and shoots a bow it holds, shuns the sun and flees wolves. The
+/// drowned is the aquatic fighter: a type copying it swims, goes to water,
+/// and fights with a trident or in melee.
+pub const LIVING_TEMPLATES: [&str; 8] = [
     "minecraft:cat",
+    "minecraft:drowned",
     "minecraft:parrot",
+    "minecraft:skeleton",
     "minecraft:villager",
     "minecraft:wandering_trader",
     "minecraft:wolf",
@@ -760,6 +950,12 @@ mod entity_type;
 pub use entity_type::EntityType;
 pub mod fluid_interaction;
 pub use fluid_interaction::FluidInteraction;
+mod lenient;
+pub use lenient::without_comments;
+#[cfg(feature = "references")]
+mod references;
+#[cfg(feature = "references")]
+pub use references::{Findings, check_references};
 
 /// A block entity type declared in code, with the blocks it supports.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1235,6 +1431,7 @@ impl Content {
                 collision_context_shapes: file.collision_context_shapes,
                 interaction_shapes: file.interaction_shapes,
                 shapes_from_block_entity: file.shapes_from_block_entity,
+                context_collision: file.context_collision,
                 state_light: file.state_light,
                 state_properties: file.state_properties,
                 default_state: file.default_state,
@@ -1587,6 +1784,9 @@ fn check_block(file: &Block) -> Result<(), String> {
         light.check()?;
     }
     for (name, property) in &file.state_properties {
+        if name == "waterlogged" && !matches!(property, StateProperty::Boolean) {
+            return Err("state_properties.waterlogged must have type boolean".into());
+        }
         if !state_name(name) {
             return Err(format!(
                 "state property {name:?} is lower case letters, digits and underscores"
@@ -1627,6 +1827,14 @@ fn check_block(file: &Block) -> Result<(), String> {
             return Err(format!(
                 "random_ticks needs values of the block's own state property {property:?} (state_properties)"
             ));
+        }
+    }
+    for (key, value, max) in [
+        ("max_horizontal_offset", p.max_horizontal_offset, 0.25),
+        ("max_vertical_offset", p.max_vertical_offset, 0.2),
+    ] {
+        if value.is_some_and(|v| !v.is_finite() || !(0.0..=max).contains(&v)) {
+            return Err(format!("{key} is a finite number from 0 to {max}"));
         }
     }
     let finite = |v: Option<f32>| v.is_none_or(f32::is_finite);
@@ -1736,10 +1944,26 @@ fn check_block(file: &Block) -> Result<(), String> {
                 file.template
             ));
         }
-        if !namespaced_id(sound) {
-            return Err(format!(
-                "{key} {sound:?} is a sound event id, namespace:path"
-            ));
+        let sites = match sound {
+            GateSound::All(sound) => [("", Some(sound)), ("", None), ("", None)],
+            GateSound::Sites {
+                on_use,
+                on_explosion,
+                on_redstone,
+            } => [
+                (".use", on_use.as_ref()),
+                (".explosion", on_explosion.as_ref()),
+                (".redstone", on_redstone.as_ref()),
+            ],
+        };
+        for (site, sound) in sites {
+            if let Some(sound) = sound
+                && !namespaced_id(sound)
+            {
+                return Err(format!(
+                    "{key}{site} {sound:?} is a sound event id, namespace:path"
+                ));
+            }
         }
     }
     if let Some(item) = &file.block_item {
@@ -1856,6 +2080,18 @@ pub(crate) fn folder_files(root: &Path) -> Result<Vec<(String, u64)>, String> {
     let mut out = Vec::new();
     for top in ["assets", "data"] {
         walk(root, &root.join(top), &mut out)?;
+    }
+    Ok(out)
+}
+
+/// The files under a package folder's `runtime/`, as `(name below it, bytes)`. Symbolic links and
+/// other non-files are refused, not followed.
+pub(crate) fn runtime_folder_files(root: &Path) -> Result<Vec<(String, u64)>, String> {
+    let mut out = Vec::new();
+    walk(root, &root.join(crate::manifest::RUNTIME_DIR), &mut out)?;
+    let prefix = format!("{}/", crate::manifest::RUNTIME_DIR);
+    for (name, _) in &mut out {
+        *name = name.strip_prefix(&prefix).unwrap_or(name).to_owned();
     }
     Ok(out)
 }
@@ -2200,6 +2436,7 @@ capabilities = ["registries"]
                 collision_context_shapes: BTreeMap::new(),
                 interaction_shapes: None,
                 shapes_from_block_entity: false,
+                context_collision: None,
                 state_light: None,
                 state_properties: BTreeMap::new(),
                 default_state: BTreeMap::new(),
@@ -2644,6 +2881,14 @@ capabilities = ["registries"]
                 "data/ruby/sunrise/entity_type/tabby.json",
                 br#"{"template": "minecraft:cat"}"#,
             ),
+            (
+                "data/ruby/sunrise/entity_type/archer.json",
+                br#"{"template": "minecraft:skeleton"}"#,
+            ),
+            (
+                "data/ruby/sunrise/entity_type/diver.json",
+                br#"{"template": "minecraft:drowned"}"#,
+            ),
         ];
         let content = smod("living", MANIFEST_TEXT, files).unwrap();
         let types: Vec<_> = content
@@ -2663,6 +2908,8 @@ capabilities = ["registries"]
         assert_eq!(
             types,
             [
+                ("ruby:archer", "minecraft:skeleton", true, vec![]),
+                ("ruby:diver", "minecraft:drowned", true, vec![]),
                 (
                     "ruby:ghoul",
                     "minecraft:zombie",
@@ -2783,6 +3030,40 @@ capabilities = ["registries"]
         for bad in [r#""animated""#, r#""model""#, "1"] {
             assert!(block(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn block_offset_refusals_name_the_file_and_key() {
+        for (properties, key) in [
+            (r#""offset":"XY""#, "offset"),
+            (r#""max_horizontal_offset":-0.1"#, "max_horizontal_offset"),
+            (r#""max_horizontal_offset":0.3"#, "max_horizontal_offset"),
+            (r#""max_horizontal_offset":"wide""#, "max_horizontal_offset"),
+            (r#""max_vertical_offset":0.3"#, "max_vertical_offset"),
+        ] {
+            let json = format!(r#"{{"template":"minecraft:stone","properties":{{{properties}}}}}"#);
+            let file = "data/ruby/sunrise/block/offset.json";
+            let error =
+                smod("offset-refusal", MANIFEST_TEXT, &[(file, json.as_bytes())]).unwrap_err();
+            assert!(error.contains(file) && error.contains(key), "{error}");
+        }
+    }
+
+    #[test]
+    fn block_instruments_accept_every_vanilla_constant_and_name_unknown_values() {
+        for instrument in mod_vocab::NoteInstrument::ALL {
+            let name = instrument.name().to_ascii_uppercase();
+            let properties: BlockProperties =
+                serde_json::from_str(&format!(r#"{{"instrument":"{name}"}}"#)).unwrap();
+            assert_eq!(properties.instrument, Some(instrument));
+        }
+        let error = serde_json::from_str::<BlockProperties>(r#"{"instrument":"FLUTEISH"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("instrument") && error.contains("FLUTEISH"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2933,6 +3214,27 @@ capabilities = ["registries"]
     }
 
     #[test]
+    fn declared_waterlogged_requires_a_boolean() {
+        let parse = |template: &str, property: &str| {
+            let json = format!(
+                r#"{{"template":"minecraft:{template}","state_properties":{{"waterlogged":{property}}}}}"#
+            );
+            smod(
+                "waterlogged",
+                MANIFEST_TEXT,
+                &[("data/ruby/sunrise/block/plant.json", json.as_bytes())],
+            )
+        };
+        assert!(parse("tall_grass", r#"{"type":"boolean"}"#).is_ok());
+        assert!(parse("stone", r#"{"type":"boolean"}"#).is_ok());
+        let error = parse("stone", r#"{"type":"enum","values":["false","true"]}"#).unwrap_err();
+        assert!(
+            error.contains("state_properties.waterlogged") && error.contains("plant.json"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn gate_sounds_need_a_fence_gate_and_sound_ids() {
         let block = |json: &str| {
             smod(
@@ -2946,12 +3248,29 @@ capabilities = ["registries"]
         )
         .unwrap();
         assert_eq!(
-            parsed.blocks[0].open_sound.as_deref(),
-            Some("ruby:gate.open")
+            parsed.blocks[0].open_sound,
+            Some(GateSound::All("ruby:gate.open".into()))
         );
         assert_eq!(
-            parsed.blocks[0].close_sound.as_deref(),
-            Some("minecraft:block.chain.break")
+            parsed.blocks[0].close_sound,
+            Some(GateSound::All("minecraft:block.chain.break".into()))
+        );
+        let sites = block(r#"{"template":"minecraft:oak_fence_gate","open_sound":{"use":"ruby:rope.open","redstone":"ruby:wire.open"},"close_sound":{"explosion":"ruby:blast.close"}}"#).unwrap();
+        assert_eq!(
+            sites.blocks[0].open_sound,
+            Some(GateSound::Sites {
+                on_use: Some("ruby:rope.open".into()),
+                on_explosion: None,
+                on_redstone: Some("ruby:wire.open".into()),
+            })
+        );
+        assert_eq!(
+            sites.blocks[0].close_sound,
+            Some(GateSound::Sites {
+                on_use: None,
+                on_explosion: Some("ruby:blast.close".into()),
+                on_redstone: None,
+            })
         );
         let plain = block(r#"{"template": "minecraft:oak_fence_gate"}"#).unwrap();
         assert_eq!(
@@ -2967,8 +3286,21 @@ capabilities = ["registries"]
                 r#"{"template": "minecraft:oak_fence_gate", "close_sound": "gate"}"#,
                 "namespace:path",
             ),
+            (
+                r#"{"template":"minecraft:oak_fence","open_sound":{"use":"ruby:open"}}"#,
+                "open_sound",
+            ),
+            (
+                r#"{"template":"minecraft:oak_fence_gate","open_sound":{"other":"ruby:open"}}"#,
+                "open_sound",
+            ),
+            (
+                r#"{"template":"minecraft:oak_fence_gate","close_sound":{"redstone":"bad"}}"#,
+                "close_sound.redstone",
+            ),
         ] {
             let e = block(bad).unwrap_err();
+            assert!(e.contains("data/ruby/sunrise/block/gate.json"), "{e}");
             assert!(e.contains(word), "{bad}: {e}");
         }
     }
@@ -3617,6 +3949,40 @@ capabilities = ["registries"]
     }
 
     #[test]
+    fn reserved_namespace_accepts_only_declared_extension_tags() {
+        for tag in crate::extension_tags::ALL {
+            let path = format!(
+                "data/sunrise/tags/{}/{}.json",
+                tag.registry,
+                tag.id.strip_prefix("sunrise:").unwrap()
+            );
+            let content = smod(
+                "extension",
+                MANIFEST_TEXT,
+                &[(path.as_str(), br#"{"values":[]}"#)],
+            )
+            .unwrap();
+            assert_eq!(content.files.len(), 1);
+        }
+        for (path, hint) in [
+            (
+                "data/sunrise/tags/block/villager_secondary_poi/custom.json",
+                "secondary_blocks",
+            ),
+            (
+                "data/sunrise/tags/item/villager_secondary_poi/farmer.json",
+                "extension_tags",
+            ),
+            ("data/sunrise/tags/block/class/crop.json", "block_part_tag"),
+            ("data/sunrise/loot_table/a.json", "own namespaces"),
+            ("assets/sunrise/lang/en_us.json", "own namespaces"),
+        ] {
+            let error = smod("extension-refused", MANIFEST_TEXT, &[(path, b"{}")]).unwrap_err();
+            assert!(error.contains(path) && error.contains(hint), "{error}");
+        }
+    }
+
+    #[test]
     fn listed_namespaces_hold_content() {
         let manifest = format!("{MANIFEST_TEXT}namespaces = [\"kaisyn\"]\n");
         let files: &[(&str, &[u8])] = &[
@@ -3678,6 +4044,8 @@ capabilities = ["registries"]
         ] {
             assert!(check_path(bad).is_err(), "{bad}");
         }
+        let error = check_path("data/ruby/Glow-Slab.json").unwrap_err();
+        assert!(error.contains("\"data/ruby/glow-slab.json\""), "{error}");
     }
 }
 

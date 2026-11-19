@@ -530,9 +530,13 @@ impl Game<'_> {
         stack: Option<ItemStack>,
     ) -> bool {
         let stack = stack.filter(|s| s.count > 0 && &*s.item != "minecraft:air");
+        let items = self.res.shared_items();
         self.display_edit(display, Some(DisplayKind::Item), |c| match stack {
             Some(stack) => {
-                c.insert("item".into(), sunrise_client::save::item_to_nbt(&stack));
+                c.insert(
+                    "item".into(),
+                    sunrise_client::save::item_to_nbt(&stack, &items),
+                );
             }
             None => {
                 c.remove(&"item".into());

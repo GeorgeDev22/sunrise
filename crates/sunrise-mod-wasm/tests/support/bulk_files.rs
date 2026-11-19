@@ -92,6 +92,10 @@ impl ConfigFiles for Files {
             .get(path.as_str())
             .map(|bytes| stat(bytes.len())))
     }
+    fn remove(&self, file: &ConfigPath) -> Result<bool, ConfigFileError> {
+        self.available()?;
+        Ok(self.files.lock().unwrap().remove(file.as_str()).is_some())
+    }
 }
 
 static CONFIG: Files = Files::new();

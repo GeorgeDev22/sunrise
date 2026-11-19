@@ -107,7 +107,7 @@ class NightlyTests(unittest.TestCase):
             # An older selected checkout may not contain the template. It must already be loaded.
             with mock.patch.object(Path, "read_text", side_effect=AssertionError("late template read")):
                 text = notes(merged=[merged_pr(9, "Fix fork install", [])], issues=["- Known issue"])
-        self.assertTrue(text.startswith(nightly.FORK_PLAYERS + "\n\n"))
+        self.assertTrue(text.startswith(nightly.SUNRISE_PLAYERS + "\n\n"))
         self.assertNotIn(nightly.PLAYERS, text)
         self.assertIn("Nightly 2026-10-28 · bbbbbbb: main (mmmmmmm)", text)
         self.assertIn("nightly-source/2026-10-28-bbbbbbb", text)
@@ -212,17 +212,13 @@ class UntrustedBuildTests(unittest.TestCase):
         self.assertIn("save-if: ${{ inputs.trusted }}", self.game)
         self.assertEqual(self.game.count("Swatinem/rust-cache"), 1)
 
-    def test_an_untrusted_build_never_runs_on_the_release_runner(self):
-        runs_on = [line for line in self.game.splitlines() if "runs-on: ${{" in line and "'dyna-small'" not in line]
-        self.assertEqual(len(runs_on), 3)
-        # The nightly's own runner: never the release runner, and never behind pull requests' parity queue.
-        nightly_default = "'[\"self-hosted\", \"macOS\", \"sunrise-nightly\"]'"
-        for line, variable in zip(runs_on, ("NIGHTLY_EXPORTERS_RUNNER", "NIGHTLY_MAC_RUNNER")):
-            self.assertIn("inputs.trusted && toJSON(vars.MAC_RUNNER)", line)
-            self.assertIn(f"vars.DYNA_CI_SELF_HOSTED == 'true' && vars.{variable}", line)
-            self.assertIn(f"vars.SELF_HOSTED_CI != 'off' && {nightly_default}", line)
-        self.assertNotIn("NIGHTLY_LINUX_RUNNER", runs_on[1])
-        self.assertIn("vars.NIGHTLY_LINUX_RUNNER", runs_on[2])
+    def test_no_build_job_names_a_self_hosted_mac(self):
+        # Sunrise has no Mac runner of its own: the Macs build on Blacksmith's (or GitHub's) machines, and exporters
+        # run on Dyna's runner for an untrusted build only, never sharing a trusted build with pull requests' jobs.
+        self.assertNotIn("MAC_RUNNER", self.game)
+        self.assertNotIn('"macOS"', self.game)
+        exporters = next(line for line in self.game.splitlines() if "runs-on:" in line and "NIGHTLY_EXPORTERS_RUNNER" in line)
+        self.assertIn("!inputs.trusted && vars.DYNA_CI_SELF_HOSTED == 'true' && vars.NIGHTLY_EXPORTERS_RUNNER", exporters)
 
     def test_a_trusted_build_never_reads_the_shared_sccache(self):
         calls = self.game.count("bash tools/ci/runner-env.sh")
@@ -285,7 +281,9 @@ class SdkPairTests(unittest.TestCase):
             "sdk.json", "SHA256SUMS", "SHA256SUMS.sig", "api-source.tar.xz", "build-data.tar.xz", "surface.json",
             *(f"{kind}-{leg}.tar.xz" for kind in ("runtime", "api", "engine") for leg in (
                 "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu-server", "x86_64-pc-windows-gnu",
-                "aarch64-apple-darwin")))]
+                "aarch64-apple-darwin")),
+            *(f"tool-{target}.tar.xz" for target in (
+                "x86_64-unknown-linux-gnu", "x86_64-pc-windows-gnu", "aarch64-apple-darwin")))]
         release = {"draft": False, "tag_name": "sdk-" + "a" * 40, "assets": assets}
         for changes, expected in [({}, True), ({"draft": True}, False),
                                   ({"tag_name": "sdk-" + "b" * 40}, False),
@@ -309,9 +307,9 @@ class SdkPairTests(unittest.TestCase):
                     mock.patch.dict(nightly.os.environ, {"NIGHTLY_BASE": explicit}), \
                     mock.patch.object(nightly.train, "channel_head", return_value="a" * 40) as gate, \
                     mock.patch.object(nightly, "git", return_value=NOW), \
-                    mock.patch.object(nightly, "sdk_ready", side_effect=AssertionError("SDK is optional")):
+                    mock.patch.object(nightly, "sdk_ready", side_effect=AssertionError("build_set checks the SDK")):
                 self.assertEqual(nightly.green_base("sunrise-org/sunrise", "").sha, "a" * 40)
-                gate.assert_called_once_with("nightly", explicit)
+                gate.assert_called_once_with("nightly", explicit, "")
         with mock.patch.object(nightly.train, "channel_head", side_effect=SystemExit("gate failed")):
             with self.assertRaisesRegex(SystemExit, "gate failed"):
                 nightly.green_base("sunrise-org/sunrise", "")
@@ -325,23 +323,67 @@ class SdkPairTests(unittest.TestCase):
                 nightly.build_set(nightly.Ref("main", "a" * 40, T), [], [], "2026-11-11", True, False)
             push.assert_not_called()
 
-    def test_nightly_without_sdk_builds_and_names_native_mod_limit(self):
-        import io
-        for ready in (False, True):
-            document = io.StringIO()
-            with self.subTest(ready=ready), \
-                    mock.patch.dict(nightly.os.environ, {"GITHUB_REPOSITORY": "sunrise-org/sunrise"}), \
+    def test_a_real_nightly_without_its_sdk_stops_before_pushing(self):
+        for ready, dry_run in ((False, False), (False, True), (True, False)):
+            with self.subTest(ready=ready, dry_run=dry_run), \
+                    mock.patch.dict(nightly.os.environ, {"GITHUB_REPOSITORY": "sunrise-org/sunrise",
+                                                         "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"}), \
                     mock.patch.object(nightly.ns, "fetch_heads", return_value=[]), \
                     mock.patch.object(nightly.ns, "assemble", return_value="a" * 40), \
+                    mock.patch.object(nightly.ns, "builds_today", return_value=[]), \
+                    mock.patch.object(nightly.ns, "next_build", return_value="nightly/build-2026-11-11-1"), \
+                    mock.patch.object(nightly.ns, "update_state"), \
+                    mock.patch.object(nightly.ns, "push", return_value=True) as push, \
                     mock.patch.object(nightly, "sdk_ready", return_value=ready), \
-                    mock.patch.object(nightly, "git", return_value="a" * 40), \
+                    mock.patch.object(nightly, "git", return_value="b" * 40), \
                     mock.patch.object(nightly, "merged_since", return_value=[]), \
                     mock.patch.object(nightly.train, "known_issues", return_value=[]), \
-                    mock.patch("builtins.open", return_value=mock.MagicMock(__enter__=lambda _: document)), \
+                    mock.patch("builtins.open", mock.mock_open()), \
                     mock.patch.object(nightly, "output") as output:
-                nightly.build_set(nightly.Ref("main", "a" * 40, T), [], [], "2026-11-11", False, False)
-                self.assertEqual(output.call_args.kwargs["sdk"], str(ready).lower())
-                self.assertEqual("Native mods cannot be built" in document.getvalue(), not ready)
+                if not ready and not dry_run:
+                    with self.assertRaises(SystemExit):
+                        nightly.build_set(nightly.Ref("main", "a" * 40, T), [], [], "2026-11-11", False, dry_run)
+                    push.assert_not_called()
+                    output.assert_not_called()
+                else:
+                    nightly.build_set(nightly.Ref("main", "a" * 40, T), [], [], "2026-11-11", False, dry_run)
+                    push.assert_called_once()
+                    self.assertEqual(output.call_args.kwargs["sdk"], str(ready).lower())
+
+    def test_forced_rebuild_of_the_published_commit_lists_the_changes_since_the_nightly_before(self):
+        import io, os, subprocess, tempfile
+        with tempfile.TemporaryDirectory() as repo:
+            def sh(*args):
+                return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+            sh("init", "-q")
+            commits = []
+            for n in range(3):
+                sh("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", str(n))
+                commits.append(sh("rev-parse", "HEAD"))
+            first, second, published = commits
+            sh("remote", "add", "origin", repo)
+            sh("tag", "nightly-source/2026-11-15-aaaaaaa", first)
+            sh("tag", "nightly-source/2026-11-16-bbbbbbb", second)
+            sh("tag", "nightly-source/2026-11-17-ccccccc", published)
+            sh("tag", "nightly", published)
+            cwd = os.getcwd()
+            os.chdir(repo)
+            try:
+                with mock.patch.dict(nightly.os.environ, {"GITHUB_REPOSITORY": "sunrise-org/sunrise"}), \
+                        mock.patch.object(nightly.ns, "fetch_heads", return_value=[]), \
+                        mock.patch.object(nightly.ns, "assemble", return_value=published), \
+                        mock.patch.object(nightly.ns, "builds_today", return_value=["nightly/build-2026-11-17-1"]), \
+                        mock.patch.object(nightly.ns, "push", return_value=True), \
+                        mock.patch.object(nightly.ns, "update_state"), \
+                        mock.patch.object(nightly, "sdk_ready", return_value=True), \
+                        mock.patch.object(nightly, "merged_since", return_value=[]) as since, \
+                        mock.patch.object(nightly.train, "known_issues", return_value=[]), \
+                        mock.patch("builtins.open", return_value=mock.MagicMock(__enter__=lambda _: io.StringIO())), \
+                        mock.patch.object(nightly, "output"):
+                    nightly.build_set(nightly.Ref("main", published, T), [], [], "2026-11-17", True, False)
+            finally:
+                os.chdir(cwd)
+        since.assert_called_once_with(second, published)
 
     def test_publication_checks_fresh_inventory_and_leaves_upstream_unchanged(self):
         with mock.patch.dict(nightly.os.environ, {"GITHUB_REPOSITORY": "sunrise-org/sunrise"}), \

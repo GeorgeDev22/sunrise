@@ -52,7 +52,7 @@ impl Binding {
         }
         Ok(Self { universes })
     }
-    fn field(
+    pub(super) fn field(
         &self,
         owner: &str,
         registry: &str,
@@ -275,14 +275,6 @@ impl Binding {
                     &data.tags,
                 )?;
             }
-        }
-        for (i, (ingredient, _, _)) in data.smelting.iter_mut().enumerate() {
-            self.field(
-                &format!("smelting[{i}].ingredient"),
-                "item",
-                ingredient,
-                &data.tags,
-            )?;
         }
         Ok(())
     }

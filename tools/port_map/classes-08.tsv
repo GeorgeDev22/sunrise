@@ -101,12 +101,12 @@ ApplyBonusCount.UniformBonusCount.calculateNewCount	inline	crates/sunrise-items/
 ApplyExplosionDecay.run	port	crates/sunrise-items/src/items.rs::LootContext::modifiers	explosion_decay arm
 CopyBlockState.run	port	crates/sunrise-items/src/items.rs::LootContext::modifiers	copy_state arm; copies the listed properties
 CopyBlockState.Builder	skip:java		builder (build, copy)
-CopyComponentsFunction.run	port	crates/sunrise-client/src/game/blocks/spill.rs::Pending::record	gap: minor: copies only what spill.rs keeps for block entities (shulker, banner, names, heads, bees)
+CopyComponentsFunction.run	port	crates/sunrise-world/src/loot_copy.rs::copy_components	shared include/exclude evaluation for collected block, tool and available entity components
 CopyComponentsFunction.Builder	skip:java		builder (build, exclude, include)
-CopyCustomDataFunction.run	missing		minor: no vanilla loot table or item modifier uses copy_custom_data
+CopyCustomDataFunction.run	port	crates/sunrise-world/src/loot_copy/custom_data.rs::copy_custom_data	shared context/storage provider and custom-data update in both evaluators
 CopyCustomDataFunction.copyData	skip:java		builder factory
 CopyCustomDataFunction.Builder.copy	skip:java		builder
-CopyCustomDataFunction.CopyOperation.apply	missing		minor: part of copy_custom_data, which is not ported
+CopyCustomDataFunction.CopyOperation.apply	port	crates/sunrise-world/src/loot_copy/custom_data.rs::copy_custom_data	ordered replace-last, list append and recursive compound merge through shared NBT paths
 CopyNameFunction.run	missing		minor: no vanilla loot table uses copy_name
 EnchantedCountIncreaseFunction.run	port	crates/sunrise-world/src/loot.rs::Context::run	enchanted_count_increase arm
 EnchantedCountIncreaseFunction.Builder.build	skip:java		builder

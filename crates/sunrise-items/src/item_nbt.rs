@@ -57,32 +57,33 @@ fn canonical_saved_adventure_predicates(components: &mut Tag) {
     }
 }
 
-pub fn encode_item(stack: &crate::items::ItemStack) -> Vec<(&'static str, Tag)> {
+fn stack_fields(
+    stack: &crate::items::ItemStack,
+    components: Option<Tag>,
+) -> Vec<(&'static str, Tag)> {
     let mut entries = vec![
         ("id", string(&stack.item)),
         ("count", Tag::Int(stack.count as i32)),
     ];
-    if let Some(mut components) = crate::item_data::encode_components(stack) {
-        canonical_saved_adventure_predicates(&mut components);
+    if let Some(components) = components {
         entries.push(("components", components));
     }
     entries
 }
-/// ItemStack.CODEC (id, count, components).
-pub fn item_to_nbt(stack: &crate::items::ItemStack) -> Tag {
-    Tag::compound(encode_item(stack))
+
+pub fn encode_item(
+    stack: &crate::items::ItemStack,
+    items: &crate::items::Items,
+) -> Vec<(&'static str, Tag)> {
+    let components = crate::item_data::encode_components(stack, items).map(|mut components| {
+        canonical_saved_adventure_predicates(&mut components);
+        components
+    });
+    stack_fields(stack, components)
 }
 /// ItemStack.CODEC saved against the actual loaded item prototype.
-pub fn item_to_nbt_with_items(stack: &crate::items::ItemStack, items: &crate::items::Items) -> Tag {
-    let mut entries = vec![
-        ("id", string(&stack.item)),
-        ("count", Tag::Int(stack.count as i32)),
-    ];
-    if let Some(mut components) = crate::item_data::encode_components_with_items(stack, items) {
-        canonical_saved_adventure_predicates(&mut components);
-        entries.push(("components", components));
-    }
-    Tag::compound(entries)
+pub fn item_to_nbt(stack: &crate::items::ItemStack, items: &crate::items::Items) -> Tag {
+    Tag::compound(encode_item(stack, items))
 }
 /// ItemStack.CODEC's count range is independent of the item's stack limit;
 /// an out-of-range count uses the field's default of one. The id is read as an
@@ -107,28 +108,26 @@ pub fn item_from_nbt(tag: &Tag) -> Option<crate::items::ItemStack> {
         extra,
     })
 }
-pub fn encode_items(slots: &[Option<crate::items::ItemStack>]) -> Tag {
-    encode_items_using(slots, item_to_nbt)
+pub fn encode_items(slots: &[Option<crate::items::ItemStack>], items: &crate::items::Items) -> Tag {
+    Tag::List(encode_items_using(slots, |stack| item_to_nbt(stack, items)))
 }
 
-/// Save an inventory with the stack encoder owned by its persistence boundary.
+/// Encode the occupied slot rows with the stack encoder owned by their persistence boundary.
 pub fn encode_items_using(
     slots: &[Option<crate::items::ItemStack>],
     encode: impl Fn(&crate::items::ItemStack) -> Tag,
-) -> Tag {
-    Tag::List(
-        slots
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| {
-                let mut tag = encode(s.as_ref()?);
-                if let Tag::Compound(entries) = &mut tag {
-                    entries.insert("Slot".into(), Tag::Byte(i as i8));
-                }
-                Some(tag)
-            })
-            .collect(),
-    )
+) -> Vec<Tag> {
+    slots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let mut tag = encode(s.as_ref()?);
+            if let Tag::Compound(entries) = &mut tag {
+                entries.insert("Slot".into(), Tag::Byte(i as i8));
+            }
+            Some(tag)
+        })
+        .collect()
 }
 pub fn decode_items(tag: Option<&Tag>, size: usize) -> Vec<Option<crate::items::ItemStack>> {
     let mut slots = vec![None; size];
@@ -143,10 +142,15 @@ pub fn decode_items(tag: Option<&Tag>, size: usize) -> Vec<Option<crate::items::
     slots
 }
 
-/// A stack as its saved NBT (`item_to_nbt`).
+/// An explicit stack snapshot, including default-valued component presence.
+/// For persistent ItemStack.CODEC output use [`item_to_nbt`] with the catalog.
 impl From<&crate::items::ItemStack> for Tag {
     fn from(stack: &crate::items::ItemStack) -> Self {
-        item_to_nbt(stack)
+        let components = crate::item_data::component_snapshot(stack).map(|mut components| {
+            canonical_saved_adventure_predicates(&mut components);
+            components
+        });
+        Tag::compound(stack_fields(stack, components))
     }
 }
 
@@ -207,7 +211,7 @@ mod tests {
                 let stack = item_from_nbt(&tag).unwrap();
                 assert_eq!(stack.count, expected, "{item}: {raw:?}");
                 assert_eq!(
-                    number(item_to_nbt(&stack).get("count")),
+                    number(item_to_nbt(&stack, &Default::default()).get("count")),
                     Some(i64::from(expected))
                 );
             }
@@ -236,7 +240,10 @@ mod tests {
     fn runtime_counts_remain_independent_of_the_nbt_decode_range() {
         let stack = crate::items::ItemStack::new("minecraft:diamond_sword", 1000);
         assert_eq!(stack.count, 1000);
-        assert_eq!(number(item_to_nbt(&stack).get("count")), Some(1000));
+        assert_eq!(
+            number(item_to_nbt(&stack, &Default::default()).get("count")),
+            Some(1000)
+        );
     }
 }
 
@@ -306,7 +313,7 @@ mod h285_saved_adventure_tests {
             assert_eq!(stack.data().unwrap().other(key), Some(&wanted));
             assert!(stack.data().unwrap().wire.patch().is_none());
             let live = components_tag(stack.damage, stack.data()).unwrap();
-            let saved = item_to_nbt(&stack);
+            let saved = item_to_nbt(&stack, &Default::default());
             let components = saved.get("components").unwrap();
             assert_eq!(saved.get("id"), Some(&string("minecraft:stone")));
             assert_eq!(saved.get("count"), Some(&Tag::Int(3)));
@@ -368,13 +375,16 @@ mod h285_saved_adventure_tests {
                 let wanted = parse(value);
                 let stack = item_from_nbt(&item(key, wanted.clone())).unwrap();
                 assert_eq!(
-                    item_to_nbt(&stack).get("components").unwrap().get(key),
+                    item_to_nbt(&stack, &Default::default())
+                        .get("components")
+                        .unwrap()
+                        .get(key),
                     Some(&wanted)
                 );
             }
         }
         assert!(
-            item_to_nbt(&ItemStack::new("minecraft:stone", 3))
+            item_to_nbt(&ItemStack::new("minecraft:stone", 3), &Default::default())
                 .get("components")
                 .is_none()
         );
@@ -424,18 +434,18 @@ mod h285_saved_adventure_tests {
                     }
                     let before = stack.clone();
                     let live = components_tag(stack.damage, stack.data());
-                    let a = item_to_nbt(&stack);
-                    let b = item_to_nbt_with_items(&stack, &items);
+                    let a = item_to_nbt(&stack, &Default::default());
+                    let b = item_to_nbt(&stack, &items);
                     assert_eq!(a, b);
                     assert_eq!(
                         a.get("components").unwrap().get(key),
                         Some(&parse(expected))
                     );
-                    assert_eq!(item_to_nbt(&stack), a);
-                    assert_eq!(item_to_nbt_with_items(&stack, &items), b);
+                    assert_eq!(item_to_nbt(&stack, &Default::default()), a);
+                    assert_eq!(item_to_nbt(&stack, &items), b);
                     let back = item_from_nbt(&a).unwrap();
-                    assert_eq!(item_to_nbt(&back), a);
-                    assert_eq!(item_to_nbt_with_items(&back, &items), a);
+                    assert_eq!(item_to_nbt(&back, &Default::default()), a);
+                    assert_eq!(item_to_nbt(&back, &items), a);
                     assert_eq!(stack, before);
                     assert_eq!(components_tag(stack.damage, stack.data()), live);
                     assert_eq!(stack.data().unwrap().other(key), Some(&parse(wanted)));
@@ -466,7 +476,10 @@ mod h285_saved_adventure_tests {
                 let value = parse(value);
                 let stack = item_from_nbt(&item(key, value.clone())).unwrap();
                 assert_eq!(
-                    item_to_nbt(&stack).get("components").unwrap().get(key),
+                    item_to_nbt(&stack, &Default::default())
+                        .get("components")
+                        .unwrap()
+                        .get(key),
                     Some(&value)
                 );
             }
@@ -480,7 +493,7 @@ mod h285_saved_adventure_tests {
         stack
             .data_mut()
             .set_other("!minecraft:can_break", Some(parse("{}")));
-        let saved = item_to_nbt(&stack);
+        let saved = item_to_nbt(&stack, &Default::default());
         assert_eq!(
             saved
                 .get("components")
@@ -502,7 +515,7 @@ mod h285_saved_adventure_tests {
             .data_mut()
             .set_other("minecraft:can_break", Some(raw.clone()));
         assert_eq!(
-            crate::item_data::encode_components(&inner)
+            crate::item_data::encode_components(&inner, &Default::default())
                 .unwrap()
                 .get("minecraft:can_break"),
             Some(&raw)
@@ -515,7 +528,7 @@ mod h285_saved_adventure_tests {
         );
         let mut outer = ItemStack::new("minecraft:shulker_box", 1);
         outer.data_mut().container.push((0, inner));
-        let saved = item_to_nbt(&outer);
+        let saved = item_to_nbt(&outer, &Default::default());
         let Some(Tag::List(slots)) = saved.get("components").unwrap().get("minecraft:container")
         else {
             panic!("container")
@@ -550,7 +563,7 @@ mod h285_saved_adventure_tests {
                 entry("minecraft:armor", "mod:x"),
             ])),
         );
-        let saved = item_to_nbt(&stack);
+        let saved = item_to_nbt(&stack, &Default::default());
         assert_eq!(
             saved
                 .get("components")

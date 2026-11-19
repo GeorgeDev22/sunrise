@@ -85,7 +85,14 @@ fn a_saved_mob_writes_its_current_glide_flag() {
             ] {
                 let mut m = husk(types, true, None);
                 m.extra.fall_flying = gliding;
-                let tag = crate::entity_nbt::mob_to_nbt(&m, [168, 0, 0, 1], raw, None, |_| None);
+                let tag = crate::entity_nbt::mob_to_nbt(
+                    &m,
+                    [168, 0, 0, 1],
+                    raw,
+                    None,
+                    |_| None,
+                    &Default::default(),
+                );
                 assert_eq!(
                     flag(&tag),
                     Some(Tag::Byte(expected)),

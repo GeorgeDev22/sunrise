@@ -4,6 +4,8 @@
 //! the load factor) and `java.util.HashSet<String>` (chained buckets split on
 //! resize). Commands list, and `scoreboard.dat` saves, in these orders.
 
+use sunrise_core::random::java_string_hash;
+
 /// The keys of a fastutil open hash map in their table slots.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OpenOrder {
@@ -17,11 +19,6 @@ impl Default for OpenOrder {
     fn default() -> Self {
         Self::new(16, 0.75)
     }
-}
-/// `String.hashCode`.
-pub fn java_hash(s: &str) -> i32 {
-    s.encode_utf16()
-        .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)))
 }
 /// `HashCommon.mix`.
 fn mix(x: i32) -> usize {
@@ -54,7 +51,7 @@ impl OpenOrder {
         self.size == 0
     }
     fn slot(&self, key: &str) -> usize {
-        mix(java_hash(key)) & (self.keys.len() - 1)
+        mix(java_string_hash(key.encode_utf16())) & (self.keys.len() - 1)
     }
     pub fn contains(&self, key: &str) -> bool {
         let mask = self.keys.len() - 1;
@@ -134,7 +131,7 @@ impl OpenOrder {
         let mask = new_n - 1;
         // `for (int j = realSize(); j-- != 0;) { while (key[--i] == null); ... }`
         for key in old.into_iter().rev().flatten() {
-            let mut pos = mix(java_hash(&key)) & mask;
+            let mut pos = mix(java_string_hash(key.encode_utf16())) & mask;
             while self.keys[pos].is_some() {
                 pos = (pos + 1) & mask;
             }
@@ -160,7 +157,7 @@ pub struct HashSetOrder {
 }
 /// `HashMap.hash`.
 fn spread(s: &str) -> usize {
-    let h = java_hash(s) as u32;
+    let h = java_string_hash(s.encode_utf16()) as u32;
     (h ^ (h >> 16)) as usize
 }
 impl HashSetOrder {
@@ -227,11 +224,8 @@ mod tests {
 
     #[test]
     fn hash_and_order() {
-        assert_eq!(java_hash("harness"), {
-            "harness"
-                .chars()
-                .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
-        });
+        // String.hashCode over UTF-16 code units: the emoji is two surrogates.
+        assert_eq!(java_string_hash("\u{1F600}".encode_utf16()), 1_772_899);
         let mut o = OpenOrder::new(16, 0.5);
         for k in ["harness", "harness_h"] {
             o.insert(k);

@@ -7,7 +7,7 @@ use sunrise_protocol::{
 #[test]
 fn every_registered_engine_codec_refuses_a_hostile_oversized_body() {
     type Rejects = fn(&[u8]) -> bool;
-    let cases: [(&str, Rejects); 13] = [
+    let cases: [(&str, Rejects); 14] = [
         ("minecraft:brand", |body| {
             let mut packet = Writer::new();
             packet.string("minecraft:brand");
@@ -37,6 +37,9 @@ fn every_registered_engine_codec_refuses_a_hostile_oversized_body() {
         }),
         ("sunrise:passage_cross", |body| {
             protocol::passage_sync::decode_cross(body).is_err()
+        }),
+        ("sunrise:carry_age", |body| {
+            protocol::carry_age::decode(body).is_err()
         }),
         ("sunrise:lod", |body| {
             crate::lod_net::Offer::decode(body).is_none()

@@ -7,6 +7,7 @@ use sunrise_client::{
     clipboard::{self, AppendSelection, SystemClipboard},
     options_ui::{Event, OptionsUi, Page},
     widgets::{Kind, Target},
+    window::{GuiSize, PointerProjection, PointerSample, PointerSpace},
 };
 use winit::{event::KeyEvent, keyboard::ModifiersState};
 
@@ -19,7 +20,8 @@ pub(super) struct StartupMenu {
     win: Option<(sunrise_client::win_screen::WinScreen, Instant)>,
     root: PathBuf,
     cursor: (f32, f32),
-    pointer: (f64, f64),
+    pointer: PointerSample,
+    window_pointer_space: std::cell::OnceCell<PointerSpace>,
     modifiers: ModifiersState,
     physical_keys: HashSet<KeyCode>,
     dragging: bool,
@@ -151,6 +153,9 @@ impl StartupMenu {
         game.perf = std::mem::take(&mut self.perf);
         game.mod_jobs = std::mem::take(&mut self.mod_jobs);
         game.cursor = self.cursor;
+        if self.key_focus.is_none() {
+            game.window_cursor = Some(self.pointer);
+        }
         game.modifiers = self.modifiers;
         game.physical_keys = std::mem::take(&mut self.physical_keys);
         game.clipboard = std::mem::take(&mut self.clipboard);
@@ -413,7 +418,7 @@ pub(super) fn spawn_loader(
                     });
             let result = root
                 .and_then(|root| {
-                    load_resources(
+                    load_resources_for_mods(
                         root,
                         super::pack_finders::data_packs(&mod_sources),
                         world.as_deref(),
@@ -426,6 +431,7 @@ pub(super) fn spawn_loader(
                         &mut |gui, root| {
                             let _ = sender.send(LoaderMsg::Ui(gui, root.to_path_buf()));
                         },
+                        &mod_sources,
                     )
                 })
                 .map(|mut loaded| {
@@ -486,7 +492,7 @@ impl Loading {
     }
     pub(super) fn apply_menu_settings(&mut self) {
         if let Some(renderer) = &mut self.renderer {
-            renderer.gamma = self.settings.gamma;
+            renderer.gamma = self.settings.gamma as f32;
             renderer.set_present_mode(self.settings.vsync, self.settings.sunrise.present_mode);
         }
 
@@ -522,12 +528,31 @@ impl Loading {
         self.update_menu_cursor();
     }
 
-    fn update_menu_cursor(&mut self) {
-        let batch = HudBatch::new(self.menu_size(), self.settings.gui_scale_inputs());
-        self.menu.cursor = (
-            self.menu.pointer.0 as f32 / batch.scale,
-            self.menu.pointer.1 as f32 / batch.scale,
+    fn menu_pointer_projection(&self) -> PointerProjection {
+        let inputs = self.settings.gui_scale_inputs();
+        let size = self.menu_size();
+        let window = self.window.as_deref().map_or_else(
+            || PointerSpace::new(size, 1.0),
+            |window| {
+                *self
+                    .menu
+                    .window_pointer_space
+                    .get_or_init(|| PointerSpace::from_window(window))
+            },
         );
+        PointerProjection {
+            gui: GuiSize::new(size, inputs.requested, inputs.unicode),
+            window,
+        }
+    }
+
+    fn projected_menu_pointer(&self) -> sunrise_client::window::GuiPointer {
+        self.menu_pointer_projection()
+            .project_pointer(self.menu.pointer)
+    }
+
+    fn update_menu_cursor(&mut self) {
+        self.menu.cursor = self.projected_menu_pointer().subpixel();
     }
 
     fn menu_size(&self) -> [u32; 2] {
@@ -1136,10 +1161,15 @@ impl Loading {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
+                self.menu.window_pointer_space.take();
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
                 }
                 self.apply_menu_settings();
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.menu.window_pointer_space.take();
+                self.update_menu_cursor();
             }
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::ModifiersChanged(modifiers) => self.menu.modifiers = modifiers.state(),
@@ -1193,8 +1223,9 @@ impl Loading {
             WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
                 if self.menu.win.is_some() => {}
             WindowEvent::CursorMoved { position, .. } => {
-                self.menu.pointer = (position.x, position.y);
-                self.update_menu_cursor();
+                let projection = self.menu_pointer_projection();
+                self.menu.pointer = projection.window.os_sample(position);
+                self.menu.cursor = projection.project_pointer(self.menu.pointer).subpixel();
                 if self.menu.options_open && self.menu.dragging {
                     self.menu_options_click(true, false);
                 } else if let Some(title) = &mut self.menu.title {
@@ -1279,7 +1310,7 @@ impl Loading {
                     sunrise_client::mouse::java_signum(f64::from(raw)) as f32
                 } else {
                     raw
-                } * self.settings.mouse_wheel_sensitivity;
+                } * self.settings.mouse_wheel_sensitivity as f32;
                 let size = self.menu_size();
                 let batch = HudBatch::new(size, self.settings.gui_scale_inputs());
                 if self.menu.options_open {
@@ -1346,6 +1377,11 @@ impl Loading {
             sunrise_client::ui_theme::draw_boot(&self.boot, batch, &logs);
             return;
         };
+        let cursor = if self.menu.key_focus.is_some() {
+            self.menu.cursor
+        } else {
+            self.projected_menu_pointer().pixel()
+        };
         // `Gui.setScreen` clears the focus of the screen it leaves
         // (`Screen.clearFocus`): the title behind the options, and the one
         // that comes back, start with no button highlighted.
@@ -1359,11 +1395,13 @@ impl Loading {
             }
         }
         if self.menu.pending.is_some() {
+            self.bar =
+                sunrise_client::level_loading::ease_overlay(self.bar, self.progress.fraction());
             sunrise_client::level_loading::draw_loading_overlay(
                 batch,
                 &gui.atlas,
-                self.progress.line(),
-                self.progress.fraction(),
+                self.bar,
+                sunrise_client::level_loading::OverlayFade::OPAQUE,
                 self.settings.file.bool("darkMojangStudiosBackground"),
             );
             let (bars, lines) = super::startup_progress::shown();
@@ -1389,10 +1427,8 @@ impl Loading {
                 .draw_background(&self.settings, output, batch, &gui.atlas);
             self.menu
                 .options
-                .draw_contents(&self.settings, batch, &gui.atlas, self.menu.cursor);
-            self.menu
-                .options
-                .draw_overlays(batch, &gui.atlas, self.menu.cursor);
+                .draw_contents(&self.settings, batch, &gui.atlas, cursor);
+            self.menu.options.draw_overlays(batch, &gui.atlas, cursor);
         } else if let Some(title) = &mut self.menu.title {
             title.poll_backup();
             if std::mem::take(&mut title.onboarding_finished) {
@@ -1414,7 +1450,7 @@ impl Loading {
                 &gui.atlas,
                 items,
                 batch,
-                self.menu.cursor,
+                cursor,
                 self.settings.file.bool("hideSplashTexts"),
                 self.settings.file.bool("hideServerAddress"),
                 &mut |_, _| {},
@@ -1508,6 +1544,7 @@ mod tests {
                 96, 110, 111, 255,
             ])),
             splashes: Arc::from(""),
+            plain_texts: Default::default(),
         }
     }
 
@@ -1526,6 +1563,7 @@ mod tests {
             started: Instant::now(),
             panorama_rotation: Default::default(),
             progress: Progress::new(),
+            bar: 0.0,
             receiver,
             loaded: None,
             delivered: false,
@@ -1629,7 +1667,10 @@ mod tests {
             assert_eq!(view(&second), (4.0, 240.0, 180.0));
         });
         first.settings.force_unicode = true;
-        first.menu.pointer = (400.0, 200.0);
+        first.menu.pointer = first
+            .menu_pointer_projection()
+            .window
+            .physical_sample(winit::dpi::PhysicalPosition::new(400.0, 200.0));
         first.apply_menu_settings();
         assert_eq!(view(&first), (4.0, 240.0, 180.0));
         assert_eq!(first.menu.cursor, (100.0, 50.0));
@@ -1725,6 +1766,7 @@ mod tests {
             game.handle_window_event_inner(
                 &Loop,
                 WindowEvent::DroppedFile(source.join("Game pack")),
+                None,
             );
             assert!(game.ui.options.pack_screen.as_ref().unwrap().confirming());
             assert!(!packs::packs_dir().join("Game pack").exists());

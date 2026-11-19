@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use sunrise_client_core::component::name_text;
 use sunrise_client_core::scoreboard::comp_text;
 use sunrise_core::nbt::{JavaString, Tag, parse_snbt};
-use sunrise_items::item_data::{canon_tag, encode_components};
+use sunrise_items::item_data::{canon_tag, component_snapshot};
 use sunrise_items::items::ItemStack;
 use sunrise_optifine::cit::{ComponentTest, Source, ValueTest};
 use sunrise_optifine::{Properties, properties_files_in};
@@ -139,7 +139,7 @@ impl CitRules {
         max_damage: u32,
     ) -> Option<usize> {
         let candidates = self.by_item[kind as usize].get(&*stack.item)?;
-        let comps = encode_components(stack);
+        let comps = component_snapshot(stack);
         let key = cache_key((0, kind, hand), stack, max_damage, comps.as_ref());
         if let Some(hit) = lock(&self.selected).get(&key) {
             return hit.map(|i| i as usize);
@@ -161,7 +161,7 @@ impl CitRules {
         if named.is_empty() && self.any_item.is_empty() {
             return Vec::new();
         }
-        let comps = encode_components(stack);
+        let comps = component_snapshot(stack);
         let key = cache_key(
             (1, Kind::Enchantment, hand),
             stack,
@@ -196,7 +196,7 @@ impl CitRules {
         if !foil || (no_rules && self.global.use_glint) {
             return None;
         }
-        let comps = encode_components(stack);
+        let comps = component_snapshot(stack);
         let key = cache_key(
             (2, Kind::Enchantment, hand),
             stack,

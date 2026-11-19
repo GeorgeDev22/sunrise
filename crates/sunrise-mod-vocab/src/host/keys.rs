@@ -42,12 +42,6 @@ pub trait KeysHost {
     #[access(WorldOnly)]
     fn registry_entry_in_tag(&self, entry: &RegistryEntry, tag: &str) -> Option<bool>;
     /// Side: both.
-    /// Resolve a live typed key's load-owned slot, never its protocol numeric id.
-    // hidden: RegistryEntry narrowing transports a host-issued opaque key.
-    #[doc(hidden)]
-    #[access(WorldOnly)]
-    fn registry_entry_key_slot(&self, entry: &RegistryEntry) -> Option<u32>;
-    /// Side: both.
     /// Every block key in the registry's registration order: vanilla's first, then
     /// mod blocks in the order they registered. A block registry lists a name once
     /// per state; this yields it once. Empty before the block table completes.
@@ -82,7 +76,9 @@ pub trait KeysHost {
     /// connection's registries, a server the ones it sends. The id holds for one connection and one
     /// data reload: do not keep it across a reconnect, a reconfiguration or `/reload`. None for an
     /// unknown registry or name, on a client before that registry was synced, and with no
-    /// connection. Allocates nothing; each registry is searched in order.
+    /// connection. Allocates nothing; each registry is searched in order. Use
+    /// [`ItemKey::registry_id`] for the local prepared item number used by scatter rendering;
+    /// that read is available without a connection and is not a packet lookup.
     #[access(WorldOnly)]
     fn registry_protocol_id(&self, registry: &Identifier, name: &Identifier) -> Option<i32>;
 }
@@ -96,6 +92,11 @@ pub trait KeysBackend {
     #[access(WorldOnly)]
     fn biome_key_id(&self, key: BiomeKey) -> Result<String, BiomeKeyError>;
 
+    /// Side: both.
+    /// Resolve a live typed key's load-owned slot, never its protocol numeric id.
+    #[access(WorldOnly)]
+    fn registry_entry_key_slot(&self, entry: &RegistryEntry) -> Option<u32>;
+
     /// Side: both. Exact id of an installed game-event slot; invalid keys are refused.
     #[access(Metadata)]
     fn game_event_key_id(&self, key: GameEventKey) -> Result<String, GameEventKeyError>;
@@ -108,6 +109,9 @@ pub trait KeysBackend {
     /// The canonical item id retained by the load-owned registration slot.
     #[access(Metadata)]
     fn item_key_id(&self, key: ItemKey) -> String;
+    /// Side: both. Current numeric item registry id, unavailable before completion.
+    #[access(Metadata)]
+    fn item_registry_id(&self, key: ItemKey) -> Option<u32>;
     /// Side: both.
     /// The canonical effect id retained by the load-owned registration slot.
     #[access(Metadata)]

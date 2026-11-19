@@ -8,15 +8,17 @@ Some packets are not the tick's: the server's own timing decides them (keep-aliv
 acknowledgements, teleport acceptances and the move that follows one, chat acknowledgements). They are kept
 apart (`frame`), never compared tick by tick, and `misplaced` checks vanilla's rule for them instead: the
 client processes the server's packets at the start of a frame (Minecraft.runTick: processQueuedPackets before
-the ticks), so none of them lands between two packets of one tick. Keep-alive answers are the exception: the
-network thread sends them (ClientCommonPacketListenerImpl.handleKeepAlive).
+the ticks), so none of them lands between two packets of one tick. Keep-alive answers and chunk batch
+acknowledgements are the exception: the network thread sends them (ClientCommonPacketListenerImpl.handleKeepAlive,
+ClientPacketListener.handleChunkBatchFinished), so they may land anywhere.
 """
 import struct
 
 # Sent from the frame (the server's packets), not from a tick.
 FRAME = {'keep_alive', 'pong', 'chunk_batch_received', 'accept_teleportation', 'chat_ack'}
-# Answers to the server that also come from the frame; `misplaced` checks them.
-ASYNC = FRAME - {'keep_alive'}
+# Answers to the server that also come from the frame; `misplaced` checks them. The network thread's own
+# answers are left out: they may come between two packets of a tick.
+ASYNC = FRAME - {'keep_alive', 'chunk_batch_received'}
 
 
 class Reader:

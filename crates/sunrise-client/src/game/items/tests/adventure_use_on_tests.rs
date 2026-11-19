@@ -11,9 +11,8 @@ use sunrise_core::nbt::Tag;
 use sunrise_world::registry::BlockStateId;
 
 /// A server's game with the prepared resources, or `None` where CI has none.
-fn game() -> Option<Game<'static>> {
+fn game<'a>(resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>) -> Option<Game<'a>> {
     std::env::var_os("SUNRISE_TEST_RESOURCES")?;
-    let resources = Box::leak(Box::new(None));
     let mut game = server_game(resources);
     game.build_registries();
     Some(game)
@@ -101,7 +100,8 @@ fn held(game: &Game<'_>) -> Option<(String, u32)> {
 /// block unchanged; one with it acts, as `ItemStack.useOn` does.
 #[test]
 fn an_adventure_use_on_needs_may_build_or_a_matching_can_place_on() {
-    let Some(mut game) = game() else {
+    let mut resources = None;
+    let Some(mut game) = game(&mut resources) else {
         return;
     };
     game.set_mode(GameMode::Adventure);
@@ -253,7 +253,8 @@ fn an_adventure_use_on_needs_may_build_or_a_matching_can_place_on() {
 /// A player who may build keeps every one of those uses.
 #[test]
 fn a_builder_use_on_is_unaffected() {
-    let Some(mut game) = game() else {
+    let mut resources = None;
+    let Some(mut game) = game(&mut resources) else {
         return;
     };
     game.set_mode(GameMode::Survival);
@@ -326,7 +327,8 @@ fn a_builder_use_on_is_unaffected() {
 /// strip (no sound, no swing), while a builder or a matching stack does.
 #[test]
 fn an_adventure_use_on_is_not_predicted_on_the_client() {
-    let Some(mut game) = game() else {
+    let mut resources = None;
+    let Some(mut game) = game(&mut resources) else {
         return;
     };
     game.set_mode(GameMode::Adventure);

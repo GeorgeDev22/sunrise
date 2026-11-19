@@ -33,16 +33,21 @@ process lifetime. Its non-exhaustive `MathProfile` describes the
 engine's selection for `sin`, `cos`, `tan`, `exp`, `log`, `log10` and `pow`, without
 returning machine/vendor/OS identification:
 
-- `LibmRounding`: platform libm for all seven.
-- `CorrectlyRounded`: only `sin`, `cos` and `log` use the correctly rounded path;
-  `tan`, `exp`, `log10` and `pow` still use platform libm. This is the
-  selection on Windows other than AArch64.
+- `HotSpotX86_64`: HotSpot's x86-64 stubs for `sin`, `cos` and `tan` (a
+  translation of Intel's libm) and for `exp`; correctly rounded `log` and
+  `log10`; platform libm for `pow`. This is the selection on every x86-64
+  target, Windows included.
 - `Aarch64Fma`: fdlibm with fused multiply-adds for `sin` and `cos`, fdlibm for
   `log` and `log10`, and the Rust `libm` crate for `tan`, `exp` and `pow`.
   Those last three are not advertised as StrictMath. This branch wins on all
   AArch64 targets, including Windows.
-- `StrictMath`: fdlibm throughout. No target selects it: every other target uses
-  `LibmRounding`.
+- `CorrectlyRounded`: correctly rounded `sin`, `cos`, `log` and `log10`;
+  HotSpot's x86-64 `exp` algorithm; platform libm for `tan` and `pow`. This is
+  the selection on Windows targets that are neither x86-64 nor AArch64.
+- `LibmRounding`: platform libm for `sin`, `cos`, `tan` and `pow`; HotSpot's
+  x86-64 `exp` algorithm; correctly rounded `log` and `log10`. This is the
+  selection on every remaining target.
+- `StrictMath`: fdlibm throughout. No target selects it.
 
 Every profile retains the engine's Java `pow` special cases. This is information,
 not guest math: `java_math` stays native-only. A guest must ship whatever libm,

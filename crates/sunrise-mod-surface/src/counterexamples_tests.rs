@@ -855,6 +855,12 @@ fn rows() -> Vec<Row> {
             DimsField,
             Refused,
         ),
+        row(
+            "an absolute path is not read through a name another module binds",
+            one("mod other { use mod_api::Pos as world; }\nfn f() { let d = ::mod_api::world::DimensionSettings { min_y: 0, height: 256, logical_height: 256 }; }"),
+            DimsField,
+            Refused,
+        ),
         row("3f3e8ce: `let r#type = …`", one(format!("fn f() {{ let r#type = {d}; }}")), DimsField, Refused),
         row(
             "3f3e8ce: `self.r#type = …`",

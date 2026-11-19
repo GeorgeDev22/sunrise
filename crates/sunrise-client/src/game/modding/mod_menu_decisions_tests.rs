@@ -5,8 +5,8 @@
 //! listener made. The fixtures need prepared resources.
 use crate::game::native_guest_turn_tests::with_guests;
 use mod_api::{
-    BlockEntityPart, Flow, Hooks, ITEMS, ItemPlace, ItemResource, MenuClickedEvent,
-    MenuQuickMoveEvent, ModEntry, Mods, Registrar, ServerHost,
+    BlockEntityPart, Flow, Hooks, ITEMS, ItemPlace, ItemResource, MenuButtonEvent,
+    MenuClickedEvent, MenuQuickMoveEvent, ModEntry, Mods, Registrar, ServerHost,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -17,7 +17,7 @@ use sunrise_client::{
     items::ItemStack,
     lan::menu::Slots,
 };
-use sunrise_protocol::packets::play::{ContainerClick, Serverbound};
+use sunrise_protocol::packets::play::{ContainerButtonClick, ContainerClick, Serverbound};
 
 #[derive(Clone, Default)]
 struct Script {
@@ -26,6 +26,7 @@ struct Script {
     panic: bool,
     /// `menu_quick_move`: take 9 of the stack into slots 1 and 2 of the block (4, then 5).
     take: bool,
+    all: bool,
     /// ...and answer with a stack past the item's maximum in slot 1.
     invalid: bool,
     /// `menu_quick_move`: move 4 of the stack into the second block through its `ITEMS`
@@ -36,6 +37,8 @@ struct Script {
 thread_local! {
     static SCRIPT: RefCell<Script> = RefCell::new(Script::default());
     static DISPATCHES: Cell<usize> = const { Cell::new(0) };
+    /// `menu_button` calls on the depot.
+    static BUTTONS: Cell<usize> = const { Cell::new(0) };
     /// Whether a transaction was open at each dispatch: the action's savepoint.
     static IN_ACTION: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
 }
@@ -63,6 +66,9 @@ struct Part;
 impl mod_api::BlockPart for Part {}
 #[mod_api::sunrise_part]
 impl BlockEntityPart for Part {
+    fn menu_button(&self, _: &mut dyn ServerHost, _: &mut MenuButtonEvent<'_>) {
+        BUTTONS.set(BUTTONS.get() + 1);
+    }
     fn menu_quick_move(
         &self,
         host: &mut dyn ServerHost,
@@ -84,8 +90,12 @@ impl BlockEntityPart for Part {
         if s.take {
             event.entity.items.resize(9, None);
             event.entity.items[1] = Some(stone(if s.invalid { 65 } else { 4 }));
-            event.entity.items[2] = Some(stone(5));
-            event.stack.set_count(1).unwrap();
+            event.entity.items[2] = Some(stone(if s.all { 6 } else { 5 }));
+            if s.all {
+                *event.stack = None;
+            } else {
+                event.stack.as_mut().unwrap().set_count(1).unwrap();
+            }
         }
         if s.cross {
             let level = host.level("minecraft:overworld").expect("the level");
@@ -97,7 +107,7 @@ impl BlockEntityPart for Part {
                 items.insert(host, &tx, 0, &ItemResource::of(&stone(1)), 4),
                 4
             );
-            event.stack.set_count(6).unwrap();
+            event.stack.as_mut().unwrap().set_count(6).unwrap();
         }
         if s.panic {
             panic!("a listener failed");
@@ -388,6 +398,15 @@ fn a_mod_quick_move_is_one_action_and_a_refusal_leaves_no_prefix() {
             assert_eq!(IN_ACTION.with(|a| a.borrow().clone()), [true]);
             assert_eq!(depot(game), (1, 4, 5, 0));
             assert!(game.transactions.is_empty());
+            // A complete move empties the source through the optional API remainder.
+            open_depot(game);
+            script(Script {
+                take: true,
+                all: true,
+                ..Script::default()
+            });
+            click(game);
+            assert_eq!(depot(game), (0, 4, 6, 0));
             // Row 77: the same move, and the listener also writes the guest's inventory: stale,
             // so the whole move is refused: the source keeps its 10 and neither target slot is
             // left holding a prefix of the move.
@@ -540,5 +559,87 @@ fn a_replaced_block_entity_makes_an_admitted_quick_move_stale() {
             .guests
             .update(0, |guest| guest.menu = None);
         assert!(!admitted.holds(game));
+    });
+}
+
+/// A content mod's menu type, the one the depot's container opens (`depot_container`).
+const DEPOT_MENU: &str = "movemod:depot_menu";
+
+/// Makes the depot at `POS` a mod container whose menu is `DEPOT_MENU`, so `mod_menu_at(POS)`
+/// names it.
+fn depot_container(game: &mut crate::game::Game<'_>) {
+    let state = game
+        .pack
+        .assets
+        .registry
+        .default_state("minecraft:stone")
+        .unwrap();
+    game.world.set(POS.0, POS.1, POS.2, state).unwrap();
+    game.world.block_entities.set_mod_containers(
+        [(
+            state.0,
+            Arc::new(ModContainer {
+                slots: 9,
+                menu: Some(DEPOT_MENU.into()),
+                ..Default::default()
+            }),
+        )]
+        .into_iter()
+        .collect(),
+    );
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_code_opened_menus_button_reaches_a_blocks_menu_button_only_for_its_menu_type() {
+    let depot_menu = [(DEPOT_MENU.into(), 9, 0, Vec::new(), None, None)];
+    sunrise_client::containers::with_mod_menu_types(depot_menu, || {
+        with_mod(|| {
+            with_guests(|game| {
+                let button = |game: &mut crate::game::Game<'_>, window| {
+                    game.lan_guest_packet(
+                        12,
+                        Serverbound::ContainerButtonClick(ContainerButtonClick {
+                            container: window,
+                            button: 3,
+                        }),
+                    );
+                };
+                BUTTONS.set(0);
+                let window = open_depot(game);
+                depot_container(game);
+                button(game, window);
+                assert_eq!(
+                    BUTTONS.get(),
+                    1,
+                    "the block's own menu reaches its menu_button"
+                );
+                // A menu a mod opened from code at the same position: the block's when its type is
+                // the one the block's container opens (as the client tells the screen hooks).
+                let window = open_native_menu(game);
+                game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                    let menu = guest.menu.as_mut().unwrap();
+                    menu.pos = Some(POS);
+                    menu.registry_id = DEPOT_MENU.into();
+                });
+                button(game, window);
+                assert_eq!(
+                    BUTTONS.get(),
+                    2,
+                    "the same type at the block is the block's menu"
+                );
+                // Another menu type at that position (another mod's menu at a machine): not the
+                // block's.
+                game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                    guest.menu.as_mut().unwrap().registry_id = "test:native".into();
+                });
+                button(game, window);
+                assert_eq!(
+                    BUTTONS.get(),
+                    2,
+                    "another menu type reaches no block's menu_button"
+                );
+            });
+        })
     });
 }

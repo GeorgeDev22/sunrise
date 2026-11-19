@@ -273,8 +273,8 @@ impl Game<'_> {
             let offset = riders::vehicle_attachment(m, width);
             let m = self.mob_object_mut(id).unwrap();
             m.seated(root, offset, vehicle_box);
-            m.position = riders::seat(attachment, offset, position, yaw);
-            m.previous = m.position;
+            let at = riders::seat(attachment, offset, position, yaw);
+            sunrise_client::mobs::living::teleports::snap_to(m, at);
         }
         for (_, child, player) in children {
             if !player {
@@ -641,8 +641,8 @@ impl Game<'_> {
             let mut carried = None;
             if let Some(m) = self.mob_object_mut(id) {
                 let from = m.position;
-                m.position = passenger_destination(old, new, m.position);
-                m.previous = m.position;
+                let at = passenger_destination(old, new, m.position);
+                sunrise_client::mobs::living::teleports::snap_to(m, at);
                 carried = Some((from, m.position));
                 // Entity.calculatePassengerTransition turns the rider with the
                 // vehicle, then Entity.teleportSetPosition keeps the old angles

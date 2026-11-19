@@ -29,29 +29,6 @@ impl Game<'_> {
         }
     }
 
-    /// The `mode` of the block state at `pos`.
-    pub(super) fn test_block_state_mode(&self, pos: Pos) -> Option<TestBlockMode> {
-        let state = self.world.block(pos.0, pos.1, pos.2);
-        let mode = self
-            .pack
-            .assets
-            .registry
-            .state(state)?
-            .properties
-            .get("mode")?;
-        TestBlockMode::of_serialized_name(mode)
-    }
-
-    /// `new TestBlockEntity(pos, state)`: the mode is the state's.
-    pub(super) fn test_block_placed(&mut self, pos: Pos) {
-        let Some(mode) = self.test_block_state_mode(pos) else {
-            return;
-        };
-        if let Some(b) = self.test_block_mut(pos) {
-            b.mode = mode;
-        }
-    }
-
     fn test_block_at(&self, pos: Pos) -> Option<&TestBlock> {
         match self.world.block_entities.get(&pos)? {
             BlockEntity::TestBlock(b) => Some(b),

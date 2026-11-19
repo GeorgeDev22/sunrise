@@ -20,6 +20,19 @@ $Repo = "sunrise-org/sunrise"
 # Sunrise's release public keys, base64: copy of crates/sunrise-release-sign/release-keys.txt (rotation adds a key
 # there first; keep the two in step, and install.sh's RELEASE_KEYS too).
 $ReleaseKeys = @("r53xb3cuafGxZSicLz06KC+xXp9NJdPH8snNmXo5pAc=")
+# sunrise-verify, the release checker the install pins: its SHA-256 per platform,
+# from release verifier@$VerifierVersion. "unpinned" until the first verifier release exists.
+# >>> verifier pin (tools/ci/pin_verifier.py rewrites this block; do not edit it by hand)
+$VerifierVersion = 'unpinned'
+$VerifierSha256 = @{
+    'linux-x86_64' = 'unpinned'
+    'linux-aarch64' = 'unpinned'
+    'macos-arm64' = 'unpinned'
+    'macos-x64' = 'unpinned'
+    'windows-x64' = 'unpinned'
+    'windows-arm64' = 'unpinned'
+}
+# <<< verifier pin
 $Fallback = $null
 $Architecture = $env:PROCESSOR_ARCHITEW6432
 if (-not $Architecture) { $Architecture = $env:PROCESSOR_ARCHITECTURE }

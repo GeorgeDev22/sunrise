@@ -3,8 +3,9 @@
 //! shortcut: these positions approximate native placement; saved/visited and
 //! completed native chunks replace them rather than changing gameplay worldgen.
 use crate::{
+    columns::Surface,
     fast_hash::FxHashMap,
-    lod::{Column, Span, Surface},
+    lod::{Column, Span},
 };
 use serde_json::Value;
 use sunrise_world::{

@@ -942,6 +942,7 @@ mod tests {
             Some(&armadillo_tag(Some("idle"))),
             None,
             |_| None,
+            &Default::default(),
         );
         assert_eq!(saved.get("state"), Some(&Tag::String("rolling".into())));
         let back = mob_from_nbt(&saved, &types, 2, None).unwrap();

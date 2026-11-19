@@ -3,11 +3,36 @@ use super::*;
 
 mod saved_portals;
 
-/// The background thread that encodes chunks and writes them into the region files, in
-/// submission order.
+/// The background thread that encodes chunks and writes them into the region files, grouped
+/// by folder within each drained pass. Submission order is preserved within each folder.
 pub(super) struct Writer {
     send: mpsc::Sender<WriteBatch>,
     thread: std::thread::JoinHandle<()>,
+}
+
+/// The sole owner of completion for a queued record. Pending readers borrow
+/// only the record; dropping this job releases them even on cancellation,
+/// coalescing, or an unwind before the record reaches the writer.
+pub(super) struct QueuedWrite {
+    pub(super) key: (i32, i32),
+    pub(super) record: Record,
+    seq: u64,
+}
+
+impl QueuedWrite {
+    pub(super) fn new(key: (i32, i32), record: Record, seq: u64) -> Self {
+        Self {
+            key,
+            record: record.track_block_entity_edits(),
+            seq,
+        }
+    }
+}
+
+impl Drop for QueuedWrite {
+    fn drop(&mut self) {
+        self.record.resolve_block_entity_edits(false);
+    }
 }
 
 /// Writes still queued or running, with a condition to wait for none.
@@ -69,15 +94,19 @@ impl SaveDir {
             {
                 let mut pending = self.pending.lock().map_err(|_| "pending writes poisoned")?;
                 for (key, record) in records {
-                    let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
-                    pending.insert((folder, key.0, key.1), (seq, record.clone()));
-                    batch.push((key, record, seq));
+                    let job = QueuedWrite::new(
+                        key,
+                        record,
+                        self.sequence.fetch_add(1, Ordering::Relaxed),
+                    );
+                    pending.insert((folder, key.0, key.1), (job.seq, job.record.clone()));
+                    batch.push(job);
                 }
             }
             // After the pending writes: a search reads the new chunks from here on.
             self.outstanding
                 .portals
-                .written(folder, batch.iter().map(|(key, _, _)| *key));
+                .written(folder, batch.iter().map(|job| job.key));
             *self
                 .outstanding
                 .count
@@ -121,76 +150,89 @@ impl SaveDir {
         );
         let pending = self.pending.clone();
         let outstanding = self.outstanding.clone();
-        let thread = std::thread::Builder::new()
+        // The writer runs chunk_data_save callbacks before handing records to compression.
+        let thread = sunrise_guest_stack::builder()
             .name("sunrise-region-writer".into())
             .spawn(move || {
-                let mut buffer: std::collections::VecDeque<WriteBatch> =
-                    std::collections::VecDeque::new();
-                const MAX_BATCH_CHUNKS: usize = 64;
-                while let Some((kind, mut batch)) =
-                    buffer.pop_front().or_else(|| receive.recv().ok())
-                {
-                    let mut batch_count = 1;
-                    while batch.len() < MAX_BATCH_CHUNKS
-                        && let Ok(next) = receive.try_recv()
-                    {
-                        if next.0 == kind {
-                            batch.extend(next.1);
-                            batch_count += 1;
-                        } else {
-                            buffer.push_back(next);
+                const MAX_PASS_CHUNKS: usize = 512;
+                const KINDS: [Folder; 3] = [Folder::Region, Folder::Entities, Folder::Poi];
+                let slot = |kind: Folder| match kind {
+                    Folder::Region => 0,
+                    Folder::Entities => 1,
+                    Folder::Poi => 2,
+                };
+                while let Ok(first) = receive.recv() {
+                    let mut groups: [(Vec<QueuedWrite>, usize); 3] = Default::default();
+                    let mut total = 0;
+                    let mut next = Some(first);
+                    while let Some((kind, batch)) = next.take() {
+                        total += batch.len();
+                        let group = &mut groups[slot(kind)];
+                        group.0.extend(batch);
+                        group.1 += 1;
+                        if total >= MAX_PASS_CHUNKS {
                             break;
                         }
+                        next = receive.try_recv().ok();
                     }
-                    let cache = match kind {
-                        Folder::Region => &regions,
-                        Folder::Entities => &entity_regions,
-                        Folder::Poi => &poi_regions,
-                    };
-                    let folder = kind.name();
-                    // IOWorker.pendingWrites: a chunk queued again since is
-                    // written once, by its newest batch.
-                    let newest = |k: &(i32, i32), seq: u64| {
-                        pending.lock().map_or(true, |p| {
-                            p.get(&(kind, k.0, k.1)).is_none_or(|p| p.0 <= seq)
-                        })
-                    };
-                    let resolved: Vec<_> = batch
-                        .iter()
-                        .filter(|(k, _, seq)| newest(k, *seq))
-                        .filter_map(|(k, r, _)| Some((*k, resolve_poi(&root, cache, *k, r)?)))
-                        .collect();
-                    let records: Vec<_> = resolved.iter().map(|(k, r)| (*k, r)).collect();
-                    let result = (|| -> Result<()> {
-                        chunk_disk::prepare_batch(&batch)?;
-                        write_region_records(&root, cache, folder, &records)
-                    })();
-                    if let Err(e) = &result {
-                        chunk_disk::note_failed(&batch);
-                        let message = format!("failed to write {folder} files: {e}");
-                        log::warn!("Sunrise: {message}");
-                        *outstanding.error.lock().unwrap() = Some(message);
-                        // `reportChunkSaveFailure` for each chunk of the batch.
-                        for (k, _, _) in &batch {
-                            crate::chunk_io::report_save_failure(&root, k.0, k.1, e);
+                    for (i, (batch, batch_count)) in groups.into_iter().enumerate() {
+                        if batch.is_empty() {
+                            continue;
                         }
-                    }
-                    // Keep failed snapshots readable; never report them as durable.
-                    if result.is_ok()
-                        && let Ok(mut pending) = pending.lock()
-                    {
-                        for (k, _, seq) in &batch {
-                            if pending.get(&(kind, k.0, k.1)).is_some_and(|p| p.0 == *seq) {
-                                pending.remove(&(kind, k.0, k.1));
+                        let kind = KINDS[i];
+                        let cache = match kind {
+                            Folder::Region => &regions,
+                            Folder::Entities => &entity_regions,
+                            Folder::Poi => &poi_regions,
+                        };
+                        let folder = kind.name();
+                        let newest = |k: &(i32, i32), seq: u64| {
+                            pending.lock().map_or(true, |p| {
+                                p.get(&(kind, k.0, k.1)).is_none_or(|p| p.0 <= seq)
+                            })
+                        };
+                        let resolved: Vec<_> = batch
+                            .iter()
+                            .filter(|job| newest(&job.key, job.seq))
+                            .filter_map(|job| {
+                                Some((job.key, resolve_poi(&root, cache, job.key, &job.record)?))
+                            })
+                            .collect();
+                        let records: Vec<_> = resolved.iter().map(|(k, r)| (*k, r)).collect();
+                        let result = (|| -> Result<()> {
+                            chunk_disk::prepare_batch(&batch)?;
+                            write_region_records(&root, cache, folder, &records)
+                        })();
+                        if let Err(e) = &result {
+                            chunk_disk::note_failed(&batch);
+                            let message = format!("failed to write {folder} files: {e}");
+                            log::warn!("Sunrise: {message}");
+                            *outstanding.error.lock().unwrap() = Some(message);
+                            for job in &batch {
+                                crate::chunk_io::report_save_failure(
+                                    &root, job.key.0, job.key.1, e,
+                                );
                             }
                         }
-                    }
-                    if kind == Folder::Region {
-                        outstanding.chunks.fetch_sub(batch.len(), Ordering::Relaxed);
-                    }
-                    if let Ok(mut count) = outstanding.count.lock() {
-                        *count -= batch_count;
-                        outstanding.done.notify_all();
+                        if result.is_ok()
+                            && let Ok(mut pending) = pending.lock()
+                        {
+                            for job in &batch {
+                                let key = (kind, job.key.0, job.key.1);
+                                if pending.get(&key).is_some_and(|p| p.0 == job.seq) {
+                                    pending.remove(&key);
+                                }
+                            }
+                        }
+                        let chunk_count = batch.len();
+                        drop(batch);
+                        if kind == Folder::Region {
+                            outstanding.chunks.fetch_sub(chunk_count, Ordering::Relaxed);
+                        }
+                        if let Ok(mut count) = outstanding.count.lock() {
+                            *count -= batch_count;
+                            outstanding.done.notify_all();
+                        }
                     }
                 }
             })
@@ -205,6 +247,30 @@ impl SaveDir {
             .lock()
             .map_err(|_| "writer poisoned")?;
         while *count > 0 {
+            count = self
+                .outstanding
+                .done
+                .wait(count)
+                .map_err(|_| "writer poisoned")?;
+        }
+        self.write_result()
+    }
+    /// Wait until at most `low` chunk records are still queued, without waiting
+    /// for all of them; a save pass resuming at half the cap keeps the writer fed
+    /// without stalling for records it did not have to.
+    ///
+    /// The predicate is `chunks`, not `count`: `count` holds queued batches and
+    /// one batch can carry many records, so waiting on it would let the record
+    /// cap (`MAX_ASYNC_CHUNK_WRITES`) drift with how the caller batches.
+    pub(super) fn wait_for_chunk_writes_below(&self, low: usize) -> Result<()> {
+        let mut count = self
+            .outstanding
+            .count
+            .lock()
+            .map_err(|_| "writer poisoned")?;
+        // The writer lowers `chunks` before it takes this same mutex to notify,
+        // so a wakeup cannot fall between the check and the wait.
+        while self.outstanding.chunks.load(Ordering::Relaxed) > low {
             count = self
                 .outstanding
                 .done

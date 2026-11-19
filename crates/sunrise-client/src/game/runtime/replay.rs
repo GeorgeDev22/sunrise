@@ -558,7 +558,6 @@ impl Game<'_> {
                 }
                 _ => Ok(Some(json!({ "error": "unknown studio replay subcommand" }))),
             },
-            Some("screen") if super::studio::EDITOR => self.studio_screen_control(words),
             _ => Ok(Some(json!({ "error": "unknown studio command" }))),
         }
     }
@@ -839,6 +838,7 @@ impl Game<'_> {
             &r.builtin,
             &biome_names,
             &registry,
+            self.res.shared_items(),
         );
 
         let mut count = 0;

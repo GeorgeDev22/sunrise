@@ -44,9 +44,9 @@ fn sync_packet() -> CustomPayload {
 fn engine_only_installation_has_no_mod_declarations_and_needs_no_mod_handler() {
     let local = engine_only();
     assert!(!local.has_mod_declarations());
-    // A client receives the engine channel with no mod callback for it.
+    // A client receives every engine channel with no mod callback for it.
     let entries = accepted(&local, Some(&local.manifest));
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), engine::DECLARATIONS.len());
     assert!(local.freeze(&entries, Side::Client).is_ok());
 }
 

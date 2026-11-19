@@ -12,6 +12,9 @@ impl Game<'_> {
     fn tick_guests_inner(&mut self) {
         // `EntityEvent.Size` for the poses the guests' moves set since the last tick.
         self.native_guest_sizes();
+        // EntityTickEvent.Pre for each player's `ServerPlayer.tick`, before its first part: its
+        // parts are the batches below and those in the player's own turn.
+        let round = self.native_players_tick_pre();
         self.tick_guest_cameras();
         self.lan_merchant_tick();
         self.lan_stations_tick();
@@ -52,13 +55,20 @@ impl Game<'_> {
         if host.play.values().any(|p| p.hook.is_some()) {
             self.refresh_hook_targets();
         }
+        // The player told alone whose turn just ended: its Post comes before the next turn.
+        let mut told = None;
         for conn in conns {
+            self.native_player_tick_post_alone(&round, &mut told);
+            let canceled = self.player_tick_canceled(conn);
             let Some(host) = self.lan.as_mut() else {
                 return;
             };
             let Some(gi) = host.hub.guests.iter().position(|g| g.conn == conn) else {
                 continue;
             };
+            if !canceled && round.alone_kind(crate::game::native_ticks::PLAYER) {
+                told = Some(host.hub.guests[gi].entity_id as u32);
+            }
             // ServerGamePacketListenerImpl.tick: the chat and command throttlers
             // decay one a tick, dead or alive.
             let play = host.play.entry(conn).or_default();
@@ -135,7 +145,8 @@ impl Game<'_> {
             let Some(host) = self.lan.as_mut() else {
                 return;
             };
-            if let Some((pos, _)) = host.play.get(&conn).and_then(|play| play.digging)
+            if !canceled
+                && let Some((pos, _)) = host.play.get(&conn).and_then(|play| play.digging)
                 && self
                     .res
                     .facts()
@@ -163,7 +174,8 @@ impl Game<'_> {
                     if body {
                         g.attack_ticks = g.attack_ticks.saturating_add(1);
                     }
-                    if let Some((pos, face)) = digging {
+                    // ServerPlayerGameMode.tick's destroy progress, part of ServerPlayer.tick.
+                    if let Some((pos, face)) = digging.filter(|_| !canceled) {
                         g.forced_hit = Some(Hit {
                             pos,
                             face,
@@ -175,7 +187,9 @@ impl Game<'_> {
                             inside: false,
                         });
                     }
-                    let _ = g.tick_mining();
+                    if !canceled {
+                        let _ = g.tick_mining();
+                    }
                     g.forced_hit = None;
                     g.right = g.using.is_some();
                     g.tick_using();
@@ -229,7 +243,9 @@ impl Game<'_> {
                     play.attack_item = held.cloned();
                 }
             }
-            self.guest_delayed_destroy(conn);
+            if !canceled {
+                self.guest_delayed_destroy(conn);
+            }
             self.guest_server_tick(conn, body);
             // Player.tick's statistics and ServerPlayer.tick's triggers, then
             // PlayerAdvancements.flushDirty.
@@ -250,18 +266,25 @@ impl Game<'_> {
                     g.native_inventory_ticks();
                     g.count_tick_stats(sleeping);
                 }
-                g.tick_advancements();
-                g.update_player_attributes();
+                // ServerPlayer.tick's triggers and updatePlayerAttributes.
+                if !canceled {
+                    g.tick_advancements();
+                    g.update_player_attributes();
+                }
                 g.record_player_scores(&mut recorded);
             });
             if let Some(host) = self.lan.as_mut() {
                 host.play.entry(conn).or_default().score_recorded = recorded;
             }
             self.lan_map_updates(conn);
-            if let Some(host) = self.lan.as_mut() {
-                host.hub.flush_progress(conn);
+            // ServerPlayer.tick's PlayerAdvancements.flushDirty and ServerPlayerGameMode.tick's
+            // destroy progress.
+            if !canceled {
+                if let Some(host) = self.lan.as_mut() {
+                    host.hub.flush_progress(conn);
+                }
+                self.guest_dig_feedback(conn);
             }
-            self.guest_dig_feedback(conn);
             // A hand-over freezes this player's inventory until its record is released.
             if self
                 .lan
@@ -289,6 +312,8 @@ impl Game<'_> {
                 );
             }
         }
+        self.native_player_tick_post_alone(&round, &mut told);
+        self.native_tick_post_batch(round);
     }
 
     /// Whether guest `g`'s body ticks this tick: `ServerPlayer.doTick`'s

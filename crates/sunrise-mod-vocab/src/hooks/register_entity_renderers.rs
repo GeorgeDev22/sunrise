@@ -9,7 +9,10 @@ pub trait Hooks {
     /// draws nothing new. Asked once at start on the client, before resources load; the game
     /// resolves each type's renderer on every resource load. This build draws the registered
     /// renderers of content mods' thrown types, of the living types drawn as mobs (in place of
-    /// the model and its vanilla layers) and of primed TNT (in place of the flashing cube);
+    /// the model and its vanilla layers), of primed TNT (in place of the flashing cube), of
+    /// experience orbs (in place of the billboarded orb quad) and of paintings (in place of the
+    /// painting's quads) and of item frames and glow item frames (in place of the frame model and
+    /// the item or map on its face);
     /// the other entity families keep their own drawing.
     #[notes = r#"## Entity renderers
 
@@ -64,9 +67,15 @@ and the type keeps its own drawing until its family does. Today these routes dra
 renderers: the content mods' thrown types (a `data/<id>/sunrise/entity_type/<name>.json` with the
 `minecraft:snowball` template), the living types drawn as mobs, vanilla's and the content mods'
 (not the player, whose model goes by its skin, and not the armour stand or the ender dragon, which draw
-through routes of their own), and primed TNT (`minecraft:tnt`, in place of the flashing cube, reading
-`tnt_fuse`). Primed TNT's `age` is its unsaved `tickCount` plus the partial tick; its yaw and pitch
-are its current rotation, not interpolated (it has no previous rotation). Around a living type's renderer everything else stays: `render_living_pre`
+through routes of their own), primed TNT (`minecraft:tnt`, in place of the flashing cube, reading
+`tnt_fuse`), experience orbs (`minecraft:experience_orb`, in place of the billboarded orb quad, reading
+`orb_value`), paintings (`minecraft:painting`, in place of the painting's quads,
+reading `painting`), and item frames and glow item frames (`minecraft:item_frame` and
+`minecraft:glow_item_frame`, in place of the frame model and the item or map on its face, reading
+`item_frame`). Primed TNT's `age` is its unsaved `tickCount` plus the partial tick; its yaw and pitch
+are its current rotation, not interpolated (it has no previous rotation). A painting's `age` is its unsaved `tickCount` plus the partial tick; its yaw is
+`Direction.get2DDataValue * 90` and its pitch is 0 (it does not interpolate rotation). An item frame's `age` is its unsaved `tickCount` plus the partial tick; its yaw and
+pitch follow `ItemFrame.setDirection` and are not interpolated (it has no previous rotation). Around a living type's renderer everything else stays: `render_living_pre`
 (whose cancel skips it), the mods' layers (with no posed parts) and `render_living_post`, in the order
 the type's own model has, so it changes with #3915 and not before. Boats, displays and the other
 projectiles come in follow-ups of #860, and a mod's general entity types (#792) will register the same

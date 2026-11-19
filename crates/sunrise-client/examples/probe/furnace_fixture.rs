@@ -94,7 +94,11 @@ pub fn main() -> sunrise_client::Result<()> {
         }
         write!(out, "{n} kind={} ", f[1])?;
         for i in 0..3 {
-            write!(out, "s{i}={} ", canon_stack(furnace.items[i].as_ref()))?;
+            write!(
+                out,
+                "s{i}={} ",
+                canon_stack(furnace.items[i].as_ref(), &Default::default())
+            )?;
         }
         write!(
             out,

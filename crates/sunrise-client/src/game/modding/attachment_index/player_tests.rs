@@ -40,7 +40,7 @@ fn saved_placement_respawn_removal_and_reconnect_publish_player_rows() {
         VALUE
             .set(guests.attachments_mut(12).unwrap(), Holder::Level, 31)
             .unwrap();
-        sunrise_client::lan::playerdata::save(&guests[0], &game.world_root);
+        sunrise_client::lan::playerdata::save(&guests[0], &game.world_root, &Default::default());
         guests.update_all(|g| g.placed = false);
         game.lan_guest_joined(12, &[], [0.5, 64.0, 0.5]);
         game.lan_guest_joined(13, &[], [0.5, 64.0, 0.5]);

@@ -209,6 +209,18 @@ impl BlockUpdateFlags {
     pub const SKIP_BLOCK_ENTITY_SIDE_EFFECTS: Self = Self(256);
     /// Skip the new block's on-place behavior.
     pub const SKIP_ON_PLACE: Self = Self(512);
+
+    /// Returns whether all the requested flags are set.
+    pub const fn contains(self, flags: Self) -> bool {
+        self.0 & flags.0 == flags.0
+    }
+
+    // hidden: game-side conversion of the applied engine flag word, not part of the mod surface
+    #[doc(hidden)]
+    pub const fn from_bits_retain(bits: i32) -> Self {
+        Self(bits)
+    }
+
     // hidden: a game-side helper, not part of the mod surface
     #[doc(hidden)]
     pub fn bits(self) -> i32 {
@@ -268,9 +280,7 @@ pub enum SupportType {
 /// Removal, replacement or chunk reload invalidates the handle, even at the same
 /// position. In-place data edits and temporary tick take/put preserve identity.
 /// Stale handles read as `None`; Result-returning methods report `Stale`.
-#[derive(sunrise_mod_api_macros::Wire)]
-#[wire(internal_field_layouts)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct BlockEntityRef {
     pub(crate) level: LevelRef,

@@ -8,6 +8,7 @@ impl Game<'_> {
             // left of it here rather than race it.
             self.join_world_rest()?;
             self.resolve_entity_renderers();
+            self.resolve_client_item_extensions()?;
             self.texture_atlases_stitched();
             self.native_model_baking_completed();
             self.native_client_setup();

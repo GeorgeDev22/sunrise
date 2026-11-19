@@ -121,7 +121,7 @@ fn a_stars_negative_age_survives_item_nbt() {
         0.0,
     );
     star.age = -6000;
-    let tag = crate::entity_nbt::item_entity_to_nbt(&star, [1, 2, 3, 4], None);
+    let tag = crate::entity_nbt::item_entity_to_nbt(&star, [1, 2, 3, 4], None, &Default::default());
     assert_eq!(tag.get("Age"), Some(&Tag::Short(-6000)));
     let loaded = crate::entity_nbt::item_entity_from_nbt(&tag, 7, 0.0).unwrap();
     assert_eq!(loaded.age, -6000);

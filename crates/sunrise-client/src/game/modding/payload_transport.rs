@@ -320,11 +320,17 @@ mod config_tests;
 #[path = "payload_transport/disconnect_tests.rs"]
 mod disconnect_tests;
 #[cfg(test)]
+#[path = "payload_transport/phase_refusal_tests.rs"]
+mod phase_refusal_tests;
+#[cfg(test)]
 #[path = "payload_transport/raw_fault_tests.rs"]
 mod raw_fault_tests;
 #[cfg(test)]
 #[path = "payload_transport/sender_tests.rs"]
 mod sender_tests;
+#[cfg(test)]
+#[path = "payload_transport/task_tests.rs"]
+mod task_tests;
 #[cfg(test)]
 #[path = "payload_transport/tests.rs"]
 mod tests;

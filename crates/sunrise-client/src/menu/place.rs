@@ -677,7 +677,7 @@ impl Menu {
                         ..stack.clone()
                     },
                 );
-                self.drop_stack(&dropped);
+                self.drop_stack(&dropped, env.items);
                 break;
             };
             let have = self.state.containers[PLAYER][slot]

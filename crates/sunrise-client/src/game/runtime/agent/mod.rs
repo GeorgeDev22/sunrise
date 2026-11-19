@@ -7,6 +7,7 @@
 mod navigation;
 
 use super::event_loop::EventLoopCtl;
+use super::owner_link::{ControlRequest, OwnerRequest};
 use super::{Game, Screen};
 use navigation::{Cell, Node, Plan, Progress};
 use serde_json::{Value, json};
@@ -27,7 +28,6 @@ use sunrise_client::{
 use sunrise_core::geometry::Vec3;
 use sunrise_world::registry::BlockStateId;
 use winit::{
-    dpi::PhysicalPosition,
     event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
     keyboard::KeyCode,
 };
@@ -410,7 +410,7 @@ impl Game<'_> {
             v["max_damage"] = json!(max);
             v["durability_left"] = json!((i64::from(max) - i64::from(s.damage)).max(0));
         }
-        if let Some(c) = sunrise_client::item_data::encode_components(s) {
+        if let Some(c) = sunrise_client::item_data::component_snapshot(s) {
             v["components"] = json!(sunrise_client::snbt::to_snbt(&c));
         }
         v
@@ -485,7 +485,6 @@ impl Game<'_> {
             Screen::DebugOptions => "debug-options",
             Screen::Mod => "mod",
             Screen::HudEditor => "hud-editor",
-            Screen::Studio => "studio",
         }
     }
     pub(super) fn inventory_counts(&self) -> BTreeMap<String, i64> {
@@ -563,7 +562,7 @@ impl Game<'_> {
         let mut state = json!({
             "dialog": self.dialog_status(),
             "screen": self.screen_label(),
-            "menu": (self.title.is_some() || self.split_profiles_open() || self.split_setup_open()).then(|| self.title_value()),
+            "menu": self.title.is_some().then(|| self.title_value()),
             "world": (self.title.is_none()).then(|| match &self.integrated {
                 Some(server) => server.world_name.clone(),
                 None => self.level.name.clone(),
@@ -599,23 +598,8 @@ impl Game<'_> {
         state
     }
 
-    /// Splitscreen's profile page, a joining player's (`split_profiles`).
-    fn split_profiles_open(&self) -> bool {
-        self.screen == Screen::Options
-            && self.ui.options.page() == sunrise_client::options_ui::Page::SplitProfiles
-    }
-    fn split_setup_open(&self) -> bool {
-        self.screen == Screen::Options
-            && self.ui.options.page() == sunrise_client::options_ui::Page::SplitSetup
-    }
     fn title_value(&self) -> Value {
         use sunrise_client::title::Mode;
-        if self.split_profiles_open() {
-            return self.ui.options.split_profiles.state();
-        }
-        if self.split_setup_open() {
-            return json!({ "mode": "splitscreen-setup", "status": self.ui.options.split_setup.status() });
-        }
         let Some(title) = &self.title else {
             return Value::Null;
         };
@@ -845,7 +829,7 @@ impl Game<'_> {
             v["chat_input"] = json!(chat.input.value);
             v["chat_suggestions"] = json!(chat.suggestions_visible());
         }
-        if self.title.is_some() || self.split_profiles_open() || self.split_setup_open() {
+        if self.title.is_some() {
             v["menu"] = self.title_value();
         }
         if self.screen == Screen::Inventory && self.title.is_none() {
@@ -1060,20 +1044,12 @@ impl Game<'_> {
         button: MouseButton,
     ) -> Result<()> {
         let id = self.window.as_ref().ok_or("no window yet")?.id();
-        let scale = self
-            .renderer
-            .as_ref()
-            .map(|r| {
-                sunrise_client::hud::HudBatch::new(
-                    [r.config.width, r.config.height],
-                    self.settings.gui_scale_inputs(),
-                )
-                .scale
-            })
+        let projection = self
+            .renderer_pointer_projection()
             .ok_or("no renderer yet")?;
         let device_id = DeviceId::dummy();
-        for (i, &(x, y)) in points.iter().enumerate() {
-            let position = PhysicalPosition::new(f64::from(x * scale), f64::from(y * scale));
+        for (i, &point) in points.iter().enumerate() {
+            let position = projection.window_pointer(point);
             self.handle_window_event(
                 event_loop,
                 id,
@@ -1660,19 +1636,11 @@ impl Game<'_> {
                 let (x, y) = (a.f64(0, "X")? as f32, a.f64(1, "Y")? as f32);
                 let steps = a.f64(2, "STEPS")? as f32;
                 let id = self.window.as_ref().ok_or("no window yet")?.id();
-                let scale = self
-                    .renderer
-                    .as_ref()
-                    .map(|r| {
-                        sunrise_client::hud::HudBatch::new(
-                            [r.config.width, r.config.height],
-                            self.settings.gui_scale_inputs(),
-                        )
-                        .scale
-                    })
+                let projection = self
+                    .renderer_pointer_projection()
                     .ok_or("no renderer yet")?;
                 let device_id = DeviceId::dummy();
-                let position = PhysicalPosition::new(f64::from(x * scale), f64::from(y * scale));
+                let position = projection.window_pointer((x, y));
                 self.handle_window_event(
                     event_loop,
                     id,
@@ -1705,22 +1673,6 @@ impl Game<'_> {
                 };
                 self.synth_click(event_loop, x, y, button)?;
                 ok(json!({ "ok": true, "screen": self.screen_label() }))
-            }
-            // Splitscreen's profile page, over a joining player's title screen.
-            "type" if self.split_profiles_open() => {
-                let text = line
-                    .trim_start()
-                    .strip_prefix("type")
-                    .unwrap_or("")
-                    .strip_prefix(' ')
-                    .unwrap_or("");
-                let page = &mut self.ui.options.split_profiles;
-                if text == "\\b" {
-                    page.key(winit::keyboard::KeyCode::Backspace, None);
-                } else {
-                    page.type_text(text);
-                }
-                ok(json!({ "ok": true, "menu": self.title_value() }))
             }
             "type" if self.title.is_some() => {
                 // type [--field name|seed] [--replace] TEXT on the title screens.
@@ -1809,7 +1761,9 @@ impl Game<'_> {
                 // Single player's console is its server thread's.
                 if let Some(server) = &self.integrated {
                     let (chat, outcome) = server
-                        .call(move |g| g.owner_console_command(&command))
+                        .ask(|reply| {
+                            OwnerRequest::Control(ControlRequest::ConsoleCommand { command, reply })
+                        })
                         .ok_or(super::integrated::NO_ANSWER)?;
                     return ok(command_reply(chat, outcome));
                 }
@@ -2417,7 +2371,7 @@ mod tests {
                 name: "Moor".into(),
                 ..Default::default()
             }
-            .write(&saves.join("Moor"))
+            .write(&saves.join("Moor"), &Default::default())
             .unwrap();
             let world = list_worlds(&saves).remove(0);
             let mut title = Title::new(saves, scratch.path(), "");

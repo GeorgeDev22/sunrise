@@ -328,7 +328,7 @@ impl Game<'_> {
         let result = s
             .result
             .as_ref()
-            .and_then(|r| Some((banner::banner_color(&r.item)?, banner::layers(r))));
+            .and_then(|r| Some((banner::banner_color(&r.item)?, r.banner_layers())));
         let view = LoomView {
             width: 176,
             height: 166,

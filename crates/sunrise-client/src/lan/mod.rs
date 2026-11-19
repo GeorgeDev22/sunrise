@@ -9,8 +9,8 @@ pub mod abilities;
 mod advancements;
 pub mod announced_channels;
 pub mod config_payloads;
+pub mod configuration_tasks;
 pub use advancements::ServerAdvancements;
-pub mod anticheat;
 pub mod arrivals;
 pub mod attributes;
 mod biome_resend;
@@ -30,7 +30,6 @@ mod effect_meta;
 pub mod entity;
 pub mod equipment_cache;
 pub mod far;
-pub mod forwarding;
 pub mod guest;
 pub mod guest_list;
 pub mod handoff;
@@ -43,7 +42,6 @@ pub mod menu_extra_rev;
 mod payload_bounds_tests;
 pub mod player_shown;
 pub mod playerdata;
-pub mod prediction;
 pub mod recipes;
 mod registry_names;
 pub mod scoreboard;
@@ -61,7 +59,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering},
-        mpsc::{Receiver, channel},
+        mpsc::{Receiver, Sender, channel},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -105,6 +103,7 @@ pub struct Joined {
     /// started (`arrivals`).
     pub expected: bool,
 }
+
 pub(crate) fn event_channel() -> (
     crate::net::ingress::Producer<NetEvent>,
     crate::net::ingress::Consumer<NetEvent>,
@@ -233,12 +232,6 @@ pub const SUNRISE_CLIENTS_ONLY: &str = "sunrise-clients-only";
 /// What another client is told.
 pub const SUNRISE_CLIENTS_ONLY_REASON: &str =
     "This server is for the Sunrise client: playsunrise.net";
-/// The server.properties key (server.toml's `server.accept_older_clients`) that lets 26.2 clients join
-/// (off unless "true").
-pub const ACCEPT_OLDER_CLIENTS: &str = "sunrise-accept-older-clients";
-/// What a 26.2 client is told while only its packet ids are translated (#10404).
-pub const OLDER_CLIENTS_UNFINISHED: &str =
-    "This server lets 26.2 join, but Sunrise cannot translate 26.2 yet: join with 26.3";
 
 /// How the server side of the network behaves: an integrated server's LAN
 /// uses the defaults, a dedicated server takes them from server.properties.
@@ -273,9 +266,6 @@ pub struct NetConfig {
     pub gate: Option<LoginGate>,
     /// Online mode: players are authenticated (a LAN world's when its host is signed in).
     pub online: Option<Arc<OnlineMode>>,
-    /// Behind a Velocity proxy: the secret its forwarded player information is signed with. Only an offline
-    /// server (the proxy authenticates) uses it; without it a login is the plain offline one.
-    pub forwarding_secret: Option<Vec<u8>>,
     /// `[transfer]` on: the players a proxy said would arrive
     /// (`arrivals::Transfers`), shared with the hub. A login uses its
     /// expectation up as it starts, once the bans and the whitelist let it in.
@@ -303,15 +293,6 @@ pub struct NetConfig {
     /// client whose `minecraft:brand` isn't Sunrise's is turned away during
     /// configuration. A brand can be spoofed: a gate, not security.
     pub sunrise_clients_only: bool,
-    /// `sunrise-accept-older-clients` (off): a client of 26.2 joins too, its packets renumbered
-    /// (sunrise_protocol::adapter::ClientSession). Off, it is turned away as vanilla turns it away.
-    pub accept_older_clients: bool,
-    /// Lets an older client past configuration although only its packet ids are translated yet
-    /// (#10404's later parts translate the registry ids and the packets whose layout changed): for tests
-    /// of the id renumbering, never in server.toml. False, such a client is told
-    /// [`OLDER_CLIENTS_UNFINISHED`] before any registry data, tag or play packet would reach it in 26.3's
-    /// ids and layouts.
-    pub older_clients_play: bool,
     /// `sunrise-lod-distance` (Sunrise's own server.properties key, 64): how
     /// far, in chunks, the server samples far terrain for Sunrise clients
     /// (`lod_net`); 0 serves none.
@@ -353,15 +334,12 @@ impl NetConfig {
             bypasses_limit: None,
             gate: None,
             online: None,
-            forwarding_secret: None,
             arrivals: None,
             log: None,
             resource_pack: None,
             code_of_conducts: Vec::new(),
             server_links: Vec::new(),
             sunrise_clients_only: false,
-            accept_older_clients: false,
-            older_clients_play: false,
             lod_distance: crate::lod_net::DEFAULT_DISTANCE,
             levels: crate::chunk::LevelShapes::VANILLA,
             owner_profile: None,
@@ -460,6 +438,7 @@ pub struct Shared {
     /// What the next login is sent; `PlayerList.reloadResources` swaps it.
     sync: Mutex<Arc<data::SyncData>>,
     pub events: crate::net::ingress::Producer<NetEvent>,
+    configuration_requests: Option<Sender<configuration_tasks::ConfigurationRequest>>,
     pub config: NetConfig,
     motd: Mutex<String>,
     max_players: AtomicUsize,
@@ -621,10 +600,6 @@ impl Shared {
     /// ServerStatus.CODEC): description, players with up to 12 shuffled
     /// names, version, favicon and enforcesSecureChat when true.
     pub fn status_json(&self) -> String {
-        self.status_json_for(PROTOCOL_VERSION)
-    }
-    /// [`Self::status_json`] stating `protocol`: an older client's own, when it may join.
-    pub fn status_json_for(&self, protocol: i32) -> String {
         use crate::server::json::Json;
         let motd = self.motd.lock().unwrap().clone();
         let online: Vec<(u128, String)> = self.online.lock().unwrap().clone();
@@ -666,7 +641,10 @@ impl Shared {
                 "version".to_owned(),
                 Json::Object(vec![
                     ("name".to_owned(), Json::String(GAME_VERSION.to_owned())),
-                    ("protocol".to_owned(), Json::Number(protocol.to_string())),
+                    (
+                        "protocol".to_owned(),
+                        Json::Number(PROTOCOL_VERSION.to_string()),
+                    ),
                 ]),
             ),
         ];
@@ -713,7 +691,9 @@ pub fn base64(data: &[u8]) -> String {
 /// A running LAN server.
 pub struct Lan {
     pub shared: Arc<Shared>,
+    pub configuration_tasks: configuration_tasks::Tasks,
     events: crate::net::ingress::Consumer<NetEvent>,
+    configuration_requests: Option<Receiver<configuration_tasks::ConfigurationRequest>>,
     pub port: u16,
     listener: Option<JoinHandle<()>>,
     /// Stops the accept loop alone: local connections stay.
@@ -733,7 +713,21 @@ impl Lan {
     }
     /// ServerConnectionListener.startTcpServerListener with a configuration.
     pub fn start_with(sync: Arc<data::SyncData>, config: NetConfig) -> io::Result<Self> {
+        Self::start_with_configuration_tasks(sync, config, false)
+    }
+    /// Start a listener whose game thread collects tasks for each joining connection.
+    pub fn start_with_configuration_tasks(
+        sync: Arc<data::SyncData>,
+        config: NetConfig,
+        register_tasks: bool,
+    ) -> io::Result<Self> {
         let (tx, events) = event_channel();
+        let (request_tx, request_rx) = if register_tasks {
+            let (tx, rx) = channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let (listen, port, announce) = (config.listen, config.port, config.announce);
         let hide_online_players = config.hide_online_players;
         let enable_status = config.enable_status;
@@ -742,6 +736,7 @@ impl Lan {
                 .map_err(io::Error::other)?,
             sync: Mutex::new(sync),
             events: tx,
+            configuration_requests: request_tx,
             motd: Mutex::new(config.motd.clone()),
             max_players: AtomicUsize::new(config.max_players),
             hide_online_players: AtomicBool::new(hide_online_players),
@@ -762,7 +757,9 @@ impl Lan {
         });
         let mut lan = Self {
             shared,
+            configuration_tasks: configuration_tasks::Tasks::default(),
             events,
+            configuration_requests: request_rx,
             port: 0,
             listener: None,
             listener_stop: Arc::new(AtomicBool::new(false)),
@@ -772,6 +769,14 @@ impl Lan {
             lan.listen(port, announce)?;
         }
         Ok(lan)
+    }
+    /// Take registration requests before this server tick admits any guests.
+    pub fn configuration_requests(
+        &self,
+    ) -> impl Iterator<Item = configuration_tasks::ConfigurationRequest> + '_ {
+        self.configuration_requests
+            .iter()
+            .flat_map(Receiver::try_iter)
     }
     /// Start accepting connections on `port` (0 picks a free one), and
     /// announce the world on the local network when `announce`

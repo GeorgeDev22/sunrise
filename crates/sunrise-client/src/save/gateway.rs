@@ -130,7 +130,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&dir).unwrap();
-        let save = SaveDir::new(dir.clone(), LevelShape::END);
+        let save = SaveDir::new(dir.clone(), LevelShape::END, Some(Default::default()));
         (dir, save)
     }
     fn root() -> NamedTag {

@@ -40,12 +40,10 @@ fn registered_conditions_select_content_root_tags_and_structure_modifiers() {
     );
     let mut previous: Option<PathBuf> = None;
     for enabled in [true, false] {
-        let conditions = LoadConditions::new(["testmod"]).with_lookup(
-            BTreeMap::from([("testmod".into(), "testmod".into())]),
-            move |name, args| {
-                (name == "testmod:flag").then(|| Ok(enabled && args["value"].as_bool().unwrap()))
-            },
-        );
+        let conditions = LoadConditions::new(["testmod"])
+            .with_lookup([("testmod:flag", move |args: &serde_json::Value| {
+                Ok(enabled && args["value"].as_bool().unwrap())
+            })]);
         let out = super::super::resource_root_with_conditions(
             &base,
             Path::new(""),
@@ -156,10 +154,10 @@ fn failed_condition_build_removes_generated_staging() {
             ),
         ],
     );
-    let conditions = LoadConditions::new([]).with_lookup(
-        BTreeMap::from([("testmod".into(), "testmod".into())]),
-        |name, _| (name == "testmod:flag").then(|| Err("bad value".into())),
-    );
+    let conditions = LoadConditions::new([])
+        .with_lookup([("testmod:flag", |_: &serde_json::Value| {
+            Err("bad value".into())
+        })]);
     let out = scratch.path().join("candidate");
     let error = super::super::build_with_conditions(
         &base,
@@ -268,7 +266,7 @@ fn content_root_tag_layers_ignore_failing_top_level_conditions() {
         ("lower", r#"{"values":["minecraft:stone"]}"#),
         (
             "conditional",
-            r#"{"neoforge:conditions":[{"type":"neoforge:false"}],"values":["minecraft:dirt"]}"#,
+            r#"{"neoforge:conditions":[{"type":"neoforge:never"}],"values":["minecraft:dirt"]}"#,
         ),
     ];
     let mods: Vec<_> = packages

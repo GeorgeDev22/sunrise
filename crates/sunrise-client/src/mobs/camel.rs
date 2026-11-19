@@ -500,7 +500,7 @@ pub fn dash(m: &mut Mob, context: &LoopContext, amount: f32, events: &mut Vec<Mo
     m.velocity.y += 1.4285 * a * 0.42;
     m.extra.anim_ticks = DASH_COOLDOWN;
     m.extra.flag2 = true;
-    crate::motion::native_living_jump(context, m.id, &m.kind.id);
+    m.living_jumped(context);
     sound(m, voice(m, 3), events);
     true
 }

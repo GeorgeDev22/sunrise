@@ -1036,7 +1036,7 @@ struct Handle {
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct SoundPlayback<'a> {
-    /// Engine-local handle; not unique across split-screen engines.
+    /// Engine-local handle.
     pub instance: InstanceId,
     pub identifier: &'a str,
     pub source: usize,

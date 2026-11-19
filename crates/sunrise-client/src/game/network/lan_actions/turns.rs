@@ -34,6 +34,11 @@ impl Game<'_> {
             self.drain_entity_inside();
             result
         }));
+        // A panic interrupted this turn, and the swaps still open above it: the restore below
+        // clears the acting marker, so teardown learns of them from the record (#2704).
+        if result.is_err() {
+            self.record_open_turns();
+        }
         // Commit the guest's progress and restore the outer player before propagating a panic.
         self.leave_guest(swap);
         match result {
@@ -45,6 +50,42 @@ impl Game<'_> {
     /// Where guest `conn` is in the hub's list.
     pub(in crate::game) fn guest_index(&self, conn: u32) -> Option<usize> {
         self.lan.as_ref()?.hub.guests.connection_index(conn)
+    }
+
+    /// Runs `f` with guest `gi`'s own inventory, equipment and cursor in its hub record. In
+    /// its own turn the game holds them and the record holds the outer player's, so a packet
+    /// built from the record would show that player's stacks. Only the LAN host and the item
+    /// table are available to `f`: game callbacks must run after the acting player is restored.
+    pub(in crate::game) fn with_own_record<R>(
+        &mut self,
+        gi: usize,
+        f: impl FnOnce(&mut LanHost, &sunrise_client::items::Items) -> Option<R>,
+    ) -> Option<R> {
+        let own = self
+            .lan
+            .as_ref()
+            .is_some_and(|host| self.lan_acting == Some(host.hub.guests[gi].conn));
+        let swap = |game: &mut Self| {
+            if let Some(host) = game.lan.as_mut() {
+                host.hub.guests.update(gi, |g| {
+                    // The fields `enter_guest_at` swaps.
+                    std::mem::swap(&mut game.inventory, &mut g.inventory);
+                    std::mem::swap(&mut game.armor, &mut g.armor);
+                    std::mem::swap(&mut game.location_armor, &mut g.location_armor);
+                    std::mem::swap(&mut game.offhand, &mut g.offhand);
+                    std::mem::swap(&mut game.equipment, &mut g.equipment);
+                    std::mem::swap(&mut game.carried, &mut g.carried);
+                });
+            }
+        };
+        if own {
+            swap(self);
+        }
+        let result = f(self.lan.as_mut()?, world_items!(self));
+        if own {
+            swap(self);
+        }
+        result
     }
 
     /// `as_guest`, with the system messages the guest's action earns (the
@@ -76,7 +117,27 @@ impl Game<'_> {
         }
         match result {
             Ok(result) => self.lan.is_some().then_some(result),
-            Err(payload) => std::panic::resume_unwind(payload),
+            Err(payload) => {
+                // `f`'s panic was caught inside the turn, which ended cleanly: record it here.
+                self.record_interrupted_turn(conn);
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    /// Record that a panic interrupted `conn`'s turn: the crash save keeps that player's last
+    /// saved file. The record clears at the start of the next server tick.
+    pub(in crate::game) fn record_interrupted_turn(&mut self, conn: u32) {
+        if !self.interrupted_turns.contains(&conn) {
+            self.interrupted_turns.push(conn);
+        }
+    }
+
+    /// Record every swap still open: a panic going through them leaves each of their players'
+    /// state displaced or half-done.
+    fn record_open_turns(&mut self) {
+        for i in 0..self.lan_guest_swaps.len() {
+            self.record_interrupted_turn(self.lan_guest_swaps[i]);
         }
     }
 
@@ -238,6 +299,7 @@ impl Game<'_> {
         let (entity_reach, block_reach) = (self.entity_reach, self.block_reach);
         let (game_mode, guest_previous) = (g.game_mode, g.previous_game_mode);
         self.set_mode_raw(game_mode);
+        self.sync_main_hand();
         let previous_mode = std::mem::replace(
             &mut self.previous_mode,
             guest_previous.map(crate::game::game_mode::mode_from_id),
@@ -493,6 +555,10 @@ impl Game<'_> {
             unreachable!("LanHost dropped inside a guest turn; closes are deferred");
         };
         debug_assert_eq!(host.hub.guests.get(swap.i).map(|g| g.conn), Some(swap.conn));
+        // Recorded before the callbacks run, cleared only after a clean put-back (a record the
+        // turn's own panic made stays).
+        let already_recorded = self.interrupted_turns.contains(&swap.conn);
+        self.record_interrupted_turn(swap.conn);
         let turn_events = self
             .player
             .as_mut()
@@ -540,7 +606,10 @@ impl Game<'_> {
         }));
         let (totem, panic) = match callbacks {
             Ok(totem) => (totem, None),
-            Err(payload) => (None, Some(payload)),
+            Err(payload) => {
+                self.record_open_turns();
+                (None, Some(payload))
+            }
         };
         let GuestSwap {
             attachments,
@@ -1031,6 +1100,8 @@ impl Game<'_> {
         if let Some(mob) = guest_mount {
             self.lan_open_mount(conn, mob);
         }
+        // An ender chest a mod opened for them in the turn (`player_open_ender_chest`).
+        self.open_turn_ender_menus(conn);
         // The turn's teleports are in the hub now: the mods hear them.
         self.flush_teleport_notes();
         if let Some(host) = self.lan.as_ref() {
@@ -1044,6 +1115,9 @@ impl Game<'_> {
         }
         if let Some(payload) = panic {
             std::panic::resume_unwind(payload);
+        }
+        if !already_recorded {
+            self.interrupted_turns.retain(|&c| c != conn);
         }
     }
 

@@ -9,6 +9,26 @@ impl Game<'_> {
         if let Some(r) = self.remote.as_mut() {
             r.use_target = None;
         }
+        if self.uses_stored_pick() {
+            let Some(mod_api::CrosshairTarget::Entity { entity, .. }) = self.crosshair_target()
+            else {
+                return false;
+            };
+            let Some([lo, hi]) = self.entity_bounding_box(entity) else {
+                return false;
+            };
+            let Some(eye) = self.eye_position() else {
+                return false;
+            };
+            // Client interact range: closest box point, strict bound and no server buffer.
+            // Refuse this use without choosing another target or the block behind it.
+            let distance_squared = (0..3)
+                .map(|i| (eye[i] - eye[i].clamp(lo[i], hi[i])).powi(2))
+                .sum::<f64>();
+            if distance_squared >= self.entity_reach.powi(2) {
+                return false;
+            }
+        }
         let sneaking = self.remote_shift_down();
         // A boat, minecart, item frame, armor stand or painting nearer than
         // any mob: the server uses it (AbstractBoat.interact boards it).
@@ -65,12 +85,18 @@ impl Game<'_> {
             let cushion_passes = is_cushion
                 && (sneaking
                     || self.riding.is_some_and(|r| r as i32 == hit.id)
-                    || self
-                        .mobs
-                        .iter()
-                        .any(|m| m.extra.mount.is_some_and(|r| r as i32 == hit.id)));
-            let passes =
-                is_painting || frame_passes || boat_passes || cart_passes || cushion_passes;
+                    || self.remote.as_ref().is_some_and(|r| {
+                        r.passenger_vehicles.values().any(|&v| v as i32 == hit.id)
+                    }));
+            // EndCrystal and EnderDragonPart keep Entity.interact's PASS.
+            let crystal_passes = self.crystals.iter().any(|c| c.id as i32 == hit.id)
+                || self.level_dragon_part(hit.id as u32).is_some();
+            let passes = is_painting
+                || frame_passes
+                || boat_passes
+                || cart_passes
+                || cushion_passes
+                || crystal_passes;
             // Otherwise the main hand's turn takes it; there is no off hand turn.
             if response.is_none() && hand == Hand::Off && !passes {
                 return false;
@@ -195,9 +221,8 @@ impl Game<'_> {
             // Player.isSecondaryUseActive with something in either hand
             // keeps the block from reacting by default; an explicit block
             // allow overrides that skip, and False always skips the block.
-            let sneaking = self.remote_shift_down();
-            let hands_full = self.stack_in(self.selected).is_some() || self.offhand.is_some();
-            let block_used = canceled.is_none() && use_block.or(!(sneaking && hands_full));
+            let block_used =
+                canceled.is_none() && use_block.or(!self.remote_secondary_use_skips_block());
             let item_forced = use_item == TriState::True;
             let item_used = canceled.is_none()
                 && use_item.or(true)
@@ -234,19 +259,24 @@ impl Game<'_> {
                 if let Some(result) = crate::game::native_hooks::block_use_result(answer) {
                     (result, DryUse::default())
                 } else if hand == Hand::Main {
-                    self.remote_block_template(&hit, held.as_ref(), true)
+                    self.remote_block_template(&hit, held.as_ref(), true, true)
                 } else {
                     (InteractionResult::Pass, DryUse::default())
                 }
             } else if hand == Hand::Main && !spectator && vanilla_block {
-                self.remote_block_reacts(&hit, held.as_ref())
+                self.remote_block_reacts(&hit, held.as_ref(), true)
             } else {
                 // useItemOn runs for the off hand too (useWithoutItem doesn't):
                 // RespawnAnchorBlock.useItemOn charges an anchor with its
-                // glowstone, SUCCESS.
+                // glowstone, SUCCESS; the blocks of `client_block_answer` answer too.
                 let charges = vanilla_block && self.anchor_takes(hit.pos, held.as_ref());
                 let result = if charges {
                     InteractionResult::Success
+                } else if let Some(answer) = (vanilla_block && !spectator)
+                    .then(|| self.client_block_answer(&hit, held.as_ref()))
+                    .flatten()
+                {
+                    answer
                 } else {
                     InteractionResult::Pass
                 };
@@ -385,6 +415,19 @@ impl Game<'_> {
                 if result.should_swing() && block_answer != Some(Answer::SuccessServer) {
                     self.with_hand(hand, Game::swing_arm);
                 }
+            } else if item_used
+                && held
+                    .as_ref()
+                    .is_some_and(|s| &*s.item == "minecraft:end_crystal")
+            {
+                // EndCrystalItem.useOn on a client level: SUCCESS where the
+                // crystal fits (the server spawns it), this hand swings; FAIL
+                // elsewhere, no swing. Either ends the click
+                // (Minecraft.startUseItem), so no UseItem and no other hand.
+                if self.end_crystal_fits(hit.pos) {
+                    self.with_hand(hand, Game::swing_arm);
+                }
+                return true;
             } else if item_used && held.as_ref().is_some_and(|s| &*s.item == "minecraft:brush") {
                 // BrushItem.useOn: brushing starts here (CONSUME, no swing); the
                 // server brushes and the dust is this client's own.
@@ -445,7 +488,7 @@ impl Game<'_> {
                 if let Some(mud) = self.pack.assets.registry.default_state("minecraft:mud") {
                     let pos =
                         sunrise_core::position::BlockPos::new(hit.pos[0], hit.pos[1], hit.pos[2]);
-                    self.predict_blocks(&vec![(pos, mud)], seq);
+                    self.predict_blocks(&[(pos, mud)], seq);
                 }
                 self.with_hand(hand, |g| {
                     g.filled_result(ItemStack::new("minecraft:glass_bottle", 1))
@@ -484,19 +527,9 @@ impl Game<'_> {
                 {
                     self.with_hand(hand, |g| g.start_eating(info));
                 }
-                if let Some(placed) = &placed {
-                    self.predict_place(placed, seq);
-                    if let Some(stack) = &held {
-                        let pos = placed.0;
-                        self.apply_predicted_item([pos.x, pos.y, pos.z], stack);
-                    }
-                    self.with_hand(hand, Game::consume_held);
-                } else if let Some(r) = self.remote.as_mut() {
-                    // BlockItem.place plays its sound only once the block is set: the
-                    // server's resend of the target it refused is no placement.
-                    r.placing = None;
-                }
-                if placed.is_some() {
+                if let Some((placed, stack)) = placed.as_ref().zip(held.as_ref()) {
+                    self.predict_place(placed, stack, seq);
+                    self.with_hand(hand, |g| g.consume_placed(stack));
                     self.with_hand(hand, Game::swing_arm);
                 }
                 // BlockItem.place returns FAIL when placement is rejected:

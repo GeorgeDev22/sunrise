@@ -170,6 +170,7 @@ mod tests {
                 None,
                 None,
                 |_| None,
+                &Default::default(),
             );
             let loaded =
                 sunrise_client::entity_nbt::mob_from_nbt(&saved, game.res.mob_types(), 13, None)

@@ -45,6 +45,21 @@ impl StateConstraint {
     }
 }
 
+/// Vanilla `WeatheringCopper.WeatherState`, from fresh copper to fully oxidized.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum WeatheringAge {
+    /// Fresh and unaffected by weathering.
+    Unaffected,
+    /// First stage after fresh copper.
+    Exposed,
+    /// Second stage after fresh copper.
+    Weathered,
+    /// Final stage.
+    Oxidized,
+}
+
 /// An invalid constraint, identifying its index in the supplied list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -114,6 +129,42 @@ impl BlockMetadata for BlockStates<'_> {
 }
 
 impl BlockStates<'_> {
+    /// `WeatheringCopper.getAge`. None for an unknown state or a block that
+    /// doesn't implement weathering, including waxed copper; ask `unwaxed`
+    /// first to get the age of a waxed block's underlying stage.
+    pub fn weathering_age(&self, state: BlockState) -> Option<WeatheringAge> {
+        self.backend?.block_weathering_age((&state).into())
+    }
+
+    /// `WeatheringCopper.getNext`: the next weathering stage, retaining
+    /// compatible state properties. None if no such stage or state exists.
+    /// Reads the host's loaded oxidation maps before the vanilla chain.
+    pub fn next_weathering_stage(&self, state: BlockState) -> Option<BlockState> {
+        self.backend?.block_next_weathering_stage((&state).into())
+    }
+
+    /// `WeatheringCopper.getPrevious`: the previous weathering stage,
+    /// retaining compatible state properties. None if no such stage or state
+    /// exists. Reads the host's loaded oxidation maps before the vanilla chain.
+    pub fn previous_weathering_stage(&self, state: BlockState) -> Option<BlockState> {
+        self.backend?
+            .block_previous_weathering_stage((&state).into())
+    }
+
+    /// `HoneycombItem.getWaxed`: the waxed counterpart, retaining compatible
+    /// state properties. None if the state does not have one or is unknown.
+    /// Reads the host's loaded waxables map before vanilla's.
+    pub fn waxed(&self, state: BlockState) -> Option<BlockState> {
+        self.backend?.block_state_waxed((&state).into())
+    }
+
+    /// `HoneycombItem.WAX_OFF_BY_BLOCK`: the unwaxed counterpart, retaining
+    /// compatible state properties. None if the state does not have one or
+    /// is unknown. Reads the host's loaded waxables map before vanilla's.
+    pub fn unwaxed(&self, state: BlockState) -> Option<BlockState> {
+        self.backend?.block_state_unwaxed((&state).into())
+    }
+
     /// `BlockState.canBeReplaced()`: whether placing a block where `state` stands replaces it
     /// (air, grass, water, snow layers). None for an unknown state, or a host without a game.
     pub fn replaceable(&self, state: BlockState) -> Option<bool> {
@@ -165,6 +216,14 @@ impl BlockStates<'_> {
     pub fn map_color(&self, state: BlockState) -> Option<u8> {
         self.backend?.block_state_map_color(state)
     }
+    /// Decode a packed map color (`MapColor.getColorFromPackedId`) to `[red, green, blue, alpha]`.
+    /// Pack a palette ID (such as one from [`Self::map_color`]) as `id * 4 + shade`, where
+    /// shades 0–3 scale each RGB channel by 180, 220, 255 or 135 out of 255, rounding down.
+    /// ID 0 and undefined palette IDs are transparent (`[0; 4]`); other colors have alpha 255.
+    /// Returns `None` only when the host has no game behind it.
+    pub fn map_color_rgba(&self, packed: u8) -> Option<[u8; 4]> {
+        self.backend?.block_state_map_color_rgba(packed)
+    }
     /// `BlockState.getLightEmission()`: the light level the state gives off, 0 to 15 (a torch 14,
     /// glowstone 15). A block that declares `dynamic_light` answers per cell through its parts,
     /// which this does not ask. None as for `replaceable`.
@@ -177,11 +236,16 @@ impl BlockStates<'_> {
         self.backend?.block_state_friction(state)
     }
     /// `BlockState.isSolidRender()`: whether the state is a full, occluding cube for rendering
-    /// and light (stone yes; glass, leaves and slabs no). Whether a block conducts redstone at a
-    /// position is [`LevelRef::is_redstone_conductor`](crate::LevelRef::is_redstone_conductor).
+    /// and light (stone yes; glass, leaves and slabs no). This is not redstone conduction.
     /// None as for `replaceable`.
     pub fn is_solid_render(&self, state: BlockState) -> Option<bool> {
         self.backend?.block_state_is_solid_render(state)
+    }
+    /// `BlockState.isRedstoneConductor` when vanilla decides from `state` alone. None for an
+    /// unknown state, no game backend, or a context-dependent predicate (such as shulker boxes).
+    /// For a placed block see [`LevelRef::is_redstone_conductor`](crate::LevelRef::is_redstone_conductor).
+    pub fn is_redstone_conductor(&self, state: BlockState) -> Option<bool> {
+        self.backend?.block_state_is_redstone_conductor(state)
     }
     /// The block's property names and legal serialized values. None without resolved tables.
     pub fn definition(&self, block: crate::BlockKey) -> Option<Vec<StateProperty>> {
@@ -230,6 +294,7 @@ mod tests {
         assert_eq!(facts.sound(state), None);
         assert_eq!(facts.has_block_entity(state), None);
         assert_eq!(facts.map_color(state), None);
+        assert_eq!(facts.map_color_rgba(6), None);
         assert_eq!(facts.states_of(crate::BlockKey(0)), None);
     }
 }

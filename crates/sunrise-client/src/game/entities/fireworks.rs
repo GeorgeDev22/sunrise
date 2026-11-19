@@ -133,6 +133,7 @@ impl Rocket {
         uuid: [i32; 4],
         player: Option<[i32; 4]>,
         raw: Option<&sunrise_core::nbt::Tag>,
+        items: &crate::items::Items,
     ) -> sunrise_core::nbt::Tag {
         sunrise_client::entity_nbt::firework_rocket_to_nbt(
             &sunrise_client::entity_nbt::RocketSave {
@@ -155,6 +156,7 @@ impl Rocket {
             },
             uuid,
             raw,
+            items,
         )
     }
     /// A rocket loaded from its NBT (`/summon`, a saved chunk).

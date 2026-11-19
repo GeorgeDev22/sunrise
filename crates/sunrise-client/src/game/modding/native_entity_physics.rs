@@ -437,6 +437,7 @@ mod tests {
                 &game.armor_stands[0],
                 [1, 2, 3, 4],
                 None,
+                &Default::default(),
             );
             let loaded = sunrise_client::entity_nbt::armor_stand_from_nbt(&saved, 44).unwrap();
             assert!(

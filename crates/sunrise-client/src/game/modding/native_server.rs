@@ -608,12 +608,22 @@ impl Game<'_> {
         {
             return Err(ActionRefused::InvalidSetup);
         }
+        let full_attack_charge = setup.full_attack_charge;
         let mut state = ScopedPlayerState::new(self.motion, self.items(), setup)?;
         let host = self.lan.as_mut().expect("validated fake's host");
         host.hub.guests.update(gi, |guest| state.swap(guest));
         let play = host.play.insert(conn, Default::default());
         let menus = host.menus.insert(conn, Default::default());
-        let outcome = self.perform_fake_action(gi, conn, action);
+        // In a turn, so the setup's stack in hand gives the attack speed the charge is for.
+        let charged = !full_attack_charge
+            || self
+                .as_guest_at(gi, conn, Game::charge_attack_fully)
+                .is_ok();
+        let outcome = if charged {
+            self.perform_fake_action(gi, conn, action)
+        } else {
+            Err(ActionRefused::Busy)
+        };
         let host = self.lan.as_mut().expect("guest turns retain the host");
         let (held, other, position) = host.hub.guests.update(gi, |guest| {
             let held = guest
@@ -795,7 +805,7 @@ impl Game<'_> {
     /// Resolve a real online player by UUID, never a fake. A fake is reached
     /// through the handle returned by its factory. During a nested player swap,
     /// outer players whose records are displaced return None.
-    pub(super) fn player(&self, uuid: u128) -> Option<PlayerRef> {
+    pub(in crate::game) fn player(&self, uuid: u128) -> Option<PlayerRef> {
         let epoch = self.native_lifecycle.epoch()?;
         if let Some(remote) = self
             .remote
@@ -957,18 +967,19 @@ impl Game<'_> {
     }
     /// The local player's `Abilities` on a client: what its game mode gives
     /// (`GameType.updatePlayerAbilities`, `mayBuild` among them), then the
-    /// flags and speeds `ClientPacketListener.handlePlayerAbilities` took.
+    /// flags and speeds `ClientPacketListener.handlePlayerAbilities` took, except
+    /// flying, which follows the local body's prediction between packets.
     fn client_abilities(&self) -> PlayerAbilities {
         let mut a = PlayerAbilities::default();
         a.update_for_mode(self.mode_id());
         if let Some(p) = self.remote_abilities() {
             a.invulnerable = p.flags & 1 != 0;
-            a.flying = p.flags & 2 != 0;
             a.may_fly = p.flags & 4 != 0;
             a.instabuild = p.flags & 8 != 0;
             a.flying_speed = p.flying_speed;
             a.walking_speed = p.walking_speed;
         }
+        a.flying = self.player.as_ref().is_some_and(|body| body.flying);
         a
     }
 
@@ -1129,8 +1140,8 @@ impl Game<'_> {
     /// `item_toss` asked first. Nothing is taken from an inventory: the stack is the caller's
     /// (take it out through the item places first). `thrown_by_player` names the player as the
     /// thrower, as the drop key does. None once the item is in the world; the stack back,
-    /// untouched, for an empty stack, a stale or dead player and a toss a mod canceled, so a
-    /// refused drop never loses items.
+    /// untouched, for an empty stack, a stale or dead player, a player in another level than the
+    /// one in place and a toss a mod canceled, so a refused drop never loses items.
     pub(super) fn player_drop_stack(
         &mut self,
         player: PlayerRef,
@@ -1148,7 +1159,10 @@ impl Game<'_> {
         let copy = stack.clone();
         let mut dropped = false;
         let ran = self.native_as_player_handle(player, |game| {
-            dropped = game.drop_stack_from_eyes(stack, thrown_by_player).is_some();
+            // A stack thrown from a player in another level would land in this one.
+            if game.acting_in_level_in_place() {
+                dropped = game.drop_stack_from_eyes(stack, thrown_by_player).is_some();
+            }
         });
         (!(ran && dropped)).then_some(copy)
     }
@@ -1284,8 +1298,7 @@ impl Game<'_> {
         Identifier::parse(level.dimension_id()).ok()
     }
 
-    /// The IP address the player connects from, without the port (behind a
-    /// Velocity proxy, the address the proxy forwards). Displaced connected
+    /// The IP address the player connects from, without the port. Displaced connected
     /// players keep their address; an acting player with no known connection
     /// has an empty address. None for a stale or unavailable player.
     pub(super) fn player_address(&self, player: PlayerRef) -> Option<String> {
@@ -1624,8 +1637,7 @@ impl Game<'_> {
     /// again. Hovering the shown name gives the real one, which stays in the
     /// log, commands, selectors and the server's events. Kept until a mod
     /// sets it again or the server stops (also if they leave and come back).
-    /// Plain text: the mod checks it (`Messages::text_allowed`, its length,
-    /// other players' names). False when the server list is unavailable,
+    /// Plain text: the mod checks it (its length, other players' names). False when the server list is unavailable,
     /// the handle is stale or the player isn't online.
     pub(super) fn player_set_nickname(
         &mut self,
@@ -1643,18 +1655,6 @@ impl Game<'_> {
         }
         host.hub.set_nickname(uuid, nickname.map(str::to_owned));
         true
-    }
-    /// Whether the server's chat filter (`server.toml` `[chat_filter]`)
-    /// lets `text` through: true without a filter, None inside a player's
-    /// hook (where the server is out of reach).
-    pub(super) fn native_text_allowed(&self, text: &str) -> Option<bool> {
-        let host = self.lan.as_ref()?;
-        Some(
-            host.hub
-                .chat_filter
-                .as_ref()
-                .is_none_or(|g| !g.matches(text)),
-        )
     }
     /// A system line in every player's chat and the server's log.
     pub(super) fn native_broadcast(&self, mut line: Text) {
@@ -1832,8 +1832,9 @@ impl Game<'_> {
     /// (orbs merged into it, each worth `value`) and `age` (ticks lived; an orb
     /// despawns at 6000); a `None` is left as it is.
     /// False, and nothing written, for an orb not in the server level `dimension`, a
-    /// `count` of 0 or above `i32::MAX`, a `value` outside -32768..=32767 (a save keeps
-    /// `Value` as a short and `Count` as an int, so a write it accepts reloads
+    /// `count` of 0 or above `i32::MAX`, an `age` above `i32::MAX` (`ExperienceOrb.age`
+    /// is an int), a `value` outside -32768..=32767 (a save keeps `Value` as a short
+    /// and `Count` as an int, so a write it accepts reloads
     /// unchanged), and on a client of a server. In `experience_orb_merge`, a write to
     /// `into` is the merged orb.
     pub(super) fn set_experience_orb(
@@ -1852,6 +1853,9 @@ impl Game<'_> {
         {
             return false;
         }
+        let Ok(age) = age.map(i32::try_from).transpose() else {
+            return false;
+        };
         let Some(orb) = self.orbs.iter_mut().find(|o| o.id == id) else {
             return false;
         };
@@ -1860,58 +1864,74 @@ impl Game<'_> {
         orb.age = age.unwrap_or(orb.age);
         true
     }
+    /// Runs `f` in the turn of the player a handle names, against the level in place. False
+    /// when it didn't run: stale or dead.
     pub(super) fn native_as_player_handle(
         &mut self,
         player: PlayerRef,
         f: impl FnOnce(&mut Self),
     ) -> bool {
-        let Some(read) = self.player_handle_read(player) else {
-            return false;
-        };
-        let conn = match read {
-            PlayerRead::Acting { .. } => None,
-            PlayerRead::Guest(g) if !g.dead => Some(g.conn),
-            PlayerRead::Guest(_) => return false,
-        };
-        let Some(conn) = conn else {
-            if self
-                .player
-                .as_ref()
-                .is_none_or(|p| p.health.health() <= 0.0)
-            {
-                return false;
+        match self.player_handle_read(player) {
+            None => false,
+            Some(PlayerRead::Acting { .. }) => self.native_as_acting(f),
+            Some(PlayerRead::Guest(g)) if !g.dead => {
+                let conn = g.conn;
+                self.as_guest(conn, f).is_some()
             }
-            f(self);
-            return true;
-        };
-        self.as_guest(conn, f).is_some()
+            Some(PlayerRead::Guest(_)) => false,
+        }
     }
 
-    /// Runs `f` with the player `uuid`'s state in place: theirs already when
-    /// they are the acting player (the host, or a guest swapped in), else a
-    /// guest's through `as_guest`, including within another guest's turn.
-    /// False when it didn't run: no such player here, or dead.
+    /// Runs `f` with the player `uuid`'s state in place, against the level in place: theirs
+    /// already when they are acting (a guest in their turn, or the `Game`'s own player where no
+    /// guest holds them), else a guest's through `as_guest`, including within another guest's
+    /// turn. What `f` writes to the player's own state holds wherever they are; what would land
+    /// in the world checks [`Self::acting_in_level_in_place`]. False when it didn't run: no such
+    /// player here, or dead.
     pub(super) fn native_as_player(&mut self, uuid: u128, f: impl FnOnce(&mut Self)) -> bool {
-        if uuid == self.native_acting_id() {
-            if self
-                .player
-                .as_ref()
-                .is_none_or(|p| p.health.health() <= 0.0)
-            {
-                return false;
-            }
-            f(self);
-            return true;
+        if self.lan_acting_uuid == Some(uuid) {
+            return self.native_as_acting(f);
         }
-        let Some(host) = self.lan.as_ref() else {
-            return false;
-        };
-        let conn = host
-            .hub
-            .holder_guest(uuid, self.dim.id())
+        // With no guest's turn running, `native_acting_id` is the world's owner: on a server
+        // thread that owner is a guest too, whose state is theirs, not the `Game`'s own.
+        let conn = self
+            .lan
+            .as_ref()
+            .and_then(|host| host.hub.holder_guest(uuid, self.dim.id()))
             .filter(|g| !g.dead)
             .map(|g| g.conn);
-        conn.and_then(|conn| self.as_guest(conn, f)).is_some()
+        match conn {
+            Some(conn) => self.as_guest(conn, f).is_some(),
+            None if uuid == self.native_acting_id() => self.native_as_acting(f),
+            None => false,
+        }
+    }
+
+    /// `f` for the acting player, whose state is in place: false when they are dead.
+    fn native_as_acting(&mut self, f: impl FnOnce(&mut Self)) -> bool {
+        if self
+            .player
+            .as_ref()
+            .is_none_or(|p| p.health.health() <= 0.0)
+        {
+            return false;
+        }
+        f(self);
+        true
+    }
+
+    /// Whether the acting player is in the level in place: a guest's own level is their hub
+    /// record's, also when a hook of another level borrows them into its turn. What lands
+    /// in the world at a player (a thrown stack, an overflow drop, a sound, a broken block) is
+    /// left out for a player in another level, whose inventory and data writes still hold.
+    pub(in crate::game) fn acting_in_level_in_place(&self) -> bool {
+        let Some(conn) = self.lan_acting else {
+            return true;
+        };
+        self.lan
+            .as_ref()
+            .and_then(|host| host.hub.guest(conn))
+            .is_none_or(|g| g.dimension == self.dim.id())
     }
 }
 
@@ -4801,6 +4821,51 @@ pub(super) mod fake_action_tests {
         });
     }
 
+    /// A scoped attack with `full_attack_charge` deals the sword's full damage, one without it
+    /// only the empty charge's share, and the fake's own ticker comes back after each.
+    #[test]
+    #[ignore = "daily"]
+    fn scoped_fake_attack_with_full_charge_deals_the_weapons_full_damage() {
+        use mod_api::PlayerActionSetup;
+        super::super::native_entity_refs::tests::with_game(|game| {
+            let (player, conn, _) = fake(game, None, 0);
+            game.as_guest(conn, |g| g.attack_ticks = 3).unwrap();
+            let charged = zombie(game, 5000, [2.0, 64.0, 0.5]);
+            // Out of a sweep's reach of the first.
+            let uncharged = zombie(game, 5001, [-1.5, 64.0, 0.5]);
+            let full = health(game, 5000);
+            let mut attack = |target, full_attack_charge| {
+                let mut setup = PlayerActionSetup::new(
+                    Some(crate::game::api_values::test_snapshot(&ItemStack::new(
+                        "minecraft:diamond_sword",
+                        1,
+                    ))),
+                    [0.5, 64.0 + f64::from(1.62_f32), 0.5],
+                    0.0,
+                    0.0,
+                    false,
+                );
+                setup.full_attack_charge = full_attack_charge;
+                let result = player
+                    .perform_action_scoped(game, PlayerAction::Attack { target }, setup)
+                    .unwrap();
+                assert_eq!(result.outcome, ActionOutcome::Consumed);
+                assert_eq!(
+                    game.as_guest(conn, |g| g.attack_ticks).unwrap(),
+                    3,
+                    "the fake's own ticker comes back"
+                );
+            };
+            attack(charged, true);
+            attack(uncharged, false);
+            // A diamond sword's 7, after a zombie's 2 armour (`getDamageAfterAbsorb`: the armour
+            // left is at least a fifth of it, 0.4).
+            let dealt = 7.0f32 * (1.0 - 0.4 / 25.0);
+            assert!((full - health(game, 5000) - dealt).abs() < 1e-4);
+            assert!(full - health(game, 5001) < dealt / 2.0);
+        });
+    }
+
     /// An armor stand holding a saved item this build doesn't have hands it to a scoped action:
     /// the stack can't cross, so it goes back into the world where the fake stood, unchanged,
     /// with the default pickup delay, and the result counts it instead of panicking.
@@ -6041,7 +6106,7 @@ mod player_rule_tests {
     }
 }
 
-// Dedicated network settings stay engine-private; never expose the forwarding secret.
+// Dedicated network settings stay engine-private.
 #[allow(dead_code)]
 impl Game<'_> {
     /// Whether the dedicated server runs in online mode (`online-mode` of server.properties):
@@ -6056,13 +6121,6 @@ impl Game<'_> {
     pub(super) fn native_server_port(&self) -> Option<u16> {
         Some(self.dedicated_lan()?.port)
     }
-    /// How the dedicated server takes its players from a proxy: `"velocity"` when it signs the
-    /// forwarded player information with `forwarding.secret` (offline mode behind Velocity),
-    /// `"none"` when it doesn't; None off a dedicated server and before it listens. The secret
-    /// itself is never returned. API @API:server_settings@.
-    pub(super) fn native_proxy_forwarding(&self) -> Option<&'static str> {
-        Some(proxy_forwarding_of(&self.dedicated_lan()?.shared.config))
-    }
     /// The listening socket of a dedicated server; None on any other side and before it listens.
     fn dedicated_lan(&self) -> Option<&sunrise_client::lan::Lan> {
         self.options.dedicated.as_ref()?;
@@ -6076,16 +6134,6 @@ fn online_mode_of(config: &sunrise_client::lan::NetConfig) -> bool {
     config.online.is_some()
 }
 
-/// The proxy forwarding a dedicated server's network config carries: the secret
-/// is set only offline behind a proxy (game/dedicated.rs `forwarding_secret`).
-fn proxy_forwarding_of(config: &sunrise_client::lan::NetConfig) -> &'static str {
-    if config.forwarding_secret.is_some() {
-        "velocity"
-    } else {
-        "none"
-    }
-}
-
 #[cfg(test)]
 mod network_settings_tests {
     use super::*;
@@ -6094,17 +6142,10 @@ mod network_settings_tests {
     fn server_settings_follow_the_network_config() {
         use sunrise_client::lan::{NetConfig, OnlineMode};
         let mut config = NetConfig::loopback(25565, String::new(), 20);
-        // online-mode=false, no proxy: no key, no forwarding secret.
+        // online-mode=false: no key.
         assert!(!online_mode_of(&config));
-        assert_eq!(proxy_forwarding_of(&config), "none");
-        // online-mode=false behind Velocity: the secret is set.
-        config.forwarding_secret = Some(b"secret".to_vec());
-        assert!(!online_mode_of(&config));
-        assert_eq!(proxy_forwarding_of(&config), "velocity");
-        // online-mode=true: the server's key, and forwarding stays off.
-        config.forwarding_secret = None;
+        // online-mode=true: the server's key.
         config.online = Some(std::sync::Arc::new(OnlineMode::generate(false).unwrap()));
         assert!(online_mode_of(&config));
-        assert_eq!(proxy_forwarding_of(&config), "none");
     }
 }

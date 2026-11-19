@@ -9,7 +9,6 @@ use sunrise_mod_runtime::byte_channel::{self, Permit, ReserveError, Sender, TryS
 use sunrise_protocol::payload_negotiation::Phase;
 use sunrise_protocol::{
     Error, Result,
-    adapter::ServerVersion,
     connection::{Closer, ConnWriter, Framing},
     frame::FrameSize,
 };
@@ -39,8 +38,6 @@ pub(crate) struct Inner {
     alive: Arc<AtomicBool>,
     retired: AtomicBool,
     terminal: AtomicBool,
-    version: ServerVersion,
-    secure_chat: Box<dyn Fn() -> Option<bool> + Send + Sync>,
     phase: Mutex<(u64, Phase)>,
 }
 impl std::ops::Deref for QueuedWriter {
@@ -151,14 +148,7 @@ impl QueuedWriter {
         {
             return Err(SendPacketError::NotInPlay);
         }
-        // Legacy adapters are stateful. Their FIFO worker must translate only
-        // after root publication, with all preceding ACKs applied in order.
-        let prepared = if self.version == ServerVersion::Current {
-            self.prepare_contents(body)
-        } else {
-            self.prepare_job(WriteJob::Packet(body))
-        };
-        let payload = prepared.map_err(|error| match error {
+        let payload = self.prepare_contents(body).map_err(|error| match error {
             PrepareFailure::Closed => SendPacketError::NotConnected,
             PrepareFailure::Full => SendPacketError::Backpressure,
             PrepareFailure::Encode(error) => match error.frame_limit() {
@@ -181,8 +171,6 @@ impl QueuedWriter {
         let framing = writer.framing();
         let closer = Arc::new(writer.closer()?);
         let alive = Arc::new(AtomicBool::new(true));
-        let version = writer.server_version();
-        let secure_chat = Box::new(writer.legacy_secure_chat_observer());
         let (sender, receiver) = byte_channel::channel(CAPACITY).expect("nonzero writer capacity");
         #[cfg(any(test, feature = "test-payload-probe"))]
         let probe = Arc::new(std::array::from_fn::<_, 4, _>(|_| {
@@ -238,8 +226,6 @@ impl QueuedWriter {
             framing,
             closer,
             alive,
-            version,
-            secure_chat,
             phase: Mutex::new((0, Phase::Configuration)),
         })))
     }
@@ -269,12 +255,6 @@ impl QueuedWriter {
     }
     pub(crate) fn payload_capacity(&self) -> usize {
         CAPACITY
-    }
-    pub(crate) fn server_version(&self) -> ServerVersion {
-        self.version
-    }
-    pub(crate) fn legacy_secure_chat_enforcement(&self) -> Option<bool> {
-        (self.secure_chat)()
     }
     pub(crate) fn shutdown(&self) {
         if self.retired.load(Ordering::Acquire) {

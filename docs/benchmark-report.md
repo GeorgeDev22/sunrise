@@ -97,6 +97,7 @@ confidence interval of the mean, Student's t, null when `n` is 1). The unit is t
 | `launcher.start_ms` | launcher process start to its first frame (a session) |
 | `launcher.cold_start_ms`, `launcher.warm_start_ms` | the same in `sunrise-launcher benchmark`: its first start, then the others |
 | `launcher.rss_mb`, `launcher.cpu_idle_pct` | launcher resident memory (sampled; `max` is the peak), CPU used while idle |
+| `launcher.frame_work_p50_ms`, `launcher.frame_work_p95_ms`, `launcher.frame_work_p99_ms`, `launcher.late_frames` | a `--features frame-stats` launcher's own work per frame (build, layout, paint), and the frames that took longer than a refresh |
 | `launcher.release_list_ms` | fetching the release list |
 | `launcher.install_ms`, `launcher.update_ms` | downloading and unpacking a version: a new one, an update |
 | `launcher.prepare_ms` | preparing a version's resources |

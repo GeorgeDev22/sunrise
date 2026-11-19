@@ -2622,6 +2622,7 @@ mod crossbow_tests {
         std::fs::remove_dir_all(&root).unwrap();
         let death = Death {
             loot: &loot,
+            this_nbt: None,
             damage: None,
             player: None,
             player_killed: false,
@@ -2875,7 +2876,14 @@ mod cannot_hunt_save_tests {
             let m = crate::entity_nbt::mob_from_nbt(&saved(raw), &types, 1, None).unwrap();
             assert_eq!(m.extra.piglin.cannot_hunt, expected);
             assert_eq!(can_hunt(&m), !expected);
-            let out = crate::entity_nbt::mob_to_nbt(&m, [1, 2, 3, 4], None, None, |_| None);
+            let out = crate::entity_nbt::mob_to_nbt(
+                &m,
+                [1, 2, 3, 4],
+                None,
+                None,
+                |_| None,
+                &Default::default(),
+            );
             assert_eq!(out.get("CannotHunt"), Some(&Tag::Byte(i8::from(expected))));
         }
     }

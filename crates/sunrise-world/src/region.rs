@@ -10,6 +10,18 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 use sunrise_core::position::ChunkPos;
+
+/// A record exceeded the region format's compressed size admission limit.
+#[derive(Debug)]
+pub struct CompressedChunkLimit;
+
+impl std::fmt::Display for CompressedChunkLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("compressed chunk limit exceeded")
+    }
+}
+
+impl std::error::Error for CompressedChunkLimit {}
 use {
     crate::compression::{Compression, invalid},
     sunrise_core::{
@@ -46,6 +58,15 @@ impl ChunkRecord {
             compressed: compression.encode(&bytes)?,
             timestamp,
         })
+    }
+    fn check_compressed_size(&self) -> io::Result<()> {
+        if self.compressed.len() > MAX_COMPRESSED {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                CompressedChunkLimit,
+            ));
+        }
+        Ok(())
     }
     /// `RegionFileStorage.read`: the root read straight off the decompressing
     /// stream, so bytes after it, and a damaged stream past it, are never read.
@@ -308,9 +329,7 @@ impl RegionFile {
     /// they are. A chunk's last sector is padded with zeros.
     pub fn write(&mut self, chunk: ChunkPos, record: &ChunkRecord) -> io::Result<()> {
         let i = slot(self.position, chunk)?;
-        if record.compressed.len() > MAX_COMPRESSED {
-            return Err(invalid("compressed chunk limit exceeded"));
-        }
+        record.check_compressed_size()?;
         let required = (record.compressed.len() + 5).div_ceil(SECTOR);
         let external = required >= 256;
         let sectors = if external { 1 } else { required };
@@ -385,6 +404,11 @@ impl RegionFile {
     /// Flush the writes to the disk.
     pub fn sync(&self) -> io::Result<()> {
         self.file.sync_data()
+    }
+
+    /// Clone the file handle so a caller can flush after releasing the region lock.
+    pub fn sync_handle(&self) -> io::Result<File> {
+        self.file.try_clone()
     }
 
     /// `RegionFile.writeHeader`: both header sectors from memory, so the
@@ -580,9 +604,7 @@ impl RegionWriter {
         if self.offsets[i] != 0 {
             return Err(invalid("chunk already written"));
         }
-        if record.compressed.len() > MAX_COMPRESSED {
-            return Err(invalid("compressed chunk limit exceeded"));
-        }
+        record.check_compressed_size()?;
         let required = (record.compressed.len() + 5).div_ceil(SECTOR);
         let external = required >= 256;
         let sectors = if external { 1 } else { required as u32 };
@@ -749,6 +771,31 @@ mod tests {
         // The next region's chunk.
         assert!(header.read_chunk(ChunkPos::new(0, 64)).is_err());
         assert!(RegionHeader::read(dir.join("r.5.5.mca")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cloned_sync_handle_flushes_region_writes() {
+        let dir =
+            std::env::temp_dir().join(format!("sunrise-region-sync-handle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("r.0.0.mca");
+        let chunk = ChunkPos::new(3, 5);
+        let record = ChunkRecord {
+            compression: Compression::None,
+            compressed: vec![7; 100],
+            timestamp: 7,
+        };
+        let mut region = RegionFile::open_writable(&path, true).unwrap();
+        region.write(chunk, &record).unwrap();
+        let handle = region.sync_handle().unwrap();
+        drop(region);
+        handle.sync_data().unwrap();
+
+        let mut reopened = RegionFile::open(&path).unwrap();
+        let saved = reopened.read(chunk).unwrap().unwrap();
+        assert_eq!(saved.compressed, record.compressed);
+        assert_eq!(saved.timestamp, record.timestamp);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

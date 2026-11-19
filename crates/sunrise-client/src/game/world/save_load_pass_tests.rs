@@ -44,10 +44,10 @@ fn loaded_queue_join_save_refuses_without_losing_remaining_rows() {
                     ("id", Tag::String("minecraft:item".into())),
                     (
                         "Item",
-                        sunrise_client::save::item_to_nbt(&ItemStack::new(
-                            "minecraft:diamond",
-                            i as u32,
-                        )),
+                        sunrise_client::save::item_to_nbt(
+                            &ItemStack::new("minecraft:diamond", i as u32),
+                            &Default::default(),
+                        ),
                     ),
                     ("UUID", Tag::IntArray(vec![i, 2, 3, 4])),
                     (

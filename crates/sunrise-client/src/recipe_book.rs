@@ -1093,14 +1093,9 @@ impl RecipeIndex {
                 0
             } else if kind == "minecraft:crafting_transmute" {
                 // TransmuteRecipe.display: one per material count.
-                match &v["material_count"] {
-                    serde_json::Value::Object(o) => {
-                        let min = o.get("min").and_then(|m| m.as_u64()).unwrap_or(1);
-                        let max = o.get("max").and_then(|m| m.as_u64()).unwrap_or(8);
-                        (max.saturating_sub(min) + 1) as usize
-                    }
-                    _ => 1,
-                }
+                let (min, max) =
+                    crate::crafting::transmute_material_bounds(v.get("material_count"));
+                (max + 1).saturating_sub(min)
             } else {
                 1
             };
@@ -1471,7 +1466,7 @@ mod tests {
 
     #[test]
     fn content_recipe_condition_gates_crafting_and_index() {
-        let recipe = r#"{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:flint"],"result":{"id":"minecraft:stick"},"neoforge:conditions":[{"type":"neoforge:not","value":{"type":"neoforge:true"}}]}"#;
+        let recipe = r#"{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:flint"],"result":{"id":"minecraft:stick"},"neoforge:conditions":[{"type":"neoforge:not","value":{"type":"neoforge:always"}}]}"#;
         let root = content_recipe_root("condition", recipe);
         let items = crate::items::Items::for_tests(HashMap::new());
         let recipes = Recipes::load(
@@ -2457,5 +2452,39 @@ mod tests {
         assert!(!book.collection_matches(&[custom_index], "rod", &lines));
         assert!(book.collection_matches(&[custom_index], "minecraft:blaze", &lines));
         assert!(!book.collection_matches(&[custom_index], "iron", &lines));
+    }
+
+    /// A transmute recipe's displays are counted over crafting's bounded
+    /// material range, so an out-of-range `material_count` (a pack's or a
+    /// server's) neither overflows nor misnumbers the recipes after it.
+    #[test]
+    fn transmute_displays_follow_the_bounded_material_range() {
+        let transmute = |count: serde_json::Value| serde_json::json!({"type": "minecraft:crafting_transmute", "material_count": count});
+        let source = |id: &str, v| (id.to_owned(), v);
+        let index = RecipeIndex::load_from_sources(&[
+            source(
+                "minecraft:a_in_range",
+                transmute(serde_json::json!({"min": 2, "max": 4})),
+            ),
+            source(
+                "minecraft:b_huge",
+                transmute(serde_json::json!({"min": 0, "max": 18446744073709551615u64})),
+            ),
+            source(
+                "minecraft:c_reversed",
+                transmute(serde_json::json!({"min": 5, "max": 2})),
+            ),
+            source("minecraft:d_exact", transmute(serde_json::json!(3))),
+            source(
+                "minecraft:e_shaped",
+                serde_json::json!({"type": "minecraft:crafting_shaped"}),
+            ),
+        ]);
+        let first = |id| index.first_display(id);
+        // 3 displays, then 8 (1..=8), then none, then 1.
+        assert_eq!(first("minecraft:a_in_range"), Some(0));
+        assert_eq!(first("minecraft:b_huge"), Some(3));
+        assert_eq!(first("minecraft:d_exact"), Some(11));
+        assert_eq!(first("minecraft:e_shaped"), Some(12));
     }
 }

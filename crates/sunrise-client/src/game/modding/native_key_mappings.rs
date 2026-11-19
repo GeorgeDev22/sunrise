@@ -210,8 +210,15 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn opening_and_closing_a_direct_screen_discards_pending_clicks() {
-        crate::game::native_entity_refs::tests::with_game(|game| {
+        crate::game::native_entity_refs::tests::with_client_game(|game| {
             game.title = None;
+            game.player = Some(
+                sunrise_client::motion::PlayerMotion::new(
+                    game.motion,
+                    sunrise_core::geometry::Vec3::ZERO,
+                )
+                .unwrap(),
+            );
             game.native_input
                 .mappings
                 .bind([sunrise_client::keymapping::ModBinding {
@@ -229,6 +236,7 @@ mod tests {
                 0,
             );
             game.open_hud_editor(false);
+            assert!(matches!(game.screen, crate::game::Screen::HudEditor));
             game.close_hud_editor();
             assert!(!game.consume_click("test", "pending"));
         });

@@ -664,3 +664,36 @@ fn a_discard_reachable_from_material_needs_pack_coverage() {
     // A helper with a discard that `material` never calls cuts no hole.
     coverage_pack("", MATERIAL, helpers).unwrap();
 }
+
+/// A stage file with an expression chain of ten thousand terms is refused, naming the file and
+/// the line, instead of overflowing the parser's stack (which aborts the process): so is one
+/// longer than a shader may be. Both checks run before anything is parsed.
+#[test]
+fn a_pack_file_that_would_overflow_the_parser_is_refused() {
+    let chain = format!(
+        "fn post(input: PostInput) -> vec4<f32> {{\n    let a = input.color.r;\n    let x = a{};\n    return vec4<f32>(x);\n}}\n",
+        "+a".repeat(10_000)
+    );
+    let refused = pack_0_2(&chain, TONEMAP, "").unwrap_err();
+    assert_eq!(refused.len(), 1, "{refused:#?}");
+    assert_eq!(
+        (refused[0].file.as_str(), refused[0].line),
+        ("post.wgsl", 3)
+    );
+    assert!(
+        refused[0]
+            .message
+            .starts_with("an expression chains more than 200 operators ("),
+        "{}",
+        refused[0].message
+    );
+    let long = format!("{POST}// {}\n", "x".repeat(200_000));
+    let refused = pack_0_2(&long, TONEMAP, "").unwrap_err();
+    assert!(
+        refused[0].message.ends_with("a shader may hold 131072"),
+        "{refused:#?}"
+    );
+    // The same stage within the bounds is accepted, so the refusal is the chain's.
+    let short = chain.replace(&"+a".repeat(10_000), &"+a".repeat(150));
+    pack_0_2(&short, TONEMAP, "").unwrap();
+}

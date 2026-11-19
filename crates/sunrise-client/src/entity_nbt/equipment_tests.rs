@@ -46,7 +46,7 @@ const STAND: (&str, &str) = (
 /// Loads `tag` as an armor stand and saves it back over itself.
 fn stand_round_trip(tag: &Tag) -> Tag {
     let a = armor_stand_from_nbt(tag, 1).unwrap();
-    armor_stand_to_nbt(&a, UUID, Some(tag))
+    armor_stand_to_nbt(&a, UUID, Some(tag), &Default::default())
 }
 
 fn types(id: &str, species: Species) -> HashMap<String, Arc<MobType>> {
@@ -60,7 +60,7 @@ fn types(id: &str, species: Species) -> HashMap<String, Arc<MobType>> {
 /// Loads `tag` as a mob and saves it back over itself, as a chunk save does.
 fn round_trip(tag: &Tag, id: &str, species: Species) -> Tag {
     let m = mob_from_nbt(tag, &types(id, species), 1, None).unwrap();
-    mob_to_nbt(&m, UUID, Some(tag), None, |_| None)
+    mob_to_nbt(&m, UUID, Some(tag), None, |_| None, &Default::default())
 }
 
 fn bytes(tag: &Tag) -> Vec<u8> {

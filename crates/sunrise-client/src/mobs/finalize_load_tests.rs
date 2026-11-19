@@ -33,7 +33,7 @@ fn loaded(id: &str, species: Species, defaults: &[(&str, f64)], extra: &str) -> 
 fn saved(m: &Mob, input: &Tag) -> Vec<(String, f64)> {
     let mut out: Option<Vec<(String, f64)>> = None;
     for raw in [None, Some(input)] {
-        let tag = mob_to_nbt(m, [1, 2, 3, 4], raw, None, |_| None);
+        let tag = mob_to_nbt(m, [1, 2, 3, 4], raw, None, |_| None, &Default::default());
         let Some(Tag::List(list)) = tag.get("attributes") else {
             panic!("no attributes list");
         };
@@ -204,7 +204,14 @@ fn a_wolf_with_a_health_modifier_keeps_its_taming_base() {
         add_modifier(&mut m, Attr::MaxHealth, "test:boost", 10.0, Op::AddValue);
         for _ in 0..2 {
             assert_eq!(saved(&m, &tag), [(HEALTH.to_owned(), base)], "{extra}");
-            tag = mob_to_nbt(&m, [1, 2, 3, 4], Some(&tag), None, |_| None);
+            tag = mob_to_nbt(
+                &m,
+                [1, 2, 3, 4],
+                Some(&tag),
+                None,
+                |_| None,
+                &Default::default(),
+            );
             m = mob_from_nbt(&tag, &types("minecraft:wolf", Species::Wolf, &d), 1, None).unwrap();
         }
     }

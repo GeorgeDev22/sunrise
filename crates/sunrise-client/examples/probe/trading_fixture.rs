@@ -89,10 +89,10 @@ fn canon_str(t: &Tag) -> String {
     canon(t, &mut s);
     s
 }
-fn stack(s: Option<&ItemStack>) -> String {
+fn stack(s: Option<&ItemStack>, items: &Items) -> String {
     match s {
         None => "-".into(),
-        Some(s) => canon_str(&sunrise_client::save::item_to_nbt(s)),
+        Some(s) => canon_str(&sunrise_client::save::item_to_nbt(s, items)),
     }
 }
 
@@ -288,7 +288,7 @@ pub fn main() -> sunrise_client::Result<()> {
                     writeln!(
                         out,
                         "{name} v{k} {}",
-                        canon_str(&entity_nbt::offers_to_nbt(&m.trader.offers))
+                        canon_str(&entity_nbt::offers_to_nbt(&m.trader.offers, &items))
                     )?;
                 }
                 let mut line = format!("{name} draws");
@@ -361,7 +361,7 @@ pub fn main() -> sunrise_client::Result<()> {
                 }
                 let mob =
                     entity_nbt::mob_from_nbt(&tag, &types, 1, None).ok_or("unreadable villager")?;
-                let back = entity_nbt::mob_to_nbt(&mob, [0; 4], None, None, |_| None);
+                let back = entity_nbt::mob_to_nbt(&mob, [0; 4], None, None, |_| None, &items);
                 writeln!(out, "{name} snbt {text}")?;
                 let mut kept = sunrise_core::nbt::Compound::new();
                 for key in [
@@ -507,7 +507,7 @@ fn trade(
         let mut line = format!("{name} {k} {s} menu {open_menu}");
         if open_menu {
             for i in 0..3 {
-                write!(line, " {}", stack(menu.slot(i)))?;
+                write!(line, " {}", stack(menu.slot(i), env.items))?;
             }
             write!(
                 line,
@@ -515,11 +515,11 @@ fn trade(
                 menu.merchant.as_ref().map_or(0, |s| s.future_xp)
             )?;
         }
-        write!(line, " carried {}", stack(menu.carried.as_ref()))?;
+        write!(line, " carried {}", stack(menu.carried.as_ref(), env.items))?;
         line.push_str(" inv");
         for i in 0..36 {
             if let Some(st) = menu.player_item(i) {
-                write!(line, " {i}={}", stack(Some(st)))?;
+                write!(line, " {i}={}", stack(Some(st), env.items))?;
             }
         }
         let sess = menu

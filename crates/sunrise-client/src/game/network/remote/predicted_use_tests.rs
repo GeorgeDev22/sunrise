@@ -68,19 +68,9 @@ fn matrix(mods: mod_api::Mods) {
                             PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, player_z)).unwrap(),
                         );
                         if path >= 3 {
-                            let kind = game
-                                .res
-                                .mob_types()
-                                .get("minecraft:zombie")
-                                .unwrap()
-                                .clone();
-                            game.mobs.push(sunrise_client::mobs::Mob::new(
-                                42,
-                                kind,
-                                Vec3::new(0.5, 64.0, 2.5),
-                                0.0,
-                            ));
+                            game.spawn_entity(42, "minecraft:zombie", [0.5, 64.0, 2.5], [0.0; 3]);
                         }
+                        game.refresh_client_pick(1.0);
                         game.swing = Default::default();
                         let mut control = mod_api::ModBlockEntity::new(
                             "wasm_fixture:prediction_control".into(),
@@ -172,7 +162,7 @@ fn wasm_client_prediction_owns_the_hand_loop() {
                     let manifest = Package::read(&path).unwrap().manifest;
                     let info = mod_api::PackageInfo::new(
                         manifest.id.clone(),
-                        manifest.version.clone(),
+                        manifest.version.to_string(),
                         mod_api::PackageKind::Code,
                         mod_api::Side::Both,
                         vec![manifest.id.clone()],

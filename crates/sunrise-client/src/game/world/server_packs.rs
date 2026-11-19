@@ -19,7 +19,6 @@ use sunrise_client::{
     toasts::SystemToast,
     ui,
 };
-use sunrise_core::jmath;
 use sunrise_protocol::{packets::configuration::ResourcePackPush, servers};
 
 /// `ClientCommonPacketListenerImpl.PackConfirmScreen`: the packs it asks
@@ -191,26 +190,14 @@ impl PackNotifier {
             Some(size) if size > 0 => {
                 Text::tr("download.pack.progress.percent", &[&(bytes * 100 / size)])
             }
-            _ => Text::tr("download.pack.progress.bytes", &[&human_readable(bytes)]),
+            _ => Text::tr(
+                "download.pack.progress.bytes",
+                &[&sunrise_client::realms::human_readable(bytes)],
+            ),
         });
         (title, message)
     }
 }
-/// `com.mojang.realmsclient.Unit.humanReadable`, for
-/// `download.pack.progress.bytes`.
-fn human_readable(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let exp = (jmath::log(bytes as f64) / jmath::log(1024.0)) as i32;
-    let prefix = &"KMGTPE"[exp as usize - 1..exp as usize];
-    let value = bytes as f64 / 1024f64.powi(exp);
-    format!(
-        "{} {prefix}B",
-        sunrise_core::java_number::format_fixed(value, 1)
-    )
-}
-
 pub(super) fn saves() -> PathBuf {
     std::env::current_dir().unwrap_or_default().join("saves")
 }
@@ -332,19 +319,6 @@ impl Game<'_> {
         }
     }
 
-    /// Splitscreen: this player's answer for the server's packs, once it gave one (or its
-    /// server list entry did).
-    pub(super) fn pack_answer(&self) -> Option<bool> {
-        match self.server_packs.packs.prompt() {
-            Prompt::Allowed => Some(true),
-            Prompt::Declined => Some(false),
-            Prompt::Pending => None,
-        }
-    }
-    /// Splitscreen: this player is asked about a server's packs right now.
-    pub(super) fn pack_prompt_open(&self) -> bool {
-        self.server_packs.prompt.is_some()
-    }
     /// The prompt's answer (`PackConfirmScreen`'s callback): the server's
     /// setting follows it, declining a required pack disconnects, and every
     /// pack it asked about is pushed.
@@ -556,7 +530,7 @@ impl Game<'_> {
     /// The download notifiers' toasts, each in a free 32-pixel slot of the
     /// `ToastManager` (`hidden`, F1, keeps them timing out undrawn).
     pub(super) fn draw_pack_toasts(&mut self, batch: &mut HudBatch, hidden: bool) {
-        let multiplier = f64::from(self.settings.notification_display_time);
+        let multiplier = self.settings.notification_display_time;
         self.add_chunk_io_toasts();
         let mut used = self.toast_slots_used();
         let packs = &mut self.server_packs;
@@ -591,7 +565,7 @@ impl Game<'_> {
                 toast.draw(&self.gui.atlas, batch, 32.0 * slot as f32);
             }
         }
-        self.draw_split_hud(batch, hidden);
+        self.draw_controller_notice(batch);
     }
     /// A left click on the prompt: its answer when it hit a button.
     pub(super) fn pack_prompt_click(&mut self) -> Result<()> {
@@ -698,25 +672,5 @@ mod tests {
         let (send, receive) = std::sync::mpsc::channel::<download::Progress>();
         drop(send);
         assert!(!PackNotifier::new(receive, 1).poll(Some));
-    }
-
-    #[test]
-    fn sizes_read_as_realms_unit_human_readable() {
-        // com.mojang.realmsclient.Unit.humanReadable, run on the 26.3 jar.
-        for (bytes, text) in [
-            (0, "0 B"),
-            (1023, "1023 B"),
-            (1024, "1.0 KB"),
-            (1280, "1.3 KB"),
-            (1535, "1.5 KB"),
-            (10_000, "9.8 KB"),
-            (1_048_575, "1024.0 KB"),
-            (1_048_576, "1.0 MB"),
-            (52_428_800, "50.0 MB"),
-            (262_144_000, "250.0 MB"),
-            (1_073_741_824, "1.0 GB"),
-        ] {
-            assert_eq!(human_readable(bytes), text, "{bytes}");
-        }
     }
 }

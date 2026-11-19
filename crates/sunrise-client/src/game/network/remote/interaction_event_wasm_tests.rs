@@ -235,8 +235,15 @@ fn matrix(mods: mod_api::Mods) {
     // registration-time declarations (a custom statistic) refuse once the registry is frozen.
     mod_platform::testing::with_mods(mods.clone(), || {
         crate::game::api_values::install_parts(&mods).unwrap();
+        // The fixture declares blocks of its own: the game stands over the content root its mods make,
+        // built once for both of this matrix's games.
+        let base = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
+        let root = crate::game::mods::content_root(&base, &Default::default())
+            .unwrap()
+            .prepared()
+            .to_owned();
         for client in [false, true] {
-            with_interaction_game(client, |game| {
+            with_interaction_game_at(client, root.clone(), |game| {
                 let registry = game.pack.assets.registry;
                 let stone = registry.default_state("minecraft:stone").unwrap();
                 let lever = game
@@ -375,7 +382,7 @@ fn wasm_interaction_shared_matrix_on_guest_stack() {
     let manifest = Package::read(&path).unwrap().manifest;
     let info = mod_api::PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         mod_api::PackageKind::Code,
         mod_api::Side::Both,
         vec![manifest.id.clone()],

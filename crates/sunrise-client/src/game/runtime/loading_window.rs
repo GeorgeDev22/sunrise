@@ -104,6 +104,7 @@ pub(super) fn build_renderer(
     renderer.set_lines_shader(atlas.lines_shader.as_deref());
     renderer.set_world_text_shaders(&atlas.text_shaders);
     renderer.set_sky_shaders(atlas.sky_shader.as_deref(), atlas.stars_shader.as_deref());
+    renderer.set_lightmap_shader(atlas.lightmap_shader.as_deref());
     renderer.set_custom_sky(&*pack.custom_sky);
     renderer.set_shared_material_maps(&atlas.material_maps);
     let cit_glints = pack.item_renderer.cit.as_ref().map(|c| &c.glint_textures);
@@ -401,8 +402,6 @@ pub(super) fn start_game<'a>(
     }
     // The atlases the initial load stitched, the models it baked, then FMLClientSetupEvent: once
     // per process, here in `run`, after the initial load applied.
-    // A dedicated server has no client and returned above; a splitscreen guest's `run` is
-    // another local player of the same process.
     game.publish_initial_client_models()?;
     // Finish Setup -> Config -> World before any screen, connection, input or tick hooks.
     game.native_configs_client_start();

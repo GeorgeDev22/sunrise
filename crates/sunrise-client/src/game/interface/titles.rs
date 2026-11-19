@@ -92,7 +92,7 @@ impl Game<'_> {
         self.saving_indicator.tick(saving);
         let held = self.held_name();
         self.tool_highlight
-            .tick(held, f64::from(self.settings.notification_display_time));
+            .tick(held, self.settings.notification_display_time);
         self.tool_highlight.tip = self.highlight_tip();
     }
     /// `IItemExtension.getHighlightTip` of the selected stack, while its name

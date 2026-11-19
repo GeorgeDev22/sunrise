@@ -393,7 +393,7 @@ impl Game<'_> {
             e.head_yaw = a.yaw;
             e.velocity = [a.velocity.x, a.velocity.y, a.velocity.z];
             let mut flags = 0i8;
-            if a.fire_ticks > 0 {
+            if a.is_on_fire() {
                 flags |= 1;
             }
             if a.invisible {
@@ -573,6 +573,7 @@ impl Game<'_> {
             ));
         }
         self.lan_projectile_states(out, after);
+        self.lan_general_states(out, after);
         for o in self.others.iter().filter(|o| o.id > after) {
             let p = o.position;
             let e = add_state(out, o.id, &o.kind, [p.x, p.y, p.z], o.yaw, false);
@@ -797,6 +798,30 @@ impl Game<'_> {
             assign_entity_id(next, id);
         });
         assign_resident_ids!(self.breath_clouds, b, next, None);
+    }
+
+    /// A mod's general entity rows (#792), as the tracker reads them. Their type key is no
+    /// entity type a client knows, so pairing introduces them on `sunrise:general_entity`
+    /// (`lan/entity.rs`), to Sunrise clients only; their own data are their synced attachments.
+    /// Only these states are marked general: a quarantined record, which keeps its type's key,
+    /// is no row and is tracked as an unknown kind (never paired).
+    fn lan_general_states(&self, out: &mut States, after: u32) {
+        let catalog = super::general::general_type_catalog();
+        let rows = self.resident_entities.general.rows.iter();
+        for row in rows.filter(|row| row.id > after) {
+            let kind = catalog.key(row.type_slot);
+            let e = out.add(
+                row.id as i32,
+                sunrise_client::lan::playerdata::ints_uuid(row.uuid),
+                kind,
+            );
+            let (p, v) = (row.position, row.velocity);
+            e.position = [p.x, p.y, p.z];
+            e.velocity = [v.x, v.y, v.z];
+            [e.yaw, e.pitch] = row.rotation;
+            e.head_yaw = row.rotation[0];
+            e.general = true;
+        }
     }
 
     /// Primed TNT, falling blocks, projectiles, tridents, firework rockets and

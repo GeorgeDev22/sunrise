@@ -7,8 +7,9 @@ mod below_world;
 mod friction_tests;
 #[cfg(test)]
 mod lifetime_tests;
+#[cfg(test)]
+mod paddle_tests;
 mod placement;
-pub(super) use placement::OutlineFluidRay;
 
 use super::{Game, InteractTarget, entity::Entity, entity_culling::at, view_vector};
 use std::{collections::HashMap, f32::consts::PI, sync::Arc};
@@ -124,6 +125,56 @@ pub(super) struct Boat {
     /// `Entity.tickCount`, for the 100 ticks a saved holder is waited for.
     pub age: i32,
     pub random: LegacyRandom,
+    /// The server teleport the boat this client drives is easing to.
+    pub(super) lerp: Option<DrivenLerp>,
+}
+/// `LinearInterpolationHandler` of the boat this client drives: where a server
+/// teleport takes it (`interpolationData`), the steps left, and where the boat
+/// was after the last step (`lastPositionAndRotation`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct DrivenLerp {
+    pub target: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    steps: u32,
+    last: (Vec3, f32, f32),
+}
+/// `LinearInterpolationHandler.DEFAULT_INTERPOLATION_STEPS`, the length
+/// `AbstractBoat.createInterpolationHandler` gives it.
+const LERP_STEPS: u32 = 3;
+/// `Mth.wrapDegrees(double)`.
+fn wrap_degrees_f64(angle: f64) -> f64 {
+    let mut a = angle % 360.0;
+    if a >= 180.0 {
+        a -= 360.0;
+    }
+    if a < -180.0 {
+        a += 360.0;
+    }
+    a
+}
+/// `restituteMovementAfterCollisions` for a boat, which doesn't bounce: each axis the
+/// move was blocked on stops, a sideways one told by `Mth.equal`, the vertical one by
+/// any difference (`verticalCollision`), as `Entity.move` tells them.
+fn stop_blocked_axes(velocity: Vec3, movement: Vec3, moved: Vec3) -> Vec3 {
+    use sunrise_world::entity_move::different;
+    Vec3::new(
+        if different(movement.x, moved.x) {
+            0.0
+        } else {
+            velocity.x
+        },
+        if moved.y != movement.y {
+            0.0
+        } else {
+            velocity.y
+        },
+        if different(movement.z, moved.z) {
+            0.0
+        } else {
+            velocity.z
+        },
+    )
 }
 /// `ChestBoat.CONTAINER_SIZE`.
 pub(super) const CHEST_SLOTS: usize = 27;
@@ -251,7 +302,48 @@ impl Boat {
             leash_spin: 0.0,
             age: 0,
             random: sunrise_client::random_source::entity(),
+            lerp: None,
         }
+    }
+    /// `AbstractInterpolationHandler.interpolateTo`: the boat eases to a server
+    /// teleport over `LERP_STEPS` ticks, unless it is easing to that spot already.
+    pub(super) fn interpolate_to(&mut self, target: Vec3, yaw: f32, pitch: f32) {
+        if self
+            .lerp
+            .is_some_and(|l| l.yaw == yaw && l.pitch == pitch && l.target == target)
+        {
+            return;
+        }
+        self.lerp = Some(DrivenLerp {
+            target,
+            yaw,
+            pitch,
+            steps: LERP_STEPS,
+            last: (self.position, self.yaw, self.pitch),
+        });
+    }
+    /// The client took over a boat that was easing toward the server's position
+    /// (`target` and the rotation, `steps` to go): its LinearInterpolationHandler
+    /// goes on, now following the boat's own moves too.
+    pub(super) fn go_on_easing(&mut self, target: Vec3, rotation: (f32, f32), steps: u32) {
+        if steps == 0 || self.lerp.is_some() {
+            return;
+        }
+        self.lerp = Some(DrivenLerp {
+            target,
+            yaw: rotation.0,
+            pitch: rotation.1,
+            steps,
+            last: (self.position, self.yaw, self.pitch),
+        });
+    }
+    /// `Entity.getClientPositionAndRotation`: where the boat is easing to, or
+    /// where it is when it isn't.
+    pub(super) fn client_position(&self) -> (Vec3, f32, f32) {
+        self.lerp
+            .map_or((self.position, self.yaw, self.pitch), |l| {
+                (l.target, l.yaw, l.pitch)
+            })
     }
     /// A chest boat or chest raft.
     pub fn with_chest(mut self) -> Self {
@@ -272,7 +364,12 @@ impl Boat {
     }
     /// `Entity.saveWithoutId` with `AbstractChestBoat`'s items: the loaded
     /// compound `raw` under the live fields.
-    pub(super) fn to_nbt(&self, uuid: [i32; 4], raw: Option<&Tag>) -> Tag {
+    pub(super) fn to_nbt(
+        &self,
+        uuid: [i32; 4],
+        raw: Option<&Tag>,
+        items: &crate::items::Items,
+    ) -> Tag {
         let mut tag = sunrise_client::entity_nbt::boat_to_nbt(
             &self.entity_type(),
             self.position,
@@ -282,6 +379,7 @@ impl Boat {
             uuid,
             raw,
             self.chest.then_some(&self.items[..]),
+            items,
         );
         sunrise_client::entity_nbt::write_saved_flags(&mut tag, self.on_ground, self.no_gravity);
         if let Tag::Compound(map) = &mut tag {
@@ -766,9 +864,58 @@ impl Game<'_> {
         b.fall_distance
     }
     /// `AbstractBoat.tick` for one boat (`controlled` when the player rides it).
+    /// `AbstractInterpolationHandler.interpolate` for the boat this client
+    /// drives: its own moves since the last step carry the target along (where
+    /// the boat fits there), then `LinearInterpolationHandler.doInterpolate`
+    /// takes a `1 / steps` share of the way.
+    fn interpolate_driven_boat(&self, b: &mut Boat) {
+        let Some(mut l) = b.lerp.take() else {
+            return;
+        };
+        let moved = b.position.subtract(l.last.0);
+        if moved.length_squared() > f64::from(1.0e-5_f32) {
+            let to = l.target.add_vector(moved);
+            let mut scene = SceneCollisions {
+                world: &self.world,
+                binding: self.collision,
+                subject: None,
+            };
+            if scene.unobstructed(Boat::bounds_at(to)).unwrap_or(false) {
+                l.target = to;
+            }
+        }
+        l.yaw += b.yaw - l.last.1;
+        l.pitch += b.pitch - l.last.2;
+        let alpha = 1.0 / f64::from(l.steps);
+        b.position = b.position.lerp(l.target, alpha);
+        let yaw = f64::from(b.yaw) + alpha * wrap_degrees_f64(f64::from(l.yaw) - f64::from(b.yaw));
+        let pitch = f64::from(b.pitch) + alpha * (f64::from(l.pitch) - f64::from(b.pitch));
+        // Entity.setRot
+        b.yaw = yaw as f32 % 360.0;
+        b.pitch = pitch as f32 % 360.0;
+        l.steps -= 1;
+        l.last = (b.position, b.yaw, b.pitch);
+        if l.steps > 0 {
+            b.lerp = Some(l);
+        }
+    }
     pub(super) fn tick_boat(&mut self, mut b: Boat, controlled: bool) -> Boat {
         b.previous = b.position;
         b.previous_yaw = b.yaw;
+        // Entity.commonTick: the client's interpolation, before the boat ticks.
+        if controlled {
+            let from = b.position;
+            self.interpolate_driven_boat(&mut b);
+            // A step that crosses a section is filed where it happens, not folded into
+            // the end-of-tick scan with the boat's own move.
+            if from != b.position {
+                self.entity_section_step(
+                    b.id,
+                    [from.x, from.y, from.z],
+                    [b.position.x, b.position.y, b.position.z],
+                );
+            }
+        }
         // Entity.baseTick ends with Leashable.tickLeash, on a server only
         // (a ridden boat's lead ticks in `tick_boats`).
         if !controlled && self.remote.is_none() {
@@ -886,9 +1033,12 @@ impl Game<'_> {
             if down {
                 acceleration -= 0.005;
             }
-            let r = b.yaw.to_radians();
-            b.velocity.x += f64::from((-r).sin() * acceleration);
-            b.velocity.z += f64::from(r.cos() * acceleration);
+            // AbstractBoat.controlBoat: Mth's sine table, at the float angle.
+            use sunrise_core::geometry::trig;
+            b.velocity.x +=
+                f64::from(trig::sin(f64::from(-b.yaw * trig::DEG_TO_RAD)) * acceleration);
+            b.velocity.z +=
+                f64::from(trig::cos(f64::from(b.yaw * trig::DEG_TO_RAD)) * acceleration);
             b.paddling = [right && !left || up, left && !right || up];
         }
         // Entity.move: collisions zero the blocked components, the world border's
@@ -925,15 +1075,7 @@ impl Game<'_> {
             );
             b.on_ground = movement.y < 0.0 && moved.y > movement.y;
             b.fall_distance = self.boat_fall(&b, moved.y);
-            if (moved.x - movement.x).abs() > 1.0e-7 {
-                b.velocity.x = 0.0;
-            }
-            if (moved.z - movement.z).abs() > 1.0e-7 {
-                b.velocity.z = 0.0;
-            }
-            if (moved.y - movement.y).abs() > 1.0e-7 {
-                b.velocity.y = 0.0;
-            }
+            b.velocity = stop_blocked_axes(b.velocity, movement, moved);
         }
         // AbstractBoat.tick's applyEffectsFromBlocks: powder snow or a cobweb makes the
         // boat stuck, which slows its next move, and resets its fall.
@@ -1609,19 +1751,19 @@ impl Game<'_> {
     }
     /// Where the boat at `i` lets a player facing `yaw` off.
     pub(super) fn boat_player_dismount_target(&self, i: usize, yaw: f32) -> Vec3 {
-        self.boat_dismount_target(&self.boats[i], 0.6, yaw)
+        // The player's bbWidth, a float.
+        self.boat_dismount_target(&self.boats[i], f64::from(0.6_f32), yaw)
     }
-    /// `getDismountLocationForPassenger` for a passenger `width` wide
-    /// facing `yaw`.
+    /// `AbstractBoat.getDismountLocationForPassenger` for a passenger `width` wide (its float `getBbWidth()`,
+    /// widened) facing `yaw`: the escape vector from a box `getBbWidth() * Mth.SQRT_OF_TWO` wide, in float.
     pub(super) fn boat_dismount_target(&self, b: &Boat, width: f64, yaw: f32) -> Vec3 {
-        let r = yaw.to_radians();
-        let distance = (WIDTH * std::f64::consts::SQRT_2 + width + 1.0e-5) / 2.0;
-        let (s, c) = (-(r.sin()) as f64, r.cos() as f64);
-        let m = s.abs().max(c.abs());
-        let (x, z) = (
-            b.position.x + s * distance / m,
-            b.position.z + c * distance / m,
+        let sqrt_of_two = 2.0_f64.sqrt() as f32;
+        let escape = sunrise_world::living_air::escape_vector(
+            f64::from(WIDTH as f32 * sqrt_of_two),
+            width,
+            yaw,
         );
+        let (x, z) = (b.position.x + escape.x, b.position.z + escape.z);
         let top = b.bounds().max_position().y;
         let (bx, by, bz) = (x.floor() as i32, top.floor() as i32, z.floor() as i32);
         let below = self.res.facts().get(self.world.block(bx, by - 1, bz));
@@ -1721,13 +1863,22 @@ impl Game<'_> {
         Some(boat)
     }
     pub(super) fn boat_hit(&self) -> Option<(usize, f64)> {
+        let mut pick = crate::game::pick_accumulator::PickAccumulator::new(self.entity_reach);
+        self.boat_hit_with_pick(&mut pick)
+    }
+    pub(super) fn boat_hit_with_pick(
+        &self,
+        pick: &mut crate::game::pick_accumulator::PickAccumulator,
+    ) -> Option<(usize, f64)> {
+        if let Some(hit) = self.cached_entity_pick() {
+            let (entity, distance, _) = hit?;
+            let index = self.boats.iter().position(|f| f.id == entity.id())?;
+            return Some((index, distance));
+        }
         let (eye, dir) = self.aim()?;
         let reach: f64 = self.entity_reach;
         let mut best: Option<(usize, f64)> = None;
         for (i, b) in self.boats.iter().enumerate() {
-            if Some(b.id) == self.riding {
-                continue;
-            }
             let bb = b.bounds();
             let (lo, hi) = (bb.min_position(), bb.max_position());
             let (lo, hi) = ([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]);
@@ -1745,7 +1896,7 @@ impl Game<'_> {
                 t0 = t0.max(ta);
                 t1 = t1.min(tb);
             }
-            if hit && t0 <= t1 && best.is_none_or(|b| t0 < b.1) {
+            if hit && t0 <= t1 && pick.consider(self, b.id, t0) {
                 best = Some((i, t0));
             }
         }
@@ -2197,6 +2348,65 @@ mod tests {
         Boat::new(1, Arc::from("oak"), Vec3::ZERO, 0.0)
     }
 
+    /// A boat the client takes over while it eases toward the server's position goes on
+    /// easing there and reports that spot (the handler is the entity's, not the driver's).
+    #[test]
+    #[ignore = "daily"]
+    fn a_boat_taken_over_mid_way_goes_on_easing() {
+        super::super::native_entity_refs::tests::with_game(|game| {
+            let mut b = Boat::new(9, "oak".into(), Vec3::new(0.5, 64.0, 2.5), 0.0);
+            b.go_on_easing(Vec3::new(0.5, 64.0, 3.5), (0.0, 0.0), 2);
+            assert_eq!(b.client_position().0, Vec3::new(0.5, 64.0, 3.5));
+            game.interpolate_driven_boat(&mut b);
+            assert!((b.position.z - 3.0).abs() < 1e-9, "{}", b.position.z);
+            game.interpolate_driven_boat(&mut b);
+            assert!((b.position.z - 3.5).abs() < 1e-9, "{}", b.position.z);
+            assert!(b.lerp.is_none());
+        });
+    }
+
+    /// The boat this client drives eases to a server teleport over three ticks
+    /// (LinearInterpolationHandler), and until it gets there it reports the spot it is
+    /// going to (getClientPositionAndRotation).
+    #[test]
+    #[ignore = "daily"]
+    fn a_driven_boat_eases_to_a_teleport_and_reports_where_it_is_going() {
+        super::super::native_entity_refs::tests::with_game(|game| {
+            let mut b = Boat::new(9, "oak".into(), Vec3::new(0.5, 64.0, 2.5), 0.0);
+            b.interpolate_to(Vec3::new(0.5, 64.0, 6.5), 90.0, 0.0);
+            let mut steps = Vec::new();
+            for _ in 0..3 {
+                game.interpolate_driven_boat(&mut b);
+                steps.push((b.position.z, b.yaw, b.client_position()));
+            }
+            let expected = [
+                (2.5 + 4.0 / 3.0, 30.0),
+                (2.5 + 8.0 / 3.0, 60.0),
+                (6.5, 90.0),
+            ];
+            for (i, ((z, yaw, _), (want_z, want_yaw))) in steps.iter().zip(expected).enumerate() {
+                assert!((z - want_z).abs() < 1e-9, "step {i}: z {z}");
+                assert!((yaw - want_yaw).abs() < 1e-4, "step {i}: yaw {yaw}");
+            }
+            assert_eq!(steps[0].2, (Vec3::new(0.5, 64.0, 6.5), 90.0, 0.0));
+            assert_eq!(steps[1].2, (Vec3::new(0.5, 64.0, 6.5), 90.0, 0.0));
+            assert_eq!(steps[2].2, (b.position, b.yaw, b.pitch));
+            assert!(b.lerp.is_none());
+        });
+    }
+
+    /// Entity.move's collision tests: a vertical move cut short by any amount stops the
+    /// boat's fall, a sideways one only when it is off by `Mth.equal`'s 1e-5 or more.
+    #[test]
+    fn a_boat_stops_on_the_axes_vanilla_counts_as_blocked() {
+        let velocity = Vec3::new(0.3, -1.0e-8, 0.2);
+        let moved = Vec3::new(0.3 - 1.0e-6, 0.0, 0.2 - 1.0e-4);
+        assert_eq!(
+            stop_blocked_axes(velocity, velocity, moved),
+            Vec3::new(0.3, 0.0, 0.0)
+        );
+    }
+
     #[test]
     #[ignore = "daily"]
     fn destruction_and_underwater_ejection_snap_rejected_passenger_descendants() {
@@ -2385,13 +2595,21 @@ mod tests {
             Vec3::new(0.0, 64.0, 0.0),
             0.0,
         );
-        assert_eq!(b.to_nbt([0; 4], None).get("TicksFrozen"), None);
+        assert_eq!(
+            b.to_nbt([0; 4], None, &Default::default())
+                .get("TicksFrozen"),
+            None
+        );
         b.ticks_frozen = 6;
-        let saved = b.to_nbt([0; 4], None);
+        let saved = b.to_nbt([0; 4], None, &Default::default());
         assert_eq!(saved.get("TicksFrozen"), Some(&Tag::Int(6)));
         assert_eq!(saved_ticks_frozen(&saved), 6);
         b.ticks_frozen = 0;
-        assert_eq!(b.to_nbt([0; 4], Some(&saved)).get("TicksFrozen"), None);
+        assert_eq!(
+            b.to_nbt([0; 4], Some(&saved), &Default::default())
+                .get("TicksFrozen"),
+            None
+        );
     }
     /// `PowderSnowBlock.entityInside`'s snowflake: only for an entity that moved sideways, and
     /// then only when a coin falls so.

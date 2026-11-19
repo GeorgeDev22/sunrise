@@ -11,7 +11,7 @@
 //! stays reserved, so no mod may declare it (`Local::capture`), and the generic packet API
 //! still refuses it.
 use sunrise_protocol::{
-    attachment_sync,
+    attachment_sync, collider_sync, general_entity,
     payload_negotiation::{Error, Flow, ManifestBuilder, Phase, RegistrationPhase},
 };
 
@@ -23,13 +23,28 @@ pub(super) struct Declaration {
     pub version: &'static str,
 }
 
-/// Every engine declaration. Attachment sync: play, clientbound only.
-pub(super) const DECLARATIONS: &[Declaration] = &[Declaration {
-    phase: Phase::Play,
-    id: attachment_sync::CHANNEL,
-    flow: Flow::ToClient,
-    version: attachment_sync::VERSION,
-}];
+/// Every engine declaration. Attachment sync, collider sync and general entity spawns: play,
+/// clientbound only.
+pub(super) const DECLARATIONS: &[Declaration] = &[
+    Declaration {
+        phase: Phase::Play,
+        id: attachment_sync::CHANNEL,
+        flow: Flow::ToClient,
+        version: attachment_sync::VERSION,
+    },
+    Declaration {
+        phase: Phase::Play,
+        id: collider_sync::CHANNEL,
+        flow: Flow::ToClient,
+        version: collider_sync::VERSION,
+    },
+    Declaration {
+        phase: Phase::Play,
+        id: general_entity::CHANNEL,
+        flow: Flow::ToClient,
+        version: general_entity::VERSION,
+    },
+];
 
 /// Add the engine declarations to an installation's manifest, as optional entries.
 pub(super) fn register(manifest: &mut ManifestBuilder) -> Result<(), Error> {

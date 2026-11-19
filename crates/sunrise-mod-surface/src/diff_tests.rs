@@ -3,6 +3,78 @@
 use super::*;
 use crate::*;
 
+#[test]
+fn engine_catalogs_share_the_diff_and_note_gate() {
+    let point = |signature_hash: &str| {
+        EngineItem::new(
+            "point:game::tick".into(),
+            EngineContract::Point {
+                name: "game_tick".into(),
+                signature_hash: signature_hash.into(),
+            },
+        )
+    };
+    let old = functions(vec![]).with_engine_items(vec![
+        point("old"),
+        EngineItem::new(
+            "loop:entities.tick".into(),
+            EngineContract::Loop {
+                entry: "Game::tick_entities".into(),
+                generic: "tick_entities_with".into(),
+                slot: "Slot".into(),
+                side: "server".into(),
+            },
+        ),
+    ]);
+    let new = functions(vec![]).with_engine_items(vec![
+        point("new"),
+        EngineItem::new(
+            "internal:fn:game::step".into(),
+            EngineContract::Internal {
+                signature: "fn step()".into(),
+                signature_hash: "step".into(),
+                shape_only: false,
+                opaque_reason: None,
+            },
+        ),
+    ]);
+    let mut report = diff(&old, &new);
+    assert_eq!(
+        report
+            .changes
+            .iter()
+            .map(|c| (c.id.as_str(), c.kind, c.class))
+            .collect::<Vec<_>>(),
+        [
+            ("loop:entities.tick", ChangeKind::Removed, Class::Breaking),
+            ("point:game::tick", ChangeKind::Changed, Class::Breaking),
+            ("internal:fn:game::step", ChangeKind::Added, Class::Advisory),
+        ]
+    );
+    assert_eq!(report.changes[1].what, ["signature hash: `old` → `new`"]);
+    assert_eq!(report.undeclared().count(), 2);
+    assert!(
+        report
+            .attach(
+                &Note {
+                    file: "tick.toml".into(),
+                    why: "Tick moved.".into(),
+                    migrate: None
+                },
+                &["loop:entities.tick".into(), "point:game::tick".into()],
+            )
+            .is_empty()
+    );
+    assert_eq!(report.undeclared().count(), 0);
+
+    let only_internal = functions(vec![]).with_engine_items(vec![new.engine_items[0].clone()]);
+    let report = diff(&only_internal, &functions(vec![]));
+    assert_eq!(report.verdict, Verdict::Advisory);
+    assert_eq!(report.undeclared().count(), 0);
+    assert_eq!(report.changes[0].kind, ChangeKind::Removed);
+    assert_eq!(report.changes[0].class, Class::Advisory);
+}
+
 fn hook(name: &str, side: Side, arguments: &[(&str, &str)]) -> Hook {
     Hook::new(
         format!("hook:{name}"),
@@ -1273,4 +1345,56 @@ fn a_called_trait_gaining_a_supertrait_that_breaks_dyn_breaks() {
         let (id, _, c, what, _) = only(&d);
         assert_eq!((id, c, what), ("trait:Host", class, vec![line]), "{bound}");
     }
+}
+
+#[test]
+fn removing_an_extension_tag_is_breaking_and_old_readers_ignore_the_collection() {
+    let empty = functions(vec![]);
+    let old = empty.clone().with_extension_tags(vec![ExtensionTag {
+        registry: "block".into(),
+        id: "sunrise:villager_secondary_poi/farmer".into(),
+        doc: "Additional secondary work blocks.".into(),
+    }]);
+    let removed = diff(&old, &empty);
+    assert_eq!(removed.verdict, Verdict::Breaking);
+    assert_eq!(
+        removed.changes[0].id,
+        "extension_tag:block/sunrise:villager_secondary_poi/farmer"
+    );
+    assert_eq!(removed.changes[0].kind, ChangeKind::Removed);
+    assert_ne!(old.hash, empty.hash);
+    let mut redocumented = old.clone();
+    redocumented.extension_tags[0].doc = "Clarified words.".into();
+    assert_eq!(diff(&old, &redocumented).verdict, Verdict::Identical);
+    assert_eq!(old.document_hash(), redocumented.document_hash());
+    // The pre-extension reader's document fields, with serde's normal unknown-field policy.
+    #[derive(serde::Deserialize)]
+    struct OldReader {
+        schema: u32,
+        hash: String,
+        hooks: Vec<Hook>,
+        traits: Vec<Trait>,
+        handles: Vec<Function>,
+        functions: Vec<Function>,
+        macros: Vec<Macro>,
+        types: Vec<Type>,
+        parts: Vec<Part>,
+        capabilities: Vec<Capability>,
+        behaviours: Vec<Behaviour>,
+    }
+    let text = serde_json::to_string(&old).unwrap();
+    let read: OldReader = serde_json::from_str(&text).unwrap();
+    assert_eq!(read.schema, SCHEMA);
+    assert_eq!(read.hash, old.hash);
+    assert!(
+        read.hooks.is_empty()
+            && read.traits.is_empty()
+            && read.handles.is_empty()
+            && read.functions.is_empty()
+            && read.macros.is_empty()
+            && read.types.is_empty()
+            && read.parts.is_empty()
+            && read.capabilities.is_empty()
+            && read.behaviours.is_empty()
+    );
 }

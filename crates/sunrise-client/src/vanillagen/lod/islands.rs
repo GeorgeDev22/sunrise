@@ -7,8 +7,9 @@
 //! the direct sampler always drew. Refined, visited and saved chunks still win.
 use super::vegetation::hash;
 use crate::{
+    columns::Surface,
     fast_hash::FxHashMap,
-    lod::{Column, Span, Surface},
+    lod::{Column, Span},
     vanillagen::VanillaTerrain,
 };
 use std::{collections::VecDeque, sync::Arc};

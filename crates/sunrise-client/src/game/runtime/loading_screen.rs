@@ -32,9 +32,7 @@ pub(super) fn run_event_loop(mut game: Game<'_>) -> Result<()> {
         }
         return result;
     }
-    let mut split = split::Split::new(game);
-    let result = EventLoop::new()?.run_app(&mut split);
-    game = split.host;
+    let result = EventLoop::new()?.run_app(&mut game);
     narrator::stop();
     leave_fullscreen_after(&result, &mut game.settings);
     let result = result
@@ -64,6 +62,8 @@ pub(super) struct Loading {
     pub(super) started: Instant,
     pub(super) panorama_rotation: sunrise_client::gfx::panorama::Rotation,
     pub(super) progress: Progress,
+    /// The bar as drawn, easing toward `progress` (`LoadingOverlay.currentProgress`).
+    pub(super) bar: f32,
     pub(super) receiver: Receiver<LoaderMsg>,
     pub(super) loaded: Option<std::result::Result<Loaded, String>>,
     /// The loader's `Done` arrived: its channel closing afterwards is expected.
@@ -305,7 +305,7 @@ impl Loading {
             );
         }
     }
-    pub(super) fn finish(&mut self, mut loaded: Loaded) -> Result<Option<split::Split<'static>>> {
+    pub(super) fn finish(&mut self, mut loaded: Loaded) -> Result<Option<Game<'static>>> {
         let handoff_at = Instant::now();
         let mut options = self.options.take().ok_or("loading already finished")?;
         options.resources = loaded.root.clone();
@@ -407,7 +407,7 @@ impl Loading {
             renderer_ms,
             game_ms
         );
-        Ok(Some(split::Split::new(game)))
+        Ok(Some(game))
     }
 }
 
@@ -415,7 +415,7 @@ impl Loading {
 /// the game itself, on the same event loop and window.
 pub(super) enum App {
     Loading(Box<Loading>),
-    Ready(Box<split::Split<'static>>),
+    Ready(Box<Game<'static>>),
 }
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -438,7 +438,7 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         enum Step {
             Waiting,
-            Ready(Box<split::Split<'static>>),
+            Ready(Box<Game<'static>>),
             Done,
             Failed(Box<dyn std::error::Error>),
         }

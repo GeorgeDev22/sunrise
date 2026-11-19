@@ -388,3 +388,33 @@ impl super::Remote {
         self.tab_players.insert(self.profile, me);
     }
 }
+
+#[test]
+#[ignore = "daily"]
+fn client_base_tick_preserves_previous_eye_sample() {
+    mod_platform::testing::with_mods(Vec::new().into(), || {
+        crate::game::native_entity_refs::tests::with_client_game(|game| {
+            let _server = crate::game::native_client_session::tests::logged_client(game);
+            game.spawn_entity(15, "minecraft:zombie", [0.0; 3], [0.0; 3]);
+            game.mobs
+                .iter_mut()
+                .find(|m| m.id == 15)
+                .unwrap()
+                .fluids
+                .eye_in_water = true;
+            game.tick_remote_entities(true);
+            let m = game.mobs.iter_mut().find(|m| m.id == 15).unwrap();
+            assert!(m.was_eye_in_water);
+            assert!(!m.fluids.eye_in_water);
+            game.tick_remote_entities(true);
+            assert!(
+                !game
+                    .mobs
+                    .iter()
+                    .find(|m| m.id == 15)
+                    .unwrap()
+                    .was_eye_in_water
+            );
+        });
+    });
+}

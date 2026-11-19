@@ -16,7 +16,9 @@ pub(super) struct CreditEntity {
 pub(super) struct CreditPlan {
     victim: i32,
     player: Option<(PlayerCredit, CreditEntity)>,
-    previous_mob: CreditEntity,
+    /// The mob the victim's hurt memory names, by that recorded id, and the
+    /// entity the credit resolves to now (`LivingRef::kill_credit`'s).
+    previous_mob: (u32, CreditEntity),
     attacking_mob: CreditEntity,
     responsibility: Option<Option<(PlayerCredit, CreditEntity)>>,
     fixed: CreditEntity,
@@ -65,8 +67,8 @@ impl KnockbackCredit for CreditLoan<'_> {
                         Some(Who::Mob(id)) if id as i32 == self.plan.attacking_mob.id => {
                             Some(&self.plan.attacking_mob)
                         }
-                        Some(Who::Mob(id)) if id as i32 == self.plan.previous_mob.id => {
-                            Some(&self.plan.previous_mob)
+                        Some(Who::Mob(id)) if id == self.plan.previous_mob.0 => {
+                            Some(&self.plan.previous_mob.1)
                         }
                         _ => None,
                     }
@@ -79,12 +81,23 @@ impl KnockbackCredit for CreditLoan<'_> {
 }
 
 impl Game<'_> {
+    /// The credited entity and its main hand: in the level in place, or a mob
+    /// a kill credit found in another loaded level.
     fn knockback_credit_entity(&self, id: i32) -> CreditEntity {
-        if id == 0 || self.entity(id as u32).is_none() {
+        if id == 0 {
             return CreditEntity::default();
         }
-        let [main, _] = self.attack_of(id).held;
-        CreditEntity { id, main }
+        if self.entity(id as u32).is_some() {
+            let [main, _] = self.attack_of(id).held;
+            return CreditEntity { id, main };
+        }
+        match self.mob_in_other_level(id as u32) {
+            Some((_, mob)) => CreditEntity {
+                id,
+                main: mob.extra.main_hand_stack().cloned(),
+            },
+            None => CreditEntity::default(),
+        }
     }
 
     fn knockback_player_credit(&self, credit: PlayerCredit) -> (PlayerCredit, CreditEntity) {
@@ -146,6 +159,10 @@ impl Game<'_> {
             .and_then(|who| match who {
                 Who::Mob(id) => Some(id),
                 Who::Player => None,
+            })
+            .map(|id| {
+                let credited = self.credited_entity(id).map_or(0, |e| e.id() as i32);
+                (id, entity(credited))
             });
         let fixed = if observed && mob.is_none() {
             self.entity(victim as u32)
@@ -159,7 +176,7 @@ impl Game<'_> {
         CreditPlan {
             victim,
             player: player.map(credited_player),
-            previous_mob: previous_mob.map(|id| entity(id as i32)).unwrap_or_default(),
+            previous_mob: previous_mob.unwrap_or_default(),
             attacking_mob: match attacker {
                 Some(Who::Mob(id)) => entity(id as i32),
                 _ => CreditEntity::default(),

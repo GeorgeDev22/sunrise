@@ -94,7 +94,14 @@ fn ghast_explosion_power_sizes_the_fireball_it_shoots() {
                     expected,
                     "ExplosionPower={saved:?}"
                 );
-                let back = crate::entity_nbt::mob_to_nbt(&m, [0; 4], Some(&tag), None, |_| None);
+                let back = crate::entity_nbt::mob_to_nbt(
+                    &m,
+                    [0; 4],
+                    Some(&tag),
+                    None,
+                    |_| None,
+                    &Default::default(),
+                );
                 assert_eq!(
                     back.get("ExplosionPower"),
                     Some(&Tag::Byte(expected as i8)),

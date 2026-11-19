@@ -106,6 +106,7 @@ impl Game<'_> {
                     width: 1,
                     height: 1,
                     check_interval: 0,
+                    ticks: 0,
                 });
                 let (lo, hi) = self.paintings[0].bounds();
                 Vec3::new(
@@ -132,6 +133,7 @@ impl Game<'_> {
                     fixed: kind == "fixed_frame",
                     invisible: false,
                     check_interval: 0,
+                    ticks: 0,
                     custom_name: None,
                     random: sunrise_core::random::LegacyRandom::new(0),
                 });

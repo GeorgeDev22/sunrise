@@ -436,7 +436,13 @@ impl PlayerEffects {
     /// ticked; the next tick refreshes Raid Omen and drops Bad Omen.
     pub fn tick_with(
         &mut self,
-        omen: &mut dyn FnMut(&EffectInstance, i32, &mut Vec<EffectAction>, bool) -> OmenTick,
+        omen: &mut dyn FnMut(
+            &EffectInstance,
+            i32,
+            &mut Vec<EffectAction>,
+            bool,
+            &[EffectInstance],
+        ) -> OmenTick,
         absorption_empty: bool,
         keep_expired: &[&'static str],
     ) -> (Vec<EffectAction>, bool) {
@@ -464,11 +470,11 @@ impl PlayerEffects {
             if let Some(a) = periodic(e.id, t, e.amplifier) {
                 actions.push(a);
             }
-            omen(e, t, &mut actions, false);
+            omen(e, t, &mut actions, false, &self.list);
             let answer = match e.id {
-                "bad_omen" => omen(e, t, &mut actions, true),
-                "raid_omen" if t == 1 => omen(e, t, &mut actions, true),
-                id if potions::is_mod_effect(id) => omen(e, t, &mut actions, true),
+                "bad_omen" => omen(e, t, &mut actions, true, &self.list),
+                "raid_omen" if t == 1 => omen(e, t, &mut actions, true, &self.list),
+                id if potions::is_mod_effect(id) => omen(e, t, &mut actions, true, &self.list),
                 "absorption" if absorption_empty => OmenTick::Remove,
                 _ => OmenTick::Continue,
             };
@@ -784,7 +790,8 @@ mod tests {
         let mut convert = |e: &EffectInstance,
                            _: i32,
                            _: &mut Vec<EffectAction>,
-                           dispatch: bool| match (dispatch, e.id) {
+                           dispatch: bool,
+                           _: &[EffectInstance]| match (dispatch, e.id) {
             (true, "bad_omen") => OmenTick::Add(EffectInstance::new("raid_omen", 600, e.amplifier)),
             _ => OmenTick::Continue,
         };
@@ -825,6 +832,7 @@ mod tests {
             0xFF0000,
             potions::Category::Neutral,
             None,
+            "ruby".into(),
         )]);
         let mut fx = PlayerEffects::default();
         fx.add(EffectInstance::new(
@@ -840,7 +848,7 @@ mod tests {
         ordered.add(EffectInstance::new("ruby:glow", 10, 0));
         ordered.add(EffectInstance::new("wither", 40, 0));
         let (actions, _) = ordered.tick_with(
-            &mut |_, _, actions, dispatch| {
+            &mut |_, _, actions, dispatch, _| {
                 if dispatch {
                     actions.push(EffectAction::Eat(2, 0.5));
                 }
@@ -872,7 +880,11 @@ mod tests {
         fx.add(EffectInstance::new("ruby:glow", 3, 1));
         fx.add(EffectInstance::new("ruby:bleed", -1, 0));
         let mut seen = Vec::new();
-        let mut answer = |e: &EffectInstance, t: i32, _: &mut Vec<EffectAction>, dispatch: bool| {
+        let mut answer = |e: &EffectInstance,
+                          t: i32,
+                          _: &mut Vec<EffectAction>,
+                          dispatch: bool,
+                          _: &[EffectInstance]| {
             if !dispatch {
                 return OmenTick::Continue;
             }
@@ -899,7 +911,11 @@ mod tests {
         let mut fx = PlayerEffects::default();
         fx.add(EffectInstance::new("raid_omen", 2, 0));
         let mut seen = Vec::new();
-        let mut watch = |e: &EffectInstance, _: i32, _: &mut Vec<EffectAction>, dispatch: bool| {
+        let mut watch = |e: &EffectInstance,
+                         _: i32,
+                         _: &mut Vec<EffectAction>,
+                         dispatch: bool,
+                         _: &[EffectInstance]| {
             if !dispatch {
                 return OmenTick::Continue;
             }

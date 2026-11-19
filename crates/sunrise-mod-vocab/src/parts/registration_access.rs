@@ -95,6 +95,8 @@ pub fn install_parts(
 /// Consume owned declarations and derive the lookup indexes here, never from caller bits.
 pub fn install_input(input: super::installation::InstalledInput) {
     let mut installed: Installed = input.into();
+    static EPOCHS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    installed.epoch = EPOCHS.fetch_add(1, Ordering::Relaxed);
     installed.keys.index_hooks();
     installed.hook_bits = installed.keys.hooks.iter().map(Option::is_some).collect();
     installed.tag_hook_bits = vec![false; HOOK_COUNT];

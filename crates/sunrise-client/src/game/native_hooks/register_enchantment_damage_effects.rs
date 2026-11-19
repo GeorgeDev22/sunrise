@@ -130,7 +130,7 @@ mod tests {
                     game.world_tables = game
                         .stage_world_tables(&stack, false, &resources)
                         .unwrap()
-                        .0;
+                        .tables;
                     assert!(
                         game.stations()
                             .enchantments

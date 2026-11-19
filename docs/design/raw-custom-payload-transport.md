@@ -42,8 +42,13 @@ Sunrise-branded peers, even with empty or all-optional mod registries. On `sunri
 then the manifest record count. The second byte is raw transport revision 1,
 independent of application versions. A wrong revision or an absent marked response
 from a Sunrise-branded peer refuses admission with a named raw-protocol cause.
-Servers send the Query before known packs so a compatible empty peer's Offer cannot
-be overtaken by that barrier. Non-Sunrise vanilla peers remain eligible for optional
+A server whose mods declare payloads sends the Query before known packs; otherwise it
+sends the Query only once the peer names itself Sunrise, so a vanilla client is sent
+nothing on `sunrise:payloads`. That Query, or the server's Offer to a client's own Query,
+follows the known-packs request, so if a Sunrise peer's Offer has not arrived by its
+known-packs reply, the server pings it there and reads on until the Offer or the pong: a
+pong with no Offer before it is the missing marked response. A vanilla peer is never
+pinged. Non-Sunrise vanilla peers remain eligible for optional
 admission; a brand is capability negotiation, not authentication of a build.
 
 A connection owns its negotiated table, protocol and incarnation epoch. Application
@@ -85,7 +90,7 @@ Preserve order with ordinary gameplay ingress. Default handlers run on the logic
 receiving main thread. IPayloadContext supplies player, reply, disconnect and
 enqueueWork. Root transaction commit publishes sends; abort publishes none. Replies
 cannot execute inline across the connection and are received on a subsequent turn.
-Single-player and split-screen use their real connect_local sessions, not direct
+Single-player uses its real connect_local session, not direct
 callback shortcuts.
 
 `IPayloadHandler::handle` returns `Result<(), PayloadHandleError>`, with explicit
@@ -118,7 +123,7 @@ Backpressure, bounded flood memory and progress for more than 32 legal messages.
 Its registered-body limit wording must distinguish discard limits from the actual
 connection framing bounds above.
 
-Exercise integrated single-player, split-screen, two remote players, LAN and
+Exercise integrated single-player, two remote players, LAN and
 dedicated paths. Check sender attribution, ordering, next-turn replies, rollback,
 epoch invalidation, optional vanilla admission, required mismatch, duplicate load
 refusal, generic-send bypass and named decode failures. Native and wasm must both

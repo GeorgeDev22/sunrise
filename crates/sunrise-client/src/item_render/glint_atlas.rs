@@ -17,11 +17,13 @@ pub(super) fn load(
         .get("minecraft:items")
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    let textures = atlas_sources::list_textures(root);
-    let decode = |name: &str, dir: &str| {
+    let mut textures = atlas_sources::list_textures(root);
+    // `list` searches them by their identifiers, which sort differently from their paths.
+    textures.sort_unstable();
+    let decode = |name: &str| {
         crate::hud::decode_bytes(
             &root
-                .read(&atlas_sources::texture_resource(name, dir))
+                .read(&atlas_sources::texture_resource(name, "textures"))
                 .ok()?,
         )
         .ok()
@@ -32,7 +34,7 @@ pub(super) fn load(
         names.push(id.clone());
         let dimensions = match &origin {
             atlas_sources::SpriteOrigin::File(texture) => (|| {
-                let (w, h, _) = decode(texture, "textures")?;
+                let (w, h, _) = decode(texture)?;
                 let path = format!(
                     "{}.mcmeta",
                     atlas_sources::texture_resource(texture, "textures")

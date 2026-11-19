@@ -13,7 +13,7 @@ The launcher asks, for each enabled native mod of an instance, in this order:
    internals (an `internals` list, or a dependency on `sunrise-internals`) changes or reads game code, so it works on
    the build it was made for only. No test runs.
 3. **Does its package say what it uses?** Its `uses.json` must be one this launcher reads and be made for the mod's
-   pin. A package without one (made by an older tool) works on the build it was made for only.
+   pin. A package without one (not packed by `cargo sunrise-mod build`, which writes it) works on the build it was made for only.
 4. **Is every item it uses unchanged?** Each entry of the list must hold in this build's `surface.json`:
    - the record exists, with the same hash, under every public path the mod writes it by;
    - a type keeps every trait impl it had;

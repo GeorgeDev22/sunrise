@@ -573,9 +573,9 @@ impl Dim {
 impl Game<'_> {
     /// The cap on open runtime levels `server.properties` sets (`sunrise-max-runtime-levels`,
     /// docs/hosting.md): the default, 64, for a missing or unreadable value.
-    pub(in crate::game) fn read_runtime_level_cap<'a>(
+    pub(in crate::game) fn read_runtime_level_cap(
         &mut self,
-        property: impl Fn(&str) -> Option<&'a str>,
+        property: impl Fn(&str) -> Option<String>,
     ) {
         if let Some(cap) = property("sunrise-max-runtime-levels")
             .and_then(|value| value.trim().parse::<usize>().ok())

@@ -6,6 +6,7 @@ use super::dynamic::{
 };
 use super::json;
 use sunrise_core::nbt::{JavaString, Tag};
+use sunrise_core::random::java_string_hash;
 
 /// `V704.ITEM_TO_BLOCKENTITY`.
 const ITEM_TO_BLOCK_ENTITY: &[(&str, &str)] = &[
@@ -1135,12 +1136,6 @@ fn fix_profile_properties(v: Option<&Tag>) -> Option<Tag> {
     Some(Tag::List(out))
 }
 
-/// Java `String.hashCode`.
-pub(super) fn java_string_hash(s: &str) -> i32 {
-    s.encode_utf16()
-        .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)))
-}
-
 /// Iteration order of a `java.util.HashMap`/`HashSet` built by inserting the
 /// items in order (default capacity, string keys, no tree bins).
 pub(super) fn java_hash_order<T>(items: Vec<T>, key: impl Fn(&T) -> String) -> Vec<T> {
@@ -1151,7 +1146,7 @@ pub(super) fn java_hash_order<T>(items: Vec<T>, key: impl Fn(&T) -> String) -> V
     let spread = |h: i32| (h ^ ((h as u32) >> 16) as i32) as u32 as usize;
     let mut buckets: Vec<Vec<T>> = (0..capacity).map(|_| Vec::new()).collect();
     for item in items {
-        let index = spread(java_string_hash(&key(&item))) & (capacity - 1);
+        let index = spread(java_string_hash(key(&item).encode_utf16())) & (capacity - 1);
         buckets[index].push(item);
     }
     buckets.into_iter().flatten().collect()

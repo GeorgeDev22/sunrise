@@ -67,6 +67,17 @@ impl Game<'_> {
         });
         host.into_iter().chain(guests).collect()
     }
+    /// VaultBlock.useItemOn on a client level: something in the hand on an ACTIVE vault is
+    /// SUCCESS_SERVER, so the click ends there (no UseItem, no other hand, no swing); only the
+    /// server tries the key.
+    pub(super) fn vault_takes_click(&self, pos: [i32; 3], held: Option<&ItemStack>) -> bool {
+        let state = self.world.block(pos[0], pos[1], pos[2]);
+        held.is_some()
+            && self.pack.assets.registry.state(state).is_some_and(|block| {
+                sunrise_client::block_entity_types::factory_block(&block.name) == "minecraft:vault"
+                    && block.properties.get("vault_state").map(String::as_str) == Some("active")
+            })
+    }
     /// The vault at `key` with its block's state and ominous flag.
     pub(super) fn take_vault(&mut self, key: Pos) -> Option<TakenVault> {
         let state = self.world.block(key.0, key.1, key.2);
@@ -294,7 +305,7 @@ impl Game<'_> {
                 ) * glam::Mat4::from_rotation_y(vault.display_spin(alpha as f32).to_radians());
             let light = self.world.light(key.0, key.1, key.2);
             let seed =
-                i64::from(self.pack.item_renderer.item_id(&stack.item)) + i64::from(stack.damage);
+                i64::from(self.item_number(&stack.item).unwrap_or(0)) + i64::from(stack.damage);
             for copy in item_render::cluster_poses(
                 &state,
                 pose,

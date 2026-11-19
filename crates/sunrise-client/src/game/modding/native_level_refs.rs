@@ -733,11 +733,12 @@ impl Game<'_> {
             .is_loaded_at(pos[0], pos[1], pos[2])
             .then(|| world_brightness(world, layer, pos))
     }
-    /// `BlockAndTintGetter.canSeeSky`: the sky light at `pos` is full. None as for
-    /// `level_brightness`.
+    /// `BlockAndLightGetter.canSeeSky`: whether the local sky light at `pos` is full.
     pub(super) fn level_can_see_sky(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool> {
-        self.native_level_world(level)?;
-        Some(self.level_brightness(level, LightLayer::Sky, pos)? >= 15)
+        Some(super::native_world_read::can_see_sky(
+            self.native_level_read_world(level)?,
+            pos,
+        ))
     }
     /// `LevelLightEngine.checkBlock` at `pos`, queued with the level's light edits: the next
     /// update asks a `dynamic_light` block's parts again (`ask_edited_light_emission`) and
@@ -2211,7 +2212,7 @@ mod tests {
             let root = game.save.root.clone();
             let shape = game.world.shape;
             game.native_levels_closing();
-            let save = SaveDir::new(root, shape);
+            let save = SaveDir::new(root, shape, Some(Default::default()));
             let chunk = save.load(0, 0, registry, game.res.biomes()).unwrap();
             game.world = World::new(registry.default_state("minecraft:air").unwrap(), 0);
             game.world.chunks.insert((0, 0), Arc::new(chunk));
@@ -2622,7 +2623,11 @@ mod tests {
                     std::env::temp_dir().join(format!("sunrise-validate-{}", std::process::id()));
                 game.world_root = world.clone();
                 let root = sunrise_client::save::dimension_dir(&world, other.id());
-                let save = sunrise_client::save::SaveDir::new(root, other.shape());
+                let save = sunrise_client::save::SaveDir::new(
+                    root,
+                    other.shape(),
+                    Some(Default::default()),
+                );
                 let mut tickets = sunrise_client::mod_chunk_tickets::ModTickets::default();
                 tickets.insert(saved("machines:quarry", [1, 64, 1], (7, 7)));
                 tickets.insert(saved("machines:quarry", [9, 64, 9], (8, 8)));

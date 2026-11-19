@@ -204,9 +204,10 @@ pub fn try_pickup_world_fluid(
 
 /// `FluidUtil.tryPlaceFluid` with a handler: a bucket of the first fluid of `source`, index by
 /// index, that comes out whole and places at `pos` in `level` ([`LevelRef::place_fluid`]):
-/// into air or a block it replaces, water into a waterloggable block, or hissing away where
-/// water evaporates. `validate` refuses a waterloggable block that won't take it, which a
-/// bucket empties into all the same (NeoForge's `validatePlaced`). Each try is a transaction
+/// into air or a block it replaces, into a liquid container that accepts it (including nonwater
+/// fluids accepted by a block part), or hissing away where water evaporates. The acceptance query
+/// lends `player` when supplied. `validate` treats a container's false placement answer as failure,
+/// while a normal bucket still empties (NeoForge's `validatePlaced`). Each try is a transaction
 /// of its own (nested in one the caller has open, which then decides). What was placed, or
 /// None with nothing changed. The block's updates, the fluid tick, a replaced block's drops
 /// and the bucket's empty sound and `minecraft:fluid_place` follow at the outermost commit.

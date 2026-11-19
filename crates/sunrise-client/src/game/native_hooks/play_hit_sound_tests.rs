@@ -42,6 +42,7 @@ fn play_hit_sound_helper_and_eight_mining_ticks() {
                 game.save = Arc::new(sunrise_client::save::SaveDir::new(
                     scratch.path().to_path_buf(),
                     sunrise_client::save::LevelShape::OVERWORLD,
+                    Some(Default::default()),
                 ));
                 game.world
                     .chunks

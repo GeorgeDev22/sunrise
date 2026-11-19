@@ -10,6 +10,8 @@ pub enum MoverType {
     Piston,
     ShulkerBox,
     Shulker,
+    /// A moving collider carrying the body that stands on it (Sunrise's own).
+    Carried,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CollisionFlags {
@@ -114,7 +116,9 @@ pub trait EntityMoveWorld {
 fn java_zero(v: Vec3) -> bool {
     v.x.to_bits() == 0 && v.y.to_bits() == 0 && v.z.to_bits() == 0
 }
-fn different(a: f64, b: f64) -> bool {
+/// `!Mth.equal(a, b)`: further apart than `1.0E-5F`, how `Entity.move` tells a blocked
+/// sideways axis.
+pub fn different(a: f64, b: f64) -> bool {
     let delta = (b - a).abs();
     delta >= f64::from(1.0e-5f32) || delta.is_nan()
 }

@@ -127,6 +127,8 @@ pub(super) fn entity_render_state(m: &Mob, id: u32, partial: f32) -> EntityRende
         living: Some(living.into()),
         tnt_fuse: None,
         orb_value: None,
+        painting: None,
+        item_frame: None,
     }
     .into()
 }

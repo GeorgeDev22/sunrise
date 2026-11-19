@@ -281,6 +281,7 @@ pub(super) fn run_loading(
         started,
         panorama_rotation: Default::default(),
         progress,
+        bar: 0.0,
         receiver,
         loaded: None,
         delivered: false,
@@ -295,15 +296,14 @@ pub(super) fn run_loading(
     let result = EventLoop::new()?.run_app(&mut app);
     narrator::stop();
     match &mut app {
-        // Ready: splitscreen around P1's game.
-        App::Ready(split) => leave_fullscreen_after(&result, &mut split.host.settings),
+        App::Ready(game) => leave_fullscreen_after(&result, &mut game.settings),
         App::Loading(loading) => leave_fullscreen_after(&result, &mut loading.settings),
     }
     result?;
     match app {
-        App::Ready(mut split) => {
-            write_report(&split.host)?;
-            if let Some(e) = split.host.error.take() {
+        App::Ready(mut game) => {
+            write_report(&game)?;
+            if let Some(e) = game.error.take() {
                 return Err(e);
             }
         }

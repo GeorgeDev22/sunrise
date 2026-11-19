@@ -107,6 +107,23 @@ impl Game<'_> {
         })
     }
 
+    /// The same consume_item criterion path food and potions use, in the player's level.
+    pub(super) fn player_trigger_consume_item(
+        &mut self,
+        player: PlayerRef,
+        stack: &sunrise_client::items::ItemStack,
+    ) -> Result<(), TriggerCriterionError> {
+        if !self.is_logical_server() {
+            return Err(TriggerCriterionError::NotServer);
+        }
+        let target = self
+            .player_handle_read(player)
+            .and_then(|_| self.native_entity_target(player.entity()))
+            .ok_or(TriggerCriterionError::PlayerUnavailable)?;
+        self.for_player(target, |g| g.trigger_item("minecraft:consume_item", stack))
+            .ok_or(TriggerCriterionError::PlayerUnavailable)
+    }
+
     /// Resolve the player as `player_trigger_criterion` does, refuse an unloaded chunk, then
     /// fire in the player's own level, so predicates read where they are.
     fn with_block_use_player(
