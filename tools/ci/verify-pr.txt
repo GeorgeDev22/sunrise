@@ -1,0 +1,5 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client --lib --tests -- -D warnings
+env SUNRISE_TEST_RESOURCES=$PWD/.local/sunrise-client/26.3 cargo test --locked -p sunrise-client --lib -- --ignored game::remote:: --skip wasm_
+cargo test --locked -p sunrise-client --lib -- game::remote::
+python3 tools/ci/check_ignored_test_rows.py
