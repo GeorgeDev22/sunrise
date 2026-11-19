@@ -811,8 +811,8 @@ fn slider_sprites_ext(
     (track, handle)
 }
 /// Slider value for a click at `cx` (AbstractSliderButton.setValueFromMouse).
-pub fn slider_value(x: f32, w: f32, cx: f32) -> f32 {
-    ((cx - (x + 4.0)) / (w - 8.0)).clamp(0.0, 1.0)
+pub fn slider_value(x: f32, w: f32, cx: f32) -> f64 {
+    ((f64::from(cx) - (f64::from(x) + 4.0)) / (f64::from(w) - 8.0)).clamp(0.0, 1.0)
 }
 /// Screen.renderMenuBackground: in a world the translucent dark texture,
 /// otherwise the dirt-like menu texture, tiled at 32 pixels.

@@ -64,9 +64,15 @@ impl Bundle {
         let native = self.manifest.native.as_ref().expect("native bundle");
         Facts {
             id: Some(self.manifest.id.clone()),
-            version: Some(self.manifest.version.clone()),
-            api: format!("native-1/{}/{}", native.sunrise, native.mixins),
+            version: Some(self.manifest.version.to_string()),
+            // No SDK is at hand here: a package `cargo sunrise-mod build` made carries the
+            // revision its SDK named, and one without it lists the pin as written.
+            api: match &native.mixins {
+                Some(mixins) => format!("native-1/{}/{mixins}", native.sunrise),
+                None => format!("native-1/{}", native.sunrise),
+            },
             game: Some(native.game.clone()),
+            dependencies: super::manifest_dependencies(&self.manifest),
             ..Facts::default()
         }
     }
@@ -132,8 +138,15 @@ mod tests {
 
     #[test]
     fn facts_use_manifest_identity_and_exact_build_pins() {
-        let bundle = read("facts", &manifest(), &[]).unwrap();
+        let manifest = format!("{}[dependencies]\ncreature = '^0.1'\n", manifest());
+        let bundle = read("facts", &manifest, &[]).unwrap();
         let facts = bundle.facts();
+        assert_eq!(
+            serde_json::to_value(&facts.dependencies).unwrap(),
+            serde_json::json!([
+                {"id": "creature", "version": "^0.1"}
+            ])
+        );
         assert_eq!(facts.id.as_deref(), Some("veinminer"));
         assert_eq!(facts.version.as_deref(), Some("0.3.0"));
         assert_eq!(

@@ -45,7 +45,9 @@ fn connect(game: &mut Game<'_>) -> sunrise_protocol::connection::Pipe {
 }
 
 fn tick(game: &mut Game<'_>) {
-    game.tick_local_player(Vec::new(), 7).unwrap();
+    if let Some(input) = game.tick_local_player(Vec::new(), 7).unwrap() {
+        game.remote_send_state(input);
+    }
 }
 
 fn matrix(mods: mod_api::Mods) {
@@ -203,7 +205,7 @@ fn wasm_movement_input_keys_axes_and_sprint() {
         let manifest = Package::read(&path).unwrap().manifest;
         let info = mod_api::PackageInfo::new(
             manifest.id.clone(),
-            manifest.version.clone(),
+            manifest.version.to_string(),
             mod_api::PackageKind::Code,
             mod_api::Side::Both,
             vec![manifest.id.clone()],

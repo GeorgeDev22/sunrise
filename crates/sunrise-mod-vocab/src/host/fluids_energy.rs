@@ -103,10 +103,10 @@ pub trait FluidsEnergyBackendMut {
     /// Side: server.
     /// `BucketItem.emptyContents` of a bucket of `fluid` for a mod's fluid container (NeoForge's
     /// `FluidUtil.tryPlaceFluid`), with no hit result: at `pos` in the level in place, its source
-    /// into air or a block it replaces (broken with its drops), water into a waterloggable
-    /// block (a lit campfire or candle put out), or hissing away where water evaporates (the
-    /// Nether). `validate` refuses a waterloggable block that won't take it (one waterlogged
-    /// already), which a bucket empties into all the same (NeoForge's `validatePlaced`). True
+    /// into air or a block it replaces (broken with its drops), into an accepting container
+    /// (a part can accept nonwater), or hissing away where water evaporates (the Nether).
+    /// The acceptance query lends `player` when supplied. With `validate`, a container's
+    /// false placement answer fails instead of emptying the bucket (NeoForge's `validatePlaced`). True
     /// when it was placed or hissed away; false, with nothing done, for a fluid with no world
     /// form, where it can't be placed, in another level, a chunk that isn't loaded, or a
     /// transaction that isn't open.

@@ -1,8 +1,11 @@
-//! A block a mod writes in a player's turn: `level_set_block` with a placement's flags, then `setPlacedBy`.
+//! Placement writes and the `Block.setPlacedBy` step for code that chooses the block state.
 use super::{Game, native_server::PlayerRead};
-use mod_api::{BlockUpdateFlags, LevelRef, PlayerRef, PlayerWorldRefusal as Refusal};
+use mod_api::{
+    BlockUpdateFlags, LevelRef, LevelWriteError, PlayerRef, PlayerWorldRefusal as Refusal,
+};
+use sunrise_client::{containers::BlockEntity, items::ItemStack};
 use sunrise_core::position::BlockPos;
-use sunrise_world::registry::BlockStateId;
+use sunrise_world::{level::classes::Class, registry::BlockStateId};
 
 /// A placement's write flags: neighbours and clients told, shapes updated unless known.
 fn placement_flags(update_neighbour_shapes: bool) -> BlockUpdateFlags {
@@ -61,6 +64,12 @@ impl Game<'_> {
             return Err(Refusal::Unchanged);
         }
         let flags = placement_flags(update_neighbour_shapes);
+        if !self
+            .placement_allowed(pos, state, Some(flags))
+            .map_err(|_| Refusal::InTransaction)?
+        {
+            return Err(Refusal::Fenced);
+        }
         // The write is `level_set_block`'s, on the level as it stands (a guest's turn is not
         // the authoritative level); only `setPlacedBy` runs in the player's turn.
         match self.level_set_block(level, pos, state, flags) {
@@ -68,7 +77,9 @@ impl Game<'_> {
             Ok(false) => return Err(Refusal::Unchanged),
             Err(_) => return Err(Refusal::Stale),
         }
-        let ran = self.native_as_player_handle(player, |game| game.set_placed_by(pos, state));
+        let ran = self.native_as_player_handle(player, |game| {
+            game.run_mod_placement_callback(pos, state, None);
+        });
         if ran { Ok(()) } else { Err(Refusal::Stale) }
     }
     /// A chosen state written as a placement writes it, then `Block.setPlacedBy`, with no
@@ -80,18 +91,118 @@ impl Game<'_> {
         pos: [i32; 3],
         state: BlockStateId,
         update_neighbour_shapes: bool,
-    ) -> Result<bool, mod_api::LevelWriteError> {
+    ) -> Result<bool, LevelWriteError> {
         let flags = placement_flags(update_neighbour_shapes);
+        if !self.native_level_write_position(level, pos)?
+            || self.world.block(pos[0], pos[1], pos[2]) == state
+            || !self.placement_allowed(pos, state, Some(flags))?
+        {
+            return Ok(false);
+        }
         if !self.level_set_block(level, pos, state, flags)? {
             return Ok(false);
         }
-        self.set_placed_by(pos, state);
+        self.run_mod_placement_callback(pos, state, None);
         Ok(true)
     }
-    /// `Block.setPlacedBy` of the block that now stands at `pos`, when it is `state`'s.
-    fn set_placed_by(&mut self, pos: [i32; 3], state: BlockStateId) {
-        let at = BlockPos::new(pos[0], pos[1], pos[2]);
-        self.with_level(|b, level, ticks| b.set_placed_by_state(level, ticks, at, state));
+    /// `Block.setPlacedBy` of a block already standing at `pos`, with no placer. Its stack
+    /// is consulted, not placed: the caller has already loaded any block entity data.
+    pub(super) fn level_set_placed_by(
+        &mut self,
+        level: LevelRef,
+        pos: [i32; 3],
+        stack: Option<&ItemStack>,
+    ) -> Result<bool, LevelWriteError> {
+        if !self.native_level_write_position(level, pos)? {
+            return Ok(false);
+        }
+        let state = self.world.block(pos[0], pos[1], pos[2]);
+        if !self.placement_allowed(pos, state, None)? {
+            return Ok(false);
+        }
+        self.run_mod_placement_callback(pos, state, stack);
+        Ok(true)
+    }
+
+    fn placement_allowed(
+        &mut self,
+        pos: [i32; 3],
+        state: BlockStateId,
+        write_flags: Option<BlockUpdateFlags>,
+    ) -> Result<bool, LevelWriteError> {
+        if self.world.carrier_fences.has_locked_cells() {
+            let at = BlockPos::new(pos[0], pos[1], pos[2]);
+            if self.world.carrier_fences.locks_cell(&pos)
+                || self
+                    .preview_set_placed_by(at, state, write_flags.map(|flags| flags.bits()))
+                    .keys()
+                    .any(|p| self.world.carrier_fences.locks_cell(&[p.x, p.y, p.z]))
+            {
+                return Ok(false);
+            }
+        }
+        if !self.transactions.is_empty() && self.wither_spawn_pattern(pos, state).is_some() {
+            // The pattern's flag-2 writes, destroy events and neighbour pass are not journalled.
+            return Err(LevelWriteError::InTransaction);
+        }
+        Ok(true)
+    }
+
+    /// Chosen-state mod placements did not run the simulation's block-item placement.
+    /// Apply its state-only callbacks before the same game-level step used by an item.
+    fn run_mod_placement_callback(
+        &mut self,
+        pos: [i32; 3],
+        expected: BlockStateId,
+        stack: Option<&ItemStack>,
+    ) {
+        let [x, y, z] = pos;
+        let placed = self.world.block(x, y, z);
+        let behaviours = self.res.behaviours();
+        if behaviours.block(placed) != behaviours.block(expected) {
+            return;
+        }
+        self.with_level(|b, level, ticks| {
+            b.set_placed_by_state(level, ticks, BlockPos::new(x, y, z), placed);
+        });
+        let _ = self.set_placed_by(pos, None, stack);
         let _ = self.process_level_events();
+    }
+
+    /// The game-level part of `Block.setPlacedBy`, once the state-only part has run.
+    /// A supplied player is already the acting player. A supplied stack is read only.
+    pub(super) fn set_placed_by(
+        &mut self,
+        pos: [i32; 3],
+        placer: Option<PlayerRef>,
+        stack: Option<&ItemStack>,
+    ) -> crate::Result<()> {
+        let [x, y, z] = pos;
+        let key = (x, y, z);
+        let placed = self.world.block(x, y, z);
+        if self.res.behaviours().data(placed).is(Class::Jukebox) {
+            if let Some(stack) = stack {
+                self.jukebox_placed(pos, stack);
+            }
+        } else {
+            match self.world.block_entities.get(&key) {
+                Some(BlockEntity::CommandBlock(_)) => self.command_block_placed(key, stack),
+                // StructureBlock.createdBy accepts any living placer; this route's placers are players.
+                Some(BlockEntity::StructureBlock(_)) if placer.is_some() => {
+                    self.structure_block_placed(key)
+                }
+                // The sign editor is a ServerPlayer side effect, not a block-state or NBT write.
+                Some(BlockEntity::Sign(sign))
+                    if placer.is_some()
+                        && !sign.waxed
+                        && sign.front.has_editable_text()
+                        && !self.fake_blocks(mod_api::FakeEffect::Menu) =>
+                {
+                    self.open_text_edit(key, true);
+                }
+                _ => {}
+            }
+        }
+        self.check_wither_spawn(pos)
     }
 }

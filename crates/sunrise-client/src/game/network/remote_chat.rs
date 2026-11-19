@@ -277,8 +277,7 @@ impl Game<'_> {
     /// (SignableCommand.of over the chat's tree, the server's once it sent one) has each of them signed,
     /// all with the same time, salt and last seen (without a chat session the
     /// signature list is empty, as in vanilla); any other command goes as the
-    /// unsigned packet on releases that have one. Before 1.20.5 even a command
-    /// without message arguments carries the real last-seen acknowledgement.
+    /// unsigned packet.
     pub(super) fn send_command(&mut self, command: &str) {
         let Some(r) = self.remote.as_mut() else {
             return;
@@ -290,12 +289,7 @@ impl Game<'_> {
         } else {
             Vec::new()
         };
-        if arguments.is_empty()
-            && !r
-                .session
-                .server_version()
-                .at_most(sunrise_protocol::adapter::ServerVersion::V1_20_3)
-        {
+        if arguments.is_empty() {
             self.send(S::ChatCommand(play::ChatCommand {
                 command: command.to_owned(),
             }));

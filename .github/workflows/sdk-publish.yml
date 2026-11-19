@@ -96,12 +96,13 @@ jobs:
           if git cat-file -e "$previous:crates/sunrise-mod-vocab/changes" 2> /dev/null; then
             git archive "$previous" crates/sunrise-mod-vocab/changes | tar -x -C base
           fi
-          # A stale note fails the PR report, not the publish: the diff is written either way.
+          # CI checks engine notes; the SDK's surfaces contain only API records.
+          # A stale API note warns here: the diff is written either way.
           stage="$RUNNER_TEMP/stage-tool/sunrise-stage"
           chmod +x "$stage"
           "$stage" surface-diff \
             previous-surface.json dist/surface.json --notes crates/sunrise-mod-vocab/changes \
-            --base-notes base/crates/sunrise-mod-vocab/changes --json surface-diff.json | tee -a "$GITHUB_STEP_SUMMARY" \
+            --base-notes base/crates/sunrise-mod-vocab/changes --api-notes-only --json surface-diff.json | tee -a "$GITHUB_STEP_SUMMARY" \
             || echo "::warning::a change note names an id that did not change since $previous"
           test -s surface-diff.json
       - name: Write sdk.json over every asset

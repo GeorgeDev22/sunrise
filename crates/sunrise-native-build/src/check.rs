@@ -19,7 +19,7 @@ pub enum Verdict {
     Fits { made_for: String },
     /// It changes game code or names the game's internals (`why`: the table that does, or `internals`): it works on the build it was made for only.
     Exact { made_for: String, why: &'static str },
-    /// Its package doesn't say what it uses (an older tool, or a list for another build than its pin): it works on the build it was made for only.
+    /// Its package doesn't say what it uses (no list at all, or a list for another build than its pin): it works on the build it was made for only.
     NoList { made_for: String },
     /// Items it uses changed in this build.
     DoesNotFit {

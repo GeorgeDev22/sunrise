@@ -472,7 +472,7 @@ impl Game<'_> {
             blindness: f32::from(u8::from(self.potions.effects.get("blindness").is_some())),
             eye_light: [i32::from(light & 15), i32::from(light >> 4)],
             hide_gui: self.ui.hide_gui,
-            brightness: self.settings.gamma,
+            brightness: self.settings.gamma as f32,
             biome: info.map_or(-1, |b| {
                 let names = world_biomes!(self).list.iter().map(|b| b.name.as_str());
                 sunrise_shaders::biome_pack_id(&b.name, names)
@@ -536,7 +536,7 @@ impl Game<'_> {
             riding,
             feet_in_water: p.fluids.was_touching_water,
             swimming: p.pose == sunrise_client::pose::Pose::Swimming,
-            burning: p.fire_ticks > 0 && !spectator,
+            burning: p.is_on_fire() && !spectator,
             hurt: p.health.hurt_animation_time > 0,
             invisible,
             sneaking: p.pose == sunrise_client::pose::Pose::Crouching,

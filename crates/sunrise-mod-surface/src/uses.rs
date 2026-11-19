@@ -1546,7 +1546,7 @@ impl<'a, 's, 't> Resolver<'a, 's, 't> {
     /// (`use mod_api as Pos;`, `use mod_api::content as c;`) makes the path a module path, so
     /// the name may be a struct; only `Self`, a type the mod defines, a name bound to an API
     /// type, or an API type's name written as it stands makes it a member.
-    fn is_member(&self, path: &[&str]) -> bool {
+    fn is_member(&self, path: &[&str], rooted: bool) -> bool {
         let [.., owner, _] = path else {
             return false;
         };
@@ -1572,6 +1572,11 @@ impl<'a, 's, 't> Resolver<'a, 's, 't> {
         }
         if self.module.roots.contains(owner) {
             return false;
+        }
+        // A path from the root (`::mod_api::world::X`) names nothing of the mod's: its `use`
+        // items and types, in whatever module, cannot change what its segments mean.
+        if rooted {
+            return names_type(&[owner]);
         }
         if let Some(bound) = self.module.bound.get(owner) {
             return bound.iter().any(|segments| names_type(segments));
@@ -1773,7 +1778,7 @@ impl<'s, 't> Walk<'_, '_, 's, 't> {
             for &id in &resolved.ids {
                 if !api.struct_like(id)
                     || own
-                    || (!resolved.aliased && resolver.is_member(&build.path))
+                    || (!resolved.aliased && resolver.is_member(&build.path, build.rooted))
                 {
                     continue;
                 }

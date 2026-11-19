@@ -845,6 +845,62 @@ pub enum SpawnReason {
     DimensionTravel,
 }
 
+/// What [`LevelRef::spawn_entity`] spawns besides its kind and position: the
+/// velocity, rotation and owner it starts with, and the body its family takes.
+/// Built with [`EntitySpawn::new`], then its fields set.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub struct EntitySpawn {
+    /// The velocity it starts with, in blocks per tick (`Entity.setDeltaMovement`).
+    pub velocity: [f64; 3],
+    /// Its yaw and pitch in degrees. None: a thrown projectile faces along its
+    /// velocity (`Projectile.shoot`), a mob takes `EntityType.spawn`'s yaw, and
+    /// a general row faces south, level.
+    pub rotation: Option<[f32; 2]>,
+    /// The entity that fired it (`Projectile.setOwner`, `TraceableEntity`): for
+    /// damage credit, and so its shooter is not hit by its own shot. None for
+    /// a mob.
+    pub owner: Option<EntityRef>,
+    /// The family's own part of the spawn, which must match the kind's family.
+    pub body: SpawnBody,
+}
+
+impl EntitySpawn {
+    /// A spawn of `body` at rest, unturned and with no owner.
+    pub fn new(body: SpawnBody) -> Self {
+        Self {
+            velocity: [0.0; 3],
+            rotation: None,
+            owner: None,
+            body,
+        }
+    }
+}
+
+/// The family of entity [`LevelRef::spawn_entity`] spawns, with what that
+/// family's spawn takes.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum SpawnBody {
+    /// A thrown item projectile (vanilla's snowball, egg, ender pearl,
+    /// experience bottle, wind charge, splash or lingering potion, or a content
+    /// thrown type), carrying and drawn as `item` (`ThrowableItemProjectile.setItem`).
+    Thrown {
+        /// The item it carries; one of it is kept.
+        item: ItemStack,
+    },
+    /// A mob (vanilla's or a content living type), finalized with `reason`
+    /// (`Mob.finalizeSpawn`).
+    Living {
+        /// Why it spawns, as `finalize_spawn` and `finalizeSpawn` read it.
+        reason: SpawnReason,
+    },
+    /// A row of a code-declared general type (`declare_general_entity`).
+    General,
+}
+
 /// The local difficulty at a spawn (`DifficultyInstance`): what `finalize_spawn` reads and
 /// may change before the mob is finalized.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1316,9 +1372,10 @@ pub trait LevelHost {
     /// `BlockState.isFaceSturdy`, through the same engine read as `LevelRef::block_face_sturdy`.
     /// `canSupportRigidBlock` is `(pos, Up, Rigid)`. `canSupportCenter` is `(pos, face, Center)`
     /// except that vanilla also refuses `Down` on blocks tagged `minecraft:unstable_bottom_center`.
-    /// Returns None for unloaded or out-of-height positions, on clients, or without a support
-    /// view. Never loads chunks or opens loot containers. Available only on the owning game
-    /// thread, never in worker-thread hook bodies.
+    /// Uses the local shapes in an open server level or the current client level. Returns None
+    /// for unloaded or out-of-height positions or without a support view. Never loads chunks or
+    /// opens loot containers. Available only on the owning game thread, never in worker-thread
+    /// hook bodies.
     fn block_face_sturdy(
         &self,
         _pos: [i32; 3],
@@ -1327,10 +1384,20 @@ pub trait LevelHost {
     ) -> Option<bool> {
         None
     }
-    /// `LevelReader.canSeeSky`: full stored sky light, as `LevelRef::can_see_sky` reads it.
-    /// Returns None for unloaded or out-of-height positions, on clients, or without a light
-    /// view. Never loads chunks or opens loot containers. Available only on the owning game
-    /// thread, never in worker-thread hook bodies.
+    /// `BlockAndLightGetter.canSeeSky`: true when the level's published sky light is 15, as
+    /// `LevelRef::can_see_sky` reads it. This is not a block or heightmap read. A dimension with
+    /// no skylight always returns false. Returns None without a light view. Never loads chunks;
+    /// available only on the owning game thread, never in worker-thread hook bodies.
+    ///
+    /// Vanilla's light storage includes padding above and below build height. Sky light is full
+    /// above the highest stored section and in columns with no stored sections. A missing
+    /// section below a stored one repeats that next section's bottom row. Unloaded border
+    /// sections can retain the last light on a server; they have no full sky on a client.
+    ///
+    /// **Known gap ([#2761](https://github.com/sunrise-org/sunrise/issues/2761)):** In skylit
+    /// dimensions, Sunrise reads the resident column's allocated sections, with full sky above
+    /// them and in every missing column, and darkness below them, instead of tracking vanilla's
+    /// padding and unloaded border.
     fn can_see_sky(&self, _pos: [i32; 3]) -> Option<bool> {
         None
     }

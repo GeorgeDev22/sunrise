@@ -107,7 +107,7 @@ pub(super) struct Record {
 }
 
 /// In `Record::a[3]`: the CPU draws the section's solid quads while it fades
-/// (gfx.rs `SectionGpu::gpu_fading`), and the pass leaves it out.
+/// (`SectionGpu::gpu_fading`), and the pass leaves it out.
 const FADING: u32 = 1;
 
 impl Record {

@@ -19,7 +19,10 @@ height (`Window.getGuiScaledWidth/Height`).
 
 `LevelRef::brightness(host, layer, pos)` (`getBrightness`, the stored light 0 to 15) reads on a client too: the
 light of the level the client shows, as the server sent it for a chunk the client holds. It is `None` for a
-chunk the client does not hold and before login; `can_see_sky` stays a server read.
+chunk the client does not hold and before login. `LevelRef::block_face_sturdy(host, pos, face, support)` uses
+that level's local shapes for a loaded block inside build height. `LevelRef::can_see_sky(host, pos)` reads
+its published sky light, even outside build height or in an unloaded column. See
+[Level hosts](../../concepts/hooks-and-the-host.md#level-hosts) for the boundary rules.
 
 `ClientHost::playing()` is true while the player is in the world with nothing over it: no screen, title, sign
 editor or book, so keys and zoom apply. `ClientHost::mapping(name)` reads a vanilla key mapping (`key.forward`,
@@ -225,11 +228,15 @@ These read the local player as the client sees it. They take no mod-controlled n
 `client_pick` runs at both vanilla pick call sites: every client tick at
 partial tick 1.0 after the game mode tick and before key handling, even while
 paused; and every frame at its game-time partial tick before render-state
-extraction. Both write the same stored result. NeoForge 26.3 has no counterpart. The event supplies read-only `original`, `block_candidate` and
-`entity_candidate` values and a mutable `result`, initialized to `original`.
-Choose the block candidate to target a block through an entity, choose a target
-from the typed ray APIs, or clear the result for a miss. Later listeners see the
-previous listener's result. A reentrant `crosshair_target()` read sees `original`.
+extraction. Both write the same stored result. NeoForge 26.3 has no counterpart.
+The event supplies the vanilla `original`, the independent `block_candidate` and
+`entity_candidate`, and the pick's `origin: [f64; 3]` in world-space XYZ. This is
+the camera entity's eye for that pick: current for a tick, interpolated for a frame.
+Use it with a candidate's hit point to measure the ray distance without casting
+another ray. All listeners receive the same inputs. Only `result`, initialized to
+`original`, carries edits to later listeners. Choose the block candidate to target
+through an entity, choose a target from the typed ray APIs, or clear the result for
+a miss. A reentrant `crosshair_target()` read sees `original`.
 
 The game accepts an unchanged original without revalidating its geometry. A
 replacement is validated at writeback: finite point, current level, live entity or

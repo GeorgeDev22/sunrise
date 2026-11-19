@@ -768,6 +768,24 @@ impl crate::prelude::ItemsBackendMut for FakeHost {
         let (player, slot) = self.players.place(place)?;
         player.slots.get(&slot).cloned()
     }
+    fn game_edit_stack(
+        &mut self,
+        place: &ItemPlace,
+        stack: ItemStack,
+        _changed: &[String],
+        _: &Transaction,
+    ) -> Result<(), crate::ItemPlaceEditError> {
+        let (player, slot) = self
+            .players
+            .place(place)
+            .ok_or(crate::ItemPlaceEditError::NotHeld)?;
+        let held = player
+            .slots
+            .get_mut(&slot)
+            .ok_or(crate::ItemPlaceEditError::NotHeld)?;
+        *held = stack;
+        Ok(())
+    }
     fn game_on_crafted_by(
         &mut self,
         _: &ItemPlace,

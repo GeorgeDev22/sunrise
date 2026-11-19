@@ -118,7 +118,7 @@ fn real_wasm_datapack_reads_preserve_values_and_ordering() {
         manifest.inject.clear();
         let info = PackageInfo::new(
             manifest.id.clone(),
-            manifest.version.clone(),
+            manifest.version.to_string(),
             PackageKind::Code,
             Side::Both,
             vec![manifest.id.clone()],

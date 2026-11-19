@@ -153,3 +153,12 @@ jobs:
           path: ${{ runner.temp }}/parity.json
           if-no-files-found: ignore
           retention-days: 7
+      # The slot's build folder outlives the job and is readable outside it: the vanilla-derived scratch (oracle
+      # outputs, harness worlds, the job's copy of the prepared data) goes when the job ends, not when the next
+      # parity job on this slot starts. The kept logs under parity-keep stay for triage; the probes' target and the
+      # prepared cache other workflows read stay too.
+      - name: Delete this job's vanilla-derived scratch
+        if: always()
+        run: |
+          [ -n "${DYNA_CI_BUILD:-}" ] || exit 0
+          rm -rf -- "$DYNA_CI_BUILD/parity-out" "$DYNA_CI_BUILD/parity-tmp" "$DYNA_CI_BUILD/vanilla/job"

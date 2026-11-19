@@ -2,11 +2,12 @@
 //! network order, with their data for clients that do not know the vanilla
 //! pack) and the tags of every registry, loaded from the prepared resources
 //! (`data/minecraft/...`) and the registries report.
-use crate::chunk::LevelShapes;
+use crate::{advancements::Tree, chunk::LevelShapes};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use sunrise_core::nbt::{JavaString, Tag};
 use sunrise_protocol::{
@@ -107,10 +108,13 @@ pub const CORE_PACK: (&str, &str, &str) = ("minecraft", "core", sunrise_protocol
 /// from the prepared resources only.
 /// Enchantments are among them: the items' enchantment catalog reads a
 /// world's pack definitions too, so their ids must reach clients.
+/// World clocks are too: a dimension type's `default_clock` must name a
+/// clock the client was sent, or it reads that dimension's time as zero.
 const PACK_REGISTRIES: &[&str] = &[
     "minecraft:dialog",
     "minecraft:dimension_type",
     "minecraft:enchantment",
+    "minecraft:world_clock",
 ];
 
 /// A registry's entries from the resource root's namespaces other than
@@ -204,6 +208,57 @@ fn walk(dir: &Path, out: &mut BTreeMap<String, Value>, enchantment: bool) {
             out.insert(file.name.clone(), value);
         }
     }
+}
+
+fn synchronized_entries(
+    root: &Path,
+    resources: &Path,
+    key: &str,
+    overlay: &sunrise_world::loot::PackOverlay<'_>,
+) -> Vec<((String, String), Value, bool)> {
+    let path = key.trim_start_matches("minecraft:");
+    let enchantments = key == "minecraft:enchantment";
+    let mut found = BTreeMap::new();
+    walk(&root.join(path), &mut found, enchantments);
+    let mut entries: Vec<_> = found
+        .into_iter()
+        .map(|(id, value)| (("minecraft".to_owned(), id), value, false))
+        .collect();
+    if enchantments {
+        mod_entries(resources, path, &mut entries);
+    }
+    if key == BIOME_REGISTRY {
+        // A content mod's own biomes are always sent to clients.
+        for (id, value) in crate::biome::mod_biome_files(resources) {
+            let (ns, path) = id.split_once(':').unwrap_or(("minecraft", &id));
+            entries.push(((ns.to_owned(), path.to_owned()), value, true));
+        }
+        // Use the world's winner in both staging and eager decoding, even
+        // before a hub supplies the world's biome table with modifiers applied.
+        pack_entries(path, overlay, &mut entries);
+    }
+    // These gameplay tables already select pack winners. Wire validation
+    // must not read a losing bootstrap instrument or song instead.
+    if matches!(path, "instrument" | "jukebox_song") {
+        mod_entries(resources, path, &mut entries);
+        pack_entries(path, overlay, &mut entries);
+    }
+    entries
+}
+
+/// `WorldClock.DIRECT_CODEC`, a unit map codec: a pack's clock is any JSON object. One that is
+/// not refuses the load with its id, as `RegistryDataLoader` does, so a dimension type never
+/// names a clock that silently went missing or kept the built-in one it meant to replace.
+fn check_world_clocks(overlay: &sunrise_world::loot::PackOverlay) -> Result<(), String> {
+    for (id, files) in overlay.kind("world_clock") {
+        let top = sunrise_world::loot::PackOverlay::top(files);
+        match serde_json::from_slice::<Value>(top) {
+            Ok(Value::Object(_)) => {}
+            Ok(_) => return Err(format!("world clock {id}: not a map")),
+            Err(e) => return Err(format!("world clock {id}: {e}")),
+        }
+    }
+    Ok(())
 }
 
 /// A synchronized registry's entries from the world's data packs (`<dir>/`
@@ -313,6 +368,32 @@ pub fn component_nbt(v: &Value) -> Tag {
 }
 
 impl SyncData {
+    /// Collect conditions from the same files used by the lazy wire reader.
+    /// The world's damage catalog is already staged, and supplies its frozen wire data.
+    pub fn stage_registry_conditions(
+        resources: &Path,
+        overlay: &sunrise_world::loot::PackOverlay<'_>,
+    ) {
+        let root = resources.join("data/minecraft");
+        for &key in SYNCHRONIZED {
+            if key == "minecraft:damage_type" {
+                continue;
+            }
+            let path = key.trim_start_matches("minecraft:");
+            let mut entries = synchronized_entries(&root, resources, key, overlay);
+            if PACK_REGISTRIES.contains(&key) {
+                if key == "minecraft:dimension_type" {
+                    mod_dimension_types(
+                        sunrise_world::worldgen::overrides::mod_dimensions(),
+                        &mut entries,
+                    );
+                }
+                pack_entries(path, overlay, &mut entries);
+            }
+            condition_filter::filter(&mut entries, false, overlay.conditions, path);
+        }
+    }
+
     /// No registries, tags or recipes: enough for tests of the login phase.
     pub fn empty() -> Self {
         Self {
@@ -356,15 +437,27 @@ impl SyncData {
         Self::load_with_kept(resources, overlay, biomes, None, defaults, sources)
     }
 
-    /// Reload tags and reloadable data against the registries frozen at open.
+    /// Reload tags and reloadable data against the registries frozen at open,
+    /// using the same advancement snapshot as the owning world's reload.
     pub fn reload(
         resources: &Path,
         overlay: &sunrise_world::loot::PackOverlay,
         kept: &Self,
         defaults: &sunrise_world::item_defaults::ItemDefaults,
         sources: &crate::crafting::ResolvedSources,
+        advancements: &Arc<Tree>,
     ) -> Result<Self, String> {
-        Self::load_with_kept(resources, overlay, None, Some(kept), defaults, sources)
+        Self::load_with_frozen(
+            resources,
+            overlay,
+            None,
+            Some(kept),
+            None,
+            false,
+            defaults,
+            sources,
+            Some(advancements),
+        )
     }
 
     /// Load reloadable data with frozen synchronized registries; an explicit
@@ -378,7 +471,7 @@ impl SyncData {
         sources: &crate::crafting::ResolvedSources,
     ) -> Result<Self, String> {
         Self::load_with_frozen(
-            resources, overlay, biomes, kept, None, false, defaults, sources,
+            resources, overlay, biomes, kept, None, false, defaults, sources, None,
         )
     }
 
@@ -402,17 +495,19 @@ impl SyncData {
             true,
             defaults,
             sources,
+            None,
         )
     }
 
-    /// First lazy load after world entry: damage definitions are the same
-    /// snapshot gameplay uses, even if `/reload` happened before the first hub.
+    /// First wire load after world entry: use the damage snapshot frozen at
+    /// open and the staged advancement tree, which `/reload` can replace.
     pub fn load_with_frozen_damage(
         resources: &Path,
         overlay: &sunrise_world::loot::PackOverlay,
         damage: &FrozenDamage,
         defaults: &sunrise_world::item_defaults::ItemDefaults,
         sources: &crate::crafting::ResolvedSources,
+        advancements: Option<&Arc<Tree>>,
     ) -> Result<Self, String> {
         Self::load_with_frozen(
             resources,
@@ -423,6 +518,7 @@ impl SyncData {
             false,
             defaults,
             sources,
+            advancements,
         )
     }
 
@@ -435,6 +531,7 @@ impl SyncData {
         same_files: bool,
         defaults: &sunrise_world::item_defaults::ItemDefaults,
         sources: &crate::crafting::ResolvedSources,
+        advancements: Option<&Arc<Tree>>,
     ) -> Result<Self, String> {
         use crate::spans::startup;
         // The recipe book, the recipe sync and the advancements read the
@@ -480,19 +577,7 @@ impl SyncData {
                 continue;
             }
             let path = key.trim_start_matches("minecraft:");
-            let mut found = BTreeMap::new();
-            walk(
-                &root.join(path),
-                &mut found,
-                *key == "minecraft:enchantment",
-            );
-            let mut entries: Vec<_> = found
-                .into_iter()
-                .map(|(p, v)| (("minecraft".to_owned(), p), v, false))
-                .collect();
-            if *key == "minecraft:enchantment" {
-                mod_entries(resources, path, &mut entries);
-            }
+            let mut entries = synchronized_entries(&root, resources, key, overlay);
             let mut damage_entries = None;
             if *key == "minecraft:damage_type" {
                 // Validate the actual resource bytes before publishing any
@@ -542,23 +627,10 @@ impl SyncData {
                         &mut entries,
                     );
                 }
-                pack_entries(path, overlay, &mut entries);
-            }
-            if *key == BIOME_REGISTRY {
-                // A content mod's own biomes: no client has their files, so their data is sent.
-                for (id, v) in crate::biome::mod_biome_files(resources) {
-                    let (ns, p) = id.split_once(':').unwrap_or(("minecraft", &id));
-                    entries.push(((ns.to_owned(), p.to_owned()), v, true));
+                if *key == "minecraft:world_clock" {
+                    check_world_clocks(overlay)?;
                 }
-            }
-            condition_filter::filter(
-                &mut entries,
-                damage_entries.is_some(),
-                overlay.conditions,
-                path,
-            );
-            if *key == "minecraft:enchantment" {
-                holder_sets::expand_enchantments(&mut entries, resources, overlay, defaults)?;
+                pack_entries(path, overlay, &mut entries);
             }
             // A biome the mods' modifiers changed is not the client's own file any more:
             // its data is sent, as a pack's biome is.
@@ -585,6 +657,15 @@ impl SyncData {
                     let packed = pack.is_some() || modified.contains(name);
                     entries.push(((ns.to_owned(), p.to_owned()), json, packed));
                 }
+            }
+            condition_filter::filter(
+                &mut entries,
+                damage_entries.is_some(),
+                overlay.conditions,
+                path,
+            );
+            if *key == "minecraft:enchantment" {
+                holder_sets::expand_enchantments(&mut entries, resources, overlay, defaults)?;
             }
             let mut entries = damage_entries.unwrap_or_else(|| {
                 entries
@@ -670,9 +751,10 @@ impl SyncData {
                     })
                     .map_err(|error| error.to_string())?;
                     startup::time("sync.advancements", || {
-                        super::advancements::ServerAdvancements::load(
-                            resources, overlay, recipes, groups,
-                        )
+                        let tree = advancements
+                            .cloned()
+                            .unwrap_or_else(|| Tree::shared(&resources.join("data"), overlay));
+                        super::advancements::ServerAdvancements::from_tree(tree, recipes, groups)
                     })
                 }
             },
@@ -684,6 +766,7 @@ impl SyncData {
                 &sources.property_additions,
             )
         });
+        overlay.conditions.check_errors()?;
         Ok(sync)
     }
 
@@ -1135,6 +1218,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn synchronized_registries_validate_only_the_winning_pack_files_before_join() {
+        let root = tempfile::tempdir().unwrap();
+        let bad = |id| {
+            serde_json::json!({"neoforge:conditions":[{"type":id}]})
+                .to_string()
+                .into_bytes()
+        };
+        std::fs::create_dir(root.path().join("worldgen")).unwrap();
+        std::fs::write(
+            root.path().join("worldgen/biomes.json"),
+            serde_json::json!({"test:wire_biome": String::from_utf8(bad("absent:wire_biome")).unwrap()}).to_string(),
+        ).unwrap();
+        let instrument = root.path().join("data/minecraft/instrument");
+        std::fs::create_dir_all(&instrument).unwrap();
+        std::fs::write(
+            instrument.join("override.json"),
+            bad("absent:root_instrument"),
+        )
+        .unwrap();
+        let files = [
+            ("instrument/minecraft:override".into(), vec![b"{}".to_vec()]),
+            (
+                "dialog/test:valid".into(),
+                vec![bad("absent:loser"), b"{}".to_vec()],
+            ),
+            (
+                "dialog/test:bad".into(),
+                vec![b"{}".to_vec(), bad("absent:dialog")],
+            ),
+            (
+                "dimension_type/test:bad".into(),
+                vec![bad("minecraft:unknown")],
+            ),
+        ];
+        let conditions = sunrise_world::conditions::LoadConditions::new([]);
+        SyncData::stage_registry_conditions(
+            root.path(),
+            &sunrise_world::loot::PackOverlay {
+                files: &files,
+                conditions: &conditions,
+            },
+        );
+        let error = conditions.check_errors().unwrap_err();
+        assert!(
+            error.contains("data/test/dialog/bad.json: unknown load conditions [absent:dialog]"),
+            "{error}"
+        );
+        assert!(
+            error.contains(
+                "data/test/dimension_type/bad.json: unknown load conditions [minecraft:unknown]"
+            ),
+            "{error}"
+        );
+        assert!(error.contains("data/test/worldgen/biome/wire_biome.json: unknown load conditions [absent:wire_biome]"), "{error}");
+        assert!(!error.contains("absent:loser"), "{error}");
+        assert!(!error.contains("absent:root_instrument"), "{error}");
+    }
+
+    #[test]
     fn false_conditions_do_not_suppress_lan_tag_operations() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("tags/dialog")).unwrap();
@@ -1205,6 +1347,43 @@ mod tests {
     }
 
     #[test]
+    fn wire_reload_uses_the_staged_advancement_generation() {
+        use sunrise_world::loot::PackOverlay;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let data = root.join("data");
+        std::fs::create_dir(&data).unwrap();
+        for name in ["items.json", "registries.json"] {
+            std::fs::write(root.join(name), "{}").unwrap();
+        }
+        let files = |trigger: &str| {
+            vec![(
+                "advancement/test:staged".into(),
+                vec![
+                    serde_json::json!({"criteria":{"fixture":{"trigger":trigger}}})
+                        .to_string()
+                        .into_bytes(),
+                ],
+            )]
+        };
+        let tree = Arc::new(Tree::load_with(
+            &data,
+            &PackOverlay::new(&files("minecraft:tick")),
+        ));
+        let reloaded = SyncData::reload(
+            root,
+            &PackOverlay::new(&files("minecraft:impossible")),
+            &SyncData::empty(),
+            &sunrise_world::item_defaults::read(root).unwrap(),
+            &crate::crafting::ResolvedSources::default(),
+            &tree,
+        )
+        .unwrap();
+        let advancement = reloaded.advancements.definition("test:staged").unwrap();
+        assert_eq!(advancement.criteria[0].trigger, "minecraft:tick");
+    }
+
+    #[test]
     #[ignore = "daily"]
     fn datapack_damage_registry_reload_keeps_wire_ids_and_reloads_tags_before_future_join() {
         use sunrise_world::loot::PackOverlay;
@@ -1263,6 +1442,10 @@ mod tests {
             &open,
             &sunrise_world::item_defaults::read(&root).unwrap(),
             &crate::crafting::ResolvedSources::default(),
+            &Arc::new(Tree::load_with(
+                &root.join("data"),
+                &PackOverlay::new(&changed),
+            )),
         )
         .unwrap();
         assert_eq!(
@@ -1486,6 +1669,100 @@ mod tests {
             [0, 2],
             "the pack's dialog, then the nested tag's"
         );
+    }
+
+    /// #2506: a world pack's clocks reach the clients from the pack's own files, so a dimension
+    /// type that names one as `default_clock` resolves on their side. Under known-pack
+    /// negotiation a clock the pack replaces goes with its data, one it leaves does not.
+    #[test]
+    #[ignore = "daily"]
+    fn world_packs_supply_world_clocks() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/sunrise-client")
+            .join(sunrise_core::VANILLA_VERSION);
+        let world =
+            std::env::temp_dir().join(format!("sunrise-pack-clocks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&world);
+        let pack = world.join("datapacks/moon");
+        let write = |p: &str, t: &str| {
+            let path = pack.join(p);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, t).unwrap();
+        };
+        write(
+            "pack.mcmeta",
+            r#"{"pack":{"description":"Moon","pack_format":1}}"#,
+        );
+        write("data/demo/world_clock/moon.json", "{}");
+        write("data/minecraft/world_clock/the_end.json", "{}");
+        write(
+            "data/demo/dimension_type/moon.json",
+            r#"{"default_clock":"demo:moon"}"#,
+        );
+        let packs = crate::datapack::discover(&world);
+        let files: Vec<_> = crate::datapack::DataStore::load(&packs.iter().collect::<Vec<_>>())
+            .files
+            .into_iter()
+            .collect();
+        let _ = std::fs::remove_dir_all(&world);
+        let sync = SyncData::load(
+            &root,
+            &sunrise_world::loot::PackOverlay::new(&files),
+            &sunrise_world::item_defaults::read(&root).unwrap(),
+            &crate::crafting::ResolvedSources::default(),
+        )
+        .unwrap();
+        let packets = sync.registry_packets(true, &LevelShapes::VANILLA);
+        let registry = |key: &str| packets.iter().find(|p| p.registry == key).unwrap();
+        let moon = registry("minecraft:dimension_type")
+            .entries
+            .iter()
+            .find(|e| e.id == "demo:moon")
+            .and_then(|e| e.data.as_ref())
+            .expect("the pack's dimension type goes with its data");
+        let Some(Tag::String(clock)) = moon.get("default_clock") else {
+            panic!("the dimension type names no clock: {moon:?}");
+        };
+        let clock = clock.to_string_lossy();
+        let sent = |name: &str| {
+            let clocks = &registry("minecraft:world_clock").entries;
+            clocks
+                .iter()
+                .find(|e| e.id == name)
+                .map(|e| e.data.is_some())
+        };
+        assert_eq!(
+            sent(&clock),
+            Some(true),
+            "no client knows the clock {clock} the dimension names"
+        );
+        assert_eq!(sent("minecraft:the_end"), Some(true), "the replaced clock");
+        assert_eq!(
+            sent("minecraft:overworld"),
+            Some(false),
+            "the untouched clock"
+        );
+    }
+
+    /// A pack's clock that is not a map refuses the registry load with its id
+    /// (`WorldClock.DIRECT_CODEC`), where it used to be skipped; any map is a clock.
+    #[test]
+    fn a_malformed_world_clock_refuses_the_load() {
+        let check = |json: &[u8]| {
+            let files = vec![
+                (
+                    "world_clock/demo:fine".to_owned(),
+                    vec![br#"{"any":1}"#.to_vec()],
+                ),
+                ("world_clock/demo:moon".to_owned(), vec![json.to_vec()]),
+            ];
+            check_world_clocks(&sunrise_world::loot::PackOverlay::new(&files))
+        };
+        assert_eq!(check(b"{}"), Ok(()));
+        for bad in [&b"[]"[..], b"{", b"5"] {
+            let refused = check(bad).unwrap_err();
+            assert!(refused.contains("demo:moon"), "{refused}");
+        }
     }
 
     /// #7843: the server sends its tags as `TagLoader` merged them from the

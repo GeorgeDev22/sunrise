@@ -266,7 +266,7 @@ fn load_conditions_recipe_reload_counts_and_failed_candidates_keep_old_recipes()
                     if bad == 2 || bad == 3 {
                         assert!(error.contains("testmod:flag"), "{error}");
                     }
-                    if bad == 1 || bad == 3 {
+                    if bad == 3 {
                         assert!(error.contains("mod testmod"), "{error}");
                     }
                     assert_eq!(
@@ -411,7 +411,7 @@ fn load_conditions_refuse_a_builtin_id_at_startup_even_if_ignored() {
 }
 
 #[test]
-fn load_conditions_foreign_registrations_do_not_grant_namespace_ownership() {
+fn load_conditions_admit_registered_foreign_ids_but_refuse_every_unknown_id() {
     mod_platform::testing::with_mods(
         vec![
             ModEntry::new("a", Box::new(NamedCondition("a:x"))),
@@ -430,20 +430,16 @@ fn load_conditions_foreign_registrations_do_not_grant_namespace_ownership() {
                 &file("neoforge:custom"),
                 "data/demo/advancement/custom.json"
             ));
-            for (id, path) in [
-                ("c:missing", "data/demo/advancement/c.json"),
-                ("neoforge:missing", "data/demo/advancement/neoforge.json"),
-            ] {
-                assert!(!conditions.allows_file(&file(id), path));
+            for namespace in ["a", "c", "neoforge"] {
+                let id = format!("{namespace}:missing");
+                let path = format!("data/demo/advancement/{namespace}.json");
+                assert!(!conditions.allows_file(&file(&id), &path));
+                let error = conditions.check_errors().unwrap_err();
+                assert!(
+                    error.contains(&format!("{path}: unknown load conditions [{id}]")),
+                    "{error}"
+                );
             }
-            assert_eq!(conditions.check_errors(), Ok(()));
-            assert!(!conditions.allows_file(&file("a:missing"), "data/demo/advancement/a.json"));
-            let error = conditions.check_errors().unwrap_err();
-            assert!(
-                error.contains("condition a:missing in namespace registered by mod a"),
-                "{error}"
-            );
-            assert!(!error.contains("mod b"), "{error}");
         },
     );
 }

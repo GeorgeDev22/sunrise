@@ -177,11 +177,8 @@ impl Stats {
     /// `ServerStatsCounter.save`.
     pub(super) fn write(&self, path: &Path) {
         let json = self.to_json();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         if let Ok(text) = serde_json::to_string_pretty(&json) {
-            let _ = std::fs::write(path, text);
+            let _ = sunrise_client::save::write_durable(path, text.as_bytes());
         }
     }
 }
@@ -337,7 +334,11 @@ impl Game<'_> {
     }
     /// `ServerStatsCounter.save`.
     pub(super) fn save_stats(&self) {
-        if !self.stats.loaded || self.remote.is_some() || self.no_player_here() {
+        if !self.stats.loaded
+            || self.remote.is_some()
+            || self.no_player_here()
+            || self.crash_save.holds_interrupted(self.lan_acting)
+        {
             return;
         }
         if let Some(path) = self.stats_path() {
@@ -680,6 +681,77 @@ mod tests {
                 .retain(|g| g.uuid != 2);
             game.spawn_phantoms();
             assert_eq!(with_fake, game.world.random.next_int());
+        });
+    }
+
+    /// A write that cannot finish leaves the last saved JSON of a player: the owner's stats and
+    /// advancements and a network player's, which a crash save can reach mid-write. The new
+    /// file is written beside it and renamed over, so blocking the beside file stops the write
+    /// before the saved one is touched; unblocked, the same saves write.
+    #[test]
+    #[ignore = "daily"]
+    fn a_player_json_write_that_cannot_finish_keeps_the_last_saved_file() {
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            let world = std::env::temp_dir().join(format!(
+                "sunrise-player-json-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&world);
+            game.world_root = world.clone();
+            game.level.player_uuid = Some([0, 0, 0, 5]);
+            game.stats.loaded = true;
+            game.adv.loaded = true;
+            assert!(!game.advancement_tree().list.is_empty());
+            let guest = sunrise_client::lan::playerdata::uuid_ints(12);
+            let files = [
+                game.stats_path().unwrap(),
+                player_json(&world, "advancements", [0, 0, 0, 5]),
+                player_json(&world, "stats", guest),
+                player_json(&world, "advancements", guest),
+            ];
+            let beside = |file: &Path| {
+                let mut name = file.file_name().unwrap().to_owned();
+                name.push("_new");
+                file.with_file_name(name)
+            };
+            for file in &files {
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, "last saved").unwrap();
+                std::fs::create_dir(beside(file)).unwrap();
+            }
+            let host = game.lan.as_mut().unwrap();
+            host.play
+                .insert(12, super::super::lan_actions::GuestPlay::default());
+            let save = |game: &Game<'_>| {
+                game.save_stats();
+                game.save_advancements();
+                let host = game.lan.as_ref().unwrap();
+                let guest = host.hub.guests.iter().find(|g| g.conn == 12).unwrap();
+                game.save_guest_records(host, guest);
+            };
+            save(game);
+            for file in &files {
+                assert_eq!(
+                    std::fs::read_to_string(file).unwrap(),
+                    "last saved",
+                    "{}",
+                    file.display()
+                );
+            }
+            for file in &files {
+                std::fs::remove_dir(beside(file)).unwrap();
+            }
+            save(game);
+            for file in &files {
+                let text = std::fs::read_to_string(file).unwrap();
+                assert!(
+                    serde_json::from_str::<serde_json::Value>(&text).is_ok(),
+                    "{} is written",
+                    file.display()
+                );
+            }
+            std::fs::remove_dir_all(&world).unwrap();
         });
     }
 

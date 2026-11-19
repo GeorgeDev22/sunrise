@@ -67,6 +67,7 @@ pub type Mods = Arc<[ModEntry]>;
 
 pub(crate) struct Installed {
     pub(crate) mods: Mods,
+    by_id: std::collections::HashMap<&'static str, usize>,
     pub(crate) subscribers: sunrise_mod_runtime::subscribers::Subscribers,
     pub(crate) disabled: Box<[std::sync::atomic::AtomicBool]>,
     mod_id_owners: std::collections::HashMap<&'static str, usize>,
@@ -116,6 +117,11 @@ impl Installed {
             .map(|(index, entry)| (entry.id, index))
             .collect();
         Self {
+            by_id: mods
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| (entry.id, i))
+                .collect(),
             mods,
             subscribers,
             disabled,
@@ -506,6 +512,20 @@ pub(crate) fn listening(
                 )
             })
     })
+}
+
+/// Look up the enabled subscriber owning a namespaced kind without walking the hook's listeners.
+pub(crate) fn listening_kind_owner(hook: HookId, kind: &str) -> Option<&'static ModEntry> {
+    let (namespace, _) = kind.split_once(':')?;
+    let installed = installed()?;
+    let &index = installed.by_id.get(namespace)?;
+    if !installed.subscribers.contains(hook as usize, index)
+        || installed.disabled[index].load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return None;
+    }
+    bump_listener_serial();
+    Some(&installed.mods[index])
 }
 
 /// Marks the thread as inside `entry`'s `hook` until the guard drops, and hands back its hooks.

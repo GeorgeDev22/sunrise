@@ -849,7 +849,9 @@ pub struct ExperienceOrb {
     /// `ExperienceOrb.DATA_VALUE`: an int that a save or command can leave at
     /// 0 or below, which a pickup turns into no experience.
     pub value: i32,
-    pub age: u32,
+    /// `ExperienceOrb.age`: ticks lived, signed (a save can start it below 0);
+    /// the orb is discarded at 6000.
+    pub age: i32,
     pub on_ground: bool,
     /// `ExperienceOrb.count`: orbs merged into this one; each pickup gives
     /// `value` once and takes one off.
@@ -1287,7 +1289,8 @@ impl ExperienceOrb {
         if self.on_ground && wanted.y < -0.03 {
             self.velocity.y = -wanted.y * 0.4;
         }
-        self.age += 1;
+        // `++age` on a Java int.
+        self.age = self.age.wrapping_add(1);
         let step = OrbMove {
             from,
             moved,
@@ -1739,6 +1742,8 @@ pub struct ArmorStand {
     /// When it joined its list ([`crate::join_seq`]); set by the list, not by the spawn site.
     pub join: crate::join_seq::JoinSeq,
     pub fire_ticks: i32,
+    /// Unsaved fire immunity granted on this logical side.
+    pub mod_fire_immune: bool,
     pub health: f32,
     pub id: u32,
     pub position: Vec3,
@@ -1979,11 +1984,15 @@ impl ArmorStand {
         }
         best
     }
+    /// `Entity.isOnFire`: an immune stand does not count as burning.
+    pub fn is_on_fire(&self) -> bool {
+        !self.mod_fire_immune && self.fire_ticks > 0
+    }
     /// `EntityRenderer.getPackedLightCoords` for the cell `light_probe` chose:
     /// the level's sky light over the cell's block light, at 15 block light
     /// while the stand `isOnFire`. `light` is the level's packed light.
     pub fn render_light(&self, light: u8) -> u32 {
-        let block = if self.fire_ticks > 0 { 15 } else { light & 15 };
+        let block = if self.is_on_fire() { 15 } else { light & 15 };
         (u32::from(light >> 4) * 16) | ((u32::from(block) * 16) << 8)
     }
     /// The body's yaw `alpha` of the way through the tick
@@ -2020,6 +2029,7 @@ impl ArmorStand {
             pitch: 0.0,
             join: Default::default(),
             fire_ticks: 0,
+            mod_fire_immune: false,
             health: 20.0,
             id,
             position,
@@ -2132,6 +2142,8 @@ impl ArmorStand {
         }
         if water {
             self.fire_ticks = 0;
+        } else if self.mod_fire_immune {
+            self.fire_ticks = self.fire_ticks.min(0);
         }
         if self.fire_ticks > 0 {
             if self.fire_ticks % 20 == 0
@@ -2146,13 +2158,17 @@ impl ArmorStand {
             }
             self.fire_ticks -= 1;
         }
-        if lava {
+        if lava && !self.mod_fire_immune {
             self.fire_ticks = self.fire_ticks.max(300);
         }
-        let fire = crate::motion::environment::fire_contact(world, registry, self.bounds()) > 0.0;
         // The fire block reaches a stand through `applyEffectsFromBlocks`,
         // which a NoGravity stand does not feel (measured beside the server).
-        if fire && !self.invisible && !self.marker && !self.no_gravity {
+        if !self.mod_fire_immune
+            && !self.invisible
+            && !self.marker
+            && !self.no_gravity
+            && crate::motion::environment::fire_contact(world, registry, self.bounds()) > 0.0
+        {
             if self.fire_ticks > 0 {
                 if !invulnerable(world, "minecraft:in_fire") {
                     self.health -= 0.15;

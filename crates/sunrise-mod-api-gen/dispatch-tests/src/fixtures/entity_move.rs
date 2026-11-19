@@ -115,6 +115,16 @@ fn an_ordinary_listener_still_replaces_the_delta() {
 
 mod root {
     mod runtime {
+        pub(super) fn listening_kind_owner(
+            hook: super::HookId,
+            kind: &str,
+        ) -> Option<&'static super::ModEntry> {
+            let (namespace, _) = kind.split_once(':')?;
+            super::listening(hook)
+                .map(|(_, entry)| entry)
+                .find(|entry| entry.id == namespace)
+        }
+
         pub(super) struct ListenerScope;
         impl ListenerScope {
             pub(super) fn new() -> Self {

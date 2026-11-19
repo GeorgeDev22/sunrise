@@ -124,6 +124,7 @@ fn every_ordinary_resident_family_binds_its_actual_owned_slot() {
                 previous: sunrise_core::geometry::Vec3::ZERO,
                 velocity: sunrise_core::geometry::Vec3::ZERO,
                 rotation: [0.0, 0.0],
+                owner: None,
                 fall_distance: 0.0,
                 payload_version: 1,
                 payload_bytes: Vec::new(),

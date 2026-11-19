@@ -5,6 +5,22 @@ use crate::*;
 #[sunrise_mod_api_macros::host_area]
 pub trait TextHost {
     /// Side: both.
+    /// `Component.getString()`: resolve translations, arguments, keybinds and
+    /// siblings to plain characters. Styles do not add characters; literal
+    /// legacy formatting codes remain. Invalid components return their boundary error.
+    ///
+    /// On the client and its integrated server this uses the client process's
+    /// active language, resource-pack layers and key bindings, not a remote
+    /// player's language. A dedicated server uses built-in English, then
+    /// adds English from its enabled mods and data packs once before
+    /// `server_starting`. Keybind components there return the literal ID.
+    /// On a dedicated server, a component-valued translation replaces its
+    /// arguments and fallback.
+    /// Available outside drawing, including setup on a game-backed host, on native and wasm.
+    /// Pack discovery before game resources are available returns `TextFormError::Unavailable`.
+    #[access(Metadata)]
+    fn text_string(&self, text: &Text) -> Result<String, TextFormError>;
+    /// Side: both.
     /// Reads a text component as `/tellraw` and `ComponentSerialization.CODEC` take it: one
     /// JSON or SNBT value (`"plain"`, `{"text":"Hi","color":"gold"}`, `["a",{"text":"b"}]`,
     /// `translate`, `extra`, click and hover events), with nothing but whitespace after it

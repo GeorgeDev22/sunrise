@@ -115,7 +115,7 @@ fn hover(event: &Map<String, Value>, reg: &Registries, snbt: bool) -> Option<Val
             out.insert("value".into(), build(event.get("value")?, reg, snbt)?);
         }
         "show_item" => {
-            event.get("id")?.as_str()?;
+            mod_api::Identifier::parse(event.get("id")?.as_str()?).ok()?;
         }
         "show_entity" => {
             mod_api::Identifier::parse(event.get("id")?.as_str()?).ok()?;

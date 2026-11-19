@@ -1127,6 +1127,7 @@ fn integrated_server_save_persists_owner_player_data() {
         &dir,
         execution_role::ExecutionRole::IntegratedServer,
         &Default::default(),
+        false,
     )
     .unwrap();
 
@@ -1148,6 +1149,7 @@ fn integrated_server_save_persists_owner_player_data() {
         &dir,
         execution_role::ExecutionRole::DedicatedServer,
         &Default::default(),
+        false,
     )
     .unwrap();
 

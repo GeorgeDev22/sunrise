@@ -41,7 +41,7 @@ use mod_behaviour::{ModBehaviour, mod_curve};
 pub use native::{ParticleController, ParticleUpdate, register_particle_providers};
 use spawn::next_double_between;
 pub mod polytone;
-mod polytone_gpu;
+pub mod polytone_gpu;
 mod polytone_model;
 mod simple;
 use simple::{PARALLEL_MIN, parallel_threads, sprite_from_age_in, tick_simple};
@@ -1106,9 +1106,8 @@ pub struct ParticleEngine {
     /// Vanilla particle types a pack replaces with a custom one of the same id
     /// (`assets/minecraft/polytone/custom_particles/rain.json` is `minecraft:rain`).
     polytone_overrides: HashMap<ParticleType, String>,
-    /// The packs' GPU particles' records, one store per type, and the ticks they count in.
-    polytone_gpu: Vec<polytone_gpu::Store>,
-    polytone_ticks: u64,
+    /// The packs' GPU particles: their records, one store per type, and what they read.
+    polytone_gpu: polytone_gpu::GpuParticles,
     /// The last frame's additively blended quads (`take_additive`).
     additive: std::sync::Mutex<Vec<Vertex>>,
     emitters: Vec<TrackingEmitter>,
@@ -1224,8 +1223,7 @@ impl ParticleEngine {
             parallel_threads: parallel_threads(),
             polytone: None,
             polytone_overrides: HashMap::new(),
-            polytone_gpu: Vec::new(),
-            polytone_ticks: 0,
+            polytone_gpu: Default::default(),
             additive: std::sync::Mutex::default(),
             emitters: Vec::new(),
             starters: Vec::new(),
@@ -1420,8 +1418,10 @@ impl ParticleEngine {
         self.len() + self.starters.len() + self.elder_guardians.len()
     }
     /// `ParticleEngine.clearParticles`, for the groups this engine holds: the live
-    /// particles, firework starters, elder guardians, queued particles and tracking emitters.
+    /// particles, firework starters, elder guardians, queued particles and tracking emitters,
+    /// and the packs' GPU particle records with the heightmap they read.
     pub fn clear(&mut self) {
+        self.polytone_gpu.clear();
         self.emitters.clear();
         self.particles.clear();
         for group in &mut self.groups {
@@ -1503,7 +1503,7 @@ impl ParticleEngine {
     }
     /// Live GPU particle records (spawns, before `area` spreads them), for tests and status.
     pub fn polytone_gpu_records(&self) -> usize {
-        self.polytone_gpu.iter().map(polytone_gpu::Store::len).sum()
+        self.polytone_gpu.records()
     }
     /// Choose a frame from this particle's declared sprite set.
     pub fn set_sprite_frame(&self, particle: &mut Particle, frame: usize) {
@@ -1845,18 +1845,12 @@ impl ParticleEngine {
             && let Some(def) = registry.get(name)
         {
             let (registry, def, name) = (registry.clone(), def.clone(), name.to_owned());
-            let particle = polytone::make(self, &registry, &name, &def, o, p, v, seed)?;
+            let (particle, custom) = polytone::make(self, &registry, &name, &def, o, p, v, seed)?;
             if def.gpu.is_some() {
                 // A GPU particle is only a record: it never becomes an engine particle.
-                let now = self.polytone_ticks;
-                let store = match self.polytone_gpu.iter().position(|s| s.is(&def)) {
-                    Some(i) => &mut self.polytone_gpu[i],
-                    None => {
-                        self.polytone_gpu.push(polytone_gpu::Store::new(&def)?);
-                        self.polytone_gpu.last_mut()?
-                    }
-                };
-                store.spawn(&particle, now, seed as u64);
+                let shader = || registry.gpu_shader(&name);
+                self.polytone_gpu
+                    .spawn(&def, shader, &particle, custom, seed as u64);
                 return None;
             }
             return Some(particle);
@@ -3533,10 +3527,7 @@ impl ParticleEngine {
             *left -= 1;
             *left >= 0
         });
-        self.polytone_ticks += 1;
-        for store in &mut self.polytone_gpu {
-            store.expire(self.polytone_ticks);
-        }
+        self.polytone_gpu.tick();
         // The sounds the packs' custom particles played last tick.
         if let Some(registry) = &self.polytone {
             self.sounds.extend(registry.take_sounds());
@@ -4685,19 +4676,16 @@ impl ParticleEngine {
                 }
             }
         }
-        for store in &self.polytone_gpu {
-            store.render(
-                &self.atlas,
-                camera,
-                base,
-                self.polytone_ticks,
-                partial,
-                &mut light_cache,
-                light_at,
-                out,
-                &mut additive,
-            );
-        }
+        let frame = polytone_gpu::QuadFrame {
+            atlas: &self.atlas,
+            camera,
+            facing: base,
+            partial,
+            light_at,
+            surface: self.polytone_gpu.surface(),
+        };
+        self.polytone_gpu
+            .render(&frame, &mut light_cache, out, &mut additive);
     }
 }
 /// How brightly particle `ty` shines in HDR output, as `mesher::hdr_tier`: flames,

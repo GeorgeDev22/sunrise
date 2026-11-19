@@ -124,10 +124,8 @@ pub(super) fn event_kind(event: &HostEvent) -> EventKind {
         HostEvent::Flight { conn, .. } => ("flight", Some(*conn), None),
         HostEvent::Chat { .. } => ("chat line", None, None),
         HostEvent::PlayerChat { .. } => ("chat", None, None),
-        HostEvent::ChatFiltered { name, .. } => ("filtered chat", None, Some(name.clone())),
         HostEvent::Warn(_) => ("warning", None, None),
         HostEvent::Error(_) => ("error", None, None),
-        HostEvent::Ban { name, .. } => ("ban", None, Some(name.clone())),
     }
 }
 

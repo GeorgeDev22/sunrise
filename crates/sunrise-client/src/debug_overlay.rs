@@ -279,15 +279,6 @@ pub fn position(
     ]
 }
 
-/// `VideoMode.refreshRateLabel`: whole rates without decimals.
-pub fn refresh_rate_label(hz: f64) -> String {
-    if hz == hz.round() {
-        format!("{}", hz as i64)
-    } else {
-        format!("{hz:.2}")
-    }
-}
-
 /// `DeviceInfo.vendorName` for a PCI vendor id.
 pub fn vendor_name(id: u32) -> String {
     match id {
@@ -932,8 +923,6 @@ mod tests {
             position([0.0, 64.0, 0.0], 450.0, 0.0, "minecraft:the_nether", 2)[3],
             "Facing: west (Towards negative X) (90.0 / 0.0)"
         );
-        assert_eq!(refresh_rate_label(165.0), "165");
-        assert_eq!(refresh_rate_label(59.94), "59.94");
     }
 
     #[test]

@@ -93,8 +93,11 @@ pub trait LevelBlocksBackendMut {
     /// is `level_set_block`'s with `NEIGHBORS | CLIENTS` (plus `KNOWN_SHAPE` when
     /// `update_neighbour_shapes` is false; without it the neighbours' shapes update, so fences
     /// and walls connect). `setPlacedBy` gets no placer and no item. Nothing else of
-    /// `BlockItem.place` runs: no survival or obstruction check, no sound, no game event, no
-    /// advancement. Errors and `Ok(false)` are `level_set_block`'s.
+    /// `BlockItem.place` runs: no survival or obstruction check, item placement sound, placement
+    /// game event or advancement. A carrier-transfer fence can refuse a direct placement write
+    /// (the origin, a companion or a callback write) with `Ok(false)`; neighbour updates follow
+    /// the level's normal rules. A completed wither pattern in an open Host transaction returns
+    /// `LevelWriteError::InTransaction`.
     #[access(WorldOnly)]
     fn level_place_block(
         &mut self,
@@ -102,6 +105,24 @@ pub trait LevelBlocksBackendMut {
         pos: [i32; 3],
         state: BlockState,
         update_neighbour_shapes: bool,
+    ) -> Result<bool, LevelWriteError>;
+    /// Side: server.
+    /// Run `Block.setPlacedBy` on the block currently at `pos`, without a placer. `stack` is
+    /// a detached item value (`None` is the empty stack); the block may inspect its components.
+    /// Write the initial state and load any block entity data before calling. The callback can
+    /// write companion cells and produce block-specific effects, but will not load stack NBT.
+    /// `Ok(false)` at an unloaded or out-of-height origin or on carrier-transfer refusal.
+    /// The fence check covers the origin and cells the callback writes directly, including
+    /// companions; neighbour updates follow the level's normal rules.
+    /// Stale or unavailable levels and invalid stacks return typed errors before any effects.
+    /// A placement that would summon a wither is refused while a Host transaction is open.
+    #[access(WorldOnly)]
+    #[read_stack]
+    fn level_set_placed_by(
+        &mut self,
+        level: LevelRef,
+        pos: [i32; 3],
+        stack: Option<&ItemStack>,
     ) -> Result<bool, LevelWriteError>;
     /// Side: server.
     /// Remove a block in place (`Level.removeBlock`), preserving its fluid.

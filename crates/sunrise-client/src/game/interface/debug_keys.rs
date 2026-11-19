@@ -424,7 +424,7 @@ impl Game<'_> {
                 _ => "",
             });
         let refresh = self.debug_refresh_rate().map_or("0".into(), |mhz| {
-            debug_overlay::refresh_rate_label(f64::from(mhz) / 1000.0)
+            sunrise_client_input::window::refresh_rate_label(mhz as f32 / 1000.0)
         });
         // Sunrise: with frame generation running, the frames reaching the screen too.
         let generated = self
@@ -510,9 +510,10 @@ impl Game<'_> {
                 d.group(
                     "system",
                     [format!(
-                        "Window: {}x{} ({density:.2}x pixel density)",
+                        "Window: {}x{} ({}x pixel density)",
                         logical.width.round() as i32,
-                        logical.height.round() as i32
+                        logical.height.round() as i32,
+                        sunrise_core::java_number::format_fixed2(f64::from(density as f32))
                     )],
                 );
             }
@@ -557,18 +558,23 @@ impl Game<'_> {
     /// `DebugEntryTps` for local and remote connections.
     pub(super) fn debug_tps_line(&self, d: &mut debug_overlay::Displayer) {
         if self.player.is_some() {
-            let [tx, rx] = self.debug_charts.packet_rates.map(|n| n.round() as i64);
+            use sunrise_core::java_number::format_fixed;
+            let [tx, rx] = self
+                .debug_charts
+                .packet_rates
+                .map(|n| format_fixed(f64::from(n), 0));
             let (target, status) = if self.clock.sprinting() {
                 ("-".to_owned(), " (sprinting)")
-            } else if self.clock.stepping() {
-                (
-                    format!("{:.1}", 1000.0 / self.clock.rate()),
-                    " (frozen - stepping)",
-                )
-            } else if self.clock.frozen() {
-                (format!("{:.1}", 1000.0 / self.clock.rate()), " (frozen)")
             } else {
-                (format!("{:.1}", 1000.0 / self.clock.rate()), "")
+                let target = format_fixed(f64::from(1000.0 / self.clock.rate()), 1);
+                let status = if self.clock.stepping() {
+                    " (frozen - stepping)"
+                } else if self.clock.frozen() {
+                    " (frozen)"
+                } else {
+                    ""
+                };
+                (target, status)
             };
             if self.remote.is_none() || self.integrated.is_some() {
                 let tick_ms = self
@@ -578,7 +584,8 @@ impl Game<'_> {
                         server.smoothed_tick_ms()
                     });
                 d.line(format!(
-                    "Integrated server @ {tick_ms:.1}/{target} ms{status}, {tx} tx, {rx} rx",
+                    "Integrated server @ {}/{target} ms{status}, {tx} tx, {rx} rx",
+                    format_fixed(f64::from(tick_ms), 1),
                 ));
             } else if let Some(remote) = &self.remote {
                 d.line(format!(
@@ -948,12 +955,8 @@ impl Game<'_> {
     pub(super) fn block_entity_tag(&self, pos: [i32; 3]) -> Option<Tag> {
         let e = self.world.block_entities.get(&(pos[0], pos[1], pos[2]))?;
         let name = self.data_block_name(pos);
-        let mut tag = sunrise_client::save::block_entity_encode::encode(
-            (pos[0], pos[1], pos[2]),
-            e,
-            &name,
-            self.res.items(),
-        );
+        let mut tag =
+            self.encode_live_block_entity((pos[0], pos[1], pos[2]), e, &name, self.res.items());
         if let Tag::Compound(c) = &mut tag {
             for key in ["id", "x", "y", "z", "keepPacked"] {
                 c.remove(&key.into());

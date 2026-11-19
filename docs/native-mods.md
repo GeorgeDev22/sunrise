@@ -123,9 +123,8 @@ must be converted to the fork's hook catalog before being advertised as availabl
   owner would receive them with `show_death_messages` enabled. Listeners may replace
   or suppress the message in dispatch order. The server-only named-mob log is not
   a second player-message hook.
-- Dedicated-server settings describe the live listener: account authentication,
-  bound port and whether Velocity forwarding is active. They never expose the
-  forwarding secret, and are unavailable before listening or on integrated/LAN
+- Dedicated-server settings describe the live listener: account authentication
+  and bound port. They are unavailable before listening or on integrated/LAN
   servers. Secure-profile enforcement and hardcore are not part of this read.
 - Vehicle and passenger reads use entity handles (`entity_vehicle` and
   `entity_passengers` on `Host`), not parallel numeric-ID helpers. Passenger order

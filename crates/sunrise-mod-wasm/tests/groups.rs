@@ -87,7 +87,7 @@ fn capability_is_answered_only_within_its_group() {
             let manifest = sunrise_mod_package::Package::read(&path).unwrap().manifest;
             infos.push(mod_api::PackageInfo::new(
                 manifest.id.clone(),
-                manifest.version.clone(),
+                manifest.version.to_string(),
                 mod_api::PackageKind::Code,
                 mod_api::Side::Both,
                 vec![manifest.id.clone()],

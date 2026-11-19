@@ -198,6 +198,7 @@ def main():
     subprocess.run([*route, "--crate-type", "bin", "--crate-name", "sunrise_native_game",
                     *(flag for arg in identity["link_args"] for flag in ("-C", f"link-arg={arg}")),
                     *extern("sunrise_client"), *extern("sunrise_mod_host"), *extern("mod_api"), *extern("mod_points"), *extern("sunrise_mod_package"),
+                    *sdk_tools.official_externs(deps),
                     "--extern", f"mod_0={shipped / 'libmod_0.rlib'}", "-o", str(shipped_exe), str(shipped / "main.rs")], check=True)
     if windows:
         # std's DLL always exports the allocator shim; the game exports one only if it has its own allocator.

@@ -246,6 +246,71 @@ pub trait EntitiesRegistrar {
         before_game: bool,
         provider: EntityProviderOf,
     );
+
+    /// Tell `entity_tick_pre` and `entity_tick_post` for each entity of type `entity`
+    /// (`minecraft:zombie`, `mymod:golem`) alone, right before and right after its own tick
+    /// (NeoForge's `EntityTickEvent` timing), instead of once with its family. Every mod that
+    /// hooks them hears those entities alone. Name only the types that need their own moment:
+    /// each entity of a named type costs a call of its own every tick. A type that is not a
+    /// namespaced lowercase id refuses the mod's registration.
+    fn entity_tick_each(&mut self, entity: &str);
+
+    /// [`Self::entity_tick_each`] for every entity type the tick hooks observe,
+    /// as a port of a NeoForge mod that listens to `EntityTickEvent` needs.
+    fn entity_tick_each_entity(&mut self);
+}
+
+/// The entity types whose ticks are told one entity at a time, from every mod's
+/// [`EntitiesRegistrar::entity_tick_each`], resolved when the mods are installed.
+// hidden: the game reads it once at load to mark its entity types.
+// no wire: resolved on the host from the registrar's `entity_tick_each` calls, which cross on
+// their own; the set itself is never sent to a mod.
+// exhaustive: its fields are private, so mods cannot build or destructure it
+#[doc(hidden)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EntityTickEach {
+    all: bool,
+    /// Sorted, without repeats.
+    kinds: Vec<String>,
+}
+
+impl EntityTickEach {
+    /// The set the declarations name, in any order: `None` names every type.
+    pub fn of(declarations: &[Option<String>]) -> Self {
+        let all = declarations.iter().any(Option::is_none);
+        let mut kinds: Vec<String> = if all {
+            Vec::new()
+        } else {
+            declarations.iter().flatten().cloned().collect()
+        };
+        kinds.sort_unstable();
+        kinds.dedup();
+        Self { all, kinds }
+    }
+    /// Whether a mod named any type.
+    pub fn any(&self) -> bool {
+        self.all || !self.kinds.is_empty()
+    }
+    /// Whether a mod named every type.
+    pub fn all(&self) -> bool {
+        self.all
+    }
+    /// Whether entities of type `kind` are told one at a time.
+    pub fn names(&self, kind: &str) -> bool {
+        self.all
+            || self
+                .kinds
+                .binary_search_by(|k| k.as_str().cmp(kind))
+                .is_ok()
+    }
+}
+
+/// The installed mods' [`EntityTickEach`], or `None` before the mods are installed, when no type
+/// is named.
+// hidden: the game reads it once at load.
+#[doc(hidden)]
+pub fn entity_tick_each() -> Option<&'static EntityTickEach> {
+    installed().map(|parts| &parts.entity_tick_each)
 }
 
 /// CapabilityProviders operations for entities.

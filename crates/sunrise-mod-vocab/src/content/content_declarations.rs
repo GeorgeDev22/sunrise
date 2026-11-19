@@ -89,6 +89,15 @@ pub struct BlockProperties {
     pub max_horizontal_offset: Option<f32>,
     /// Maximum downward displacement, 0 to 0.2 (default 0.2 for XYZ; XZ has no vertical offset).
     pub max_vertical_offset: Option<f32>,
+    /// Vanilla's note-block instrument; unset inherits the template.
+    pub instrument: Option<crate::NoteInstrument>,
+    /// Lava ignition flag. The per-position `ignited_by_lava` hook still answers first.
+    pub ignited_by_lava: Option<bool>,
+    /// Whether placement and features may replace this block; the held-own-item rule still applies.
+    pub replaceable: Option<bool>,
+    /// Skip faces against any state of this same block; false disables the template's render rule.
+    /// Leaf and ice graphics culling still follows the template class.
+    pub skip_same_block_faces: Option<bool>,
     /// Opt into `VegetationBlock` survival and neighbour checks independently of the
     /// template. Templates that already inherit `VegetationBlock` keep their rules.
     /// Otherwise the default support is `minecraft:supports_vegetation`.

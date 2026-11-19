@@ -913,8 +913,11 @@ fn place_items(places: &[(String, String, mod_call::Name)]) -> proc_macro2::Toke
         quote!((#id, PointId::#variant))
     });
     let marks = places.iter().map(|(_, name, call)| {
-        let call = call.text();
-        quote!((#name) => { #[cfg(target_arch = "wasm32")] { ::mod_api::__sunrise_import!(#call); } };)
+        let mark: proc_macro2::TokenStream =
+            crate::wire::calls::mark_block("::mod_api", &call.text())
+                .parse()
+                .expect("a generated mark");
+        quote!((#name) => { #mark };)
     });
     let subscriptions = SUBSCRIPTIONS;
     quote! {

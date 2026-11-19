@@ -39,8 +39,8 @@ impl Game<'_> {
         let Some(item) = mod_api::__private::item_key_id(item) else {
             return false;
         };
-        self.stations()
-            .enchantments
-            .can_enchant(self.items(), id, item)
+        self.stations().enchantments.get(id).is_some_and(|e| {
+            sunrise_items::enchant::Enchantments::item_in(self.items(), &e.supported, item)
+        })
     }
 }

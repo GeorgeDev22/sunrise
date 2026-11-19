@@ -27,7 +27,7 @@ fn verify(folder: &Path, libraries: &[Library]) -> Result<(), String> {
             || library.identity.split_whitespace().last() != Some(RUSTC_VERSION)
         {
             return Err(format!(
-                "mod {}: incompatible build identity {:?}; game {GAME_BUILD_ID} rustc {RUSTC_VERSION}",
+                "mod {}: incompatible build identity {:?}; game {GAME_BUILD_ID} rustc {RUSTC_VERSION}. The library was built for another game build or Rust release: rebuild the mod for this build (`cargo sunrise-mod update --sunrise {GAME_BUILD_ID}`, then `cargo sunrise-mod build`)",
                 library.id, library.identity
             ));
         }

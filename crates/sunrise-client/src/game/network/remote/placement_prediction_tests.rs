@@ -123,11 +123,77 @@ fn client_placement_prediction_asks_placement_and_survival_parts() {
             game.world.set(x, 64, 0, below).unwrap();
             let preview = game.remote_can_place(&top_of(x, 0), &ItemStack::new(held, 1));
             assert_eq!(
-                preview.map(|(pos, _)| pos),
+                preview.map(|placed| placed.pos),
                 placed.then(|| sunrise_core::position::BlockPos::new(x, 65, 0)),
                 "{held} on {ground}"
             );
         }
+    });
+}
+
+struct BedInstead;
+#[mod_api::sunrise_part]
+impl BlockPart for BedInstead {
+    fn state_for_placement(
+        &self,
+        level: LevelSide<'_>,
+        _: &mut StateForPlacementEvent<'_>,
+    ) -> Option<Option<BlockState>> {
+        let LevelSide::Client(level) = level else {
+            panic!("asked on a server");
+        };
+        Some(level.block_state_id("minecraft:red_bed"))
+    }
+}
+
+struct BedPlacementMod;
+#[mod_api::__subscriptions]
+impl Hooks for BedPlacementMod {
+    fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+        let furnace = r.block_key("minecraft:furnace");
+        r.block_part(furnace, BedInstead);
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn predicts_the_selected_beds_component_adjusted_head() {
+    use sunrise_core::nbt::{Compound, Tag};
+    let mods = vec![mod_api::ModEntry::new(
+        "placement_bed",
+        Box::new(BedPlacementMod),
+    )]
+    .into();
+    on_a_client(mods, |game| {
+        let registry = game.pack.assets.registry;
+        let stone = registry.default_state("minecraft:stone").unwrap();
+        let air = registry.default_state("minecraft:air").unwrap();
+        let mut stack = ItemStack::new("minecraft:furnace", 1);
+        stack.data_mut().set_other(
+            "minecraft:block_state",
+            Some(Tag::Compound(Compound::from([
+                ("facing".into(), Tag::String("east".into())),
+                ("occupied".into(), Tag::String("not_a_boolean".into())),
+            ]))),
+        );
+        game.world.set(5, 64, 5, stone).unwrap();
+        game.world.set(6, 64, 5, stone).unwrap();
+        game.world.set(5, 65, 4, stone).unwrap(); // would block the default north head
+        let placed = game
+            .remote_can_place(&top_of(5, 5), &stack)
+            .expect("east-facing bed");
+        game.predict_place(&placed, &stack, 9);
+        let foot = registry.state(game.world.block(5, 65, 5)).unwrap();
+        let head = registry.state(game.world.block(6, 65, 5)).unwrap();
+        for part in [foot, head] {
+            assert_eq!(part.name, "minecraft:red_bed");
+            assert_eq!(part.properties["facing"], "east");
+            assert_eq!(part.properties["occupied"], "false");
+        }
+        assert_eq!(foot.properties["part"], "foot");
+        assert_eq!(head.properties["part"], "head");
+        assert_eq!(game.world.block(5, 65, 4), stone);
+        assert_eq!(game.world.block(5, 65, 6), air);
     });
 }
 
@@ -216,11 +282,12 @@ fn a_neighbour_s_survival_part_reads_the_prediction_s_blocks() {
         game.world
             .set(0, 65, 0, state(game, "minecraft:dandelion"))
             .unwrap();
-        let (_, changes) = game
+        let placed = game
             .remote_can_place(&top_of(1, 0), &ItemStack::new("minecraft:cobblestone", 1))
             .expect("the cobblestone is placed");
         let at = |x| {
-            changes
+            placed
+                .changes
                 .iter()
                 .find(|(pos, _)| *pos == sunrise_core::position::BlockPos::new(x, 65, 0))
                 .map(|&(_, state)| state)

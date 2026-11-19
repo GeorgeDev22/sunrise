@@ -34,6 +34,7 @@ impl Game<'_> {
                     .pending_loot
                     .extend(payload.pending.map(|pending| (key, pending)));
             });
+            self.notify_block_entity_load_additional(key);
         }
     }
 }

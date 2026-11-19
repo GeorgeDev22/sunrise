@@ -35,6 +35,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
+use sunrise_core::crc32::Crc32;
 
 /// Where progress lines go: the terminal for the binary, the log pane for the launcher.
 pub type Log<'a> = &'a dyn Fn(&str);
@@ -1408,7 +1409,7 @@ fn extract_member(client: &mut Jar, name: &str, target: &Path) -> Result<(), Str
     drop(member);
     if target.is_file() && fs::metadata(target).map_err(|e| e.to_string())?.len() == size {
         let mut file = fs::File::open(target).map_err(|e| e.to_string())?;
-        let mut hash = crc32fast::Hasher::new();
+        let mut hash = Crc32::new();
         let mut buffer = [0; 16 * 1024];
         loop {
             let n = file.read(&mut buffer).map_err(|e| e.to_string())?;

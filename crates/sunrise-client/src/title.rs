@@ -3389,13 +3389,6 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             _ => {}
         }
     }
-    /// The server auto-reconnect retries now, once its countdown is over.
-    pub fn due_retry(&mut self) -> Option<crate::reconnect::Retry> {
-        match &mut self.mode {
-            Mode::Multiplayer(screen) => screen.due_retry(),
-            _ => None,
-        }
-    }
     pub(crate) fn remember_direct_address(&mut self) {
         if let Mode::Multiplayer(crate::multiplayer::Screen::Direct { address }) = &self.mode {
             self.last_server.clone_from(address);

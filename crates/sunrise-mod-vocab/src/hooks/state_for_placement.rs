@@ -5,11 +5,15 @@ pub trait Hooks {
     /// A block is about to take the state it is placed in
     /// (`Block.getStateForPlacement(BlockPlaceContext)`), `state` the block's
     /// own default state. Answer only for your blocks: put the state you want
-    /// in `answer` as `Some(Some(state))` — a state of that block, as vanilla
-    /// sets properties on its own `defaultBlockState` (another block's is
-    /// ignored) — or refuse the placement with `Some(None)`: the block goes
-    /// nowhere and the stack is kept, as vanilla's `null`. Left empty, the
-    /// block's own placement runs. `context` is
+    /// in `answer` as `Some(Some(state))`, including a registered state of
+    /// another block. Survival and entity obstruction use that candidate at
+    /// the placement position, but the selected block's `getStateForPlacement`
+    /// is not called. A mod selecting a multi-cell block is responsible for
+    /// checking its footprint: `setPlacedBy` does not recheck its companion
+    /// cell. Sunrise also requires creative-operator permission to select a
+    /// game-master block. An unknown state falls back to ordinary placement.
+    /// Refuse with `Some(None)`: the block goes nowhere and the stack is kept,
+    /// as vanilla's `null`. Left empty, the block's own placement runs. `context` is
     /// vanilla's `BlockPlaceContext` (the clicked face, the placer's rotation,
     /// the clicked position, whether the clicked block is being replaced, the
     /// item in hand) and `fluid` the fluid in the position the block would go
@@ -31,10 +35,25 @@ pub trait Hooks {
     /// keeps its stack unspent until the server answers. Answer `None` on a
     /// client where only a server can decide: the template's rule then
     /// predicts, and the server still decides.
-    /// Version 2 is catalog metadata; rebuild for the `LevelSide` signature.
+    #[notes = r##"### Choosing a block placement state
+
+`BlockPart::state_for_placement` is vanilla's `Block.getStateForPlacement` for
+player and dispenser placement, including client prediction for a player.
+Answer only for your own blocks: `Some(Some(state))` selects a registered
+candidate, `Some(None)` refuses placement without spending the stack, and
+`None` delegates to the next Part or ordinary placement. Use
+`native_state_with_property(state, key, value)` to set a property, including
+one your block declares.
+
+A candidate can belong to another block. The selected block does not run its
+placement-state method again. It still gets the primary cell's survival and
+obstruction checks as applicable, and a game-master block requires creative
+operator permission. If the selected block spans cells, check its footprint
+before returning it: `setPlacedBy` does not recheck its companion cell.
+"##]
     #[hook(
         side = "both",
-        version = 2,
+        version = 3,
         contract = "replace",
         out = "answer",
         scope = "block",

@@ -1549,35 +1549,20 @@ impl Game<'_> {
     /// A raider's ominous banner (drop chance 2.0: always dropped) and a
     /// patrol captain's ominous bottle (`entities/pillager`).
     /// `OminousBottleAmplifier.onConsume`: Bad Omen for 100 minutes at the
-    /// bottle's amplifier, then the dispose sound; the bottle is used up.
-    pub(super) fn drink_ominous_bottle(
-        &mut self,
-        slot: usize,
-        stack: &sunrise_client::items::ItemStack,
-    ) {
+    /// bottle's amplifier. The consumable list owns the dispose sound.
+    pub(super) fn drink_ominous_bottle(&mut self, stack: &sunrise_client::items::ItemStack) {
         let amplifier = stack.data().and_then(|d| d.ominous_amplifier).unwrap_or(0);
         let mut effect =
             sunrise_client::effects::EffectInstance::new("bad_omen", 120_000, i32::from(amplifier));
         effect.visible = false;
         let new = self.potions.effects.get("bad_omen").is_none();
         self.potions.effects.add(effect);
-        let eye = self.eye_position().unwrap_or_default();
         // MobEffect.onEffectAdded: Bad Omen's sound when it is new, at the
         // player's feet.
         if new && let Some(p) = self.player.as_ref() {
             let at = [p.position.x, p.position.y, p.position.z];
             self.audio
                 .play("minecraft:event.mob_effect.bad_omen", Some(at), 1.0, 1.0);
-        }
-        self.audio
-            .play("minecraft:item.ominous_bottle.dispose", Some(eye), 1.0, 1.0);
-        if !self.creative
-            && let Some(s) = self.stack_in_mut(slot).as_mut()
-        {
-            s.count -= 1;
-            if s.count == 0 {
-                *self.stack_in_mut(slot) = None;
-            }
         }
     }
 }
@@ -1699,13 +1684,13 @@ impl Game<'_> {
         let pos: [i32; 3] =
             std::array::from_fn(|i| op["poi"][i].as_i64().unwrap_or(i64::MIN) as i32);
         let loaded = self.world.loaded(pos[0], pos[2]);
-        let live_poi = loaded.then(|| {
+        let live_poi = if loaded {
             let w = self.mob_world_base(&[]);
-            format!(
-                "{:?}",
-                sunrise_client::mobs::villager_brain::poi_at(&w, pos[0], pos[1], pos[2])
-            )
-        });
+            sunrise_client::mobs::villager_brain::poi_at(&w, pos[0], pos[1], pos[2])
+                .and_then(|poi| w.professions.pois.name(poi))
+        } else {
+            None
+        };
         eprintln!(
             "raid input raw: {}",
             json!({"label":op["label"],"id":id,"loaded":loaded,

@@ -146,10 +146,7 @@ impl EffectsRegistrar for PartRegistrar {
                 "mod {} attached {kind} to an invalid effect key",
                 self.mod_id
             ));
-            return Err(MobEffectPartError::Duplicate {
-                effect: *effect,
-                part: kind.into(),
-            });
+            return Err(MobEffectPartError::InvalidKey { effect: *effect });
         };
         if id.starts_with("minecraft:") {
             return Err(MobEffectPartError::VanillaEffect { effect: *effect });

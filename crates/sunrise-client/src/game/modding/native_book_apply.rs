@@ -241,7 +241,7 @@ impl Game<'_> {
                 .block_entities
                 .get_mut(&key.pos)
                 .ok_or(R::Changed)?;
-            let slot = entity.slots_mut().get_mut(key.slot).ok_or(R::Changed)?;
+            let slot = entity.slot_mut(key.slot).ok_or(R::Changed)?;
             *slot = stack;
             changed.insert(key.pos);
         }

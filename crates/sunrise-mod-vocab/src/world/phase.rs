@@ -419,6 +419,8 @@ pub struct RegistrationData {
     /// The same load-owned behavior owners that supply the game's default providers.
     capability_coverage: Option<fn(crate::ProvidedBy, &str, &str) -> bool>,
     block_entity_coverage: Option<fn(&str, &str) -> bool>,
+    /// Each package's checked runtime files, by mod ID.
+    runtime_files: Arc<std::collections::BTreeMap<String, Arc<dyn crate::RuntimeFileSource>>>,
 }
 
 impl RegistrationData {
@@ -435,6 +437,7 @@ impl RegistrationData {
             runtime,
             capability_coverage: None,
             block_entity_coverage: None,
+            runtime_files: Default::default(),
             registries: registries
                 .into_iter()
                 .map(|(name, ids)| (name, ids.into()))
@@ -450,6 +453,18 @@ impl RegistrationData {
     /// Without a registration publication, the load owns a fresh capture.
     pub fn initial_settings_snapshot() -> Option<Arc<[(String, Arc<[(String, String)]>)]>> {
         registration_data().map(|data| data.settings)
+    }
+    /// Bind each package's checked runtime files, by mod ID: what
+    /// [`RegistrationContext::runtime_files`] serves the mod being dispatched.
+    pub fn with_runtime_files(
+        mut self,
+        files: std::collections::BTreeMap<String, Arc<dyn crate::RuntimeFileSource>>,
+    ) -> Self {
+        self.runtime_files = Arc::new(files);
+        self
+    }
+    pub(crate) fn runtime_source(&self, mod_id: &str) -> Option<Arc<dyn crate::RuntimeFileSource>> {
+        self.runtime_files.get(mod_id).cloned()
     }
     /// Bind the game's pure type-coverage projection. It reads no world or runtime position.
     pub fn with_capability_coverage(
@@ -604,6 +619,9 @@ pub struct RegistrationContext {
     /// [`message`](Self::message); none without a game.
     pub(crate) startup: Option<Arc<dyn crate::StartupScreen>>,
     pub(crate) runtime: Option<crate::RuntimeEnvironment>,
+    /// The runtime files of the wasm mod this context was handed to (it crosses as a resource); a
+    /// native mod's come from `data`, by the mod being dispatched.
+    pub(crate) runtime_files: Option<Arc<dyn crate::RuntimeFileSource>>,
 }
 
 impl RegistrationContext {
@@ -619,6 +637,7 @@ impl RegistrationContext {
             warnings: Default::default(),
             instance_dir,
             startup: crate::world::startup_progress::installed(),
+            runtime_files: None,
             runtime,
         }
     }

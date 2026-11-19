@@ -179,3 +179,208 @@ fn menu_player_inventory_transactions() {
 fn menu_player_inventory_after_world_save_reload() {
     exercise(true);
 }
+
+/// #2671: single player, where the world's owner is also a guest of the server thread.
+mod owner {
+    use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// Each extract and insert the hook made, then the amounts read after.
+        static SEEN: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    }
+
+    struct Owner;
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for Owner {
+        fn menu_clicked(&self, host: &mut dyn ServerHost, event: &mut mod_api::MenuClickedEvent) {
+            let menu = host.menu(event.uuid, event.window).unwrap();
+            let diamond = mod_api::ItemResource::of(
+                &ItemStack::new("minecraft:diamond", 1)
+                    .try_into_api()
+                    .unwrap(),
+            );
+            let player_slot = ItemPlace::PlayerSlot {
+                player: event.uuid,
+                slot: 0,
+            };
+            let menu_slot = ItemPlace::MenuSlot { menu, slot: 72 };
+            let own_slot = ItemPlace::MenuSlot { menu, slot: 9 };
+            let cursor = menu.cursor();
+            let mut seen = Vec::new();
+            host.transaction(|host, tx| {
+                seen.push(player_slot.extract(host, tx, &diamond, 1));
+                seen.push(menu_slot.extract(host, tx, &diamond, 1));
+                seen.push(own_slot.insert(host, tx, &diamond, 1));
+                seen.push(cursor.insert(host, tx, &diamond, 1));
+                seen.push(player_slot.amount(host));
+                seen.push(menu_slot.amount(host));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+            SEEN.with(|s| *s.borrow_mut() = seen);
+        }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn menu_clicked_moves_the_owners_hotbar_slot_and_cursor() {
+        mod_platform::testing::with_mods(
+            vec![mod_api::ModEntry::new("owner", Box::new(Owner))].into(),
+            || {
+                with_guests(|game| {
+                    game.level.player_uuid = Some(playerdata::uuid_ints(12));
+                    game.lan
+                        .as_mut()
+                        .unwrap()
+                        .hub
+                        .update_guest(12, |g| {
+                            g.inventory[0] = Some(ItemStack::new("minecraft:diamond", 2));
+                        })
+                        .unwrap();
+                    let window = game
+                        .lan
+                        .as_mut()
+                        .unwrap()
+                        .hub
+                        .open_native_menu(12, 5, Tag::String("owner".into()), vec![None; 45])
+                        .unwrap();
+                    game.native_menu_clicked(12, window, 9, 0, 0);
+                    // Each extract takes 1, the own slot and the cursor take 1; then 0 left
+                    // in the first slot's pair of reads (2 - 1 - 1).
+                    assert_eq!(SEEN.with(|s| s.borrow().clone()), [1, 1, 1, 1, 0, 0]);
+                    let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+                    assert!(guest.inventory[0].is_none());
+                    assert_eq!(guest.carried.as_ref().map(|s| s.count), Some(1));
+                    assert_eq!(guest.native_menu[9].as_ref().map(|s| s.count), Some(1));
+                });
+            },
+        );
+    }
+
+    /// A hook running in another level than the owner's reaches the owner's own inventory,
+    /// never the `Game`'s player: a full slot takes nothing, nothing drops, and the abort puts
+    /// the giver's diamond back.
+    #[test]
+    #[ignore = "daily"]
+    fn a_hook_in_another_level_leaves_the_owners_inventory_and_drops_alone() {
+        with_guests(|game| {
+            game.level.player_uuid = Some(playerdata::uuid_ints(12));
+            assert_ne!(game.dim.id(), "minecraft:the_nether");
+            // The `Game`'s own player, living and with room: not the owner's, who is a guest.
+            game.player = Some(
+                sunrise_client::motion::PlayerMotion::new(
+                    game.motion,
+                    sunrise_core::geometry::Vec3::new(8.5, 64.0, 8.5),
+                )
+                .unwrap(),
+            );
+            game.inventory.fill(None);
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(12, |g| {
+                    g.dimension = "minecraft:the_nether".to_owned();
+                    g.inventory
+                        .fill(Some(ItemStack::new("minecraft:stone", 64)));
+                })
+                .unwrap();
+            let diamond = mod_api::ItemResource::of(
+                &ItemStack::new("minecraft:diamond", 1)
+                    .try_into_api()
+                    .unwrap(),
+            );
+            let slot = ItemPlace::PlayerSlot {
+                player: 12,
+                slot: 0,
+            };
+            // A diamond of another player moves to the owner, as a mod's transfer does: what
+            // the owner can't take goes back, here by aborting the transaction.
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(13, |g| {
+                    g.inventory[0] = Some(ItemStack::new("minecraft:diamond", 1))
+                })
+                .unwrap();
+            let source = ItemPlace::PlayerSlot {
+                player: 13,
+                slot: 0,
+            };
+            let dropped = game.dropped.len();
+            let moved: Result<(), ()> = (game as &mut dyn ServerHost).transaction(|host, tx| {
+                let taken = source.extract(host, tx, &diamond, 1);
+                assert_eq!(taken, 1);
+                assert_eq!(slot.insert(host, tx, &diamond, taken), 0);
+                Err(())
+            });
+            assert!(moved.is_err());
+            assert!(game.inventory.iter().all(Option::is_none));
+            let giver = game.lan.as_ref().unwrap().hub.guest(13).unwrap();
+            assert_eq!(giver.inventory[0].as_ref().map(|s| s.count), Some(1));
+            let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+            assert!(guest.inventory.iter().all(|s| {
+                s.as_ref()
+                    .is_some_and(|s| s.count == 64 && &*s.item == "minecraft:stone")
+            }));
+            assert_eq!(game.dropped.len(), dropped);
+        });
+    }
+
+    /// A transaction that clears a stack of a guest in the Nether and aborts restores it, and
+    /// a stack given to them with a full inventory comes back to the mod, dropped nowhere.
+    #[test]
+    #[ignore = "daily"]
+    fn a_non_owner_guest_in_another_level_keeps_their_stack_through_an_abort() {
+        use mod_api::prelude::*;
+        with_guests(|game| {
+            game.level.player_uuid = Some(playerdata::uuid_ints(12));
+            assert_ne!(game.dim.id(), "minecraft:the_nether");
+            // A level is open while a player is in it.
+            game.enter_level(super::super::Dim::Nether).unwrap();
+            game.enter_level(super::super::Dim::Overworld).unwrap();
+            let stack = |game: &super::super::Game<'_>, snbt: &str| {
+                let host: &dyn mod_api::Host = game;
+                host.item_from_snbt(snbt).unwrap()
+            };
+            let stone = stack(game, r#"{id:"minecraft:stone",count:64}"#);
+            let diamond = stack(game, r#"{id:"minecraft:diamond",count:1}"#);
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(13, |g| {
+                    g.dimension = "minecraft:the_nether".to_owned();
+                    g.inventory[0] = Some(ItemStack::new("minecraft:stone", 64));
+                })
+                .unwrap();
+            let player = game.players().server_players()[1];
+            assert_eq!(player.uuid(), 13);
+            let aborted: Result<(), ()> = (game as &mut dyn ServerHost).transaction(|host, _| {
+                player.set_inventory_slot(host, 0, None).unwrap();
+                Err(())
+            });
+            assert!(aborted.is_err());
+            assert_eq!(player.inventory_slots(game), Some(vec![(0, stone)]));
+
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(13, |g| {
+                    g.inventory
+                        .fill(Some(ItemStack::new("minecraft:stone", 64)));
+                })
+                .unwrap();
+            let dropped = game.dropped.len();
+            let given = (game as &mut dyn ServerHost)
+                .transaction(|host, _| Ok::<_, ()>(player.give_stack(host, diamond.clone())));
+            assert_eq!(given, Ok(Ok(Some(diamond))));
+            assert_eq!(game.dropped.len(), dropped);
+            game.enter_level(super::super::Dim::Nether).unwrap();
+            assert_eq!(game.dropped.len(), 0);
+        });
+    }
+}

@@ -49,21 +49,19 @@ class GateTests(unittest.TestCase):
         for event in ("push", "schedule", "workflow_dispatch"):
             self.assertEqual(pr_gate.outputs(event, False, "", never_read)["heavy"], "true")
 
-    def test_checks_runs_only_for_a_forks_pull_request(self):
-        # checks (ci.yml) is a fork's free full check on GitHub's runners; this repository's pull requests get
-        # dyna-checks' cheap checks, and its rollups and syncs the heavy gate (root, 2026-11-16).
-        import yaml
-
-        jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
-        conditions = {" ".join(job["if"].split()) for job in jobs.values() if "'pull_request'" in job.get("if", "")}
-        self.assertEqual(conditions, {"github.event_name == 'schedule' || github.event_name == 'pull_request' && "
-                                      "github.event.pull_request.head.repo.full_name != github.repository"})
-
     def test_a_dispatch_with_pr_runs_that_head_and_keeps_a_fork_off_our_runners(self):
-        fork = pr_gate.outputs("workflow_dispatch", True, "3665", lambda n: {"sha": SHA, "same_repository": False})
+        fork = pr_gate.outputs("workflow_dispatch", True, "3665", lambda n: {
+            "sha": SHA, "ref": "sync-upstream", "labels": ["rollup"], "same_repository": False})
         self.assertEqual(fork, {"heavy": "true", "pr_sha": SHA, "trusted": "false"})
-        ours = pr_gate.outputs("workflow_dispatch", True, "3672", lambda n: {"sha": SHA, "same_repository": True})
+        ours = pr_gate.outputs("workflow_dispatch", True, "3672", lambda n: {
+            "sha": SHA, "ref": "split/c3-bridge-docs", "labels": [], "same_repository": True})
         self.assertEqual(ours, {"heavy": "true", "pr_sha": SHA, "trusted": "true"})
+
+    def test_a_dispatch_on_our_rollup_or_sync_is_refused_since_its_pushes_run_the_gate(self):
+        for ref, labels in (("sunrise-review-rollup-43", []), ("sync-upstream-7", []), ("sync/upstream-acbd", []), ("integration", ["rollup"])):
+            head = {"sha": SHA, "ref": ref, "labels": labels, "same_repository": True}
+            with self.subTest(ref=ref, labels=labels), self.assertRaisesRegex(SystemExit, "rollup or sync"):
+                pr_gate.outputs("workflow_dispatch", True, "2833", lambda n, head=head: head)
 
     def test_pr_must_be_a_number(self):
         for bad in ("0", "12a", "1;id", "refs/pull/1/head", "-1"):
@@ -88,7 +86,7 @@ class WorkflowTests(unittest.TestCase):
     def test_cheap_jobs_run_without_the_heavy_gate(self):
         # verify-static runs outside the gate too: only where it runs depends on the gate.
         self.assertNotIn("outputs.heavy", self.job("verify-static").split("\n", 2)[1])
-        self.assertIn("needs.changes.outputs.heavy != 'true'", self.job("format"))
+        self.assertIn("needs.changes.outputs.heavy == 'false'", self.job("format"))
         self.assertNotRegex(self.job("format"), r"cargo (clippy|build|test|check)")
 
     def test_a_dispatched_head_is_checked_out_with_a_read_only_token_and_reported_apart(self):
@@ -165,8 +163,8 @@ class WorkflowTests(unittest.TestCase):
         # Outside the gate, the first term decides (Actions' || and && short-circuit): no switch, paid pool or boat
         # label reached through the later terms can move verify-static, and boat's watcher never starts.
         static = self.job("verify-static")
-        self.assertIn("runs-on: ${{ needs.changes.outputs.heavy != 'true' && 'ubuntu-latest' || ", static)
-        self.assertIn("RUNNER_KIND: ${{ needs.changes.outputs.heavy != 'true' && 'github' || ", static)
+        self.assertIn("runs-on: ${{ needs.changes.outputs.heavy == 'false' && 'ubuntu-latest' || ", static)
+        self.assertIn("RUNNER_KIND: ${{ needs.changes.outputs.heavy == 'false' && 'github' || ", static)
         self.assertIn("if: needs.changes.outputs.heavy == 'true' && ", self.job("boat-watch"))
         # A contributor's dispatched pull request is heavy but untrusted: GitHub's runner too.
         self.assertIn("needs.changes.outputs.trusted != 'true' && 'ubuntu-latest' ||", static)

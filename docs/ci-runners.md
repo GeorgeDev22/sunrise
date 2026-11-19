@@ -164,7 +164,8 @@ counts as passed for a required check. Everything runs on main's pushes, on disp
 this repository's own branches (rollups, syncs, fast-path fixes, our sessions' work), which carry contributors'
 changes into one heavy run. The rule is `tools/ci/pr_gate.py`; `tests/test_pr_gate.py` keeps the workflows to it.
 
-A reviewer runs the heavy gate on one contributor's pull request with `gh workflow run dyna-ci.yml -f pr=<number>`.
+A reviewer runs the heavy gate on one contributor's pull request with `gh workflow run dyna-ci.yml -f pr=<number>`. A rollup or
+sync pull request of this repository is refused: each push to it already runs the heavy gate.
 Main's workflow checks out that pull request's head commit on GitHub's runners (never ours) with a read-only token,
 and the `pr-status` job, which runs none of its code and alone may write commit statuses, posts `dispatched/lint`,
 `dispatched/verify` and `dispatched/verify-static` on that commit.

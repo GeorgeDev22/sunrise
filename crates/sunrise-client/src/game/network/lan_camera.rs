@@ -252,6 +252,10 @@ impl Game<'_> {
                 self.cmds.guest_cameras.remove(&conn);
                 continue;
             };
+            // A mod canceled this player's ServerPlayer.tick: its camera stays as it is.
+            if self.player_tick_canceled(conn) {
+                continue;
+            }
             let g = &host.hub.guests[gi];
             let state = self.camera_state(camera.id);
             if camera_ends(

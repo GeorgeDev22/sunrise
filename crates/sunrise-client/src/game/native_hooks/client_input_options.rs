@@ -8,10 +8,10 @@ impl Game<'_> {
     pub(in crate::game) fn input_options(&self) -> ClientInputOptions {
         let settings = &self.settings;
         ClientInputOptions {
-            sensitivity: settings.sensitivity,
+            sensitivity: settings.sensitivity as f32,
             invert_x: settings.invert_x,
             invert_y: settings.invert_y,
-            mouse_wheel_sensitivity: settings.mouse_wheel_sensitivity,
+            mouse_wheel_sensitivity: settings.mouse_wheel_sensitivity as f32,
             discrete_scroll: settings.discrete_scroll,
             toggle_crouch: settings.toggle_crouch,
             toggle_sprint: settings.toggle_sprint,

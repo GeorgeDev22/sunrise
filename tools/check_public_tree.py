@@ -43,6 +43,9 @@ TABLE_ENTRIES = 50
 # the removal, and main's history scan would otherwise fail.
 REMOVED_COMMERCIAL_PREFIXES = (
     "crates/sunrise-cosmetics",
+    # Upstream's in-game side of the cosmetics (emotes, the emote wheel, their effects).
+    "crates/sunrise-client/src/game/cosmetics",
+    "crates/sunrise-client/src/game/interface/cosmetics",
     "crates/sunrise-official-servers",
 )
 # The launcher lives in sunrise-org/sunrise-launcher (launcher split D1); its removed commercial pages and sculk art
@@ -51,7 +54,7 @@ REMOVED_TREE = "launcher/"
 
 
 def commercial(path):
-    """True when `path` is a removed commercial crate or anything under the removed launcher/ tree."""
+    """True when `path` is a removed commercial crate or game module, or anything under the removed launcher/ tree."""
     if path.startswith(REMOVED_TREE):
         return True
     parsed = PurePosixPath(path)
@@ -59,7 +62,7 @@ def commercial(path):
         if path == prefix or path.startswith(prefix + "/"):
             return True
         parent = PurePosixPath(prefix)
-        # partner.rs besides a partner/ folder, and the same for shop, wardrobe, wardrobe_page.
+        # partner.rs besides a partner/ folder, and the same for cosmetics, shop, wardrobe, wardrobe_page.
         if parsed.parent == parent.parent and parsed.stem == parent.name:
             return True
     return False

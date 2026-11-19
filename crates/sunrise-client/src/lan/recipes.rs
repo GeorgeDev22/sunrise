@@ -341,14 +341,30 @@ const CONTENT_MAX: usize = 1_048_576 - 1024;
 pub struct ContentPart {
     pub recipes: Vec<(String, Value)>,
     pub last: Option<Vec<String>>,
+    /// Why a recipe of this part has no decodable serializer. Set by
+    /// `decode`, never sent: the receiver refuses the whole update when its
+    /// last part comes, not only this part.
+    #[serde(skip)]
+    pub refused: Option<String>,
 }
 impl ContentPart {
     /// Decode a content part only within the same bound used by the sender.
+    /// Each recipe's `type` is decoded here, as on disk, so that the
+    /// replacement and the book's numbering read the canonical id even from a
+    /// server that sends a bare one. A malformed envelope is an error of this
+    /// part; a malformed serializer is `refused`, which keeps `last`.
     pub fn decode(data: &[u8]) -> Result<Self, String> {
         if data.len() > CONTENT_MAX {
             return Err(format!("recipe content exceeds {CONTENT_MAX} bytes"));
         }
-        serde_json::from_slice(data).map_err(|error| error.to_string())
+        let mut part: Self = serde_json::from_slice(data).map_err(|error| error.to_string())?;
+        for (id, recipe) in &mut part.recipes {
+            if let Err(error) = sunrise_items::recipe_sources::decode_type(recipe) {
+                part.refused = Some(format!("recipe {id}: {error}"));
+                break;
+            }
+        }
+        Ok(part)
     }
 }
 
@@ -390,6 +406,7 @@ pub fn encode_content(types: &[String], sources: &[(String, Value)], reset: bool
                 serde_json::to_vec(&ContentPart {
                     recipes,
                     last: None,
+                    refused: None,
                 })
                 .unwrap_or_default(),
             );
@@ -404,6 +421,7 @@ pub fn encode_content(types: &[String], sources: &[(String, Value)], reset: bool
             serde_json::to_vec(&ContentPart {
                 recipes,
                 last: None,
+                refused: None,
             })
             .unwrap_or_default(),
         );
@@ -411,6 +429,7 @@ pub fn encode_content(types: &[String], sources: &[(String, Value)], reset: bool
     let last = ContentPart {
         recipes: part,
         last: Some(types.to_vec()),
+        refused: None,
     };
     out.push(serde_json::to_vec(&last).unwrap_or_default());
     out

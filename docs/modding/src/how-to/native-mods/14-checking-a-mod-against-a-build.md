@@ -2,7 +2,7 @@
 
 In a mod folder, `cargo sunrise-mod` does this for you from the SDK it fetched into `.sunrise/sdk/`:
 
-- `cargo sunrise-mod check` runs `cargo check` for this computer and for wasm32, checks the package rules,
+- `cargo sunrise-mod check` runs `cargo check` for the project's own target (this computer for a native mod, wasm32 for a wasm mod; `--wasm` or `--native` asks for the other), checks the package rules,
   and prints what the mod uses: `Greeter uses 14 items of the API (6 hooks, 5 methods, 3 types). Made for
   nightly-2026-11-13 (afe471c).` With `--uses` it lists each item with the line that brought it in.
 - `cargo sunrise-mod build` packs the list into the package as `uses.json`, with each item's fingerprint at the
@@ -10,7 +10,7 @@ In a mod folder, `cargo sunrise-mod` does this for you from the SDK it fetched i
 - `cargo sunrise-mod fits` says, one line per build, whether the mod fits the current Nightly, or each build
   `--build` names. `cargo sunrise-mod fits greeter.smod --build nightly-2026-11-20` asks the same of a package.
   It exits 0 when every build fits, 1 when one does not, and 2 when it cannot tell or the question does not
-  apply (a mod made for one build, a content mod, or a package made by an older tool).
+  apply (a mod made for one build, a content mod, or a package with no `uses.json`).
 - `cargo sunrise-mod update` prints what moving the pin breaks in this mod, item by item with the line that uses
   it and the closest item in the new build, then moves the pin.
 - `cargo sunrise-mod hooks <text>` searches the pinned build's hooks by id, doc and their NeoForge, Fabric and

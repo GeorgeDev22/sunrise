@@ -81,6 +81,7 @@ fn without_the_gate_a_break_reports_and_passes() {
     assert!(out.starts_with(
         "Surface: breaking (1 breaking, 0 conditional, 1 additive; 1 breaking without a note)"
     ));
+    assert!(!out.contains("Engine catalogs"), "{out}");
     assert!(out.find("- fn:spawn (removed)") < out.find("- fn:summon (added)"));
 }
 
@@ -175,6 +176,67 @@ fn a_new_note_naming_an_unchanged_id_fails_and_an_old_or_edited_one_is_ignored()
     let (code, _, err) = run(dir.path(), &["--notes", "changes"]);
     assert_eq!(code, 2);
     assert!(err.contains("--notes needs --base-notes"), "{err}");
+}
+
+#[test]
+#[ignore = "daily"]
+fn sdk_note_scope_ignores_engine_ids_but_checks_api_ids() {
+    let dir = folder();
+    note(
+        dir.path(),
+        "changes",
+        "point.toml",
+        "ids = [\"point:game::old_tick\"]\nwhy = \"Tick moved.\"\n",
+    );
+    note(
+        dir.path(),
+        "changes",
+        "mixed.toml",
+        "ids = [\"loop:old.tick\", \"fn:spawn\"]\nwhy = \"Use the new entry.\"\n",
+    );
+    let notes = ["--notes", "changes", "--base-notes", "base"];
+    let mut publish = notes.to_vec();
+    publish.extend(["--api-notes-only", "--json", "diff.json"]);
+    let (code, out, err) = run(dir.path(), &publish);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.is_empty(), "{err}");
+    assert!(out.contains("0 breaking without a note"), "{out}");
+    let diff: mod_surface::Diff =
+        serde_json::from_slice(&std::fs::read(dir.path().join("diff.json")).unwrap()).unwrap();
+    let noted: Vec<_> = diff
+        .changes
+        .iter()
+        .flat_map(|c| {
+            c.notes
+                .iter()
+                .map(|note| (c.id.as_str(), note.file.as_str()))
+        })
+        .collect();
+    assert_eq!(noted, [("fn:spawn", "mixed.toml")]);
+
+    let (code, _, err) = run(dir.path(), &notes);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("change note point.toml names point:game::old_tick, which did not change"),
+        "{err}"
+    );
+    assert!(
+        err.contains("change note mixed.toml names loop:old.tick, which did not change"),
+        "{err}"
+    );
+
+    note(
+        dir.path(),
+        "changes",
+        "api-stale.toml",
+        "ids = [\"point:game::new_tick\", \"fn:keep\"]\nwhy = \"No API change.\"\n",
+    );
+    let (code, _, err) = run(dir.path(), &publish);
+    assert_eq!(code, 1);
+    assert_eq!(
+        err.trim(),
+        "change note api-stale.toml names fn:keep, which did not change"
+    );
 }
 
 #[test]

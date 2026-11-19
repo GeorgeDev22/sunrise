@@ -27,15 +27,9 @@ const SLOT_GROUPS: [&str; 11] = [
     "saddle",
 ];
 
-/// `ItemAttributeModifiers.ATTRIBUTE_MODIFIER_FORMAT`, `DecimalFormat("#.##")`
-/// of a positive amount (half-even on the exact value). Infinity reads as the
-/// infinity sign, NaN as `NaN`, and a negative that rounds to zero keeps its sign.
+/// `ItemAttributeModifiers.ATTRIBUTE_MODIFIER_FORMAT`, `DecimalFormat("#.##")`.
 fn format_amount(value: f64) -> String {
-    if value.is_infinite() {
-        return if value > 0.0 { "\u{221e}" } else { "-\u{221e}" }.to_owned();
-    }
-    let text = format!("{:.2}", value);
-    text.trim_end_matches('0').trim_end_matches('.').to_owned()
+    sunrise_core::java_number::format_decimal2(value, true)
 }
 
 /// `ItemAttributeModifiers.Display.Default.apply`: a modifier's line, none

@@ -61,7 +61,6 @@ fn save_requested_during_pickup_keeps_lifted_items_on_disk() {
                 player_idle_timeout: 0,
                 stop: false,
                 autosave: true,
-                whitelist_bypass: Vec::new(),
             })));
             game.build_registries();
             game.ui.dispatcher = chat::SessionDispatcher(Arc::new(

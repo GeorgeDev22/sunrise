@@ -1927,6 +1927,12 @@ impl<'a> Plan<'a> {
         if b.shapes.is_some() || p.offset == Some(sunrise_mod_package::content::OffsetType::None) {
             row.set("outline_offset", J::Bool(offset.is_some()));
         }
+        if let Some(value) = p.ignited_by_lava {
+            row.set("ignited_by_lava", J::Bool(value));
+        }
+        if let Some(value) = p.replaceable {
+            row.set("replaceable", J::Bool(value));
+        }
         if let Some(ticks) = &p.random_ticks {
             row.set("random_ticks", J::Bool(ticks.applies(combo)));
         }
@@ -2126,6 +2132,23 @@ impl<'a> Plan<'a> {
             "creative-inventory.json" => self.creative_tabs(doc)?,
             "block-behaviours.json" => {
                 states(doc, "states", false)?;
+                if let Some(J::Arr(rows)) = doc.at("states") {
+                    for b in &self.blocks {
+                        if let Some(instrument) = b.decl.properties.instrument {
+                            for (id, _) in (b.rename.first..).zip(b.state_combinations()) {
+                                let J::Arr(row) = &mut rows[id as usize] else {
+                                    return Err(
+                                        "block-behaviours.json: expected a compact state row"
+                                            .into(),
+                                    );
+                                };
+                                row.resize(row.len().max(9), J::Null);
+                                // Instrument column, read by sunrise_world::level::data's state facts decoder.
+                                row[8] = J::Str(instrument.name().to_ascii_uppercase());
+                            }
+                        }
+                    }
+                }
                 self.declared_solid(doc);
                 let Some(J::Arr(blocks)) = doc.at("blocks") else {
                     return Err("no blocks".into());
@@ -2244,6 +2267,12 @@ impl<'a> Plan<'a> {
                     let Some(entry) = doc.get_mut(&b.decl.id) else {
                         continue;
                     };
+                    if !model && let Some(skip) = b.decl.properties.skip_same_block_faces {
+                        entry.set(
+                            "rule",
+                            J::Str(if skip { "same_block" } else { "never" }.into()),
+                        );
+                    }
                     // Faces beside a block that occludes nothing are drawn (`Block.shouldRenderFace`).
                     if !model && let Some(can_occlude) = b.decl.properties.occludes {
                         entry.set("can_occlude", J::Bool(can_occlude));
@@ -2714,10 +2743,14 @@ impl<'a> Plan<'a> {
                         else {
                             continue;
                         };
-                        if let Some(can_occlude) = b.decl.properties.occludes
-                            && let Tag::Byte(flags) = &mut v
-                        {
-                            *flags = (*flags & !16) | if can_occlude { 16 } else { 0 };
+                        if let Tag::Byte(flags) = &mut v {
+                            if let Some(can_occlude) = b.decl.properties.occludes {
+                                *flags = (*flags & !16) | if can_occlude { 16 } else { 0 };
+                            }
+                            if let Some(replaceable) = b.decl.properties.replaceable {
+                                // `BlockPropertiesRegistry` reads replaceable from bit 2.
+                                *flags = (*flags & !4) | (i8::from(replaceable) << 2);
+                            }
                         }
                         if let (Some(f), Some(slot)) =
                             (b.decl.properties.friction, v.get_mut("friction"))
@@ -3634,6 +3667,11 @@ pub fn resolved_resources(
             assets_base = ResourceSource::indexed(files);
         }
     }
+    let mod_layers = loaded
+        .iter()
+        .flat_map(|group| &group.layers)
+        .map(|layer| layer.data.source().clone())
+        .collect();
     let layers = loaded
         .into_iter()
         .flat_map(|group| group.layers.into_iter().map(|layer| layer.assets))
@@ -3655,10 +3693,12 @@ pub fn resolved_resources(
     }
     let assets = crate::packs::resources(assets_base, &layers)?;
     data.extend(changes.clone());
-    Ok(ResourceRoot::new(prepared, cache, assets).with_data(
-        ResourceSource::indexed(data),
-        ResourceSource::indexed(changes),
-    ))
+    Ok(ResourceRoot::new(prepared, cache, assets)
+        .with_data(
+            ResourceSource::indexed(data),
+            ResourceSource::indexed(changes),
+        )
+        .with_mod_layers(mod_layers))
 }
 
 /// The root to load: `base` itself with no content, else the mods' overlay

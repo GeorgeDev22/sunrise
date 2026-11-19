@@ -75,6 +75,7 @@ impl PlayerMotion {
             swimming: false,
             is_passenger: false,
             fire_ticks: -20,
+            mod_fire_immune: false,
             air: 300,
             respiration: 0,
             speed: 0.0,

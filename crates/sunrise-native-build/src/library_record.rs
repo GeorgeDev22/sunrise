@@ -94,6 +94,23 @@ mod tests {
         assert!(error.contains("65536"), "{error}");
     }
 
+    /// A library installed with no stamp, like the one the mods' registry crates are linked from,
+    /// gets no row: it is loaded as the mods' dependency, not registered as a mod.
+    #[test]
+    fn an_unstamped_library_is_not_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mod_library, shared) = (tmp.path().join("one.dll"), tmp.path().join("shared.dll"));
+        for path in [&mod_library, &shared] {
+            fs::write(path, b"abc").unwrap();
+        }
+        stamp(&mod_library, "build", "one", "1", false).unwrap();
+        let rows = collect(&[mod_library, shared]).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.file.as_str()).collect::<Vec<_>>(),
+            ["one.dll"]
+        );
+    }
+
     #[test]
     fn records_hashes_and_dependency_order_with_patch_last() {
         let tmp = tempfile::tempdir().unwrap();

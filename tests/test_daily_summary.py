@@ -925,17 +925,18 @@ class DailyWorkflowTests(unittest.TestCase):
                                  "clippy" if wants_probe else "")
                 self.assertEqual(bool(expression_value(api["if"], {}, matrix=leg)), leg["name"] == "linux")
         self.assertEqual(shlex.split(probe["run"]), ["python", "tools/native_dylib_probe.py", "--sdk", "prebuilt",
-                                                     "--output", "target/native-dylib-probe"])
+                                                     "--output", "$RUNNER_TEMP/native-dylib-probe"])
         commands = {step["run"].split()[2]: i for i, step in enumerate(steps)
                     if step.get("run", "").startswith("python tools/prebuilt_game.py ")}
         self.assertLess(max(commands[command] for command in ("build", "smoke", "start", "exports")), steps.index(probe))
         self.assertLess(steps.index(probe), steps.index(api))
         self.assertLess(steps.index(api), commands["pack"])
         api_commands = api["run"].splitlines()
-        self.assertLess(api_commands.index("rustup target add wasm32-unknown-unknown"),
-                        api_commands.index("python tools/sdk_api_source.py build target/api-source"))
-        self.assertLess(api_commands.index("python tools/sdk_api_source.py build target/api-source"),
-                        api_commands.index("python tools/sdk_api_source.py check target/api-source"))
+        build = 'python tools/sdk_api_source.py build "$RUNNER_TEMP/api-source"'
+        check = ('python tools/sdk_api_source.py check "$RUNNER_TEMP/api-source" '
+                 '--scratch "$RUNNER_TEMP/sdk-api-source-check"')
+        self.assertLess(api_commands.index("rustup target add wasm32-unknown-unknown"), api_commands.index(build))
+        self.assertLess(api_commands.index(build), api_commands.index(check))
 
     def test_the_sdk_build_packs_exactly_the_archives_a_release_needs(self):
         from tests.test_ci_concurrency import ROOT, yaml

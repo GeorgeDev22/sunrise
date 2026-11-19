@@ -78,7 +78,7 @@ pub(super) struct BorrowedMobTick<'a> {
     pub(super) laps: &'a mut sunrise_client::spans::Laps,
     pub(super) uuid: Option<[i32; 4]>,
     pub(super) level_id: &'static str,
-    pub(super) round: &'a super::super::native_ticks::TickRound,
+    pub(super) round: &'a mut super::super::native_ticks::TickRound,
 }
 impl Game<'_> {
     pub(super) fn tick_borrowed_creatures(
@@ -163,9 +163,20 @@ impl Game<'_> {
         let mut resume_was_on_fire = false;
         let mut resume_sampled = None;
         let mut resume_guest = None;
+        // The slot of the mob whose own Pre was just told (a type a mod named): it resumes there
+        // with its checks done.
+        let mut told_at: Option<usize> = None;
+        // Whether a mob still in the lifted list has left the pass (`keep` false) since the list
+        // was last given back: a told-alone yield then takes it out before the call.
+        let mut gone_rows = false;
         loop {
             let mut pause = None;
             let mut retry_rider = None;
+            // A mob told alone hears its Pre right before its tick and its Post right after:
+            // stop there, restore the list, tell it while the live rows are readable, and resume.
+            let mut tell_pre: Option<(u32, std::sync::Arc<sunrise_client::mobs::MobType>, usize)> =
+                None;
+            let mut tell_post: Option<(u32, std::sync::Arc<sunrise_client::mobs::MobType>)> = None;
             // A mob's list is lifted while its world view is borrowed.  Once a
             // position write was captured, stop after this mob, restore the
             // list, and tell its writes while the live row is readable.
@@ -177,11 +188,10 @@ impl Game<'_> {
                 let nearest = super::super::natural_spawning::NearestPlayers::new(&players);
                 // All but the snapshot is the same for every mob of the tick, so
                 // build it once: the player view and the teams scan every UUID.
-                self.leash_boats = self
-                    .boats
-                    .iter()
-                    .map(super::super::boat_leads::boat_state)
-                    .collect();
+                let mut leash_boats = std::mem::take(&mut self.leash_boats);
+                leash_boats.clear();
+                leash_boats.extend(self.boats.iter().map(super::super::boat_leads::boat_state));
+                self.leash_boats = leash_boats;
                 let mut base = self.mob_world_base(&[]);
                 // Install the shared observer only on the per-mob view below; keeping the
                 // reusable base empty lets its reference fields remain copyable between rows.
@@ -224,6 +234,8 @@ impl Game<'_> {
                     };
                     let m = &mut mobs[i];
                     let retried = retried_rider.take() == Some(m.id);
+                    // Its checks ran before its Pre was told: they don't run again.
+                    let checked = resuming || told_at == Some(slot);
                     if blocked.contains(&m.id) {
                         cursor += 1;
                         resuming = false;
@@ -231,6 +243,7 @@ impl Game<'_> {
                     }
                     if m.removed && !resuming {
                         keep[slot] = false;
+                        gone_rows = true;
                         snapshot[slot].alive = false;
                         // `removed` is the view's authoritative gone: a dead body
                         // that is still in the level keeps resolving (#795).
@@ -261,8 +274,9 @@ impl Game<'_> {
                         }
                         conn
                     };
-                    if !resuming && !base.world.loaded(bx, bz) {
+                    if !checked && !base.world.loaded(bx, bz) {
                         keep[slot] = !m.hostile() || m.persistent;
+                        gone_rows |= !keep[slot];
                         cursor += 1;
                         continue;
                     }
@@ -270,7 +284,7 @@ impl Game<'_> {
                     // entities of chunks whose own status is entity-ticking: a mob in the
                     // loaded ring outside it fires no `mob_despawn`, makes no despawn draws
                     // and doesn't tick.
-                    if !resuming && !listed(bx, bz) {
+                    if !checked && !listed(bx, bz) {
                         cursor += 1;
                         continue;
                     }
@@ -282,7 +296,7 @@ impl Game<'_> {
                     // The wither overrides `checkDespawn` without `super`, so the
                     // event, patched into `Mob.checkDespawn`, never fires for it;
                     // a mannequin is no `Mob` and never checks despawning.
-                    if !resuming
+                    if !checked
                         && !retried
                         && mod_api::__private::listened(mod_api::HookId::MobDespawn)
                         && !matches!(
@@ -332,7 +346,7 @@ impl Game<'_> {
                     // only those within the simulation distance as well tick. The
                     // despawn check reads the nearest player and the difficulty, not
                     // the player the mob sees.
-                    if !resuming && !ticking(bx, bz) {
+                    if !checked && !ticking(bx, bz) {
                         let w = MobWorld {
                             others: &snapshot,
                             others_grid: Some(&grid),
@@ -353,6 +367,7 @@ impl Game<'_> {
                             snapshot[slot].removed = true;
                         }
                         keep[slot] = kept;
+                        gone_rows |= !kept;
                         cursor += 1;
                         continue;
                     }
@@ -370,6 +385,11 @@ impl Game<'_> {
                                 })
                         })
                         .flatten();
+                    // A mob of a type a mod named: its own Pre, right before its tick.
+                    if !checked && round.alone_mob(&m.kind) {
+                        tell_pre = Some((m.id, std::sync::Arc::clone(&m.kind), i));
+                        break;
+                    }
                     // A mod canceled its tick: it stays as it is.
                     if !resuming && round.canceled(m.id) {
                         m.despawn = mod_api::Despawn::default();
@@ -670,6 +690,11 @@ impl Game<'_> {
                         died.remove(&m.id);
                     }
                     keep[slot] = kept;
+                    gone_rows |= !kept;
+                    // Its own Post, right after its tick, also when it died or went in it.
+                    if round.alone_mob(&m.kind) {
+                        tell_post = Some((m.id, std::sync::Arc::clone(&m.kind)));
+                    }
                     // ServerLevel ticks entities one after another: the ones
                     // after this mob see it as it is now.
                     snapshot[slot] = seen(m, uuid, world_items!(self));
@@ -683,13 +708,18 @@ impl Game<'_> {
                         from,
                     );
                     cursor += 1;
-                    if section_yield {
+                    if section_yield || tell_post.is_some() {
                         break;
                     }
                 }
             }
             self.creatures.lan_sounds.append(&mut hit_sounds);
-            if pause.is_none() && retry_rider.is_none() && !section_yield {
+            if pause.is_none()
+                && retry_rider.is_none()
+                && !section_yield
+                && tell_pre.is_none()
+                && tell_post.is_none()
+            {
                 break;
             }
             // No MobWorld, DamageLevel or navigation loan crosses this boundary.
@@ -698,21 +728,35 @@ impl Game<'_> {
             lent.give_back(&mut self.world);
             // Earlier mobs' pushes become visible before a real pause callback
             // can read or replace another actor's velocity. A section-only
-            // yield must not change the normal end-of-pass push ordering.
+            // or a told-alone yield must not change the normal end-of-pass
+            // push ordering.
             if pause.is_some() || retry_rider.is_some() {
                 for m in &mut mobs {
                     sunrise_client::mobs::apply_mob_pushes(m, &mut pushes);
                 }
             }
-            mobs.retain(|m| {
-                index
-                    .get(&m.id)
-                    .and_then(|&slot| keep.get(slot as usize))
-                    .copied()
-                    .unwrap_or(true)
-            });
+            // A yield only to tell a named mob alone changes nothing of the loop's own: the list
+            // goes back as it is (the rows that left the pass taken out first, when there are
+            // any) and is taken again as it is, so the loop's views of it (snapshot, grid,
+            // index, places) stay valid unless the call wrote a mob or added one. The list's
+            // write stamp says whether it did: any mutable access moves it.
+            let told_only = pause.is_none() && retry_rider.is_none() && !section_yield;
+            let same_rows = told_only && !gone_rows;
+            if !same_rows {
+                mobs.retain(|m| {
+                    index
+                        .get(&m.id)
+                        .and_then(|&slot| keep.get(slot as usize))
+                        .copied()
+                        .unwrap_or(true)
+                });
+                gone_rows = false;
+            }
+            // Mobs that joined during the pass go first on a restore: the rows move.
+            let same_rows = same_rows && self.mobs.is_empty();
             self.mobs
                 .restore(mobs, sunrise_client::join_seq::RestoreOrder::SpawnsFirst);
+            let restored = self.mobs.stamp();
             std::mem::swap(&mut self.last_hurt_by_player, &mut player_credit);
             std::mem::swap(&mut self.died, &mut died);
             std::mem::swap(&mut self.creatures.ticked, &mut ticked);
@@ -731,8 +775,24 @@ impl Game<'_> {
                 } else if let Some(decision) = pause.as_ref() {
                     self.apply_fox_consumption(decision);
                 }
+                if let Some((id, kind)) = &tell_post {
+                    self.native_tick_post_one(round, *id, &kind.id);
+                }
+                // Let through, it checks its sleep as a mob told with its family does.
+                if let Some((id, kind, at)) = &tell_pre
+                    && self.native_tick_pre_one(round, *id, &kind.id)
+                    && mod_api::__private::listened(mod_api::HookId::CanContinueSleeping)
+                    && let Some(i) =
+                        super::super::native_ticks::place(&self.mobs, *at, |m| m.id == *id)
+                {
+                    self.sync_sleeping_mob(i);
+                }
             }))
             .err();
+            let unchanged = same_rows && self.mobs.stamp() == restored;
+            if tell_pre.is_some() {
+                told_at = Some(cursor);
+            }
             if retry_rider.is_some() {
                 blocked = std::borrow::Cow::Owned(self.mobs_below_off_level());
             }
@@ -761,43 +821,47 @@ impl Game<'_> {
                 })
                 .unwrap_or_default();
             spare = guests.first().map(|g| g.1.clone());
-            let current: sunrise_client::fast_hash::FxHashMap<u32, usize> =
-                mobs.iter().enumerate().map(|(i, m)| (m.id, i)).collect();
-            for (slot, s) in snapshot.iter_mut().enumerate() {
-                if let Some(&i) = current.get(&s.id) {
-                    *s = seen(&mobs[i], uuid, world_items!(self));
-                    s.alive &= keep.get(slot).copied().unwrap_or(true);
-                    s.removed |= !keep.get(slot).copied().unwrap_or(true);
-                } else {
-                    s.alive = false;
-                    s.removed = true;
+            // The list came back as it went: its views are the loop's still.
+            if !unchanged {
+                let current: sunrise_client::fast_hash::FxHashMap<u32, usize> =
+                    mobs.iter().enumerate().map(|(i, m)| (m.id, i)).collect();
+                for (slot, s) in snapshot.iter_mut().enumerate() {
+                    if let Some(&i) = current.get(&s.id) {
+                        *s = seen(&mobs[i], uuid, world_items!(self));
+                        s.alive &= keep.get(slot).copied().unwrap_or(true);
+                        s.removed |= !keep.get(slot).copied().unwrap_or(true);
+                    } else {
+                        s.alive = false;
+                        s.removed = true;
+                    }
                 }
+                for m in &mobs {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = index.entry(m.id) {
+                        let slot = snapshot.len();
+                        entry.insert(slot as u32);
+                        snapshot.push(seen(m, uuid, world_items!(self)));
+                    }
+                }
+                villager_slots.clear();
+                solid_slots.clear();
+                for (slot, s) in snapshot.iter().enumerate() {
+                    if s.species == Species::Villager {
+                        villager_slots.push(slot as u32);
+                    }
+                    if s.may_block_mobs() {
+                        solid_slots.push(slot as u32);
+                    }
+                }
+                grid = sunrise_client::mobs::seen_grid::SeenGrid::new(
+                    snapshot.iter().map(|s| s.bounds),
+                );
+                positions = Some(current);
             }
-            for m in &mobs {
-                if let std::collections::hash_map::Entry::Vacant(entry) = index.entry(m.id) {
-                    let slot = snapshot.len();
-                    entry.insert(slot as u32);
-                    snapshot.push(seen(m, uuid, world_items!(self)));
-                }
-            }
-            villager_slots.clear();
-            solid_slots.clear();
-            for (slot, s) in snapshot.iter().enumerate() {
-                if s.species == Species::Villager {
-                    villager_slots.push(slot as u32);
-                }
-                if s.may_block_mobs() {
-                    solid_slots.push(slot as u32);
-                }
-            }
-            grid =
-                sunrise_client::mobs::seen_grid::SeenGrid::new(snapshot.iter().map(|s| s.bounds));
-            positions = Some(current);
             if let Some(writes) = self.world.path_writes.as_mut() {
                 path_writes.append(writes);
             }
             lent = sunrise_client::health::LentLevel::take(&mut self.world);
-            resuming = retry_rider.is_none() && !section_yield;
+            resuming = pause.is_some();
             retried_rider = retry_rider;
         }
         laps.lap("creature_loop");

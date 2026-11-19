@@ -3,13 +3,25 @@
 use crate::java_character;
 
 /// JDK 25 Integer.parseInt decimal semantics, including BMP decimal digits.
+#[inline]
 pub fn parse_java_integer(text: &str) -> Option<i32> {
-    parse_java_decimal(text, i128::from(i32::MAX)).map(|value| value as i32)
+    text.parse().ok().or_else(|| {
+        if text.is_ascii() {
+            return None;
+        }
+        parse_java_decimal(text, i128::from(i32::MAX)).map(|value| value as i32)
+    })
 }
 
 /// JDK 25 Long.parseLong decimal semantics, including BMP decimal digits.
+#[inline]
 pub fn parse_java_long(text: &str) -> Option<i64> {
-    parse_java_decimal(text, i128::from(i64::MAX)).map(|value| value as i64)
+    text.parse().ok().or_else(|| {
+        if text.is_ascii() {
+            return None;
+        }
+        parse_java_decimal(text, i128::from(i64::MAX)).map(|value| value as i64)
+    })
 }
 
 fn parse_java_decimal(text: &str, max: i128) -> Option<i128> {

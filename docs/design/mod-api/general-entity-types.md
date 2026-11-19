@@ -89,6 +89,16 @@ Persistence does not imply synchronization: only declared fields cross the netwo
 
 The [moving-structures carrier](moving-structures.md) remains a game-owned specialized type and does not depend on general registration. Share identity, residency, tracking and save boundaries; its cell ownership, swept collision and assembly journal remain specialized. Never create two carrier tickers or serialize its cells twice.
 
+### Implemented: tracking and the client table (stage 5, first part)
+
+- **The tracker.** General rows join the level's one tracker (`lan_general_states` in `game/network/lan_entities.rs`). A row's range and interval are its declaration's (`tracking::general` in `lan/tracking.rs`): the range in chunks is capped by the view distance, and an interval of `i32::MAX` or below 1 never updates. Deltas are on. A quarantined record never becomes a row, so it is never tracked.
+- **Pairing.** A general key is in no client registry, so pairing sends a `sunrise:general_entity` spawn (`crates/sunrise-protocol/src/general_entity.rs`) in place of `AddEntity`. Only a client that negotiated that engine channel is paired (`Viewer::general_entity`, `Guest::negotiated_general_entity`). After the spawn:
+  - moves, position syncs, teleports and the removal are the vanilla packets keyed by the network id;
+  - the row's declared fields are its synced attachments, whose snapshot tracking start queues as for any entity.
+- **Vanilla clients.** A vanilla client is never paired with a row: no packet names it. Refusing such a client when required general types exist is still the open question below.
+- **The client.** A Sunrise client keeps the rows it was shown in `game/network/remote/general.rs`. Each row's type is resolved in the client's frozen catalog. It moves with the non-living interpolation (3 steps), keeps the position and rotation of the tick before for a frame's partial tick, and is dropped on removal or a world change. An unknown key or a duplicate id is ignored with one warning. No mod code runs on the client.
+- **Still to come.** The renderer handoff follows in the next part: renderer slots for general types, and drawing a row from its synced attachments.
+
 ## Lifecycle route owners and migration obligations
 
 Paths below are verified existing integration owners relative to this repository. They identify boundaries to extend, not proof that general types already traverse them.
@@ -96,7 +106,7 @@ Paths below are verified existing integration owners relative to this repository
 | Route | Existing file:line owner; required treatment |
 | --- | --- |
 | Part registration and dispatch | `crates/sunrise-mod-vocab/src/parts/entities.rs:124` registers behavior; `:53` resolves a type's Parts. Resolve into slots at load. |
-| Mod spawning, including callers using level handles | `crates/sunrise-client/src/game/modding/native_level_spawning.rs:15` owns level_spawn_mob. Add a general insertion path without pretending every entity is a mob. |
+| Mod spawning, including callers using level handles | `crates/sunrise-client/src/game/modding/native_level_spawning.rs` owns `level_spawn_entity` (#2641; `level_spawn_mob` is its living route at rest): `SpawnBody::General` builds a fresh record and admits it through `admit_general_record`, the single-record admission chunk loading shares, without pretending every entity is a mob. |
 | Natural/spawner policy | `crates/sunrise-client/src/game/mobs/natural_spawning.rs:43` gates eligible chunks. General MISC types do not gain natural spawning implicitly. Explicit spawn adapters use the same insertion boundary. |
 | Identity, reads and queries | `crates/sunrise-client/src/game/modding/native_entity_refs.rs:101` resolves targets, `:176` creates refs, `:245` queries entities. Extend all three to general rows; do not scan families for each lookup. |
 | Temporary lift | `crates/sunrise-client/src/game/modding/native_entity_refs.rs:86` owns held-out access. General rows must retain residency visibility and balance restoration after panic. |

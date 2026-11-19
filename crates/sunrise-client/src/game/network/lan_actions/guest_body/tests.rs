@@ -140,3 +140,52 @@ fn accepted_hit_moves_through_teleport_restore_but_not_respawn() {
         }
     }
 }
+
+#[test]
+#[ignore = "daily"]
+fn guest_equipment_changes_powder_snow_support_on_the_same_move() {
+    use crate::game::native_entity_refs::tests::with_game;
+    use crate::game::native_item_places::tests::{guest as online_guest, open_to_lan};
+    use sunrise_client::{chunk::Chunk, items::ItemStack};
+    use sunrise_core::position::BlockPos;
+
+    with_game(|game| {
+        open_to_lan(game);
+        game.streaming
+            .insert_remote(&mut game.world, Chunk::empty(0, 0));
+        let snow = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:powder_snow")
+            .unwrap();
+        game.world.set(1, 63, 1, snow).unwrap();
+        let mut guest = online_guest(1);
+        guest.loaded = true;
+        guest.position = [1.5, 64.0, 1.5];
+        guest.motion = Some(Box::new(
+            PlayerMotion::new(game.motion, Vec3::new(1.5, 64.0, 1.5)).unwrap(),
+        ));
+        game.lan.as_mut().unwrap().hub.guests.push(guest);
+        for boots in [true, false] {
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(1, |guest| {
+                    guest.armor[3] = boots.then(|| ItemStack::new("minecraft:leather_boots", 1));
+                    guest.on_ground = true;
+                    guest.moves_from_ground = false;
+                    guest.moves.push(([0.0, -0.25, 0.0], true));
+                })
+                .unwrap();
+            game.guest_server_tick(1, true);
+            let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+            assert_eq!(
+                guest.motion.as_ref().unwrap().ground.supporting_block,
+                boots.then_some(BlockPos::new(1, 63, 1)),
+                "boots worn: {boots}"
+            );
+        }
+    });
+}

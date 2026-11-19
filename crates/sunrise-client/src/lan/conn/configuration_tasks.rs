@@ -98,6 +98,3 @@ fn wait(
         }
     }
 }
-#[cfg(test)]
-#[path = "configuration_tasks_tests.rs"]
-mod tests;

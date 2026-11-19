@@ -33,9 +33,11 @@ mod registry_lock;
 pub mod registry_plan;
 mod registry_runtime;
 pub mod registry_rustc;
+mod registry_shared;
 pub mod rust;
 mod slots;
 
+pub use mixins_patch::MixinsIdentity;
 pub use prebuilt::{Refusal, compiling};
 pub use registry_inventory::Inventory as RegistryInventory;
 
@@ -65,8 +67,7 @@ pub const CLIENT: &str = if cfg!(windows) {
     "sunrise-client"
 };
 
-/// horizon-mixins, for bundles that don't name the revision they were tested with.
-const MIXINS_GIT: &str = "https://github.com/horizon-rust/horizon-mixins";
+/// The horizon-mixins revision this tool ships with.
 pub const MIXINS_REV: &str = sunrise_mod_package::mixins_tool::REV;
 
 /// `native-build --mixins-from-source`: this process builds the horizon-mixins tool from its
@@ -193,10 +194,12 @@ impl Bundle {
 
     /// Whether horizon-mixins reads source to transform the game.
     pub fn needs_mixins(&self) -> bool {
-        !self.native().mixin.is_empty()
-            || !self.native().module.is_empty()
-            || !self.native().bridge.is_empty()
-            || !self.native().state.is_empty()
+        self.manifest.native.as_ref().is_some_and(|native| {
+            !native.mixin.is_empty()
+                || !native.module.is_empty()
+                || !native.bridge.is_empty()
+                || !native.state.is_empty()
+        })
     }
 }
 
@@ -548,29 +551,6 @@ fn diagnostic(text: &str) -> Option<String> {
     Some(line)
 }
 
-/// horizon-mixins at commit `rev`, built once with the launcher's cargo (`cargo install --locked`);
-/// `on_build` hears only when it is built.
-pub fn tool(rust: &dyn Toolchain, rev: &str, on_build: &impl Fn()) -> Result<PathBuf, String> {
-    let dir = root().join("tools").join(&rev[..12]);
-    let bin = dir
-        .join("bin")
-        .join(format!("horizon-mixins{}", std::env::consts::EXE_SUFFIX));
-    if !bin.is_file() {
-        on_build();
-        let mut cmd = rust.command(&rust.cargo());
-        rust::low_priority(&mut cmd);
-        rust.configure_cargo(&mut cmd);
-        cmd.args([
-            "install", "--locked", "--git", MIXINS_GIT, "--rev", rev, "--root",
-        ])
-        .arg(&dir)
-        .arg("horizon-mixins-cli");
-        run(cmd, "Building horizon-mixins", |_| {})?;
-    }
-    host::mark_used(&dir)?;
-    Ok(bin)
-}
-
 /// External mixins traverse ordinary module declarations, not generated OUT_DIR includes.
 /// Prepare their input separately so neither the downloaded source nor a cached snapshot changes.
 pub fn prepare_mixins_source(source: &Path, prepared: &Path) -> Result<(), String> {
@@ -685,20 +665,28 @@ pub fn sync(from: &Path, to: &Path) -> Result<(), String> {
     let new = files(from)?;
     let old = if to.is_dir() { files(to)? } else { Vec::new() };
     for (name, path) in &new {
-        let target = to.join(name);
-        if fs::read(&target).ok() != fs::read(path).ok() {
-            fs::create_dir_all(target.parent().unwrap_or(to)).map_err(|e| e.to_string())?;
-            fs::copy(path, &target)
-                .and_then(|_| fs::File::options().write(true).open(&target))
-                .and_then(|file| file.set_modified(std::time::SystemTime::now()))
-                .map_err(|e| format!("{}: {e}", target.display()))?;
-        }
+        copy_changed(path, &to.join(name))?;
     }
     for (name, path) in old {
         if new.binary_search_by(|(n, _)| n.cmp(&name)).is_err() {
             let _ = fs::remove_file(path);
         }
     }
+    Ok(())
+}
+
+/// Writes `from` over `to` when their bytes differ, with the current time (see [`sync`]).
+fn copy_changed(from: &Path, to: &Path) -> Result<(), String> {
+    if fs::read(to).ok() == fs::read(from).ok() {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::copy(from, to)
+        .and_then(|_| fs::File::options().write(true).open(to))
+        .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+        .map_err(|e| format!("{}: {e}", to.display()))?;
     Ok(())
 }
 

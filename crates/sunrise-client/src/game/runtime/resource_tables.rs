@@ -356,6 +356,7 @@ impl PackResources {
             data_source: root.data().clone(),
             data_changes: root.data_changes().clone(),
             additional_data: Arc::from([]),
+            mod_layers: root.mod_layers().clone(),
             names: Arc::new(names),
             clouds: Arc::new(clouds),
             forcefield: Arc::new(forcefield),

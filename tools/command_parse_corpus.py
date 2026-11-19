@@ -17,6 +17,7 @@ SELECTORS = [
     '@e[x=1,y=2,z=3,dx=4,dy=5,dz=6]', '@e[x=1.5]', '@e[level=5..10]', '@e[level=3]', '@a[gamemode=survival]', '@a[gamemode=!creative]',
     '@e[name="Bob"]', '@e[name=Bob]', '@e[name=!Bob]', '@e[advancements={minecraft:story/root=true}]',
     '@e[advancements={minecraft:story/root={a=true}}]', '@e[predicate=minecraft:foo]', '@e[predicate=!minecraft:foo]',
+    '@e[x_rotation=1.0000000596046448..2]', '@e[y_rotation=0x1p-1..90]',
     '@e[x_rotation=..0]', '@e[y_rotation=90..180]', '@e[x_rotation=0]', '@e[limit=0]', '@e[limit=3]', '@e[sort=random]',
     '@e[sort=furthest]', '@e[sort=arbitrary]', '@e[type=player]', '@a[type=player]', '@e[distance=..5,limit=1]', '@e[ ]',
     '@e[ type = pig ]', '@e[type=pig , limit=2]', '@e[type=pig,]', '@e[,]', '@a[ name = "x" ]',

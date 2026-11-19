@@ -22,7 +22,7 @@ fn real_wasm_command_listener_receives_ordered_selector_handles() {
         manifest.inject.clear();
         let info = PackageInfo::new(
             manifest.id.clone(),
-            manifest.version.clone(),
+            manifest.version.to_string(),
             PackageKind::Code,
             Side::Both,
             vec![manifest.id.clone()],

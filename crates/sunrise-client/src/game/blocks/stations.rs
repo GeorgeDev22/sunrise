@@ -39,6 +39,7 @@ fn tooltip_position(
 use super::api_values::{TryIntoApi, TryIntoEngine};
 use super::{Game, Screen};
 use mod_api::{TooltipElement, TooltipImage};
+use std::cell::Cell;
 use sunrise_client::{
     block_entity_item, brewing,
     containers::BlockEntity,
@@ -50,6 +51,18 @@ use sunrise_client::{
     text::Text,
 };
 use sunrise_core::random::{LegacyRandom, RandomSource};
+
+thread_local! {
+    static IN_TOOLTIP_BUILD: Cell<bool> = const { Cell::new(false) };
+}
+
+struct TooltipBuildGuard;
+
+impl Drop for TooltipBuildGuard {
+    fn drop(&mut self) {
+        IN_TOOLTIP_BUILD.set(false);
+    }
+}
 
 /// The book above the enchanting table's offers: `EnchantmentScreen`'s
 /// `time`, `flip`, `oFlip`, `flipT`, `flipA`, `open`, `oOpen` and `last`.
@@ -1547,13 +1560,7 @@ impl Game<'_> {
         nested: bool,
         creative: bool,
     ) -> Vec<(sunrise_client::text::Text, u32)> {
-        self.build_stack_tooltip_lines(
-            stack,
-            nested,
-            creative,
-            self.options_advanced_tooltips(),
-            true,
-        )
+        self.tooltip_lines(stack, nested, creative, self.options_advanced_tooltips())
     }
 
     #[allow(clippy::needless_question_mark)] // TODO(#2273)
@@ -1565,7 +1572,7 @@ impl Game<'_> {
     ) -> Option<Vec<mod_api::TooltipElement>> {
         self.items().get(&stack.item)?;
         Some(
-            self.build_stack_tooltip_lines(stack, false, creative, advanced, false)
+            self.tooltip_lines(stack, false, creative, advanced)
                 .into_iter()
                 .map(|(text, color)| {
                     text.try_into_api()
@@ -1574,6 +1581,22 @@ impl Game<'_> {
                 .collect::<Result<Vec<_>, _>>()
                 .ok()?,
         )
+    }
+
+    fn tooltip_lines(
+        &self,
+        stack: &ItemStack,
+        nested: bool,
+        creative: bool,
+        advanced: bool,
+    ) -> Vec<(sunrise_client::text::Text, u32)> {
+        // A listener, part or appender may ask for another tooltip on the same client thread.
+        let guard = if IN_TOOLTIP_BUILD.replace(true) {
+            None
+        } else {
+            Some(TooltipBuildGuard)
+        };
+        self.build_stack_tooltip_lines(stack, nested, creative, advanced, guard.is_some())
     }
 
     fn build_stack_tooltip_lines(
@@ -1873,9 +1896,15 @@ impl Game<'_> {
             }
         }
         details.start("minecraft:attribute_modifiers", lines.len());
-        let shown = display.shows("minecraft:attribute_modifiers");
-        let (modifier_lines, added) =
-            self.stack_attribute_tooltip(stack, shown, nested, advanced, creative, mod_callbacks);
+        let attributes_shown = display.shows("minecraft:attribute_modifiers");
+        let (modifier_lines, added) = self.stack_attribute_tooltip(
+            stack,
+            attributes_shown,
+            nested,
+            advanced,
+            creative,
+            mod_callbacks && display.name_visible(creative),
+        );
         for (text, c) in modifier_lines {
             push(&mut lines, text, c);
         }
@@ -2581,28 +2610,137 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn resource_tooltip_uses_inventory_lines_and_explicit_flags() {
-        use mod_api::{ItemResource, TooltipElement};
+        use mod_api::{
+            AddAttributeTooltipsEvent, ClientHost, Hooks, ItemResource, ItemTooltipEvent, ModEntry,
+            Mods, TooltipElement,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use sunrise_core::nbt::Tag;
 
-        crate::game::native_entity_refs::tests::with_client_game(|game| {
-            let stack = super::ItemStack::new("minecraft:iron_sword", 1);
-            let resource = ItemResource::of(&crate::game::api_values::test_snapshot(&stack));
-            let inventory: Vec<_> = game
-                .stack_tooltip_lines(&stack, false, false)
-                .into_iter()
-                .map(|(text, color)| TooltipElement::Text(text.try_into_api().unwrap(), color))
-                .collect();
-            let advanced = game.options_advanced_tooltips();
-            assert!(resource.tooltip(game, advanced, false).unwrap() == inventory);
-            for advanced in [false, true] {
-                let lines = resource.tooltip(game, advanced, false).unwrap();
-                assert_eq!(
-                    lines.iter().any(|line| matches!(
-                        line,
-                        TooltipElement::Text(text, _) if *text == mod_api::Text::literal("minecraft:iron_sword")
-                    )),
-                    advanced
-                );
+        const BASE_NAME: &str = "base item line";
+        const REENTERED: &str = "reentered tooltip listener";
+        struct Listener(AtomicBool);
+        #[mod_api::__subscriptions]
+        impl Hooks for Listener {
+            fn add_attribute_tooltips(
+                &self,
+                _: &dyn ClientHost,
+                event: &mut AddAttributeTooltipsEvent<'_>,
+            ) {
+                event
+                    .lines
+                    .push((mod_api::Text::literal("attribute listener"), u32::MAX));
             }
+
+            fn item_tooltip(&self, host: &dyn ClientHost, event: &mut ItemTooltipEvent<'_>) {
+                if self.0.swap(true, Ordering::Relaxed) {
+                    event
+                        .lines
+                        .push((mod_api::Text::literal(REENTERED), u32::MAX));
+                    return;
+                }
+                // Asking for the same stack must return base lines, not enter another listener.
+                let nested = ItemResource::of(event.stack)
+                    .tooltip(host, event.advanced, event.creative)
+                    .unwrap();
+                self.0.store(false, Ordering::Relaxed);
+                assert!(matches!(
+                    nested.first(),
+                    Some(TooltipElement::Text(text, _)) if *text == mod_api::Text::literal(BASE_NAME)
+                ));
+                assert!(!nested.contains(&TooltipElement::Text(
+                    mod_api::Text::literal(REENTERED),
+                    u32::MAX,
+                )));
+                event
+                    .lines
+                    .push((mod_api::Text::literal("listener"), u32::MAX));
+            }
+        }
+        let mods: Mods = vec![ModEntry::new(
+            "listener",
+            Box::new(Listener(AtomicBool::new(false))),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            crate::game::native_entity_refs::tests::with_client_game(|game| {
+                let name = Tag::compound([("text", Tag::String(BASE_NAME.into()))]);
+                let mut stack = super::ItemStack::new("minecraft:iron_sword", 1);
+                stack
+                    .data_mut()
+                    .set_other("minecraft:item_name", Some(name.clone()));
+                let resource = ItemResource::of(&crate::game::api_values::test_snapshot(&stack));
+                let inventory: Vec<_> = game
+                    .stack_tooltip_lines(&stack, false, false)
+                    .into_iter()
+                    .map(|(text, color)| TooltipElement::Text(text.try_into_api().unwrap(), color))
+                    .collect();
+                let advanced = game.options_advanced_tooltips();
+                assert!(resource.tooltip(game, advanced, false).unwrap() == inventory);
+                let attribute_line =
+                    TooltipElement::Text(mod_api::Text::literal("attribute listener"), u32::MAX);
+                assert!(inventory.contains(&attribute_line));
+                let mut hidden = stack.clone();
+                hidden.data_mut().set_other(
+                    "minecraft:tooltip_display",
+                    Some(Tag::compound([("hide_tooltip", Tag::Byte(1))])),
+                );
+                let hidden = ItemResource::of(&crate::game::api_values::test_snapshot(&hidden));
+                assert!(
+                    !hidden
+                        .tooltip(game, false, false)
+                        .unwrap()
+                        .contains(&attribute_line)
+                );
+                let mut attributes_hidden = stack.clone();
+                attributes_hidden.data_mut().set_other(
+                    "minecraft:tooltip_display",
+                    Some(Tag::compound([(
+                        "hidden_components",
+                        Tag::List(vec![Tag::String("minecraft:attribute_modifiers".into())]),
+                    )])),
+                );
+                let attributes_hidden =
+                    ItemResource::of(&crate::game::api_values::test_snapshot(&attributes_hidden));
+                let lines = attributes_hidden.tooltip(game, false, false).unwrap();
+                assert!(lines.contains(&attribute_line));
+                assert!(lines.contains(&TooltipElement::Text(
+                    mod_api::Text::literal("listener"),
+                    u32::MAX,
+                )));
+
+                let mut crossbow = super::ItemStack::new("minecraft:crossbow", 1);
+                crossbow
+                    .data_mut()
+                    .set_other("minecraft:item_name", Some(name));
+                crossbow
+                    .data_mut()
+                    .charged
+                    .push(super::ItemStack::new("minecraft:arrow", 1));
+                let lines = game.stack_tooltip_lines(&crossbow, false, false);
+                assert_eq!(
+                    lines
+                        .iter()
+                        .filter(|(text, _)| text.plain().trim() == "listener")
+                        .count(),
+                    1,
+                    "only the crossbow gets the final tooltip event",
+                );
+
+                for advanced in [false, true] {
+                    let lines = resource.tooltip(game, advanced, false).unwrap();
+                    assert!(lines.last().is_some_and(|line| {
+                        *line == TooltipElement::Text(mod_api::Text::literal("listener"), u32::MAX)
+                    }));
+                    assert_eq!(
+                        lines.iter().any(|line| matches!(
+                            line,
+                            TooltipElement::Text(text, _) if *text == mod_api::Text::literal("minecraft:iron_sword")
+                        )),
+                        advanced
+                    );
+                }
+            });
         });
     }
 
@@ -2649,8 +2787,7 @@ mod tests {
 
                 let stack = super::ItemStack::new("minecraft:stick", 1);
                 let assert_context = |game: &mut super::Game<'_>, advanced, rate| {
-                    let lines =
-                        game.build_stack_tooltip_lines(&stack, false, false, advanced, true);
+                    let lines = game.tooltip_lines(&stack, false, false, advanced);
                     assert!(lines.iter().any(|(text, _)| text.plain() == "context"));
                     let context = heard.lock().unwrap().pop().expect("item tooltip Part ran");
                     assert_eq!(context.advanced, advanced);

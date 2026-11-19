@@ -733,10 +733,12 @@ impl Game<'_> {
             .is_loaded_at(pos[0], pos[1], pos[2])
             .then(|| world_brightness(world, layer, pos))
     }
-    /// `BlockAndTintGetter.canSeeSky`: the sky light at `pos` is full. None as for
-    /// `level_brightness`.
+    /// `BlockAndLightGetter.canSeeSky`: whether the local sky light at `pos` is full.
     pub(super) fn level_can_see_sky(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool> {
-        super::native_world_read::can_see_sky(self.native_level_world(level)?, pos)
+        Some(super::native_world_read::can_see_sky(
+            self.native_level_read_world(level)?,
+            pos,
+        ))
     }
     /// `LevelLightEngine.checkBlock` at `pos`, queued with the level's light edits: the next
     /// update asks a `dynamic_light` block's parts again (`ask_edited_light_emission`) and

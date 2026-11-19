@@ -91,7 +91,6 @@ def write_options(game_dir, distance, version=None):
         f'entityCulling:{CURRENT_MODE}\n'
         'entityCullingPrecheck:64\n'
         'graphicsApi:opengl\n'
-        'overlay:fps\n'
     )
     return text
 
@@ -117,7 +116,7 @@ def capture(self, line, timeout=600):
         shot_dir.mkdir(parents=True, exist_ok=True)
         scene = SCENE_NAMES[SHOT_INDEX] if SHOT_INDEX < len(SCENE_NAMES) else f'scene-{SHOT_INDEX}'
         shot_path = shot_dir / f'{CURRENT_MODE}-{scene}.png'
-        # The current camera pose is already settled and the graphics file enables the FPS overlay.
+        # The current camera pose is already settled.
         original_control_call(self, f'screenshot {shot_path}')
         print(f'SCREENSHOT {shot_path}', flush=True)
         SHOT_INDEX += 1

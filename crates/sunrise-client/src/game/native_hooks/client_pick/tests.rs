@@ -639,6 +639,59 @@ fn paused_ticks_pick_and_the_frame_can_overwrite_the_tick_target() {
     });
 }
 
+struct OverwriteOrigin;
+#[mod_api::__subscriptions]
+impl Hooks for OverwriteOrigin {
+    fn client_pick(&self, _: &mut dyn ClientHost, event: &mut ClientPickEvent<'_>) {
+        event.origin = [0.0; 3];
+    }
+}
+
+struct RecordOrigins(Arc<Mutex<Vec<[f64; 3]>>>);
+#[mod_api::__subscriptions]
+impl Hooks for RecordOrigins {
+    fn client_pick(&self, _: &mut dyn ClientHost, event: &mut ClientPickEvent<'_>) {
+        self.0.lock().unwrap().push(event.origin);
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn pick_origin_is_the_eye_used_for_each_pick_and_isolated_per_listener() {
+    use sunrise_core::geometry::Vec3;
+    let origins = Arc::new(Mutex::new(Vec::new()));
+    let mods = vec![
+        mod_api::ModEntry::new("a_overwrite", Box::new(OverwriteOrigin)),
+        mod_api::ModEntry::new("b_record", Box::new(RecordOrigins(origins.clone()))),
+    ]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_pick_game("minecraft:pig", 10.0, |game, _| {
+            let player_eye = f64::from(game.player.as_ref().unwrap().dimensions.eye_height);
+            game.previous_position = Vec3::new(4.5, 5.0, 8.5);
+            game.refresh_client_pick(1.0);
+            game.refresh_client_pick(0.25);
+
+            let mob = game.mobs.iter_mut().find(|mob| mob.id == 31).unwrap();
+            mob.previous = Vec3::new(6.0, 4.0, -1.5);
+            let mob_eye = f64::from(mob.eye_height() as f32);
+            game.remote_set_camera(31);
+            assert_eq!(game.remote_camera_id(), Some(31));
+            game.refresh_client_pick(0.25);
+
+            assert_eq!(
+                *origins.lock().unwrap(),
+                [
+                    [0.5, 1.0 + player_eye, 0.5],
+                    [3.5, 4.0 + player_eye, 6.5],
+                    [7.0, 3.5 + mob_eye, -1.0],
+                ],
+                "a listener receives the sampled camera eye, not a prior listener's edit"
+            );
+        });
+    });
+}
+
 struct RiderPart(Arc<Mutex<usize>>, bool);
 #[mod_api::sunrise_part]
 impl mod_api::EntityPart for RiderPart {

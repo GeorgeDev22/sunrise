@@ -115,7 +115,6 @@ impl Hub {
                     crate::lan::handoff::changed(chunk);
                 }
             }
-            let recording = self.recording();
             let columns: Vec<&Chunk> = bulk
                 .iter()
                 .filter_map(|k| world.chunks.get(k).map(|c| &**c))
@@ -132,30 +131,6 @@ impl Hub {
                 }
                 let body = self.encoder.body_in(chunk, world);
                 self.send_to_holders(&holders, &body);
-                if recording {
-                    // The prediction's replay excuses a client near the column: any of its blocks may have
-                    // changed, so the one nearest the player stands for them.
-                    for i in in_level(&holders) {
-                        self.guests.update(i, |g| {
-                            let Some(record) = g.record.as_deref_mut() else {
-                                return;
-                            };
-                            let slack = crate::lan::prediction::slack(std::array::from_fn(|i| {
-                                g.position[i] - g.previous_position[i]
-                            }));
-                            let column =
-                                |c: f64, at: i32| (c.floor() as i32).clamp(at * 16, at * 16 + 15);
-                            let at = [
-                                column(g.position[0], key.0),
-                                g.position[1].floor() as i32,
-                                column(g.position[2], key.1),
-                            ];
-                            if crate::lan::prediction::near(g.position, at, slack) {
-                                record.changed_near(self.ticks, at);
-                            }
-                        });
-                    }
-                }
             }
         }
         let Some(log) = world.block_log.as_mut() else {
@@ -177,8 +152,6 @@ impl Hub {
         let mut changes = std::mem::take(log);
         changes.sort_unstable();
         changes.dedup();
-        // The prediction's replay excuses a client that hadn't seen a change near it.
-        let recording = self.recording();
         // Group by section.
         let mut sections: std::collections::BTreeMap<(i32, i32, i32), Vec<(i32, i32, i32)>> =
             Default::default();
@@ -218,14 +191,6 @@ impl Hub {
                 })
             };
             self.send_to_holders(&holders, &packet.encode());
-            if recording {
-                let bounds = crate::lan::prediction::bounds(&positions);
-                for i in in_level(&holders) {
-                    self.guests.update(i, |g| {
-                        crate::lan::prediction::note_changes(g, self.ticks, bounds, &positions);
-                    });
-                }
-            }
             // Block entities with data the client shows.
             for &(x, y, z) in &positions {
                 let state = world.block(x, y, z).0;
@@ -268,12 +233,4 @@ impl Hub {
             .map(|(i, level, _)| (i, level))
             .collect()
     }
-}
-
-/// The holders in the level in place: the prediction's replay is of them only.
-fn in_level(holders: &[(usize, Option<Level>)]) -> impl Iterator<Item = usize> + '_ {
-    holders
-        .iter()
-        .filter(|(_, level)| level.is_none())
-        .map(|&(i, _)| i)
 }

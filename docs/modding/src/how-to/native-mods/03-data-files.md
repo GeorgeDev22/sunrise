@@ -40,6 +40,14 @@ any other file causes the archive to be refused ([the manifest](../../reference/
 file type, up to 64 MiB a file, 256 MiB and 256 files in all. They are not pack data and no reload touches them;
 a missing, extra or mismatched file refuses the package by name ([`[runtime]`](../../reference/manifest.md)).
 
+The game hashes each file once, when the package opens, and keeps those bytes: your registration hook reads them with
+`cx.runtime_files()`, a handle you may keep and use from any thread. `files.names()` lists them, `files.file("nav.bin")`
+returns the checked bytes (or `None` for a name your manifest does not list: a mod reads only its own package's files),
+and `files.file_path("nav.bin")`, for native code that wants to map or compile a large file without a copy, returns where
+it sits on disk. The path is native-only: a wasm mod is refused with `RuntimePathError::WasmMod` and reads the bytes. A
+package installed as a `.smod` archive has no path either (`NotAFolder`), and a later edit of a folder is yours to guard
+against. A mod whose package declares no `[runtime]` gets `RuntimeFilesError::NoRuntimeFiles`.
+
 Although the archive accepts `build.rs`, a native build refuses it unless you disable it with
 `build = false` in Cargo's `[package]` table and remove build dependencies.
 

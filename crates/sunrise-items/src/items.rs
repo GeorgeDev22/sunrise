@@ -909,6 +909,20 @@ impl Items {
         overlay: &PackOverlay,
         defaults: &ItemDefaults,
     ) -> Result<Self> {
+        let mut items = Self::load_registry(root, registry, facts, overlay, defaults)?;
+        items.load_table_loot(root, overlay, defaults)?;
+        Ok(items)
+    }
+
+    /// Load the item registry and tags before resolving the world's loot
+    /// references. The owning load must bind its separately prepared loot data.
+    pub fn load_registry(
+        root: &Path,
+        registry: &BlockRegistry,
+        facts: &BlockFacts,
+        overlay: &PackOverlay,
+        defaults: &ItemDefaults,
+    ) -> Result<Self> {
         let mut block_for_item: HashMap<&str, BlockStateId> = HashMap::new();
         for (i, s) in facts.states.iter().enumerate() {
             let default = registry.default_state(&s.name);
@@ -986,8 +1000,7 @@ impl Items {
     /// Every item's defaults, tags and block-to-item identities, without
     /// placement state ids (for headless tools that never place blocks).
     pub fn catalog(root: &Path, overlay: &PackOverlay, defaults: &ItemDefaults) -> Result<Self> {
-        let mut items = Self::load_with(root, &HashMap::new(), overlay, defaults)?;
-        items.block_items = Arc::new(ingredient_defaults::block_items(root)?);
+        let mut items = Self::catalog_items(root, overlay, defaults)?;
         ingredient_defaults::load_component_damage_registry(root, overlay, &mut items)?;
         Ok(items)
     }
@@ -999,13 +1012,19 @@ impl Items {
         defaults: &ItemDefaults,
         damage: sunrise_client_core::registries::RegistryIds,
     ) -> Result<Self> {
-        let mut items = Self::load_with(root, &HashMap::new(), overlay, defaults)?;
-        items.block_items = Arc::new(ingredient_defaults::block_items(root)?);
+        let mut items = Self::catalog_items(root, overlay, defaults)?;
         Arc::make_mut(&mut items.component_registry)
             .by_registry
             .insert("minecraft:damage_type".into(), damage);
         Ok(items)
     }
+    fn catalog_items(root: &Path, overlay: &PackOverlay, defaults: &ItemDefaults) -> Result<Self> {
+        let mut items = Self::load_with(root, &HashMap::new(), overlay, defaults)?;
+        items.block_items = Arc::new(ingredient_defaults::block_items(root)?);
+        items.load_table_loot(root, overlay, defaults)?;
+        Ok(items)
+    }
+
     fn load_with(
         root: &Path,
         block_for_item: &HashMap<&str, BlockStateId>,
@@ -1085,6 +1104,7 @@ impl Items {
                 damage,
                 extra,
             };
+            let villager_food = component_prototype.villager_food(None);
             items.insert(
                 id.clone(),
                 ItemInfo {
@@ -1181,9 +1201,7 @@ impl Items {
                         .map(|(_, rest)| (*rest).to_owned())
                         .or_else(|| mod_remainders.get(name).cloned()),
                     template: mod_templates.get(name).map(|t| Arc::from(t.as_str())),
-                    villager_food: c["minecraft:villager_food"]["nutrition"]
-                        .as_i64()
-                        .map(|n| n as i32),
+                    villager_food,
                     use_speed: c["minecraft:use_effects"]["speed_multiplier"]
                         .as_f64()
                         .unwrap_or(0.2) as f32,
@@ -1247,15 +1265,6 @@ impl Items {
             }
             order.push(id);
         }
-        // Every loot table, keyed by its id (blocks/stone, entities/sheep/white,
-        // gameplay/chicken_lay, shearing/sheep/red...), of every namespace
-        // (content mods' tables, docs/modpacks.md), with the packs' over the
-        // game's own: one map with the loot data of the same root and packs.
-        let loot_data = sunrise_world::loot::LootData::load_table_data(root, overlay, defaults)?;
-        let loot = loot_data.tables().clone();
-        let predicates = loot_data.predicates().clone();
-        let loot_modifiers = loot_data.modifiers().clone();
-        let loot_types = loot_data.types().clone();
         let registry_order = registry_order(root, &order);
         let enchantments = Arc::new(crate::enchant::Enchantments::load_with(
             root, overlay, defaults,
@@ -1268,7 +1277,6 @@ impl Items {
                 &enchantments,
                 &entity_tags,
             )?,
-            component_defaults: loot_data.component_defaults().clone(),
             mob_visibility,
             order,
             registry_order,
@@ -1279,16 +1287,25 @@ impl Items {
             item_tag_order: load_tag_lists(root, "item", overlay)?,
             block_tag_order: load_tag_lists(root, "block", overlay)?,
             fluid_tag_order: load_tag_lists(root, "fluid", overlay)?,
-            loot,
-            loot_types,
-            loot_modifiers,
-            global_modifiers: Arc::default(),
-            predicates,
             songs: load_songs(root, overlay),
             instruments: load_instruments(root, overlay),
             enchantments,
+            ..Self::default()
         })
     }
+
+    fn load_table_loot(
+        &mut self,
+        root: &Path,
+        overlay: &PackOverlay,
+        defaults: &ItemDefaults,
+    ) -> Result<()> {
+        let data = sunrise_world::loot::LootData::load_table_data(root, overlay, defaults)?;
+        self.component_defaults = data.component_defaults().clone();
+        self.set_loot_data(&data);
+        Ok(())
+    }
+
     /// Bind tables, predicates and prepared instances from the same candidate.
     pub fn set_loot_data(&mut self, data: &sunrise_world::loot::LootData) {
         self.loot = data.tables().clone();
@@ -3695,9 +3712,7 @@ mod tests {
         let file = json!({"description": "horn", "sounds": [
             {"id": "demo:a", "neoforge:conditions": [{"type": "absent:condition"}]}]});
         fs::write(dir.join("horn.json"), file.to_string()).unwrap();
-        let conditions = sunrise_world::conditions::LoadConditions::new([])
-            .with_diagnostics()
-            .with_lookup(std::collections::BTreeMap::new(), |_, _| None);
+        let conditions = sunrise_world::conditions::LoadConditions::new([]);
         let overlay = PackOverlay {
             files: &[],
             conditions: &conditions,
@@ -3705,7 +3720,7 @@ mod tests {
         let loaded = data_files(&root, "instrument", &overlay);
         fs::remove_dir_all(&root).unwrap();
         assert_eq!(loaded.get("demo:horn"), Some(&file));
-        assert_eq!(conditions.check_resource_errors("instrument"), Ok(()));
+        assert_eq!(conditions.check_errors(), Ok(()));
     }
 
     #[test]

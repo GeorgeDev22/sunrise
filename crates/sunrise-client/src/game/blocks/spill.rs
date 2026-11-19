@@ -12,7 +12,6 @@ use sunrise_client::{
     containers::BlockEntity,
     furnace::FurnaceCooking,
     items::{BlockLootRoll, ItemStack},
-    save,
 };
 use sunrise_core::position::BlockPos;
 use sunrise_core::random::RandomSource;
@@ -54,11 +53,11 @@ pub(super) fn world_source(
     world: &sunrise_client::world::World,
     pos: [i32; 3],
     block: &str,
-    items: &crate::items::Items,
+    encode: impl FnOnce((i32, i32, i32), &BlockEntity, &str) -> Tag,
 ) -> Option<std::sync::Arc<sunrise_world::loot::copy::BlockSource>> {
     let key = (pos[0], pos[1], pos[2]);
     let saved = match world.block_entities.get(&key) {
-        Some(entity) => save::block_entity_encode::encode(key, entity, block, items),
+        Some(entity) => encode(key, entity, block),
         None => saved_entity(world, pos).or_else(|| {
             // Sparse storage can omit an empty block entity, but its type's
             // implicit components still belong to the loot source. Use the
@@ -93,31 +92,20 @@ impl Pending {
         &mut self,
         world: &sunrise_client::world::World,
         pos: [i32; 3],
-        entity: &BlockEntity,
-        block: &str,
-        items: &crate::items::Items,
+        saved: Tag,
     ) {
         let key = (pos[0], pos[1], pos[2]);
         let name = world.block_names.get(&key).cloned();
-        self.record(pos, entity, block, name, world.block_lock(key), items);
-    }
-    pub(super) fn record(
-        &mut self,
-        pos: [i32; 3],
-        entity: &BlockEntity,
-        block: &str,
-        name: Option<Tag>,
-        lock: Option<&Tag>,
-        items: &crate::items::Items,
-    ) {
-        let saved =
-            save::block_entity_encode::encode((pos[0], pos[1], pos[2]), entity, block, items);
-        self.record_source(pos, source_snapshot(saved, name, lock));
+        self.record_source(pos, source_snapshot(saved, name, world.block_lock(key)));
     }
     pub(super) fn record_saved(&mut self, pos: [i32; 3], tag: &sunrise_core::nbt::Tag) {
         self.record_source(pos, source_snapshot(tag.clone(), None, None));
     }
-    fn record_source(&mut self, pos: [i32; 3], source: sunrise_world::loot::copy::BlockSource) {
+    pub(super) fn record_source(
+        &mut self,
+        pos: [i32; 3],
+        source: sunrise_world::loot::copy::BlockSource,
+    ) {
         let source = std::sync::Arc::new(source);
         self.sources.insert(pos, source.clone());
         let tag = &source.nbt;
@@ -557,10 +545,8 @@ impl GameLevel<'_> {
         let at = [pos.x, pos.y, pos.z];
         self.unpack_loot(super::container_loot::LootTarget::Block(key), None);
         if let Some(entity) = self.world.block_entities.get(&key) {
-            let entity = entity.clone();
-            let block = self.facts.get(state).name.clone();
-            self.pending
-                .record_from(self.world, at, &entity, &block, self.items);
+            let saved = self.encode_live_block_entity(key, entity, &self.facts.get(state).name);
+            self.pending.record_from(self.world, at, saved);
         } else if let Some(tag) = saved_entity(self.world, [pos.x, pos.y, pos.z]) {
             self.pending.record_saved(at, &tag);
         }
@@ -583,7 +569,7 @@ impl GameLevel<'_> {
         let entity = self
             .drop_entity
             .filter(|_| self.drop_breaker_at == Some(pos));
-        let drops = self.roll_block_loot(pos, state, entity, roll);
+        let drops = self.roll_block_loot(pos, state, entity, roll, None);
         let dropped = self.block_dropped(pos, state, None, tool.as_ref(), drops, None);
         for item in dropped.items {
             if let Some(kept) = self.drop_into.as_mut().filter(|_| machine) {
@@ -623,15 +609,9 @@ impl GameLevel<'_> {
         let at = [pos.x, pos.y, pos.z];
         let mut copied = Pending::default();
         if let Some(block_entity) = self.world.block_entities.get(&key) {
-            let name = self.world.block_names.get(&key).cloned();
-            copied.record(
-                at,
-                block_entity,
-                &self.facts.get(state).name,
-                name,
-                self.world.block_lock(key),
-                self.items,
-            );
+            let saved =
+                self.encode_live_block_entity(key, block_entity, &self.facts.get(state).name);
+            copied.record_from(self.world, at, saved);
         } else if let Some(tag) = saved_entity(self.world, at) {
             copied.record_saved(at, &tag);
         }
@@ -643,9 +623,7 @@ impl GameLevel<'_> {
             ..Default::default()
         };
         let source = copied.source(at);
-        let mut drops = sunrise_world::loot::copy::with_block_source(source.as_deref(), || {
-            self.roll_block_loot(pos, state, entity, roll)
-        });
+        let mut drops = self.roll_block_loot(pos, state, entity, roll, source.as_deref());
         drops.retain(|stack| &*stack.item != "minecraft:air" && stack.count > 0);
         drops
     }
@@ -932,6 +910,7 @@ impl GameLevel<'_> {
             PreRemove::Beacon => self.events.push(LevelEvent::Sound {
                 pos,
                 sound: "minecraft:block.beacon.deactivate".into(),
+                source: None,
                 volume: 1.0,
                 pitch: 1.0,
             }),
@@ -1068,20 +1047,22 @@ impl Game<'_> {
         entity: Option<u32>,
         roll: BlockLootRoll<'_>,
     ) -> Vec<ItemStack> {
-        let source =
-            self.pending.source(pos).or_else(|| {
-                self.pack.assets.registry.state(state).and_then(|block| {
-                    world_source(&self.world, pos, &block.name, world_items!(self))
+        let source = self.pending.source(pos).or_else(|| {
+            self.pack.assets.registry.state(state).and_then(|block| {
+                world_source(&self.world, pos, &block.name, |key, entity, block| {
+                    self.encode_live_block_entity(key, entity, block, world_items!(self))
                 })
-            });
+            })
+        });
         let storage = self.score.storage.snapshot();
         sunrise_world::loot::copy::with_storage(storage, || {
             sunrise_world::loot::copy::with_block_source(source.as_deref(), || {
                 if mod_api::__private::listened(mod_api::HookId::EnchantedBlockLoot) {
                     let at = BlockPos::new(pos[0], pos[1], pos[2]);
                     let entity = self.loot_entity_ref(entity);
-                    return self
-                        .with_level(|_, level, _| level.roll_block_loot(at, state, entity, roll));
+                    return self.with_level(|_, level, _| {
+                        level.roll_block_loot(at, state, entity, roll, source.as_deref())
+                    });
                 }
                 world_items!(self).block_drops(
                     self.pack.assets.registry,
@@ -1662,14 +1643,7 @@ mod tests {
             };
             assert_eq!(banner.layers.len(), item_data::OMINOUS_LAYERS.len());
             let mut pending = Pending::default();
-            pending.record(
-                [pos.0, pos.1, pos.2],
-                &loaded,
-                block,
-                None,
-                None,
-                &Default::default(),
-            );
+            pending.record_saved([pos.0, pos.1, pos.2], &saved);
             let mut items = sunrise_client::items::Items::for_tests(Default::default());
             items.set_loot_tables(std::sync::Arc::new([(
                 "test:banner".to_owned(),

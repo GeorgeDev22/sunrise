@@ -347,7 +347,6 @@ impl Game<'_> {
             }
         };
         let mut view = self.view;
-        let pull = self.hooks_camera_distance(partial);
         let kind = self.camera_type;
 
         let context = CollisionContext::for_entity(
@@ -376,8 +375,7 @@ impl Game<'_> {
             &entity,
             partial,
             kind,
-            |distance| {
-                let mut distance = distance * pull;
+            |mut distance| {
                 self.native_camera_distance(partial, kind.is_mirrored(), &entity, &mut distance);
                 distance
             },
@@ -874,8 +872,6 @@ impl Game<'_> {
                 packed,
                 out,
             );
-            let world = sunrise_hooks::players::Pass::World;
-            self.own_layers_geometry(m, world, camera, alpha as f32, packed, out);
             self.player_elytra_geometry(m, chest, camera, alpha as f32, packed, out);
             self.spin_attack_geometry(m, camera, alpha as f32, packed, out);
             self.shoulder_parrots_geometry(m, camera, alpha as f32, packed, out);
@@ -1000,8 +996,6 @@ impl Game<'_> {
             240 | 240 << 8,
             &mut verts,
         );
-        let picture = sunrise_hooks::players::Pass::Picture;
-        self.own_layers_geometry(&m, picture, camera, 1.0, 240 | 240 << 8, &mut verts);
         // `WingsLayer` draws through `RenderTypes.armorCutoutNoCull`: the
         // wings' faces show from both sides (the elytra texture is empty on
         // the face that looks at the body).
@@ -1022,7 +1016,7 @@ impl Game<'_> {
         let fire = self
             .player
             .as_ref()
-            .filter(|p| p.fire_ticks > 0 && !p.spectator)
+            .filter(|p| p.is_on_fire() && !p.spectator)
             .map(|p| (p.dimensions.width, p.dimensions.height));
         let glints = preview_glint_quads(&verts, gui, wings.clone(), self.glint_frame);
         let quads = player_preview_quads_no_cull(verts, gui, fire, &atlas.sprites, wings);

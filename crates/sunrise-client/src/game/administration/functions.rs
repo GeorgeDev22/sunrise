@@ -279,6 +279,24 @@ impl Game<'_> {
         } else {
             None
         };
+        let initial = if opening_world {
+            // This load warns again about saved attribute bases clamped to their bounds (#3728).
+            sunrise_client::living_attributes::LOAD_CLAMPS.begin_load();
+            let tables = self
+                .stage_world_tables(&stack, false, &resources)
+                .map_err(|error| ReloadStageError::DataSource(error.to_string()))?;
+            let wire = super::lan::sync::prepare_world_sync_data(
+                &resources,
+                &self.res.core.item_data,
+                &super::pack_files(&tables.tables),
+                &tables.health.damage,
+                tables.advancements.clone(),
+            )
+            .map_err(|error| ReloadStageError::DataSource(format!("world registries: {error}")))?;
+            Some((tables, wire))
+        } else {
+            None
+        };
         if let Some(world) = &world {
             prepared.bind_loot(world);
         }
@@ -289,6 +307,7 @@ impl Game<'_> {
             self.options.resources = root.prepared().to_owned();
             self.pack.data_source = root.data().clone();
             self.pack.data_changes = root.data_changes().clone();
+            self.pack.mod_layers = root.mod_layers().clone();
             self.mods.data_switched = true;
         }
         self.install_loop_context(context);
@@ -305,9 +324,10 @@ impl Game<'_> {
         // also install its tables before function admission validates inline holders.
         if let Some(world) = world {
             self.install_world_tables(world);
-        } else if opening_world {
-            self.open_world_tables(&stack, &resources)
+        } else if let Some((initial, wire)) = initial {
+            self.open_world_tables(initial)
                 .map_err(|error| ReloadStageError::DataSource(error.to_string()))?;
+            super::lan::sync::install_world_sync_data(wire);
         }
         self.build_native_commands(enabled_features);
         self.apply_server_reload(prepared, &stack);
@@ -328,9 +348,18 @@ impl Game<'_> {
     /// only after substitution, but ordinary lines in a macro file still
     /// have to compile (`CommandFunction.fromLines`).
     pub(super) fn admit_store(&mut self, mut store: DataStore, stack: &PackStack) {
-        // On explicit reload the actual content tables have already refreshed.
-        // The candidate's named predicates/modifiers must also be available to
-        // argument codecs before any of its functions can be exposed.
+        // The installed candidate already selected and checked the same winners
+        // gameplay uses, including the native contributions.
+        if let Some(tables) = &self.world_tables {
+            let copy = |entries: &std::collections::HashMap<String, serde_json::Value>| {
+                entries
+                    .iter()
+                    .map(|(id, value)| (id.clone(), value.clone()))
+                    .collect()
+            };
+            store.predicates = copy(tables.loot.predicates());
+            store.item_modifiers = copy(tables.loot.item_modifiers());
+        }
         self.sync_enchantment_registries();
         // A function's `loot ... loot <id>` names the reloaded packs' tables.
         self.sync_loot_table_ids();
@@ -2534,9 +2563,11 @@ mod tests {
                     .tags
                     .contains(&"test:feature_marker".to_owned())
             );
-            (game.world_tables, game.health_resources, _) = game
+            let staged = game
                 .stage_world_tables(&stack, false, &game.options.resources.clone())
                 .unwrap();
+            game.world_tables = staged.tables;
+            game.health_resources = staged.health;
             assert!(game.items().item_tags["test:sample"].contains("minecraft:diamond"));
         });
         std::fs::remove_dir_all(root).unwrap();

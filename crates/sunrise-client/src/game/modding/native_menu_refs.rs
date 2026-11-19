@@ -167,7 +167,10 @@ impl Game<'_> {
         (host.hub.holder_guest(guest.uuid, self.dim.id())?.conn == guest.conn).then_some(())?;
         (guest.menu_generation == menu.fields().generation).then_some(())?;
         if let Some(open) = &guest.menu {
-            (open.window == menu.fields().window && open.hidden.is_empty()).then_some(guest)
+            // A native menu's slots are the mods' own: its hidden ones only
+            // keep the game's shift-clicks out (`place_menu_click`).
+            let hidden_ok = open.hidden.is_empty() || open.slots == Slots::Native;
+            (open.window == menu.fields().window && hidden_ok).then_some(guest)
         } else {
             let play = host.play.get(&guest.conn);
             let menus = host.menus.get(&guest.conn);
@@ -184,8 +187,9 @@ impl Game<'_> {
     }
 
     /// A player's current supported menu. Refuses crafting tables, merchants,
-    /// workstations, lecterns, mounts and menus with hidden slots; also refuses
-    /// stale players and players whose state is swapped out by another active turn.
+    /// workstations, lecterns, mounts and block-backed menus with slots hidden at open.
+    /// Hidden slots do not refuse code-opened native windows. Also refuses stale
+    /// players and players whose state is swapped out by another active turn.
     /// The acting player's inventory, equipment, cursor and ender reads use Game's state.
     /// On a client, only the local player's supported menu is available.
     pub(super) fn player_container_menu(&self, player: PlayerRef) -> Option<MenuRef> {
@@ -517,7 +521,7 @@ impl Game<'_> {
                     .world
                     .block_entities
                     .get_mut(&pos)
-                    .and_then(|block| block.slots_mut().get_mut(index))
+                    .and_then(|block| block.slot_mut(index))
                 else {
                     return false;
                 };

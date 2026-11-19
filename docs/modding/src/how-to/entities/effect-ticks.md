@@ -30,8 +30,9 @@ the dependency to add. An absent optional package skips its Parts and key reques
 a present optional package must declare the requested effect. Unknown effects keep
 the normal unknown-key refusal. An override dropping the dependency also drops permission.
 
-Vanilla effects refuse immediately with `MobEffectPartError::VanillaEffect`; attaching
-the same concrete Part type twice returns `Duplicate`. A Part attached to several
+Unresolved keys refuse with `MobEffectPartError::InvalidKey`; vanilla effects refuse
+immediately with `MobEffectPartError::VanillaEffect`; attaching the same concrete
+Part type twice returns `Duplicate`. A Part attached to several
 effects distinguishes them with `event.effect`. `on_effect_added` stays global;
 `mob_effect_added`, the NeoForge event, also stays global.
 

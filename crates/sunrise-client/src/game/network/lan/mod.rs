@@ -1375,13 +1375,18 @@ impl Game<'_> {
         };
         // Every open menu closes first, in its guest's level
         // (`ServerPlayer.disconnect` -> `doCloseContainer`), so the cursor,
-        // the trade and the inputs are back in the file that is saved.
+        // the trade and the inputs are back in the file that is saved. An interrupted
+        // guest's file is not written, so its menu is left alone.
         let back = self.dim;
         let open: Vec<(u32, super::Dim)> = host
             .hub
             .guests
             .iter()
-            .filter(|g| g.placed && g.participates_in_player_simulation())
+            .filter(|g| {
+                g.placed
+                    && g.participates_in_player_simulation()
+                    && !self.crash_save.excludes(g.conn)
+            })
             .map(|g| (g.conn, super::Dim::from_id(&g.dimension)))
             .collect();
         for (conn, dim) in open {
@@ -1421,7 +1426,7 @@ impl Game<'_> {
             return;
         }
         // A proxy released this record to another server, which now owns saving it.
-        if guest.placed && !guest.released {
+        if guest.placed && !guest.released && !self.crash_save.excludes(guest.conn) {
             let _ = self.finish_player_autosaves(true);
             if self
                 .lan
@@ -1498,8 +1503,13 @@ impl Game<'_> {
     /// `PlayerList.remove` of a guest out of the hub: its file takes the
     /// vehicle it alone rides (`saveParentVehicle`'s RootVehicle, kept in
     /// `saved` as a file not yet ridden again), the vehicle tree leaves the
-    /// world, and the guest stops riding (`unRide`).
+    /// world, and the guest stops riding (`unRide`). A guest the crash save excludes keeps
+    /// the vehicle in the world: its file is not written, so nothing would hold it.
     pub(super) fn take_parent_vehicle(&mut self, guest: &mut sunrise_client::lan::guest::Guest) {
+        // An interrupted player's file is not written, so the vehicle stays in the world.
+        if self.crash_save.excludes(guest.conn) {
+            return;
+        }
         let Some(vehicle) = guest.vehicle.take() else {
             return;
         };
@@ -1585,7 +1595,7 @@ impl Game<'_> {
     /// live record, independently of the dirty entries sent to their client.
     pub(super) fn save_connected_guest_statistics(&self, host: &LanHost) {
         for guest in &host.hub.guests {
-            if !guest.placed || guest.released {
+            if !guest.placed || guest.released || self.crash_save.excludes(guest.conn) {
                 continue;
             }
             let Some(uuid) = self.records_uuid(host, guest.uuid) else {
@@ -1691,7 +1701,7 @@ impl Game<'_> {
             .hub
             .guests
             .iter()
-            .position(|g| g.uuid == uuid && g.placed)
+            .position(|g| g.uuid == uuid && g.placed && !self.crash_save.excludes(g.conn))
         {
             let live = Some(self.player_state.attachments.clone());
             host.hub.guests.update(i, |g| {
@@ -2071,15 +2081,6 @@ impl Game<'_> {
                 event @ (HostEvent::Chat { .. } | HostEvent::Warn(_) | HostEvent::Error(_)) => {
                     self.lan_log_event(event);
                 }
-                HostEvent::Ban { uuid, name, reason } => self.anticheat_ban(uuid, &name, &reason),
-                HostEvent::ChatFiltered {
-                    sender,
-                    name,
-                    place,
-                    text,
-                    count,
-                    action,
-                } => self.chat_filtered(sender, &name, place, &text, count, action),
                 HostEvent::PlayerChat { sender, text } => {
                     self.lan_player_chatted(sender, &text);
                 }
@@ -2446,6 +2447,9 @@ impl Game<'_> {
         // before this tick moves anyone.
         let entities = std::mem::take(&mut host.states);
         let spawn = self.world_spawn_position();
+        let mut solids = std::mem::take(&mut host.hub.move_solids);
+        self.fill_move_solids(&mut solids, !host.hub.guests.is_empty());
+        host.hub.move_solids = solids;
         let events = {
             let clock_rate = self.network_clock_rate();
             let mut ctx = TickCtx {
@@ -2781,11 +2785,22 @@ impl Game<'_> {
             }
             host.hub.far_level(&self.save);
             let spawn = self.world_spawn_position();
+            let mut solids = self
+                .lan
+                .as_mut()
+                .map(|host| std::mem::take(&mut host.hub.move_solids))
+                .unwrap_or_default();
+            let guests = self
+                .lan
+                .as_ref()
+                .is_some_and(|host| !host.hub.guests.is_empty());
+            self.fill_move_solids(&mut solids, guests);
             let (events, last) = {
                 let clock_rate = self.network_clock_rate();
                 let Some(host) = self.lan.as_mut() else {
                     return;
                 };
+                host.hub.move_solids = solids;
                 let mut ctx = TickCtx {
                     sea_level: self.end.locator().map_or(63, |terrain| terrain.sea_level()),
                     world: &mut self.world,
@@ -2915,9 +2930,6 @@ impl Game<'_> {
         self.lan_update_waypoints();
         self.lan_sync_scoreboard();
         self.lan_sync_border();
-        if let Some(host) = self.lan.as_mut() {
-            host.hub.anticheat_ping();
-        }
         drop(holding);
         self.flush_attachment_sync();
         self.flush_far_terrain();

@@ -12,10 +12,6 @@ sunrise-platform = { path = "../sunrise-platform", features = ["server-files", "
 sunrise-server-launch = { path = "../sunrise-server-launch" }
 # `sunrise-server mcp`: the Model Context Protocol, shared with sunrise-ctl and the launcher.
 sunrise-mcp = { path = "../sunrise-mcp" }
-# server.toml's [anticheat], which the game reads: checked here before every start.
-sunrise-anticheat = { path = "../sunrise-anticheat" }
-# server.toml's [chat_filter], which the game reads too: checked here before every start.
-sunrise-chat-filter = { path = "../sunrise-chat-filter" }
 # The log's local times, as the game prints them.
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 # The control API's token and the panel's login codes and sessions: the OS's random generator (already in the

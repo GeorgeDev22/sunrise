@@ -137,18 +137,7 @@ impl Game<'_> {
         let unit = super::names::NAME_TAG_UNIT;
         let (mut world, mut see_through) = (Vec::new(), Vec::new());
         let quads = |alpha, backdrop, layer, light, out: &mut Vec<Vertex>| {
-            self.styled_name_tag_quads(
-                o,
-                &lines,
-                alpha,
-                backdrop,
-                layer,
-                light,
-                unit,
-                out,
-                Default::default(),
-                None,
-            )
+            self.styled_name_tag_quads(o, &lines, alpha, backdrop, layer, light, unit, out, None)
         };
         let mut patches = if options.see_through {
             // LightCoordsUtil.lightCoordsWithEmission(light, 2): sky and block at least 2.

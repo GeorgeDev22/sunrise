@@ -5,14 +5,17 @@
 //! server does; what the game changes there itself (`/whitelist on`) is copied back afterwards.
 
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+};
 use sunrise_platform::java_properties::{Properties, date_string, now_millis};
-use sunrise_platform::server_files::biome_regions::BiomeRegions;
 #[cfg(test)]
 use sunrise_platform::server_files::biome_regions::MissingRegions;
 use sunrise_platform::server_files::properties::{
     DIFFICULTIES, GAME_MODES, ServerProperties, SystemEntropy,
 };
+use sunrise_platform::server_files::{biome_regions::BiomeRegions, missing_mods::MissingMods};
 
 pub const FILE: &str = "server.toml";
 pub const PROPERTIES: &str = "server.properties";
@@ -37,7 +40,6 @@ max_viewed_ticking_chunks = 441             # of them, ticking (one player's sim
 max_viewed_loaded_chunks_per_level = 16384  # the same for all players together, per level
 max_viewed_ticking_chunks_per_level = 3528  # ticking, all players together, per level
 admin_feedback_to_ops = true # operators see each other's commands ([name: ...], vanilla); false: only the log
-accept_older_clients = false # true: 26.2 clients join too, their packets translated (docs/hosting.md)
 
 [world]
 name = "world"               # the world folder
@@ -75,7 +77,7 @@ allow_public = false         # true lets bind be any address; the token is then 
 
 # A proxy handing players over between servers (docs/server.md). Not vanilla's accepts-transfers (the transfer packet).
 [transfer]
-enabled = false              # true: take a proxy's player-* requests; needs Velocity forwarding (forwarding.secret)
+enabled = false              # true: take a proxy's player-* requests; refused at start since Velocity forwarding was removed
 expect_seconds = 10          # how long a player the proxy announced is waited for, when it names no time
 max_expect_seconds = 60      # the longest the proxy may ask for
 max_expected = 64            # players waited for at once
@@ -89,46 +91,15 @@ webhook = ""                 # the channel's webhook URL (a secret: anyone with 
 events = ["chat", "join", "leave", "death"]   # what is posted; "kick" too if you like
 enabled = true               # false pauses it and keeps the webhook
 
-# Sunrise's anticheat (docs/anticheat.md) is on: `combat` drops attacks no vanilla client sends and
-# `ground` the false ground claims of a no-fall or a walk on water; both kick, and ban at the second kick.
-# timer and prediction only write logs/anticheat.log until they're trusted. To change it:
-# [anticheat]
-# enabled = true             # false: the server checks only what vanilla's checks
-# alerts = true              # tell online operators (alert_level = 2) in their chat; the console always is
-# log = "logs/anticheat.log" # every flag, one line each
-# [anticheat.timer]          # a sped-up game: more client ticks than the server's clock allows
-# enabled = true             # false turns this check off
-# setback = 2                # the violation level from which the player is sent back; 0: never
-# alert = 5
-# kick = 20
-# decay = 0.02               # violation level lost each second
-# ban_after = 0              # the kick (counting this check's earlier ones) that bans instead; 0: never
-
-# The chat filter (docs/chat-filter.md) is on: a message, sign, anvil name or book title with a hate slur reaches
-# nobody, the sender is told, and logs/chat-filter.log keeps it for operators. To change it:
-# [chat_filter]
-# enabled = true             # false: players' text goes out as they wrote it
-# mute_after = 2             # the hit (within window_minutes) that mutes for mute_minutes; 0: never
-# tempban_after = 3          # the hit that bans for tempban_hours; 0: never
-# words_file = ""            # your own list, in the format of the built-in one; "": the built-in list
-
 # A world's biome regions from mods are fixed when it is made (docs/design/mod-api/mod-biome-regions.md).
 # When a mod with one is gone, the server refuses to start until you choose. To change it:
 # [biome_regions]
 # missing = "vanilla"        # generate vanilla's biomes where the missing mods' regions were; "refuse": don't start
 # adopt_installed = true     # new chunks use the installed mods' regions (the world keeps its saved weights)
-# Villagers that cannot move (a trading hall's cells, or riding) skip their brain, which cuts the lag of big halls;
-# they keep trading and restocking (docs/server.md). Not vanilla, so off. Mobs push every mob they overlap, as
-# vanilla does; a crowded pen costs the square of its crowd, and max_collisions caps it (the most other mobs one
-# mob pushes per tick, pushes it receives counted; 0 = no cap, vanilla). To turn them on:
-# [entities]
-# villager_lobotomize = true
-# villager_lobotomize_check_interval = 100   # ticks between rechecks of whether a villager can move
-# max_collisions = 8
 "##;
 
 /// Each typed setting: its section, its name, and the vanilla key it writes.
-pub const TYPED: [(&str, &str, &str); 21] = [
+pub const TYPED: [(&str, &str, &str); 20] = [
     ("server", "motd", "motd"),
     ("server", "port", "server-port"),
     ("server", "bind", "server-ip"),
@@ -164,11 +135,6 @@ pub const TYPED: [(&str, &str, &str); 21] = [
         "admin_feedback_to_ops",
         "sunrise-admin-feedback-to-ops",
     ),
-    (
-        "server",
-        "accept_older_clients",
-        "sunrise-accept-older-clients",
-    ),
     ("world", "name", "level-name"),
     ("world", "seed", "level-seed"),
     ("world", "game_mode", "gamemode"),
@@ -201,12 +167,6 @@ pub struct Config {
     /// Chat and players posted to a Discord channel (discord.rs).
     #[serde(default)]
     pub discord: Discord,
-    /// The game reads this section itself (docs/anticheat.md); written only when it isn't the default.
-    #[serde(default, skip_serializing_if = "anticheat_default")]
-    pub anticheat: sunrise_anticheat::Config,
-    /// The game reads this section itself (docs/chat-filter.md); written only when it isn't the default.
-    #[serde(default, skip_serializing_if = "chat_filter_default")]
-    pub chat_filter: sunrise_chat_filter::Config,
     /// A one-time prune of barely visited chunks before a start (prune.rs); written only when set.
     #[serde(default, skip_serializing_if = "crate::prune::Settings::is_default")]
     pub prune_chunks: crate::prune::Settings,
@@ -214,66 +174,9 @@ pub struct Config {
     /// isn't the default.
     #[serde(default, skip_serializing_if = "BiomeRegions::is_default")]
     pub biome_regions: BiomeRegions,
-    /// `[entities]` (docs/server.md): mob settings passed to the game; written only when it isn't the default.
-    #[serde(default, skip_serializing_if = "Entities::is_default")]
-    pub entities: Entities,
-}
-
-/// `[entities]`: `villager_lobotomize = true` skips the brain of villagers that cannot move (stuck in a cell,
-/// riding something), rechecked every `villager_lobotomize_check_interval` ticks. The game reads it from the
-/// same file (game/dedicated.rs, `load_entities`).
-/// `[entities]`: `dab = true` runs a mob's AI less often the farther it is from the nearest player (Pufferfish's
-/// dynamic activation of brain; crates/sunrise-client/src/mobs/dab.rs). Off by default: it is not vanilla's
-/// behaviour. A mob farther than `dab_start_distance` blocks runs its AI every
-/// `clamp(distance² >> dab_activation_dist_mod, 1, dab_max_tick_freq)` ticks. `max_collisions = N` limits how many
-/// other mobs one mob pushes in a tick (pushes it receives count too); 0 is vanilla's behaviour, no cap.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Entities {
-    pub villager_lobotomize: bool,
-    pub villager_lobotomize_check_interval: u32,
-    pub dab: bool,
-    pub dab_start_distance: u32,
-    pub dab_max_tick_freq: u32,
-    pub dab_activation_dist_mod: u32,
-    pub max_collisions: u32,
-}
-impl Default for Entities {
-    fn default() -> Self {
-        Self {
-            villager_lobotomize: false,
-            // Must match `mobs::villager::lobotomy::DEFAULT_INTERVAL` in sunrise-client (this crate cannot depend on it).
-            villager_lobotomize_check_interval: 100,
-            dab: false,
-            dab_start_distance: 12,
-            dab_max_tick_freq: 20,
-            dab_activation_dist_mod: 8,
-            max_collisions: 0,
-        }
-    }
-}
-impl Entities {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-    fn check(&self) -> Result<(), String> {
-        if self.dab_max_tick_freq == 0 {
-            return Err("entities.dab_max_tick_freq must be at least 1".into());
-        }
-        if self.dab_activation_dist_mod > 30 {
-            return Err("entities.dab_activation_dist_mod must be 30 or less".into());
-        }
-        Ok(())
-    }
-}
-
-/// The game reads this section itself too (docs/chat-filter.md).
-fn chat_filter_default(c: &sunrise_chat_filter::Config) -> bool {
-    *c == sunrise_chat_filter::Config::default()
-}
-
-fn anticheat_default(c: &sunrise_anticheat::Config) -> bool {
-    *c == sunrise_anticheat::Config::default()
+    /// The game reads this opt-in itself before opening a world with missing mods (docs/hosting.md).
+    #[serde(default, skip_serializing_if = "MissingMods::is_default")]
+    pub missing_mods: MissingMods,
 }
 
 const EVENTS: [&str; 6] = ["chat", "join", "leave", "death", "kick", "announce"];
@@ -350,9 +253,6 @@ pub struct Server {
     /// Whether operators get each other's command feedback (`[name: ...]`, vanilla's broadcastToAdmins);
     /// false leaves it to the console's log, so nobody in game sees an operator's commands.
     pub admin_feedback_to_ops: bool,
-    /// Whether 26.2 clients may join, their packets translated (sunrise-protocol's `ClientSession`); off, they
-    /// are turned away as vanilla turns away any other release.
-    pub accept_older_clients: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -547,6 +447,9 @@ impl Transfer {
     }
 }
 
+/// Accepted values for `backups.keep` in the file and the configuration command.
+pub const BACKUP_KEEP_RANGE: std::ops::RangeInclusive<i64> = 1..=1000;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Backups {
@@ -615,7 +518,6 @@ impl Default for Server {
             max_viewed_loaded_chunks_per_level: 2048 * 8,
             max_viewed_ticking_chunks_per_level: 441 * 8,
             admin_feedback_to_ops: true,
-            accept_older_clients: false,
         }
     }
 }
@@ -664,9 +566,46 @@ fn text_or_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::E
     })
 }
 
+/// Sections an older `server.toml` may still have, for features Sunrise no longer has: `parse` says
+/// which to delete instead of serde's "unknown field".
+const REMOVED_SECTIONS: [(&str, &str); 2] = [
+    ("anticheat", "anticheat"),
+    ("chat_filter", "the chat filter"),
+];
+
+fn removed(section: &str, feature: &str) -> String {
+    format!("{feature} was removed from Sunrise; delete the [{section}] section from server.toml")
+}
+/// What `parse` answers for a `server.toml` that still sets `[server] accept_older_clients`.
+const OLDER_CLIENTS_REMOVED: &str = "accept_older_clients was removed from Sunrise; delete it from the [server] section of server.toml";
+/// What `parse` answers for a `server.toml` that still has an `[entities]` section (DAB, villager
+/// lobotomy, the collision cap: mob settings that traded vanilla's behaviour for speed).
+const ENTITIES_REMOVED: &str = "the mob settings dab, villager_lobotomize and max_collisions were removed from Sunrise; delete the [entities] section from server.toml";
+
 impl Config {
     pub fn parse(text: &str) -> Result<Self, String> {
-        let config: Self = toml::from_str(text).map_err(|e| e.to_string())?;
+        let config: Self = toml::from_str(text).map_err(|e| {
+            let table = toml::from_str::<toml::Table>(text).unwrap_or_default();
+            REMOVED_SECTIONS
+                .iter()
+                .find(|(section, _)| table.contains_key(*section))
+                .map_or_else(
+                    || {
+                        if table
+                            .get("server")
+                            .and_then(toml::Value::as_table)
+                            .is_some_and(|s| s.contains_key("accept_older_clients"))
+                        {
+                            OLDER_CLIENTS_REMOVED.to_owned()
+                        } else if table.contains_key("entities") {
+                            ENTITIES_REMOVED.to_owned()
+                        } else {
+                            e.to_string()
+                        }
+                    },
+                    |(section, feature)| removed(section, feature),
+                )
+        })?;
         config.check()?;
         Ok(config)
     }
@@ -708,17 +647,19 @@ impl Config {
             ));
         }
         self.backups.interval()?;
+        let keep = self.backups.keep;
+        if !BACKUP_KEEP_RANGE.contains(&i64::from(keep)) {
+            return Err(format!(
+                "backups.keep is {keep}: use {} to {}",
+                BACKUP_KEEP_RANGE.start(),
+                BACKUP_KEEP_RANGE.end()
+            ));
+        }
         self.panel.address()?;
         self.api.check()?;
         self.transfer.check()?;
-        if self.entities.villager_lobotomize_check_interval == 0 {
-            return Err("entities.villager_lobotomize_check_interval must be above zero".into());
-        }
         self.discord.check()?;
-        self.anticheat.check()?;
-        self.chat_filter.check()?;
         self.prune_chunks.check()?;
-        self.entities.check()?;
         if self.server.port == 0 {
             return Err("server.port must be a port number from 1 to 65535".into());
         }
@@ -750,8 +691,8 @@ impl Config {
     }
 
     /// Writes this configuration into `server.properties`, keeping the keys it doesn't set. Returns what it
-    /// wrote, for [`sync_back`].
-    pub fn write_properties(&self, dir: &Path) -> std::io::Result<Vec<(String, String)>> {
+    /// wrote and which keys cannot safely be copied back after the game runs.
+    pub fn write_properties(&self, dir: &Path) -> std::io::Result<WrittenProperties> {
         let path = dir.join(PROPERTIES);
         // Only a missing file starts empty. One that cannot be read is left as it is and the start stops
         // with why, so the owner's other keys (RCON, command blocks...) are not reset to defaults.
@@ -761,17 +702,37 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Properties::default(),
             Err(e) => return Err(e),
         };
-        let written = self.vanilla();
-        for (key, value) in &written {
+        let mut syncable = self.vanilla();
+        for (key, value) in &syncable {
             properties.put(key, value.clone());
         }
+        // Remember collisions while the original keys are still available.
+        // A later read cannot tell which of the Writer's identical rows won.
+        let aliases: HashSet<_> = properties
+            .iter()
+            .filter_map(|(key, _)| key.utf8_writer_alias())
+            .collect();
+        let mut writer_collisions = Vec::new();
+        syncable.retain(|(key, _)| {
+            if aliases.contains(key) {
+                writer_collisions.push(key.clone());
+                false
+            } else {
+                true
+            }
+        });
+        // Use the Java OutputStream form: escapes preserve every unit in
+        // keys we didn't set. The game, not the overlay, does the Writer pass.
         let text = properties.store(
             Some("Minecraft server properties"),
             &date_string(now_millis()),
-            false,
+            true,
         );
         replace(&path, &text)?;
-        Ok(written)
+        Ok(WrittenProperties {
+            syncable,
+            writer_collisions,
+        })
     }
 
     /// The level `op` gives a new operator: `op-permission-level` as the game reads it at its next start,
@@ -789,6 +750,20 @@ impl Config {
     /// A configuration from a vanilla `server.properties`: typed settings from their keys, and every other
     /// key the file sets to something other than vanilla's default under `[properties]`.
     pub fn import(source: &Properties) -> Result<Self, String> {
+        // Normalization can replace an invalid typed value with a valid default.
+        // Refuse unrepresentable source entries before that can hide them.
+        let mut entries: Vec<_> = source.iter().collect();
+        entries.sort_unstable_by_key(|(key, _)| *key);
+        let mut keys = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            let key = key.to_utf8().map_err(|_| {
+                format!("Cannot import server.properties key {:04X?}: TOML cannot represent an unpaired UTF-16 surrogate", key.as_units())
+            })?;
+            if value.has_unpaired_surrogate() {
+                return Err(toml_value_refusal(&key));
+            }
+            keys.push(key);
+        }
         let parsed = ServerProperties::new(source.clone(), &mut SystemEntropy::default())?;
         let defaults = ServerProperties::new(Properties::default(), &mut SystemEntropy::default())?;
         let mut table = toml::Table::try_from(Self::default()).map_err(|e| e.to_string())?;
@@ -802,25 +777,32 @@ impl Config {
             ) else {
                 continue;
             };
-            if let Some(value) = typed_value(text, slot) {
+            if let Some(value) = typed_value(&text, slot) {
                 *slot = value;
             }
         }
         let mut extra = toml::Table::new();
-        let mut keys: Vec<&String> = source.map.keys().collect();
-        keys.sort();
         for key in keys {
-            let value = parsed.raw.get(key).unwrap_or_default();
-            if TYPED.iter().any(|t| t.2 == key) || defaults.raw.get(key) == Some(value) {
+            if TYPED.iter().any(|t| t.2 == key) {
                 continue;
             }
-            extra.insert(key.clone(), loose_value(value));
+            let value = parsed.raw.get(&key);
+            if value.is_some() && defaults.raw.get(&key) == value {
+                continue;
+            }
+            extra.insert(key, loose_value(&value.unwrap_or_default()));
         }
         table.insert("properties".into(), toml::Value::Table(extra));
         let config: Self = table.try_into().map_err(|e| e.to_string())?;
         config.check()?;
         Ok(config)
     }
+}
+
+fn toml_value_refusal(key: &str) -> String {
+    format!(
+        "Cannot copy server.properties value for {key:?}: TOML cannot represent an unpaired UTF-16 surrogate"
+    )
 }
 
 /// `server.toml` for a configuration: the template's comments with this configuration's values.
@@ -858,38 +840,50 @@ pub fn render(config: &Config) -> String {
         set(&mut doc, section, field, &table[section][field]);
     }
     let mut text = doc.to_string();
-    for section in [
-        "anticheat",
-        "chat_filter",
-        "prune_chunks",
-        "biome_regions",
-        "entities",
-    ] {
-        if let Some(settings) = table.get(section) {
-            let mut only = toml::Table::new();
-            only.insert(section.into(), settings.clone());
-            text.push('\n');
-            text.push_str(&toml::to_string(&only).expect("a section's settings are a table"));
+    // Serde omits optional sections at their defaults. Append the ones it kept that have
+    // no table in the template, so accepting a new section is enough to preserve it here.
+    for (section, settings) in table {
+        if doc.contains_key(section.as_str()) {
+            continue;
         }
+        let mut only = toml::Table::new();
+        only.insert(section, settings);
+        text.push('\n');
+        text.push_str(&toml::to_string(&only).expect("a section's settings are a table"));
     }
     text
 }
 
-/// After the game stopped: copies into `server.toml` the keys it wrote that the game changed in
+/// A supervisor overlay's baseline for shutdown sync-back.
+#[derive(Debug)]
+pub struct WrittenProperties {
+    syncable: Vec<(String, String)>,
+    writer_collisions: Vec<String>,
+}
+
+impl WrittenProperties {
+    /// Managed keys that the game's Writer cannot distinguish from another key.
+    pub fn writer_collisions(&self) -> &[String] {
+        &self.writer_collisions
+    }
+}
+
+/// After the game stopped: copies into `server.toml` the unambiguous keys the game changed in
 /// `server.properties` (`/whitelist on` stores `white-list`), keeping the owner's comments. Returns the keys
 /// copied.
-pub fn sync_back(dir: &Path, written: &[(String, String)]) -> Result<Vec<String>, String> {
+pub fn sync_back(dir: &Path, written: &WrittenProperties) -> Result<Vec<String>, String> {
     let Ok(now) = read_properties(&dir.join(PROPERTIES)) else {
         return Ok(Vec::new());
     };
-    let changed: Vec<(&str, &str)> = written
-        .iter()
-        .filter_map(|(key, value)| {
-            now.get(key)
-                .filter(|v| v != value)
-                .map(|v| (key.as_str(), v))
-        })
-        .collect();
+    let mut changed = Vec::new();
+    for (key, previous) in &written.syncable {
+        if let Some(value) = now.get_java(key) {
+            let value = value.to_utf8().map_err(|_| toml_value_refusal(key))?;
+            if &value != previous {
+                changed.push((key.as_str(), value));
+            }
+        }
+    }
     if changed.is_empty() {
         return Ok(Vec::new());
     }
@@ -1064,6 +1058,21 @@ mod tests {
     }
 
     #[test]
+    fn backup_retention_must_be_between_1_and_1000() {
+        for keep in [0, 1001] {
+            let error = Config::parse(&format!("[backups]\nkeep = {keep}\n")).unwrap_err();
+            assert!(error.contains("backups.keep"), "{error}");
+            assert!(error.contains("1 to 1000"), "{error}");
+        }
+        for keep in [1, 1000] {
+            let config = Config::parse(&format!("[backups]\nkeep = {keep}\n")).unwrap();
+            assert_eq!(config.backups.keep, keep);
+        }
+        let config = Config::parse("[backups]\nevery = \"0\"\n").unwrap();
+        assert_eq!(config.backups.interval().unwrap(), None);
+    }
+
+    #[test]
     fn template_is_the_default() {
         assert_eq!(Config::parse(TEMPLATE).unwrap(), Config::default());
         assert_eq!(render(&Config::default()), TEMPLATE);
@@ -1099,74 +1108,182 @@ mod tests {
     }
 
     #[test]
-    fn the_chat_filter_is_on_unless_its_section_turns_it_off() {
-        assert!(Config::default().chat_filter.enabled);
-        assert!(!TEMPLATE.lines().any(|l| l.trim() == "[chat_filter]"));
-        let text =
-            format!("{TEMPLATE}\n[chat_filter]\nmute_after = 3\nwords_file = \"slurs.txt\"\n");
-        let c = Config::parse(&text).unwrap();
-        assert_eq!(c.chat_filter.mute_after, 3);
-        assert_eq!(Config::parse(&render(&c)).unwrap(), c);
-        // The game reads the same section from the same file.
+    fn a_leftover_section_of_a_removed_feature_says_what_to_do() {
+        let old = format!("{TEMPLATE}\n[anticheat]\nenabled = true\n");
         assert_eq!(
-            sunrise_chat_filter::Config::from_server_toml(&text).unwrap(),
-            c.chat_filter
+            Config::parse(&old),
+            Err(
+                "anticheat was removed from Sunrise; delete the [anticheat] section from server.toml"
+                    .to_owned()
+            )
         );
-        let off = Config::parse(&format!("{TEMPLATE}\n[chat_filter]\nenabled = false\n")).unwrap();
-        assert!(!off.chat_filter.enabled);
-        assert_eq!(Config::parse(&render(&off)).unwrap(), off);
-        assert!(Config::parse("[chat_filter]\nmute = 2\n").is_err());
-    }
-
-    #[test]
-    fn anticheat_is_on_unless_its_section_turns_it_off() {
-        assert!(Config::default().anticheat.enabled);
-        assert!(!TEMPLATE.lines().any(|l| l.trim() == "[anticheat]"));
-        let text =
-            format!("{TEMPLATE}\n[anticheat]\nenabled = true\n[anticheat.timer]\nkick = 20\n");
-        let c = Config::parse(&text).unwrap();
-        assert!(c.anticheat.enabled);
-        assert_eq!(c.anticheat.timer.kick, 20.0);
-        let off = Config::parse(&format!("{TEMPLATE}\n[anticheat]\nenabled = false\n")).unwrap();
-        assert!(!off.anticheat.enabled);
-        assert_eq!(Config::parse(&render(&off)).unwrap(), off);
-        // The game reads the same section from the same file.
+        let old = format!("{TEMPLATE}\n[chat_filter]\nenabled = false\n");
         assert_eq!(
-            sunrise_anticheat::Config::from_server_toml(&text).unwrap(),
-            c.anticheat
+            Config::parse(&old),
+            Err(
+                "the chat filter was removed from Sunrise; delete the [chat_filter] section from server.toml"
+                    .to_owned()
+            )
         );
-        assert_eq!(Config::parse(&render(&c)).unwrap(), c);
-        assert!(Config::parse("[anticheat]\nenable = true\n").is_err());
-        assert!(Config::parse("[anticheat.timer]\nalert = -1\n").is_err());
+        // Other unknown keys keep serde's own message.
+        let other = Config::parse("[nonsense]\nenabled = true\n").unwrap_err();
+        assert!(!other.contains("was removed from Sunrise"), "{other}");
     }
 
     #[test]
-    fn the_collision_cap_is_off_unless_its_section_sets_it() {
-        assert_eq!(Config::default().entities.max_collisions, 0);
-        assert!(!TEMPLATE.lines().any(|l| l.trim() == "[entities]"));
-        let on = Config::parse(&format!("{TEMPLATE}\n[entities]\nmax_collisions = 8\n")).unwrap();
-        assert_eq!(on.entities.max_collisions, 8);
-        assert_eq!(Config::parse(&render(&on)).unwrap(), on);
-        let off = render(&Config::default());
-        assert!(!off.lines().any(|l| l.trim() == "[entities]"), "{off}");
-        assert!(Config::parse("[entities]\nmax_collisions = -1\n").is_err());
-        assert!(Config::parse("[entities]\nmax_collision = 8\n").is_err());
+    fn a_leftover_accept_older_clients_key_says_what_to_do() {
+        let old = TEMPLATE.replace("[server]\n", "[server]\naccept_older_clients = false\n");
+        assert_ne!(old, TEMPLATE);
+        assert_eq!(Config::parse(&old), Err(OLDER_CLIENTS_REMOVED.to_owned()));
+        // Another unknown key in the section keeps serde's own message.
+        let other = TEMPLATE.replace("[server]\n", "[server]\nnonsense = false\n");
+        assert_ne!(Config::parse(&other).unwrap_err(), OLDER_CLIENTS_REMOVED);
     }
 
     #[test]
-    fn dab_is_off_unless_its_section_turns_it_on() {
-        assert!(!Config::default().entities.dab);
-        let off = render(&Config::default());
-        assert!(!off.lines().any(|l| l.trim() == "[entities]"), "{off}");
-        let on = Config::parse("[entities]\ndab = true\ndab_max_tick_freq = 10\n").unwrap();
-        assert!(on.entities.dab);
-        assert_eq!(on.entities.dab_start_distance, 12);
-        assert_eq!(on.entities.dab_activation_dist_mod, 8);
-        // Kept when the file is written again.
-        assert_eq!(Config::parse(&render(&on)).unwrap(), on);
-        assert!(Config::parse("[entities]\ndab_max_tick_freq = 0\n").is_err());
-        assert!(Config::parse("[entities]\ndab_activation_dist_mod = 99\n").is_err());
-        assert!(Config::parse("[entities]\ndap = true\n").is_err());
+    fn missing_mods_opt_in_survives_rendering() {
+        let on = Config::parse("[missing_mods]\nallow = true\n").unwrap();
+        let rendered = render(&on);
+        assert_eq!(Config::parse(&rendered).unwrap(), on);
+        let table: toml::Table = rendered.parse().unwrap();
+        assert_eq!(table["missing_mods"]["allow"].as_bool(), Some(true));
+
+        for text in ["", "[missing_mods]\n", "[missing_mods]\nallow = false\n"] {
+            let config = Config::parse(text).unwrap();
+            assert!(!config.missing_mods.allow);
+            let table: toml::Table = render(&config).parse().unwrap();
+            assert!(!table.contains_key("missing_mods"));
+        }
+        let typo = Config::parse("[missing_mods]\nalow = true\n").unwrap_err();
+        assert!(typo.contains("unknown field `alow`"), "{typo}");
+    }
+
+    #[test]
+    fn hosting_guide_server_toml_examples_pass_config_check() {
+        // The TOML examples in docs/hosting.md, without the explanatory comments.
+        let examples = [
+            (
+                "server setup",
+                r#"[server]
+motd = "A Minecraft Server"
+port = 25565
+bind = ""
+max_players = 20
+online_mode = true
+whitelist = true
+enforce_whitelist = false
+view_distance = 10
+simulation_distance = 10
+max_view_distance = 0
+max_viewed_loaded_chunks = 2048
+max_viewed_ticking_chunks = 441
+max_viewed_loaded_chunks_per_level = 16384
+max_viewed_ticking_chunks_per_level = 3528
+admin_feedback_to_ops = true
+
+[world]
+name = "world"
+seed = ""
+game_mode = "survival"
+difficulty = "easy"
+hardcore = false
+
+[properties]
+
+[engine]
+path = ""
+resources = ""
+restart_on_crash = true
+low_memory = false
+parallel_tick = false
+
+[backups]
+every = "6h"
+keep = 12
+
+[updates]
+keep = 1
+
+[panel]
+bind = "127.0.0.1:8130"
+allow_public = false
+
+[api]
+bind = ""
+token = ""
+allow_public = false
+"#,
+            ),
+            (
+                "runtime levels",
+                "[properties]\nsunrise-max-runtime-levels = 128\n",
+            ),
+            (
+                "control API",
+                r#"[api]
+bind = "127.0.0.1:8131"
+token = ""
+"#,
+            ),
+            (
+                "Discord",
+                r#"[discord]
+webhook = "https://discord.com/api/webhooks/..."
+events = ["chat", "join", "leave", "death"]
+enabled = true
+"#,
+            ),
+            (
+                "management protocol",
+                "[properties]\nmanagement-server-enabled = true\nmanagement-server-port = 8132\n",
+            ),
+            (
+                "RCON",
+                r#"[properties]
+enable-rcon = true
+"rcon.port" = 25575
+"rcon.password" = "a long random string"
+"#,
+            ),
+            (
+                "query",
+                "[properties]\nenable-query = true\n\"query.port\" = 25565\n",
+            ),
+            (
+                "prune chunks",
+                r#"[prune_chunks]
+mode = "dry-run"
+min_inhabited_ticks = 1200
+spawn_radius = 32
+ring = 1
+keep_files = ["sunrise-smp/claims.json", "sunrise-smp/places.json"]
+"#,
+            ),
+            (
+                "biome regions",
+                "[biome_regions]\nmissing = \"vanilla\"\nadopt_installed = false\n",
+            ),
+            ("missing mods", "[missing_mods]\nallow = true\n"),
+        ];
+        let errors: Vec<_> = examples
+            .into_iter()
+            .filter_map(|(name, example)| {
+                Config::parse(example)
+                    .err()
+                    .map(|error| format!("{name}: {error}"))
+            })
+            .collect();
+        assert!(errors.is_empty(), "{}", errors.join("\n"));
+    }
+
+    #[test]
+    fn a_leftover_entities_section_says_what_to_do() {
+        let old = format!("{TEMPLATE}\n[entities]\ndab = true\nmax_collisions = 8\n");
+        assert_eq!(Config::parse(&old), Err(ENTITIES_REMOVED.to_owned()));
+        let old = format!("{TEMPLATE}\n[entities]\nvillager_lobotomize = false\n");
+        assert_eq!(Config::parse(&old), Err(ENTITIES_REMOVED.to_owned()));
+        let other = Config::parse("[nonsense]\nenabled = true\n").unwrap_err();
+        assert_ne!(other, ENTITIES_REMOVED);
     }
 
     #[test]
@@ -1190,39 +1307,17 @@ mod tests {
     }
 
     #[test]
-    fn villager_lobotomize_is_off_unless_its_section_turns_it_on() {
-        let off = Config::default().entities;
-        assert!(!off.villager_lobotomize);
-        assert_eq!(off.villager_lobotomize_check_interval, 100);
-        assert!(!TEMPLATE.lines().any(|l| l.trim() == "[entities]"));
-        let on = Config::parse(&format!(
-            "{TEMPLATE}\n[entities]\nvillager_lobotomize = true\nvillager_lobotomize_check_interval = 40\n"
-        ))
-        .unwrap();
-        assert!(on.entities.villager_lobotomize);
-        assert_eq!(on.entities.villager_lobotomize_check_interval, 40);
-        // Kept when the file is written again, and left out while off.
-        assert_eq!(Config::parse(&render(&on)).unwrap(), on);
-        let text = render(&Config::default());
-        assert!(!text.lines().any(|l| l.trim() == "[entities]"), "{text}");
-        assert!(Config::parse("[entities]\nvillager_lobotomize = 1\n").is_err());
-        assert!(Config::parse("[entities]\nvillager_lobotomise = true\n").is_err());
-        assert!(Config::parse("[entities]\nvillager_lobotomize_check_interval = 0\n").is_err());
-    }
-
-    #[test]
     fn defaults_are_vanilla() {
         // Every typed default is what vanilla 26.3 writes for a missing key.
         let vanilla =
             ServerProperties::new(Properties::default(), &mut SystemEntropy::default()).unwrap();
         for (key, value) in Config::default().vanilla() {
             // Sunrise's own, which vanilla doesn't have: their defaults behave as vanilla does
-            // (the far ring off, operators told of each other's commands, other releases turned away,
-            // and caps on viewed areas, which only a mod asks for).
+            // (the far ring off, operators told of each other's commands, and caps on viewed areas,
+            // which only a mod asks for).
             if key.starts_with("sunrise-") {
                 let vanilla_like = match key.as_str() {
                     "sunrise-admin-feedback-to-ops" => "true",
-                    "sunrise-accept-older-clients" => "false",
                     "sunrise-max-viewed-loaded-chunks" => "2048",
                     "sunrise-max-viewed-ticking-chunks" => "441",
                     "sunrise-max-viewed-loaded-chunks-per-level" => "16384",
@@ -1232,7 +1327,23 @@ mod tests {
                 assert_eq!(value, vanilla_like, "{key}");
                 continue;
             }
-            assert_eq!(vanilla.raw.get(&key), Some(value.as_str()), "{key}");
+            assert_eq!(
+                vanilla.raw.get(&key).as_deref(),
+                Some(value.as_str()),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_refuses_properties_toml_cannot_represent() {
+        for input in [
+            "?=literal\n\\uD800=surrogate\n",
+            "level-seed=\\uD800\n",
+            "server-port=\\uD800\n",
+        ] {
+            let source = Properties::load_str(input).unwrap();
+            assert!(Config::import(&source).is_err(), "accepted {input:?}");
         }
     }
 
@@ -1381,18 +1492,42 @@ mod tests {
         let mut c = Config::default();
         c.properties
             .insert("spawn-protection".into(), toml::Value::Integer(0));
+        c.properties
+            .insert("?".into(), toml::Value::String("managed".into()));
         std::fs::write(dir.join(FILE), render(&c)).unwrap();
-        std::fs::write(dir.join(PROPERTIES), "rcon.port=25576\nmotd=old\n").unwrap();
+        std::fs::write(
+            dir.join(PROPERTIES),
+            "rcon.port=25576\nmotd=old\n?=literal\n\\uD800=surrogate\ncustom=\\uDC00\n",
+        )
+        .unwrap();
         let written = c.write_properties(&dir).unwrap();
         let p = read_properties(&dir.join(PROPERTIES)).unwrap();
-        assert_eq!(p.get("motd"), Some("A Minecraft Server"));
-        assert_eq!(p.get("rcon.port"), Some("25576"), "other keys are kept");
-        assert_eq!(p.get("spawn-protection"), Some("0"));
-        // The game turns the whitelist off and changes spawn protection.
-        let mut p = p;
-        p.put("white-list", "false".into());
-        p.put("spawn-protection", "4".into());
-        std::fs::write(dir.join(PROPERTIES), p.store(None, "date", false)).unwrap();
+        assert_eq!(p.get("motd").as_deref(), Some("A Minecraft Server"));
+        assert_eq!(
+            p.get("rcon.port").as_deref(),
+            Some("25576"),
+            "other keys are kept"
+        );
+        assert_eq!(p.get("spawn-protection").as_deref(), Some("0"));
+        assert_eq!(p.get("?").as_deref(), Some("managed"));
+        assert!(
+            p.iter().any(|(key, value)| key.as_units() == [0xd800]
+                && value.to_utf8().unwrap() == "surrogate")
+        );
+        assert_eq!(p.get_java("custom").unwrap().as_units(), [0xdc00]);
+        // The dedicated server rewrites its settings using the Writer path.
+        let path = dir.join(PROPERTIES);
+        ServerProperties::from_file(&path, &mut SystemEntropy::default())
+            .unwrap()
+            .update("white-list", "false".into())
+            .unwrap()
+            .update("spawn-protection", "4".into())
+            .unwrap()
+            .store(&path)
+            .unwrap();
+        let after_writer = read_properties(&path).unwrap();
+        assert_eq!(after_writer.get("?").as_deref(), Some("surrogate"));
+        assert_eq!(written.writer_collisions(), ["?"]);
         let mut changed = sync_back(&dir, &written).unwrap();
         changed.sort();
         assert_eq!(changed, ["spawn-protection", "white-list"]);
@@ -1404,6 +1539,7 @@ mod tests {
         let back = Config::parse(&text).unwrap();
         assert!(!back.server.whitelist);
         assert_eq!(back.properties["spawn-protection"], toml::Value::Integer(4));
+        assert_eq!(back.properties["?"].as_str(), Some("managed"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

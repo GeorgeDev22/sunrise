@@ -48,8 +48,6 @@ sunrise-server-files = { path = "../sunrise-server-files" }
 sunrise-java-properties = { path = "../sunrise-java-properties" }
 # The control endpoint's token (control.rs), as sunrise-server's and the relay's.
 getrandom = "0.3"
-# The dedicated server's anticheat, off unless server.toml's [anticheat] turns it on (docs/anticheat.md).
-sunrise-anticheat = { path = "../sunrise-anticheat" }
 # Shader packs: reading them and turning their GLSL into naga modules.
 sunrise-shaders = { path = "../sunrise-shaders" }
 # Sunrise's own shader packs: the format, the stages and the check (docs/shaders.md).
@@ -85,7 +83,6 @@ xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 # Opt-in data collection: the game keeps, the launcher sends (docs/telemetry.md).
 sunrise-telemetry = { path = "../sunrise-telemetry", default-features = false }
 sunrise-bench = { path = "../sunrise-bench" }
-crc32fast = "1"
 zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 # Controllers (evdev + libudev on Linux, IOKit on macOS, Windows.Gaming.Input); the `controllers` feature.
 gilrs = { version = "0.11", optional = true }

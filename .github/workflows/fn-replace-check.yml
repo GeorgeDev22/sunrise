@@ -227,6 +227,12 @@ jobs:
             | tee "$FNR_SCRATCH/fnr-check.log"
           grep -E 'Function replacement:|: [0-9]+ ms$|^Mods compiled against the prebuilt game in |^Runner load:' \
             "$FNR_SCRATCH/fnr-check.log" >> "$GITHUB_STEP_SUMMARY"
+      # Each mod is a dylib: the tip, depending on two mods that use the same crates.io crate, links
+      # only with the library the build links their registry crates from (#1379).
+      - name: Mods sharing a crates.io crate (build and link)
+        run: |
+          FNR_KEEP=1 FNR_MODS="shared_left shared_right shared_tip" tools/ci/fn_replace_check.sh \
+            "$LAUNCHER" "$FNR_SCRATCH/sdk-base" "$FNR_SCRATCH/check"
       - name: An API-only set takes the API route (build and link)
         run: |
           FNR_KEEP=1 FNR_ROUTE=prebuilt-api FNR_MODS="api_only" tools/ci/fn_replace_check.sh \

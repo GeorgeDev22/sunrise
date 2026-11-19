@@ -32,17 +32,6 @@ impl Game<'_> {
         Some(jigsaw_block::front_of_orientation(orientation).to_owned())
     }
 
-    /// `new JigsawBlockEntity(pos, state)`: the joint a block starts with
-    /// follows its facing (`StructureTemplate.getDefaultJointType`).
-    pub(super) fn jigsaw_block_placed(&mut self, pos: Pos) {
-        let Some(front) = self.jigsaw_front(pos) else {
-            return;
-        };
-        if let Some(b) = self.jigsaw_block_mut(pos) {
-            b.joint = JointType::default_for_front(&front);
-        }
-    }
-
     /// `save::decode_block_entity` for data loaded into the block at `pos`
     /// (`/setblock`, `/data`): a jigsaw without `joint` takes the default its
     /// facing gives (`JigsawBlockEntity.loadAdditional`), which the decode

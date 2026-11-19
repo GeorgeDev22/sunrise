@@ -282,7 +282,7 @@ impl Game<'_> {
     pub(super) fn draw_narrator_toast(&mut self, batch: &mut HudBatch) {
         let title = self.title.as_ref().is_some_and(|t| t.has_toast());
         let used = self.toast_slots_used() | u32::from(title);
-        let multiplier = f64::from(self.settings.notification_display_time);
+        let multiplier = self.settings.notification_display_time;
         let sound = draw_toast(
             &mut self.narrator_toast,
             used,

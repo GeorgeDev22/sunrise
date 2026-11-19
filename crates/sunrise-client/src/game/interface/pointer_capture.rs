@@ -10,7 +10,7 @@ impl Game<'_> {
     /// The options `MouseHandler.turnPlayer` reads.
     pub(super) fn look_options(&self) -> LookOptions {
         LookOptions {
-            sensitivity: f64::from(self.settings.sensitivity),
+            sensitivity: self.settings.sensitivity,
             smooth_camera: self.smooth_camera,
             scoping: self.scoping(),
             invert_x: self.settings.invert_x,

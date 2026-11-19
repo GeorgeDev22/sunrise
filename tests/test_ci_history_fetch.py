@@ -103,6 +103,8 @@ class HistoryFetchTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("git") and shutil.which("timeout"), "needs git and timeout")
     def test_the_slot_mirror_fills_then_lends_its_history_to_the_next_checkout(self):
         _, name, step = list(steps())[1]
+        # Our pool and main's pushes take the whole history: no filter.
+        step = dict(step, env=dict(step["env"], HISTORY_FILTER=""))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             quiet = dict(capture_output=True, text=True, check=True)

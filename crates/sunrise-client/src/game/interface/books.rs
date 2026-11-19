@@ -5,7 +5,6 @@
 //! with a redstone pulse, the comparator output and taking the book).
 use super::{Game, chat::PLAYER_NAME, screen_info};
 use sunrise_client::{
-    block_entity_item,
     containers::{BlockEntity, Lectern},
     first_person::Hand,
     hud::{HudBatch, rgba},
@@ -459,15 +458,6 @@ impl Game<'_> {
     /// hotbar slot or its off hand (`updateBookContents`, `signBook`).
     pub(super) fn lan_edit_book(&mut self, conn: u32, p: play::EditBook) {
         if !((0..9).contains(&p.slot) || p.slot == super::shield::OFFHAND_SLOT as i32) {
-            return;
-        }
-        if let Some(title) = &p.title
-            && !self.chat_filter_text(
-                conn,
-                &[title],
-                sunrise_client::lan::hub::chat_filter::Place::Book,
-            )
-        {
             return;
         }
         let menu_slot = if p.slot == super::shield::OFFHAND_SLOT as i32 {
@@ -951,32 +941,6 @@ impl Game<'_> {
         self.lectern_pulses.retain(|(_, left)| *left > 0);
         for key in done {
             self.set_lectern_powered(key, false);
-        }
-    }
-    /// `LecternBlock.getStateForPlacement`: a lectern placed from an item
-    /// whose `block_entity_data` holds a `Book`, by a placer who may use
-    /// game-master blocks, starts with `has_book` on. It runs before the
-    /// item's `block_state` component, which vanilla applies afterwards and
-    /// which may set `has_book` back. Returns the state to go on with.
-    pub(super) fn lectern_placed(
-        &mut self,
-        pos: [i32; 3],
-        state: BlockStateId,
-        stack: &ItemStack,
-        game_master: bool,
-    ) -> sunrise_client::Result<BlockStateId> {
-        if !game_master
-            || !block_entity_item::carries_book(stack)
-            || &*self.res.facts().get(state).name != "minecraft:lectern"
-        {
-            return Ok(state);
-        }
-        match self.with_props(state, &[("has_book", "true")]) {
-            Some(new) if new != state => {
-                self.level_set(pos, new)?;
-                Ok(new)
-            }
-            _ => Ok(state),
         }
     }
     /// `LecternBlock.useItemOn`: a book goes onto an empty lectern.
@@ -1827,7 +1791,10 @@ mod lectern_books_tag_tests {
         game.world_root = dir;
         let stack = game.reload_datapacks(false, &[]).unwrap();
         let root = game.options.resources.clone();
-        game.world_tables = game.stage_world_tables(&stack, false, &root).unwrap().0;
+        game.world_tables = game
+            .stage_world_tables(&stack, false, &root)
+            .unwrap()
+            .tables;
 
         let state = game
             .pack

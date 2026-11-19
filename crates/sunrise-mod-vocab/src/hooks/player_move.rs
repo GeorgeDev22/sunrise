@@ -13,11 +13,9 @@ pub trait Hooks {
     /// and the correction after a veto). `from` is that location. Set `cancel`
     /// for a real veto and not a rollback: the report is not applied and its
     /// bookkeeping is skipped, and the client is corrected to the accepted
-    /// position and rotation through the existing teleport correction. The veto
-    /// adds no anticheat violation of its own, but the report was already seen
-    /// by the server's own checks and by the anticheat's record of the client's
-    /// ticks before the hook, and what a violation of those would have done
-    /// still happens. The values are the exact ones: there is no once-per-tick
+    /// position and rotation through the existing teleport correction. The report
+    /// was already seen by the server's own checks before the hook, and what a
+    /// violation of those would have done still happens. The values are the exact ones: there is no once-per-tick
     /// accumulation and no threshold in the engine, so the mod filters
     /// (`if (to - from).length() < 1.0 / 16.0 { return; }` skips anything under
     /// 1/16 of a block). Their state is swapped in

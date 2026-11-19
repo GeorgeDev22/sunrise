@@ -417,7 +417,7 @@ fn a_cauldron_use_posts_its_fluid_event_after_the_sound() {
     let mut banner = ItemStack::new("minecraft:white_banner", 1);
     banner
         .data_mut()
-        .banner_patterns
+        .banner_layers_mut()
         .push(sunrise_items::banner_layer::BannerLayer::new(
             "minecraft:stripe_top",
             "minecraft:red",

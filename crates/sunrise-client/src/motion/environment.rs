@@ -41,6 +41,8 @@ impl MotionWorld<'_, '_, '_> {
     pub(super) fn tick_remaining_fire(&mut self) -> Result<()> {
         if self.player.spectator {
             self.player.fire_ticks = 0;
+        } else if self.player.mod_fire_immune {
+            self.player.fire_ticks = self.player.fire_ticks.min(0);
         }
         if self.player.invulnerable && self.player.fire_ticks > 1 {
             self.player.fire_ticks = 1;
@@ -135,10 +137,17 @@ impl MotionWorld<'_, '_, '_> {
             }
         }
         if self.player.is_in_lava() {
-            self.player.ignite_for_ticks(300)?;
-            self.environment_hurt("minecraft:lava", 4.0)?;
+            self.lava_ignite_and_hurt()?;
         }
         Ok(())
+    }
+    /// `Entity.lavaIgnite` and `Entity.lavaHurt`: both check `fireImmune`.
+    pub(super) fn lava_ignite_and_hurt(&mut self) -> Result<()> {
+        if self.player.mod_fire_immune {
+            return Ok(());
+        }
+        self.player.ignite_for_ticks(300)?;
+        self.environment_hurt("minecraft:lava", 4.0)
     }
     /// What a server's `LivingEntity.baseTick` adds for a player it hosts:
     /// the void (`Entity.checkBelowWorld`, 4 a tick, which creative players
@@ -179,7 +188,7 @@ impl MotionWorld<'_, '_, '_> {
         let damage = fire_contact(self.scene, self.assets.registry, self.player.bounds());
         if damage > 0.0 {
             self.player.ticks_frozen = 0;
-            if !self.player.fluids.was_touching_water {
+            if !self.player.mod_fire_immune && !self.player.fluids.was_touching_water {
                 let multiplier = self.player.attribute("minecraft:burning_time")?;
                 let ticks = ignite_contact(
                     self.player.fire_ticks,

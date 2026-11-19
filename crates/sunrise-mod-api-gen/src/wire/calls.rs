@@ -299,11 +299,11 @@ pub(super) fn guest(
         }
         out.push_str("}\n");
     }
-    out.push_str(&resource_codec(types, names));
+    out.push_str(&resource_codec(types));
     out
 }
 
-fn resource_codec(types: &Types<'_>, names: &super::Names) -> String {
+fn resource_codec(types: &Types<'_>) -> String {
     let mut store = String::from(
         r#"if value.is::<std::sync::Arc<dyn std::any::Any + Send + Sync>>() {
         let value=*value.downcast::<std::sync::Arc<dyn std::any::Any + Send + Sync>>().map_err(|_|crate::wire::WireError::Invalid("wrong erased handler"))?;
@@ -329,14 +329,7 @@ fn resource_codec(types: &Types<'_>, names: &super::Names) -> String {
             })
             .collect::<Vec<_>>()
             .join(",");
-        // A handler the mod keeps for the game is a use of every method its trait exports.
-        let marks: String = names
-            .marked()
-            .into_iter()
-            .filter(|(o, _, _)| *o == owner.as_str())
-            .map(|(_, _, name)| format!("{} ", mark_block("crate", &name.text())))
-            .collect();
-        writeln!(store,"if value.is::<std::sync::Arc<dyn {path}>>() {{ let value=*value.downcast::<std::sync::Arc<dyn {path}>>().map_err(|_|crate::wire::WireError::Invalid(\"wrong handler\"))?; {marks}return Ok(crate::wire::guest::add_handler(vec![{views}])); }}").unwrap();
+        writeln!(store,"if value.is::<std::sync::Arc<dyn {path}>>() {{ let value=*value.downcast::<std::sync::Arc<dyn {path}>>().map_err(|_|crate::wire::WireError::Invalid(\"wrong handler\"))?; return Ok(crate::wire::guest::add_handler(vec![{views}])); }}").unwrap();
         if super::held(owner) {
             for container in ["Box", "std::sync::Arc"] {
                 writeln!(load,"if view == std::any::TypeId::of::<{container}<dyn {path}>>() {{ return Ok(Box::new({container}::new(crate::wire::guest::Held(id)) as {container}<dyn {path}>)); }}").unwrap();
@@ -922,6 +915,14 @@ fn borrowed_prepared(
             let _ = send;
             continue;
         }
+        // A slice of borrowed strings borrows a local list of them, read as owned strings.
+        if let Ty::List(item, List::Slice) = &f.ty
+            && matches!(**item, Ty::Str(Str::Borrowed))
+        {
+            write!(read, "let {local}_held: Vec<String> = input.take()?; let {local}: Vec<&str> = {local}_held.iter().map(String::as_str).collect();").unwrap();
+            build.push(format!("{}: &{local}", f.rust));
+            continue;
+        }
         // Optional references to borrowed records need a local record before borrowing it.
         if let Ty::Option(t) = &f.ty
             && let Ty::Ref(inner, false) = &**t
@@ -1000,7 +1001,7 @@ fn borrowed_prepared(
 
 /// The export a mod answers with the hooks it listens to: they cross as names, which stay
 /// the same across builds, and the game maps them to its own ids.
-fn is_subscription(m: &Method) -> bool {
+pub(super) fn is_subscription(m: &Method) -> bool {
     super::SUBSCRIBED
         .iter()
         .any(|(owner, name)| *owner == m.owner && *name == m.name)
@@ -1037,28 +1038,54 @@ pub(super) fn dispatchable(types: &Types<'_>, m: &Method) -> bool {
 }
 
 /// A statement marking one export as used: a call of a no-op import named like it, on wasm
-/// (`__sunrise_import!`, in `mod_api`, which holds the guest's unsafe code).
-fn mark_block(root: &str, name: &str) -> String {
+/// (`__sunrise_import!`, in `mod_api`, which holds the guest's unsafe code). Every name gets its
+/// own function, since rustc folds same-path extern items into the first one's import.
+pub(crate) fn mark_block(root: &str, name: &str) -> String {
     // The call sits where only a wasm build names the macro: a crate that holds the vocabulary
     // without `mod_api`'s guest transport never resolves it.
-    format!("#[cfg(target_arch = \"wasm32\")] {{ {root}::__sunrise_import!(\"{name}\"); }}")
+    format!(
+        "#[cfg(target_arch = \"wasm32\")] {{ {root}::__sunrise_import!(__sunrise_mark_{}, \"{name}\"); }}",
+        mod_call::digest(name)
+    )
 }
 
 /// The `__sunrise_mark!` macro: one arm per export a mod can implement, each a no-op import
-/// named like the export, so a mod's import section lists exactly the hooks, Part methods and
-/// handler methods it writes; `#[sunrise_mod]` and `#[sunrise_part]` call it for each method an
-/// impl overrides. The protocol module holds the three imports every guest links.
+/// named like the export, so a mod's import section lists exactly the hooks and Part methods it
+/// writes; `#[sunrise_mod]` and `#[sunrise_part]` call it for each method an impl overrides. A
+/// plain impl of any other handler trait calls it for nothing, so it carries no marks. The protocol module holds the three imports every guest links.
 pub(super) fn mark_macro(names: &super::Names) -> String {
     let mut out = String::from(
         "/// Marks that the mod implements one export: an import of the game's table, called for nothing.\n#[doc(hidden)]\n#[cfg(not(test))]\n#[macro_export]\nmacro_rules! __sunrise_mark {\n",
     );
+    // A prepared hook is one Part method with three more entries of their own wire shapes
+    // (prepare, ask, release): its arm marks all of them, since a Part that implements the
+    // method links them all.
+    let entries = |hook: &str| {
+        let mut entries: Vec<_> = names
+            .prepared
+            .iter()
+            .filter(|((owner, _), _)| owner == hook)
+            .map(|((_, entry), name)| (entry.as_str(), name))
+            .collect();
+        entries.sort_by_key(|(entry, _)| *entry);
+        entries
+    };
     for (owner, method, name) in names.marked() {
-        writeln!(
-            out,
-            "(\"{owner}\" {method}) => {{ {} }};",
-            mark_block("::mod_api", &name.text())
-        )
-        .unwrap();
+        let is_entry = names
+            .prepared
+            .keys()
+            .any(|(_, entry)| owner == "ItemPart" && entry == method);
+        if is_entry {
+            continue;
+        }
+        let mut marks = mark_block("::mod_api", &name.text());
+        if owner == "ItemPart" {
+            for (_, entry) in entries(method) {
+                marks.push(' ');
+                marks.push_str(&mark_block("::mod_api", &entry.text()));
+            }
+        }
+        writeln!(out, "(\"{owner}\" {method}) => {{ {marks} }};").unwrap();
     }
     // A method the API keeps off wasm crosses nowhere and has no name.
     out.push_str("($owner:literal $method:ident) => {};\n}\n");
@@ -1288,4 +1315,50 @@ fn a_reborrowed_array_has_no_redundant_parentheses() {
         reborrow(&types, &Ty::Prim("u32"), "(p1).3").unwrap(),
         "(p1).3"
     );
+}
+
+/// rustc names an extern item by its Rust path and not by its `link_name`, so two marks that
+/// sit in one function must not declare the same path: each gets a function of its own.
+#[test]
+fn every_mark_declares_its_import_in_its_own_function() {
+    let names = [
+        "hook:Hooks::register#29382c5e7b4369f52195a982cc6865b2",
+        "hook:Hooks::server_tick@1#00000000000000000000000000000001",
+        "part:ItemPart::use_item#904ff21b4b21718c6eca87eca74f6cff",
+        "part:ItemPart::use_on#00000000000000000000000000000002",
+        "point:tick#00000000000000000000000000000003",
+    ];
+    let mut functions = std::collections::BTreeSet::new();
+    for name in names {
+        let block: syn::Block = syn::parse_str(&format!("{{ {} }}", mark_block("::mod_api", name)))
+            .expect("a mark is a statement");
+        let syn::Stmt::Expr(syn::Expr::Block(cfg), _) = &block.stmts[0] else {
+            panic!("a mark is a cfg-gated block: {name}");
+        };
+        let syn::Stmt::Macro(call) = &cfg.block.stmts[0] else {
+            panic!("a mark is a macro call: {name}");
+        };
+        assert!(
+            call.mac
+                .path
+                .segments
+                .last()
+                .is_some_and(|s| s.ident == "__sunrise_import")
+        );
+        let (function, literal) = call
+            .mac
+            .parse_body_with(|input: syn::parse::ParseStream| {
+                let function: syn::Ident = input.parse()?;
+                input.parse::<syn::Token![,]>()?;
+                let literal: syn::LitStr = input.parse()?;
+                Ok((function, literal))
+            })
+            .expect("a mark calls __sunrise_import! with its function and its name");
+        assert_eq!(literal.value(), name);
+        assert!(function.to_string().starts_with("__sunrise_mark_"));
+        assert!(
+            functions.insert(function.to_string()),
+            "two marks share a function: {name}"
+        );
+    }
 }

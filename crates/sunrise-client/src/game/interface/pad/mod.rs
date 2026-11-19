@@ -371,7 +371,9 @@ impl Game<'_> {
             self.pad.in_use = true;
             self.pad.keyboard_took_over = false;
         }
+        let previous_move = self.pad_move();
         self.pad.state = state;
+        self.resume_stick_mappings(previous_move);
         self.pad_radial_frame();
         self.pad_drop_frame();
         self.pad_output_frame();
@@ -590,6 +592,7 @@ impl Game<'_> {
                     return Ok(());
                 }
                 let screen_open = self.screen != Screen::Playing || self.title.is_some();
+                self.keys.resume_device_input(&KeyCode::ShiftLeft);
                 let was = self.keys.held(Action::Sneak);
                 self.toggles.pad_toggle(SNEAK, screen_open);
                 self.sync_toggle(SNEAK);
@@ -727,6 +730,27 @@ impl Game<'_> {
         gamepad::move_vector(self.pad.state.left, settings.move_deadzone)
     }
 
+    /// A changed stick component is input for that direction, even below the digital
+    /// threshold. Positive and negative travel take over their own mappings only.
+    fn resume_stick_mappings(&mut self, previous: Option<[f32; 2]>) {
+        let before = previous.unwrap_or_default();
+        let after = self.pad_move().unwrap_or_default();
+        for (axis, (positive, negative)) in [
+            (KeyCode::KeyA, KeyCode::KeyD),
+            (KeyCode::KeyW, KeyCode::KeyS),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if before[axis].max(0.0) != after[axis].max(0.0) {
+                self.keys.resume_device_input(&positive);
+            }
+            if before[axis].min(0.0) != after[axis].min(0.0) {
+                self.keys.resume_device_input(&negative);
+            }
+        }
+    }
+
     /// The right stick turns the view, once per frame (`Entity.turn`).
     pub(super) fn pad_look(&mut self, seconds: f32) {
         let settings = &self.settings.controller;
@@ -793,8 +817,7 @@ impl Game<'_> {
 
     /// Connection notices sit below the boss bars and last as long as a toast.
     pub(super) fn draw_controller_notice(&mut self, batch: &mut HudBatch) {
-        let shown_for =
-            Duration::from_secs_f64(5.0 * f64::from(self.settings.notification_display_time));
+        let shown_for = Duration::from_secs_f64(5.0 * self.settings.notification_display_time);
         self.controller_notice.draw(
             batch,
             &self.gui.atlas,

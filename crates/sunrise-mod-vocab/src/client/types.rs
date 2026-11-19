@@ -94,6 +94,11 @@ pub enum MappingError {
         /// The name asked for.
         key: String,
     },
+    /// The mapping accepts a click but has no held state (`key.pickItem`).
+    ClickOnly {
+        /// The name asked for.
+        key: String,
+    },
 }
 
 /// The metadata of a server play packet observed by `Hooks::client_packet`.
@@ -840,10 +845,10 @@ impl ColoredLight {
     }
 }
 
-/// A mod block's screen over its menu (`screen`): its size, where
+/// A menu type's screen, a mod's (`screen`): its size, where
 /// each of the container's slots is (`Slot.x`, `Slot.y`; none hides the
-/// slot, and so do slots past the list; the server's menu does not have a
-/// hidden slot either, so clicks and shift-clicks skip it), and the player inventory's first
+/// slot, and so do slots past the list; for a block's menu the server's menu
+/// does not have a hidden slot either, so clicks and shift-clicks skip it), and the player inventory's first
 /// row (vanilla's is 84; the hotbar is 58 below it) and left column, from
 /// its top left.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -957,7 +962,9 @@ pub enum PanelEvent {
         /// Whether it was a right click.
         right: bool,
     },
-    /// The search box's text, each time the player changes it.
+    /// The search box's text, each time it changes: the player's edit, or
+    /// the owner's own `panel_search` once its box draws. The same event for
+    /// both, so the filter changes in one place.
     Search(String),
     /// A physical key (`key.keyboard.r`) went down
     /// while the pointer was on an item: a slot of the screen's, or the

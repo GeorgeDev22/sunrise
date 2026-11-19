@@ -146,6 +146,7 @@ impl Game<'_> {
             let (x, y, z) = view.parts[0].0;
             return self.composter_capability_extract([x, y, z], count);
         }
+        self.containers().get(view, slot)?;
         let target = self.slot_mut_at(view, slot)?;
         let current = target.as_mut()?;
         let taken = count.min(current.count);

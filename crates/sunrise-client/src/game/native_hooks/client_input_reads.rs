@@ -50,10 +50,13 @@ impl Game<'_> {
         let &(_, key) = MAPPINGS.iter().find(|m| m.0 == name)?;
         Some(match key {
             Some(k) => self.movement_key_held(k),
-            // The button, or the mapping's own held state (a toggle, a pad, `set_mapping_down`).
+            // Attack and use read the logical mapping, not the physical mouse's state.
             None => {
-                let use_key = usize::from(name == "key.use");
-                self.mouse_held()[use_key] || [self.left, self.right][use_key]
+                if name == "key.use" {
+                    self.right
+                } else {
+                    self.left
+                }
             }
         })
     }

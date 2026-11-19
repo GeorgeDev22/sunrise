@@ -13,26 +13,9 @@ fn write(path: &Path, value: &toml::Table) -> Result<(), String> {
     fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-pub const PACKAGE: &str = "sunrise-native-game";
-/// The official game's package and executable (docs/layers.md, "How a Sunrise crate plugs in"):
-/// sunrise-client's game with Sunrise's own parts, the one the release ships as `sunrise-client`.
-pub const OFFICIAL: &str = "sunrise-official";
-
-/// Whether the staged revision has the official game. One from before it ships sunrise-client's
-/// executable, as the release did then.
-pub fn has_official(stage: &Path) -> bool {
-    stage.join("crates/sunrise-official/Cargo.toml").is_file()
-}
-
-/// The official game, once built into `out`, under the game's name, as the release ships it.
-/// Where the generated executable's package is staged, in the workspace.
-const GAME: &str = "crates/native-game";
-
 fn path_dep(path: &str) -> toml::Table {
     toml::Table::from_iter([("path".into(), path.into())])
 }
-
-const MAIN_TEMPLATE: &str = "crates/sunrise-client/src/native_main.rs.template";
 
 pub fn template(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).ok()
@@ -59,7 +42,7 @@ pub fn main_rs(
         .collect::<String>();
     let inventory = mods.iter().map(|m| format!(
         "    mod_api::__private::native::BuiltMod {{ id: {:?}, version: {:?}, side: mod_api::Side::{:?} }},\n",
-        m.id, m.version, m.side,
+        m.id, m.version.to_string(), m.side,
     )).collect::<String>();
     let api_points = listed
         .iter()
@@ -236,10 +219,20 @@ impl<'a> Project<'a> {
     }
 
     pub fn read(bundle: &'a Bundle) -> Result<Self, ProjectError> {
+        let path = bundle.dir.join("Cargo.toml");
+        let text = fs::read_to_string(&path).map_err(|e| ProjectError::Cargo {
+            mod_id: bundle.manifest.id.clone(),
+            reason: format!("{}: {e}", path.display()),
+        })?;
+        Self::parse(bundle, &text)
+    }
+
+    /// Parses the staged Cargo manifest, or one read by a caller with its own input bounds.
+    pub fn parse(bundle: &'a Bundle, text: &str) -> Result<Self, ProjectError> {
         let mod_id = || bundle.manifest.id.clone();
-        let cargo = read(&bundle.dir.join("Cargo.toml")).map_err(|reason| ProjectError::Cargo {
+        let cargo: toml::Table = text.parse().map_err(|e| ProjectError::Cargo {
             mod_id: mod_id(),
-            reason,
+            reason: format!("{}: {e}", bundle.dir.join("Cargo.toml").display()),
         })?;
         for section in ["patch", "replace"] {
             if cargo.contains_key(section) {
@@ -265,14 +258,29 @@ impl<'a> Project<'a> {
             .and_then(toml::Value::as_str)
             .ok_or_else(|| ProjectError::PackageName { mod_id: mod_id() })?
             .to_owned();
-        for table in std::iter::once(&cargo).chain(
-            cargo
-                .get("target")
-                .and_then(toml::Value::as_table)
-                .into_iter()
-                .flat_map(|targets| targets.values())
-                .filter_map(toml::Value::as_table),
-        ) {
+        let cargo_error = |reason| ProjectError::Cargo {
+            mod_id: mod_id(),
+            reason,
+        };
+        let targets = cargo
+            .get("target")
+            .map(|targets| {
+                targets
+                    .as_table()
+                    .ok_or_else(|| cargo_error("[target] must be a table".into()))
+            })
+            .transpose()?;
+        let configs = std::iter::once((None, Ok(&cargo))).chain(targets.into_iter().flatten().map(
+            |(target, config)| {
+                let table = config
+                    .as_table()
+                    .ok_or_else(|| cargo_error(format!("[target.{target}] must be a table")));
+                (Some(target.as_str()), table)
+            },
+        ));
+        let mut api_deps = Vec::new();
+        for (target, table) in configs {
+            let table = table?;
             for kind in [
                 "dependencies",
                 "dev-dependencies",
@@ -280,21 +288,36 @@ impl<'a> Project<'a> {
                 "dev_dependencies",
                 "build_dependencies",
             ] {
-                for (key, value) in table
-                    .get(kind)
-                    .and_then(toml::Value::as_table)
-                    .into_iter()
-                    .flatten()
-                {
-                    let package = value
-                        .get("package")
-                        .and_then(toml::Value::as_str)
-                        .unwrap_or(key);
-                    if let Some(&(sdk, _)) = PACKAGES.iter().find(|(sdk, _)| *sdk == package) {
-                        sdk_source(key, sdk, value).map_err(|reason| ProjectError::Cargo {
-                            mod_id: mod_id(),
-                            reason,
-                        })?;
+                let Some(dependencies) = table.get(kind) else {
+                    continue;
+                };
+                let dependencies = dependencies
+                    .as_table()
+                    .ok_or_else(|| cargo_error(format!("[{kind}] must be a table")))?;
+                for (key, value) in dependencies {
+                    if !(value.is_str() || value.is_table()) {
+                        return Err(cargo_error(format!(
+                            "{key} in [{kind}] must be a version string or a table"
+                        )));
+                    }
+                    let package = match value.get("package") {
+                        Some(package) => package.as_str().ok_or_else(|| {
+                            cargo_error(format!("{key} in [{kind}]: package must be a string"))
+                        })?,
+                        None => key,
+                    };
+                    if let Some(&(package, library)) =
+                        PACKAGES.iter().find(|(sdk, _)| *sdk == package)
+                    {
+                        sdk_source(key, package, value).map_err(cargo_error)?;
+                        if kind == "dependencies" {
+                            api_deps.push(ApiDependency {
+                                target: target.map(str::to_owned),
+                                key: key.clone(),
+                                package,
+                                library,
+                            });
+                        }
                     } else {
                         for selector in [
                             "git",
@@ -315,37 +338,12 @@ impl<'a> Project<'a> {
                             }
                         }
                     }
-                    if value
-                        .get("package")
-                        .and_then(toml::Value::as_str)
-                        .unwrap_or(key)
-                        == "sunrise-client"
-                    {
+                    if package == "sunrise-client" {
                         return Err(ProjectError::GameDependency {
                             mod_id: mod_id(),
                             key: key.clone(),
                         });
                     }
-                }
-            }
-        }
-        let mut api_deps = Vec::new();
-        for (target, dependencies) in dependency_tables(&cargo) {
-            for (key, value) in dependencies {
-                let package = value
-                    .get("package")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or(key);
-                if let Some(&(package, library)) =
-                    PACKAGES.iter().find(|(name, _)| *name == package)
-                {
-                    api_deps.push(ApiDependency {
-                        target: target.map(str::to_owned),
-                        key: key.clone(),
-                        package,
-                        library,
-                    });
-                    continue;
                 }
             }
         }
@@ -377,6 +375,13 @@ impl<'a> Project<'a> {
     /// `[target.<cfg>.dependencies]`.
     pub fn dependency_tables(&self) -> impl Iterator<Item = (Option<&str>, &toml::Table)> + '_ {
         dependency_tables(&self.cargo)
+    }
+
+    /// Whether the mod links its game internals facade, under any dependency alias.
+    pub fn uses_internals(&self) -> bool {
+        self.api_deps
+            .iter()
+            .any(|api| api.package == INTERNALS_PACKAGE)
     }
 
     /// Whether the mod links the game's wasmtime ([`WASMTIME_PACKAGE`]).
@@ -415,7 +420,8 @@ fn dependency_tables(cargo: &toml::Table) -> impl Iterator<Item = (Option<&str>,
         .filter_map(|(target, table)| Some((target, table?.as_table()?)))
 }
 
-// Add API packages and the generated executable to the fresh staged workspace.
+/// Add the mod libraries and their generated internals facades to the discovery workspace.
+/// Discovery checks the library targets, so it does not stage a game executable.
 pub fn stage(
     stage: &Path,
     projects: &[Project<'_>],
@@ -434,30 +440,12 @@ pub fn stage(
     let facades = catalog
         .prepare(mods.iter().map(|(_, project)| &project.bundle.manifest))
         .map_err(|e| e.to_string())?;
-    let template = template(&stage.join(MAIN_TEMPLATE))?;
     let packages: std::collections::HashMap<_, _> = mods
         .iter()
         .map(|(_, project)| (project.bundle.manifest.id.as_str(), project.package.clone()))
         .collect();
-    let mut deps = toml::Table::new();
-    // The generated game's features own sound/controllers, including the server's
-    // `--no-default-features`; its client dependency never enables them independently.
-    // `sunrise-threads` stays for games pinned before the allocator moved into
-    // `sunrise-client`'s library: their template still names `sunrise_threads::ALLOCATOR`.
-    for name in [
-        "sunrise-client",
-        "sunrise-mod-api",
-        "sunrise-threads",
-        "sunrise-mod-package",
-    ] {
-        let mut dependency = path_dep(&format!("../{name}"));
-        if name == "sunrise-client" {
-            dependency.insert("default-features".into(), false.into());
-        }
-        deps.insert(name.into(), toml::Value::Table(dependency));
-    }
     let mut members = Vec::new();
-    for (i, (index, project)) in mods.iter().enumerate() {
+    for (index, project) in mods {
         let bundle = project.bundle;
         let relative = format!("native-api/{}", bundle.manifest.id);
         let dest = stage.join(&relative);
@@ -465,7 +453,6 @@ pub fn stage(
 
         let path = dest.join("Cargo.toml");
         let mut manifest = project.cargo.clone();
-        let package = project.package.clone();
         for api in &project.api_deps {
             let dependency = api.value_mut(&mut manifest);
             let mut rewritten = path_dep(&if api.package == INTERNALS_PACKAGE {
@@ -496,140 +483,22 @@ pub fn stage(
                 table.insert("internals".into(), value);
             }
         }
-        let targets: Vec<_> = declared[*index]
+        let targets: Vec<_> = declared[index]
             .iter()
             .map(|dependency| super::dependencies::Package {
                 dependency,
                 package: packages.get(dependency.id.as_str()).map(String::as_str),
             })
             .collect();
-        let enabled = super::dependencies::rewrite(&bundle.manifest.id, &mut manifest, &targets)
+        super::dependencies::rewrite(&bundle.manifest.id, &mut manifest, &targets)
             .map_err(|e| e.to_string())?;
         write(&path, &manifest)?;
-        let mut dep = toml::Table::new();
-        dep.insert("path".into(), format!("../../{relative}").into());
-        dep.insert("package".into(), package.into());
-        if !enabled.is_empty() {
-            dep.insert(
-                "features".into(),
-                toml::Value::Array(enabled.into_iter().map(toml::Value::String).collect()),
-            );
-        }
-        deps.insert(format!("mod_{i}"), toml::Value::Table(dep));
-        if internals::needed(&bundle.manifest)
-            || project
-                .api_deps
-                .iter()
-                .any(|dep| dep.package == INTERNALS_PACKAGE)
-        {
+        if internals::needed(&bundle.manifest) || project.uses_internals() {
             internals::stage(stage, project, &facades[bundle.manifest.id.as_str()])?;
-            let facade = internals::relative(&bundle.manifest.id);
-            let mut dependency = path_dep(&format!("../../{facade}"));
-            dependency.insert(
-                "package".into(),
-                internals::package(&bundle.manifest.id).into(),
-            );
-            deps.insert(format!("mod_{i}_internals"), toml::Value::Table(dependency));
-            members.push(facade);
+            members.push(internals::relative(&bundle.manifest.id));
         }
         members.push(relative);
     }
-    // Beside sunrise-client, so its build script (the Windows stack size and icon, for the
-    // `sunrise-client` binary this package owns now) finds `packaging/` where it looks.
-    let game = stage.join(GAME);
-    fs::create_dir_all(game.join("src")).map_err(|e| e.to_string())?;
-    let mut manifest = toml::Table::new();
-    manifest.insert(
-        "package".into(),
-        toml::Value::Table(toml::Table::from_iter([
-            ("name".into(), PACKAGE.into()),
-            ("version".into(), "0.1.0".into()),
-            ("edition".into(), "2024".into()),
-            ("publish".into(), false.into()),
-            ("build".into(), "../sunrise-client/build.rs".into()),
-        ])),
-    );
-    // This sibling package uses the client's build.rs, so its build dependencies apply too;
-    // relative paths still point to the same crates from crates/native-game.
-    let client = read(&stage.join("crates/sunrise-client/Cargo.toml"))?;
-    if let Some(dependencies) = client.get("build-dependencies") {
-        manifest.insert("build-dependencies".into(), dependencies.clone());
-    }
-    let windows = toml::Table::from_iter([(
-        "build-dependencies".into(),
-        toml::Value::Table(toml::Table::from_iter([(
-            "winresource".into(),
-            "0.1".into(),
-        )])),
-    )]);
-    manifest.insert(
-        "target".into(),
-        toml::Value::Table(toml::Table::from_iter([(
-            "cfg(windows)".into(),
-            toml::Value::Table(windows),
-        )])),
-    );
-    manifest.insert(
-        "bin".into(),
-        toml::Value::Array(vec![toml::Value::Table(toml::Table::from_iter([
-            ("name".into(), "sunrise-client".into()),
-            ("path".into(), "src/main.rs".into()),
-        ]))]),
-    );
-    let official = has_official(stage);
-    if official {
-        let mut dep = toml::Table::new();
-        dep.insert("path".into(), "../sunrise-official".into());
-        dep.insert("optional".into(), true.into());
-        deps.insert(OFFICIAL.into(), toml::Value::Table(dep));
-    }
-    if stage.join("crates/sunrise-mod-host/Cargo.toml").is_file() {
-        deps.insert(
-            "sunrise-mod-host".into(),
-            toml::Value::Table(toml::Table::from_iter([
-                ("path".into(), "../sunrise-mod-host".into()),
-                ("default-features".into(), false.into()),
-            ])),
-        );
-    }
-    manifest.insert("dependencies".into(), toml::Value::Table(deps));
-    manifest.insert(
-        "features".into(),
-        toml::Value::Table(toml::Table::from_iter([(
-            "default".into(),
-            toml::Value::Array(vec!["sunrise-client/default".into()]),
-        )])),
-    );
-    if official {
-        let features = manifest
-            .get_mut("features")
-            .unwrap()
-            .as_table_mut()
-            .unwrap();
-        features
-            .get_mut("default")
-            .unwrap()
-            .as_array_mut()
-            .unwrap()
-            .push("official".into());
-        features.insert(
-            "official".into(),
-            toml::Value::Array(vec!["dep:sunrise-official".into()]),
-        );
-    }
-    write(&game.join("Cargo.toml"), &manifest)?;
-    let manifests: Vec<_> = mods
-        .iter()
-        .map(|(_, project)| &project.bundle.manifest)
-        .collect();
-    let mut main = main_rs(&template, &manifests, catalog);
-    if official {
-        main = main.replace(
-            "fn main() {",
-            "fn main() {\n    #[cfg(feature = \"official\")]\n    sunrise_official::register();",
-        );
-    }
-    fs::write(game.join("src/main.rs"), main).map_err(|e| e.to_string())?;
     let root = stage.join("Cargo.toml");
     let mut workspace = read(&root)?;
     let list = workspace
@@ -637,7 +506,6 @@ pub fn stage(
         .and_then(|w| w.get_mut("members"))
         .and_then(toml::Value::as_array_mut)
         .ok_or("workspace has no members")?;
-    members.push(GAME.into());
     list.extend(members.into_iter().map(toml::Value::String));
     write(&root, &workspace)?;
     Ok(true)
@@ -905,11 +773,11 @@ mod tests {
         let dir = fixture();
         let mut base = sunrise_mod_package::Package::read(&dir).unwrap().manifest;
         base.id = "base".into();
-        base.version = "1.2.3".into();
+        base.version = semver::Version::new(1, 2, 3);
         base.side = mod_vocab::Side::Both;
         let mut extra = base.clone();
         extra.id = "extra".into();
-        extra.version = "2.0.0".into();
+        extra.version = semver::Version::new(2, 0, 0);
         extra.side = mod_vocab::Side::Client;
         let mods = [&base, &extra];
         for count in 0..=2 {
@@ -950,45 +818,50 @@ mod tests {
     }
 
     #[test]
-    fn named_source_without_an_entry_template_is_refused_before_staging() {
+    fn discovery_stages_a_library_and_its_facade_without_a_game_entry_template() {
         let dir = fixture();
-        let stage_dir = dir.with_extension("workspace");
-        let _ = fs::remove_dir_all(&stage_dir);
-        let source = stage_dir.join("crates/sunrise-client/src");
-        fs::create_dir_all(&source).unwrap();
+        let workspace = tempfile::tempdir_in(dir.parent().unwrap()).unwrap();
+        let stage_dir = workspace.path();
+        fs::write(stage_dir.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let cargo = dir.join("Cargo.toml");
+        fs::write(
+            &cargo,
+            format!(
+                "{}sunrise-internals={{path='.sunrise/sdk/api/crates/sunrise-internals'}}\n",
+                fs::read_to_string(&cargo).unwrap()
+            ),
+        )
+        .unwrap();
         let resolution = super::super::dependencies::Resolution {
             order: vec![0],
             warnings: Vec::new(),
         };
-        for text in ["", "pub struct ModEntry { id: &'static str }"] {
-            fs::write(source.join("mod_api.rs"), text).unwrap();
-            let bundle = super::super::bundle_in(&dir).unwrap().unwrap();
-            let project = Project::read(&bundle).unwrap();
-            let error = stage(
-                &stage_dir,
-                &[project],
-                &[vec![]],
-                &resolution,
-                &internals::Catalog::default(),
-            )
-            .unwrap_err();
-            assert!(error.contains("Update Sunrise and rebuild"), "{error}");
-            assert!(!stage_dir.join(GAME).exists());
-            assert!(!stage_dir.join("native-api").exists());
-        }
-        assert!(
-            !stage(
-                &stage_dir,
-                &[],
-                &[],
-                &super::super::dependencies::Resolution {
-                    order: vec![],
-                    warnings: Vec::new(),
-                },
-                &internals::Catalog::default(),
-            )
-            .unwrap()
+        let bundle = super::super::bundle_in(&dir).unwrap().unwrap();
+        let project = Project::read(&bundle).unwrap();
+        let catalog = internals::Catalog {
+            discovery: true,
+            ..Default::default()
+        };
+        assert!(stage(stage_dir, &[project], &[vec![]], &resolution, &catalog).unwrap());
+        let root = read(&stage_dir.join("Cargo.toml")).unwrap();
+        assert_eq!(
+            root["workspace"]["members"].as_array().unwrap(),
+            &[
+                "native-internals/example".into(),
+                "native-api/example".into()
+            ]
         );
+        let lib = read(&stage_dir.join("native-api/example/Cargo.toml")).unwrap();
+        assert_eq!(
+            lib["dependencies"]["internals"]["path"].as_str(),
+            Some("../../native-internals/example")
+        );
+        assert!(
+            stage_dir
+                .join("native-internals/example/src/lib.rs")
+                .is_file()
+        );
+        assert!(!stage_dir.join("crates/native-game").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 

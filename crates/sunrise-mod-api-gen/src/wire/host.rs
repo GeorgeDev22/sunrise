@@ -736,6 +736,19 @@ impl Cx {
                 ));
                 continue;
             }
+            // #2534: the registrar answers an unresolved effect key with
+            // `MobEffectPartError::InvalidKey`, so this one argument carries the
+            // raw slot to it instead of refusing the import at decode. Every
+            // other `EffectKey` keeps the checked decoding.
+            if m.owner == "Registrar"
+                && m.name == "attach_mob_effect_part"
+                && i == 0
+                && held(types, ty).as_deref() == Some("mod_api::EffectKey")
+            {
+                body.push_str("let p0: mod_api::EffectKey = mod_api::__private::parts_installation::effect_key(input.take::<u32>()?);");
+                args.push(lend(types, ty, "p0").unwrap().expr);
+                continue;
+            }
             writeln!(
                 body,
                 "let {mutable}p{i}: {} = input.take()?;",

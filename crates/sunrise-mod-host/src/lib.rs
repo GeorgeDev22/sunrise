@@ -9,13 +9,21 @@ pub use native_libraries::{GAME_BUILD_ID, RUSTC_VERSION, main};
 mod loading;
 pub use loading::main_with;
 
-/// Establish main-thread stack capacity before compiler-child handling.
-pub use sunrise_guest_stack::prepare_main as prepare_main_stack;
+/// Settles the guest stack policy from the mod engine, then establishes main-thread stack
+/// capacity, before compiler-child handling. A refusal here is the same exit as a stack that
+/// cannot be made large enough.
+pub fn prepare_main_stack() {
+    if let Err(error) = sunrise_mod_wasm::install_stack_policy() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+    sunrise_guest_stack::prepare_main();
+}
 pub use sunrise_mod_wasm::compile_child;
 
 /// Handles the private compiler invocation before any game startup work.
 pub fn exit_if_compile_child() {
-    sunrise_guest_stack::prepare_main();
+    prepare_main_stack();
     if let Some(code) = compile_child(std::env::args_os().skip(1)) {
         std::process::exit(code);
     }
