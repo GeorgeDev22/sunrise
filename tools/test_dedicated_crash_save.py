@@ -20,10 +20,13 @@ checks, from the files the server leaves:
   player keeps the files the previous clean stop wrote, and a lost hub saves only the world.
 - Vanilla: the pinned 26.3 server runs the same bystander and crashes while they ride
   (`VanillaCrashServer`); what it leaves of them (their diamonds, their RootVehicle, the boat in the
-  world) must be Sunrise's. A second pair of runs refuses every player write during the crash:
-  `PlayerDataStorage.save` only logs the failure and `PlayerList.remove` still takes the boat out,
-  so vanilla loses it, and Sunrise must too. Vanilla has no interrupted player or lost hub (a throw
-  leaves no player's state half applied); those two are Sunrise's own answers, not compared.
+  world) must be Sunrise's. A second pair of runs refuses every player write during the crash. Each
+  server must show the bystander on the tagged boat, log their refused write and leave no data file
+  of theirs (a runner whose read-only folder still takes a file, as root's does, fails the case
+  instead of passing it). `PlayerDataStorage.save` only logs the failure and `PlayerList.remove`
+  still takes the boat out, so vanilla loses it, and Sunrise must too. Vanilla has no interrupted
+  player or lost hub (a throw leaves no player's state half applied); those two are Sunrise's own
+  answers, unverified against vanilla and not compared.
 """
 import hashlib
 import math
@@ -222,11 +225,28 @@ def signal_saves(build):
 BYSTANDER = 'Bystander'
 
 
-def ride_then_crash(server, directory, port, crash, refuse=False):
+def refusing(folder):
+    """Makes `folder` read-only, and proves it refuses a new file: a privileged runner (root) writes through `0555`,
+    and a case meant to refuse every player write would then pass on two successful writes."""
+    folder.mkdir(parents=True, exist_ok=True)
+    folder.chmod(0o555)
+    probe = folder / 'refused-write-probe'
+    try:
+        probe.write_bytes(b'')
+    except PermissionError:
+        return
+    probe.unlink()
+    folder.chmod(0o755)
+    raise AssertionError(f'{folder} is read-only yet still takes a new file (running as root?): this runner cannot '
+                         'refuse a player write, so the refused-write case cannot be checked here')
+
+
+def ride_then_crash(server, directory, port, crash, refused=None):
     """The bystander joins `server`, is given four diamonds and rides a tagged boat beside a tagged armor stand that
-    stays in the world; `crash()` then makes the server crash and returns once it has exited. With `refuse`, the
-    player data folder is read-only during the crash, so every player write fails. Returns the bystander's block x
-    and z (a vanilla world's spawn need not be near 0, 0)."""
+    stays in the world; `crash()` then makes the server crash and returns once it has exited. With `refused`, a
+    pattern for the server's log line on a failed player write, the player data folder is read-only during the
+    crash: the log must show the bystander's write was attempted and refused, and no file of theirs may be left.
+    Returns the bystander's block x and z (a vanilla world's spawn need not be near 0, 0)."""
     try:
         from . import lan_e2e
     except ImportError:
@@ -241,23 +261,30 @@ def ride_then_crash(server, directory, port, crash, refuse=False):
         server.console(f'give {BYSTANDER} minecraft:diamond 4')
         server.console(f'execute at {BYSTANDER} run summon minecraft:oak_boat ~ ~ ~ {{Tags:["bystander_boat"]}}')
         server.console(f'ride {BYSTANDER} mount @e[tag=bystander_boat,limit=1]')
+        server.console(f'execute as {BYSTANDER} on vehicle if entity @s[tag=bystander_boat] run say BYSTANDER-MOUNTED')
         # Stays in the world: once the restart shows it, the chunk's entities have loaded.
         server.console(f'execute at {BYSTANDER} run summon minecraft:armor_stand ~ ~ ~ {{Tags:["bystander_anchor"],NoGravity:1b}}')
         server.console('say GIVEN-TO-BYSTANDER')
         server.wait_for(r'\[Server\] GIVEN-TO-BYSTANDER')
+        assert any('BYSTANDER-MOUNTED' in l for l in server.lines), 'the bystander is not riding the tagged boat'
         assert not file.exists(), 'the bystander was saved before the crash'
         mark = len(server.lines)
         server.console(f'data get entity {BYSTANDER} Pos')
         server.wait_for(r'has the following entity data: \[')
         pos = next(re.search(r'\[(-?[\d.E-]+)d, (-?[\d.E-]+)d, (-?[\d.E-]+)d\]', line)
                    for line in server.lines[mark:] if 'has the following entity data' in line)
-        if refuse:
-            file.parent.mkdir(parents=True, exist_ok=True)
-            file.parent.chmod(0o555)
+        if refused:
+            refusing(file.parent)
         try:
             crash()
+            if refused:
+                server.reader.join(timeout=10)
+                assert any(re.search(refused, l) for l in server.lines), \
+                    f'no refused write of the bystander in the log ({refused!r}):\n' + '\n'.join(server.lines[-30:])
+                left = sorted(p.name for p in file.parent.iterdir() if offline_uuid(BYSTANDER) in p.name)
+                assert not left, f'a refused write still left the bystander\'s files: {left}'
         finally:
-            if refuse:
+            if refused:
                 file.parent.chmod(0o755)
     finally:
         other.close()
@@ -326,7 +353,9 @@ def crash_saves_bystander(build, refuse=False):
             time.sleep(0.2)
         assert server.process.poll() not in (None, 0), 'the server did not exit with an error after the panic'
         client.join(timeout=10)
-    at = ride_then_crash(server, directory, port, crash, refuse)
+    # `playerdata::save`'s warning when the file cannot be written.
+    refused = rf'{offline_uuid(BYSTANDER)}\.dat is not saved' if refuse else None
+    at = ride_then_crash(server, directory, port, crash, refused)
     log = '\n'.join(server.lines)
     assert f"The panic interrupted a player's turn ({PLAYER})" in log, 'the panic did not interrupt the player'
     assert 'Saving players' in log, 'the crash stopped the server without saving players'
@@ -381,7 +410,9 @@ def vanilla_crash_saves_bystander(build, refuse=False):
         while server.process.poll() is None and time.time() < deadline:
             time.sleep(0.2)
         assert server.process.poll() is not None, 'the vanilla server did not stop after the crash'
-    at = ride_then_crash(server, directory, port, crash, refuse)
+    # `PlayerDataStorage.save`'s warning when the file cannot be written.
+    refused = rf'Failed to save player data for {BYSTANDER}\b' if refuse else None
+    at = ride_then_crash(server, directory, port, crash, refused)
     log = '\n'.join(server.lines)
     assert 'crash fixture' in log, 'the vanilla server did not crash on the fixture'
     assert 'Saving players' in log, 'the vanilla crash stopped the server without saving players'
