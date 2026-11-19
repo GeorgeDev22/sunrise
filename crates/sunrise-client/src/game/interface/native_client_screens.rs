@@ -12,8 +12,8 @@ impl Game<'_> {
     /// screen's own close for any other: Escape closes a container with the
     /// menu's `ServerboundContainerClosePacket` first (a bare local close would
     /// leave the server's menu open), while a pause menu closes to the game.
-    /// The sign editor is an overlay beside the screen, and Escape on it sends
-    /// its `ServerboundSignUpdatePacket` like any other close. False when no
+    /// The sign editor and a book are overlays beside the screen: Escape on the sign editor
+    /// sends its `ServerboundSignUpdatePacket`, and on a lectern's book the menu's close. False when no
     /// screen is open, and for the death screen, which Escape does not close.
     pub(in crate::game) fn close_screen(&mut self) -> bool {
         if self.player.is_none() {
@@ -21,6 +21,12 @@ impl Game<'_> {
         }
         if self.sign_edit.is_some() {
             self.close_sign_editor();
+            return true;
+        }
+        // A book or a lectern's book is the same kind of overlay: its screen's onClose (a
+        // lectern's closes its menu, sending the container close).
+        if self.book.is_some() {
+            self.close_book();
             return true;
         }
         if self.screen == Screen::Playing {
@@ -135,6 +141,9 @@ mod client_screen_tests {
 
     /// The chest menu's network id, from the prepared registries report.
     fn chest_menu() -> i32 {
+        menu_id("minecraft:generic_9x3")
+    }
+    fn menu_id(name: &str) -> i32 {
         let root = std::path::PathBuf::from(
             std::env::var_os("SUNRISE_TEST_RESOURCES")
                 .expect("set SUNRISE_TEST_RESOURCES to prepared resources"),
@@ -142,11 +151,35 @@ mod client_screen_tests {
         let report = sunrise_protocol::registry::Builtin::find(&root)
             .expect("the prepared resources carry registries.json");
         let builtin = sunrise_protocol::registry::Builtin::load(&report).unwrap();
-        builtin
-            .get("minecraft:menu")
-            .unwrap()
-            .id("minecraft:generic_9x3")
-            .unwrap()
+        builtin.get("minecraft:menu").unwrap().id(name).unwrap()
+    }
+
+    /// LecternScreen.onClose closes its menu (`closeContainer`): a lectern opened by the server
+    /// closes through the screen close with the menu's id, and its book overlay is gone.
+    #[test]
+    #[ignore = "daily"]
+    fn closing_a_lectern_sends_its_menu_id() {
+        with_client_game(|game| {
+            let mut reader = logged_in(game);
+            let menu = menu_id("minecraft:lectern");
+            game.handle_packet(C::OpenScreen(play::OpenScreen {
+                container: 3,
+                menu,
+                title: sunrise_core::nbt::Tag::String("Lectern".into()),
+            }))
+            .unwrap();
+            sent(&mut reader);
+
+            assert!(game.close_screen(), "the lectern's book is open");
+            assert!(game.book.is_none());
+            let Some(S::ContainerClose(close)) = sent(&mut reader)
+                .into_iter()
+                .find(|p| matches!(p, S::ContainerClose(_)))
+            else {
+                panic!("the lectern's menu close goes out");
+            };
+            assert_eq!(close.container, 3);
+        });
     }
 
     #[test]
