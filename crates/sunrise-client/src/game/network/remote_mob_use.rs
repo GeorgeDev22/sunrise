@@ -422,7 +422,7 @@ mod tests {
             game.mobs.push(spawn("minecraft:pig", 1));
             game.mobs.push(baby);
             game.mobs.push(spawn("minecraft:parrot", 3));
-            let mut hold = |game: &mut Game<'_>, item: &str| {
+            let hold = |game: &mut Game<'_>, item: &str| {
                 game.inventory[game.selected] =
                     Some(sunrise_client::items::ItemStack::new(item, 1));
             };
