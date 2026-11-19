@@ -116,6 +116,43 @@ class WireStreamTest(unittest.TestCase):
         moved = [tick('punch'), tick('punch'), tick('abort', 'punch', 'move_player_pos'), tick('move_player_pos')]
         self.assertEqual([d[0] for d in wire_stream.compare_answered(vanilla, moved, 3, 1, 2)], [3])
 
+    def test_a_replay_names_entities_through_the_server_stream_so_a_different_target_differs(self):
+        def add(entity):
+            return {'conn': 1, 'dir': 's2c', 'state': 'play', 'name': 'add_entity', 'data': (varint(entity) + b'\0').hex()}
+        # Both clients got the same two husks; vanilla hits the first, Sunrise the second. Named per client by first
+        # appearance, both would be e1.
+        vanilla = [LOGIN, add(7), add(9), mark(), c2s('attack', varint(7)), TICK_END]
+        sunrise = [LOGIN, add(7), add(9), mark(), c2s('attack', varint(9)), TICK_END]
+        [v], [h] = wire_stream.scenarios(vanilla, exact=True), wire_stream.scenarios(sunrise, exact=True)
+        self.assertEqual((v[0]['packets'][0], h[0]['packets'][0]), (('attack', {'entity': 'e1'}),
+                                                                     ('attack', {'entity': 'e2'})))
+        self.assertEqual([d[0] for d in wire_stream.compare(v, h, 0, key='wire')], [0])
+
+    def test_a_replay_keeps_answers_in_place_and_sequences_as_sent(self):
+        use = lambda seq: c2s('use_item', varint(0) + varint(seq) + struct.pack('>ff', 0, 0))  # noqa: E731
+        entries = [LOGIN, use(4), TICK_END, mark(), c2s('pong', b'\0\0\0\7'), use(5), TICK_END]
+        [run] = wire_stream.scenarios(entries, exact=True)
+        self.assertEqual([n for n, _ in run[0]['packets']], ['pong', 'use_item', 'client_tick_end'])
+        self.assertEqual(run[0]['packets'][1][1]['sequence'], 5)
+        # A pong after the tick's first packet is a different stream, not the same one with a misplaced answer.
+        late = [LOGIN, use(4), TICK_END, mark(), use(5), c2s('pong', b'\0\0\0\7'), TICK_END]
+        [other] = wire_stream.scenarios(late, exact=True)
+        self.assertEqual([d[0] for d in wire_stream.compare(run, other, 0, key='wire')], [0])
+
+    def test_a_replay_compares_floats_by_their_bits(self):
+        rot = lambda yaw: [LOGIN, mark(), c2s('move_player_rot', struct.pack('>ffB', yaw, 0, 1)), TICK_END]  # noqa: E731
+        [a], [b] = wire_stream.scenarios(rot(0.0), exact=True), wire_stream.scenarios(rot(-0.0), exact=True)
+        self.assertEqual(a[0]['packets'], b[0]['packets'])
+        [(tick, v, h)] = wire_stream.compare(a, b, 0, key='wire')
+        self.assertEqual(wire_stream.field_diff(v, h, wire=(a[0]['wire'], b[0]['wire'])),
+                         ['    #0 move_player_rot bytes: vanilla 000000000000000001, Sunrise 800000000000000001'])
+
+    def test_the_mark_is_the_command_not_its_bytes_in_another_packet(self):
+        text = b'wire-mark'
+        self.assertTrue(wire_stream.is_mark('chat_command', varint(len(text)) + text))
+        self.assertFalse(wire_stream.is_mark('chat_command', varint(len(text) + 2) + text + b' x'))
+        self.assertFalse(wire_stream.is_mark('chat', varint(len(text)) + text + bytes(17)))
+
     def test_compare_reports_the_first_field_that_differs(self):
         tick = lambda y: {'packets': [('move_player_pos', {'x': 0.5, 'y': y})], 'frame': [], 'misplaced': []}  # noqa
         diffs = wire_stream.compare([tick(-60.0)], [tick(-60.0000001)], 0)
