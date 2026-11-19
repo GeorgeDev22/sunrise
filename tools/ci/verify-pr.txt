@@ -1,0 +1,5 @@
+cargo fmt --all -- --check
+cargo test --locked -p sunrise-world --lib stepped_interpolation
+cargo clippy --locked -p sunrise-world -p sunrise-client --lib --tests --examples -- -D warnings
+env SUNRISE_TEST_RESOURCES=/home/runner/work/sunrise/sunrise/.local/sunrise-client/26.3 cargo test --locked -p sunrise-client --lib -- network::remote --include-ignored
+python3 tools/parity.py --fresh stepped_interpolation
