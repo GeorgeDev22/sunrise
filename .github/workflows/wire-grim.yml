@@ -76,8 +76,10 @@ jobs:
           java-version: '25'
       - name: X server, software OpenGL and Vulkan
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb xauth x11-xkb-utils xkb-data libgl1-mesa-dri \
+          # A mirror's outage (2026-11-19: security.ubuntu.com 503s) failed 73 of 120 jobs: retry with backoff.
+          source tools/ci/apt_retry.sh
+          retry sudo apt-get update
+          retry sudo apt-get install -y --no-install-recommends xvfb xauth x11-xkb-utils xkb-data libgl1-mesa-dri \
             libegl1 libglx-mesa0 mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 libxcursor1 libxi6 libxrandr2 \
             libasound2t64 sqlite3
       - name: Sunrise (cloud game build ${{ env.SUNRISE_RUN }})
