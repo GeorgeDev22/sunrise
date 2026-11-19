@@ -1740,9 +1740,12 @@ SCENARIOS = {
     'water_current_push': dict(
         setup=[f'setblock 0 {FLOOR + 1} 6 minecraft:water', f'fill -1 {FLOOR + 1} 0 1 {FLOOR + 1} 7 minecraft:air replace minecraft:air'],
         ticks=80, steps={0: ['key w down'], 30: ['key w up'], 60: ['key s down'], 70: ['key s up']}),
+    # Lava without fire resistance: its hits on the way in and out, then fire resistance before the
+    # burning that follows would kill (a death screen stops the run).
     'lava_step_no_res': dict(
         setup=[f'fill 0 {FLOOR} 2 0 {FLOOR} 3 minecraft:lava'],
-        ticks=60, steps={0: ['key w down'], 12: ['key w up'], 14: ['key s down'], 30: ['key s up']}),
+        ticks=60, steps={0: ['key w down'], 12: ['key w up'], 14: ['key s down'], 26: ['key s up'],
+                         28: ['command effect give @s minecraft:fire_resistance 10 0 true']}),
     'dolphins_grace_swim': dict(
         setup=[f'fill -3 {FLOOR - 2} 1 3 {FLOOR} 20 minecraft:water',
                f'effect give {PLAYER} minecraft:dolphins_grace 30 0 true',
