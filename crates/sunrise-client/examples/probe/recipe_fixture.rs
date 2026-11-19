@@ -112,12 +112,18 @@ pub fn main() -> sunrise_client::Result<()> {
                     "recipe/test:transform".to_owned(),
                     vec![f[1].as_bytes().to_vec()],
                 )];
-                let stations = StationRecipes::load(
+                // The oracle decodes the one recipe with SmithingTransformRecipe's
+                // codec and answers none when it doesn't decode; here the load of
+                // that one file refuses instead.
+                let Ok(stations) = StationRecipes::load(
                     root,
                     &items,
                     &PackOverlay::new(&files),
                     &crate::test_resources::server_load(),
-                )?;
+                ) else {
+                    out.push_str("none\n");
+                    continue;
+                };
                 let (t, b, a) = (stack(2)?, stack(3)?, stack(4)?);
                 match stations.smithing_result(
                     crate::test_resources::server_loop_context(),
