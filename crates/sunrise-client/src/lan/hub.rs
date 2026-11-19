@@ -2367,7 +2367,6 @@ impl Hub {
                 carried,
             }));
             g.menu_sent = items;
-            g.sent_selected = g.selected;
         })
     }
 

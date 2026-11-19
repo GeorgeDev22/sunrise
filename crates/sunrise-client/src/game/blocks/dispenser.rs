@@ -481,7 +481,6 @@ impl Game<'_> {
     /// return this remainder in its answer with `CLICK`; the caller plays the
     /// answer's event and smoke once. A client, another dimension or an unloaded
     /// chunk keeps the input stack unchanged.
-    #[allow(dead_code)]
     pub(super) fn dispense_default(
         &mut self,
         dimension: &str,

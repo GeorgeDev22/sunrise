@@ -1491,21 +1491,9 @@ impl Screen {
                     return Outcome::Connect { address, lan };
                 }
             }
-            (Self::List { .. }, Some(41)) => {
-                return Outcome::Open(Box::new(Self::Direct {
-                    address: String::new(),
-                }));
-            }
+            (Self::List { .. }, Some(41)) => return Outcome::Open(Box::new(Self::direct())),
             (Self::List { .. }, Some(47)) => return Outcome::Open(Box::new(Self::friend(false))),
-            (Self::List { .. }, Some(42)) => {
-                return Outcome::Open(Box::new(Self::Edit {
-                    index: None,
-                    name: crate::lang::get_or("selectServer.defaultName", "Minecraft Server"),
-                    address: String::new(),
-                    focus: 1,
-                    packs: None,
-                }));
-            }
+            (Self::List { .. }, Some(42)) => return Outcome::Open(Box::new(Self::add_server())),
             (
                 Self::List {
                     servers, selected, ..
@@ -1894,6 +1882,22 @@ impl Screen {
             self,
             Self::Edit { .. } | Self::Friend { .. } | Self::Page(_)
         )
+    }
+    /// Add Server (`EditServerScreen` for a new `ServerData`), empty.
+    pub fn add_server() -> Self {
+        Self::Edit {
+            index: None,
+            name: crate::lang::get_or("selectServer.defaultName", "Minecraft Server"),
+            address: String::new(),
+            focus: 1,
+            packs: None,
+        }
+    }
+    /// Direct Connection (`DirectJoinServerScreen`), empty.
+    pub fn direct() -> Self {
+        Self::Direct {
+            address: String::new(),
+        }
     }
     /// Join a friend, with the relay the player set before.
     pub fn friend(from_title: bool) -> Self {

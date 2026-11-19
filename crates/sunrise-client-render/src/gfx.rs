@@ -173,6 +173,7 @@ mod celestial;
 mod census;
 pub mod compositor;
 pub(crate) mod core_lightmap;
+pub use core_lightmap::SHADERS as LIGHTMAP_SHADERS;
 pub(crate) mod core_lines;
 mod core_particles;
 pub use core_particles::HEIGHTMAP_SIZE as POLYTONE_HEIGHTMAP_SIZE;

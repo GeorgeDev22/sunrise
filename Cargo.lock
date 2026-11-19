@@ -5300,8 +5300,6 @@ dependencies = [
  "sunrise-mod-api-gen",
  "sunrise-mod-point-shape",
  "sunrise-perf-format",
- "sunrise-prepare",
- "sunrise-protocol",
  "sunrise-server-files",
  "sunrise-system",
  "sunrise-world",
