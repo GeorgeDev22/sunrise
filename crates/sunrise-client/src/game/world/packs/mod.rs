@@ -827,6 +827,8 @@ type StageResult = std::result::Result<StagedPack, String>;
 /// loading overlay; `Game::drive_pack_reload` applies it on the render thread.
 pub(super) struct PackReload {
     pub(super) progress: super::Progress,
+    /// The bar as drawn, easing toward `progress` (`LoadingOverlay.currentProgress`).
+    pub(super) bar: f32,
     kind: ReloadKind,
     handle: Option<std::thread::JoinHandle<StageResult>>,
     /// When the overlay went up. `LoadingOverlay.fadeInStart`, set on the
@@ -861,6 +863,7 @@ impl PackReload {
             .spawn(move || stage(&worker))?;
         Ok(Self {
             progress,
+            bar: 0.0,
             kind,
             handle: Some(handle),
             started: Instant::now(),

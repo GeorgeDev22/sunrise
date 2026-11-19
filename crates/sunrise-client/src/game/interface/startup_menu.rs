@@ -1359,11 +1359,13 @@ impl Loading {
             }
         }
         if self.menu.pending.is_some() {
+            self.bar =
+                sunrise_client::level_loading::ease_overlay(self.bar, self.progress.fraction());
             sunrise_client::level_loading::draw_loading_overlay(
                 batch,
                 &gui.atlas,
                 self.progress.line(),
-                self.progress.fraction(),
+                self.bar,
                 self.settings.file.bool("darkMojangStudiosBackground"),
             );
             let (bars, lines) = super::startup_progress::shown();
@@ -1526,6 +1528,7 @@ mod tests {
             started: Instant::now(),
             panorama_rotation: Default::default(),
             progress: Progress::new(),
+            bar: 0.0,
             receiver,
             loaded: None,
             delivered: false,

@@ -364,6 +364,12 @@ pub fn smooth(smoothed: f32, progress: f32) -> f32 {
     smoothed + (progress - smoothed) * 0.2
 }
 
+/// `LoadingOverlay.extractRenderState`: each frame the bar moves 5% of the
+/// way to the reload's actual progress, so a jump in stages slides in.
+pub fn ease_overlay(current: f32, actual: f32) -> f32 {
+    (current * 0.95 + actual * 0.050000012).clamp(0.0, 1.0)
+}
+
 /// `ARGB.opaque` as the batch's RGBA.
 pub const fn opaque(rgb: u32) -> u32 {
     0xFF00_0000 | (rgb & 0xFF) << 16 | (rgb & 0xFF00) | (rgb >> 16 & 0xFF)
@@ -781,6 +787,20 @@ mod tests {
         let eased = smooth(0.0, 1.0);
         assert_eq!(eased, 0.2);
         assert!((smooth(eased, 1.0) - 0.36).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_overlay_bar_slides_toward_a_jump_in_progress() {
+        // A stage jump from 0 to 1/3: the first frame moves 5% of the way.
+        let first = ease_overlay(0.0, 1.0 / 3.0);
+        assert!((first - 1.0 / 60.0).abs() < 1e-6, "{first}");
+        // After 60 frames it covers 1 - 0.95^60, about 95% of the jump.
+        let mut bar = 0.0;
+        for _ in 0..60 {
+            bar = ease_overlay(bar, 1.0);
+        }
+        assert!((bar - 0.953_930).abs() < 1e-4, "{bar}");
+        assert_eq!(ease_overlay(1.0, 1.0), 1.0);
     }
 
     #[test]

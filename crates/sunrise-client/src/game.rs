@@ -8214,17 +8214,21 @@ impl Game<'_> {
         }
         // A pack reload covers the frame with its progress
         // (`LoadingOverlay`) until `drive_pack_reload` applies it.
-        if let Some(reload) = &self.pack_reload {
+        if let Some(reload) = &mut self.pack_reload {
             if let Some(renderer) = &mut self.renderer {
                 let mut hud = HudBatch::new(
                     [renderer.config.width, renderer.config.height],
                     self.settings.gui_scale_inputs(),
                 );
+                reload.bar = sunrise_client::level_loading::ease_overlay(
+                    reload.bar,
+                    reload.progress.fraction(),
+                );
                 sunrise_client::level_loading::draw_loading_overlay(
                     &mut hud,
                     &self.gui.atlas,
                     reload.progress.line(),
-                    reload.progress.fraction(),
+                    reload.bar,
                     self.settings.file.bool("darkMojangStudiosBackground"),
                 );
                 pr.lap("pr_loading");
