@@ -1852,7 +1852,7 @@ SCENARIOS = {
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:hopper', f'setblock 2 {FLOOR + 1} 2 minecraft:crafter',
                f'item replace entity {PLAYER} hotbar.0 with minecraft:cobblestone 32'],
         ticks=70, steps={0: ['look 0 45'], 5: ['mouse right click'], 10: ['click-slot 32 shift'], 14: ['click-slot 0'],
-                         18: ['key esc tap'], 22: ['look -40 35'], 26: ['mouse right click'], 32: ['click-slot 0'], 36: ['click-slot 4'],
+                         18: ['key esc tap'], 22: ['look -45 22'], 26: ['mouse right click'], 32: ['click-slot 0'], 36: ['click-slot 4'],
                          40: ['click-slot 8'], 46: ['key esc tap']}),
     'cartography_fletching': dict(
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:cartography_table', f'setblock 1 {FLOOR + 1} 2 minecraft:fletching_table',
