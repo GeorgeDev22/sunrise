@@ -1,0 +1,3 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client --all-targets -- -D warnings
+python3 tools/parity.py --fresh --timeout 5400 stand_fall_save stand_break_loot stand_command_hurt armor_stand_equip_events < /dev/null
