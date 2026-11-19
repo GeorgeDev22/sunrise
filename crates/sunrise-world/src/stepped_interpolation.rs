@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 /// `set_entity_motion`, which `Entity.lerpMotion` set as it came) keeps
 /// 0.98 of itself; then an x, y or z under 0.003 drops to zero. Another
 /// player runs `RemotePlayer.aiStep` instead, which has neither
-/// ([`PlayerMotion`]).
+/// ([`RemotePlayerMotion`]).
 pub fn mob_motion(motion: [f64; 3], interpolating: bool) -> [f64; 3] {
     let motion = if interpolating {
         motion
@@ -28,12 +28,12 @@ pub fn mob_motion(motion: [f64; 3], interpolating: bool) -> [f64; 3] {
 /// target, which `aiStep` eases to over the player type's update interval
 /// and one tick more.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct PlayerMotion {
+pub struct RemotePlayerMotion {
     target: [f64; 3],
     steps: u32,
 }
 
-impl PlayerMotion {
+impl RemotePlayerMotion {
     /// `RemotePlayer.lerpMotion`: the player type's update interval (2) + 1.
     pub fn lerp_to(&mut self, motion: [f64; 3]) {
         *self = Self {

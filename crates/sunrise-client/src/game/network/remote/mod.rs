@@ -81,7 +81,7 @@ use {
         level::InteractionResult,
         registry::BlockStateId,
         stepped_interpolation::{
-            Path, PlayerMotion, PosRot, Start, SteppedInterpolation, mob_motion,
+            Path, PosRot, RemotePlayerMotion, Start, SteppedInterpolation, mob_motion,
         },
     },
 };
@@ -726,7 +726,7 @@ pub(super) struct Remote {
     pub(super) head_lerps: HashMap<i32, (f32, u32)>,
     /// Other players' `RemotePlayer.lerpMotion`: the server's motion they
     /// ease to.
-    pub(super) player_motions: HashMap<i32, PlayerMotion>,
+    pub(super) player_motions: HashMap<i32, RemotePlayerMotion>,
     /// The happy ghast the player just got off, until the server's teleport
     /// puts the player on top of it (`place_ghast_under`).
     pub(super) ghast_dismount: Option<u32>,

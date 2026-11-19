@@ -1,10 +1,10 @@
 //! The Rust side of tools/test_stepped_interpolation_parity.py: replays the
 //! harness's events (VanillaSteppedInterpolationOracle's input format) on
-//! `SteppedInterpolation`, `mob_motion` and `PlayerMotion`, and writes the
+//! `SteppedInterpolation`, `mob_motion` and `RemotePlayerMotion`, and writes the
 //! entity after each one.
 use std::fmt::Write as _;
 use sunrise_world::stepped_interpolation::{
-    Path, PlayerMotion, PosRot, Start, SteppedInterpolation, mob_motion,
+    Path, PosRot, RemotePlayerMotion, Start, SteppedInterpolation, mob_motion,
 };
 
 /// `Entity.setRot`: yaw and pitch wrapped, pitch clamped (`setXRot`).
@@ -20,7 +20,7 @@ pub fn main() {
     let mut handler = SteppedInterpolation::new(0);
     let mut entity = PosRot::default();
     let mut motion = [0.0f64; 3];
-    let mut player = None::<PlayerMotion>;
+    let mut player = None::<RemotePlayerMotion>;
     for line in input.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
         let num = |i: usize| f[i].parse::<f64>().expect("number");
@@ -33,7 +33,7 @@ pub fn main() {
                     pitch: f[6].parse().expect("pitch"),
                 };
                 motion = [0.0; 3];
-                player = (f.get(7) == Some(&"P")).then(PlayerMotion::default);
+                player = (f.get(7) == Some(&"P")).then(RemotePlayerMotion::default);
                 "c"
             }
             "move" => {
