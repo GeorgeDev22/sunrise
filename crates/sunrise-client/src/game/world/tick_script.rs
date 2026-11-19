@@ -96,6 +96,11 @@ impl Game<'_> {
                 clicks.extend(click);
                 continue;
             }
+            // Any other line acts after the clicks before it, in the script's order (a beacon's payment
+            // click goes before its confirm).
+            if !clicks.is_empty() {
+                self.remote_menu_clicks(&std::mem::take(&mut clicks));
+            }
             // `mouse-move DX DY`: the motion a grabbed pointer adds between frames (MouseHandler.onMove), which
             // the frame turns the view by, not sunrise-ctl's glide (one at a time), so a move every tick counts.
             // `menu-button N`: what a station screen does with its button (a stonecutter's recipe, a loom's
@@ -150,9 +155,6 @@ impl Game<'_> {
             // editor sends its text, a container its close), and nothing with no screen open.
             // sunrise-ctl's `close` sends a container close whatever is open.
             if line.trim() == "close" {
-                if !clicks.is_empty() {
-                    self.remote_menu_clicks(&std::mem::take(&mut clicks));
-                }
                 self.close_screen();
                 continue;
             }
@@ -160,9 +162,6 @@ impl Game<'_> {
                 self.mouse.add_motion(dx, dy);
                 self.agent_pointer = true;
                 continue;
-            }
-            if !clicks.is_empty() {
-                self.remote_menu_clicks(&std::mem::take(&mut clicks));
             }
             self.replay_line(&line, event_loop);
         }

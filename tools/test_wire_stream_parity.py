@@ -9,9 +9,11 @@ console, then hands the client the scenario, which it plays tick by tick from it
 SUNRISE_TICK_SCRIPT, game/world/tick_script.rs; vanilla: VanillaTickScript.java, the unchanged client with its
 keys pressed through KeyMapping). Both send /wire-mark on the scenario's first tick. tools/wire_stream.py
 cuts each scenario's stream into client ticks (ClientTickEnd ends one) and decodes the packets; every tick
-must hold the same packets, in the same order, with the same fields (doubles and floats exactly). Packets
-the server's timing decides (keep-alive, pong, chunk batch, teleport acceptance) are compared as a sequence
-over the scenario, and must never fall between two packets of one tick.
+must hold the same packets, in the same order, with the same bytes (doubles and floats by their bits). In the
+replay the answers to the server (pong, teleport acceptance, chat acknowledgement) keep their place among a tick's
+packets, and the network thread's (keep-alive, chunk batch) compare by tick and bytes; a scenario whose delivery
+ticks the replay can't vouch for is inconclusive. Live, the answers compare by name and order, and must never fall
+between two packets of one tick; a live match is not an exact pass.
 
 Vanilla plays the live server; Sunrise then gets vanilla's server stream replayed on the same scenario ticks
 (tools/wire_replay.py), so both clients answered the same server and a difference is the client's own. --live plays
@@ -151,6 +153,10 @@ def mace_fall(height, enchantment=None, effects=(), target_z=5.2):
                     every(12, 12 + fall_ticks, 3, 'mouse left click')))
 
 
+# A scenario: `ticks`, `steps` (tick: lines), `setup` (console commands before the settle's teleport), `mount`
+# (console commands after it, which must leave the player riding: play_all's mount), `enters` (a dimension the
+# scenario must take the player into: a Respawn into it, or the run fails), `anchor` (live comparison only:
+# anchored_diffs), `sunrise_steps`.
 SCENARIOS = {
     'walk': dict(ticks=70, steps=merge(
         {0: ['key w down'], 20: ['look 30 0'], 30: ['look 30 15'], 40: ['key w up'], 50: ['look 0 0']})),
@@ -314,22 +320,22 @@ SCENARIOS = {
                           20: ['key space down'], 30: ['key space up'], 45: ['key a down'], 55: ['key a up'],
                           60: ['key ctrl down'], 62: ['key space down'], 64: ['key space up'], 80: ['key ctrl up'],
                           85: ['key w up'], 100: ['key shift down'], 104: ['key shift up']}),
-    # Mounted in the setup, facing 0: a camel left alone turns its head at random before the player mounts, and a
-    # rider steering it takes its head's yaw, so the two clients dashed different ways.
+    # Turned to 0 and mounted after the settle: a camel left alone turns its head at random before the player
+    # mounts, and a rider steering it takes its head's yaw, so the two clients dashed different ways.
     'camel_dash': dict(
         setup=[f'summon minecraft:camel 0.5 {FLOOR + 1} 2.5 {{PersistenceRequired:1b,Tame:1b,Rotation:[0f,0f],'
-               'equipment:{saddle:{id:"minecraft:saddle",count:1}}}',
-               f'ride {PLAYER} mount @e[type=minecraft:camel,limit=1]'],
+               'equipment:{saddle:{id:"minecraft:saddle",count:1}}}'],
+        mount=['rotate @e[type=minecraft:camel,limit=1] 0 0', f'ride {PLAYER} mount @e[type=minecraft:camel,limit=1]'],
         ticks=120, steps={10: ['key w down'],
                           30: ['key space down'], 34: ['key space up'], 60: ['key ctrl down'], 70: ['key ctrl up'], 85: ['key w up'],
                           110: ['key shift down'], 114: ['key shift up']}),
-    # Mounted in the setup, facing 0: left alone, the mob turned at random before the mount, so the two clients'
-    # rides differed.
+    # Turned to 0 and mounted after the settle: left alone, the mob turned at random before the mount, so the two
+    # clients' rides differed.
     'pig_carrot': dict(
         setup=[f'summon minecraft:pig 0.5 {FLOOR + 1} 2.5 {{PersistenceRequired:1b,Rotation:[0f,0f],'
                'equipment:{saddle:{id:"minecraft:saddle",count:1}}}',
-               f'ride {PLAYER} mount @e[type=minecraft:pig,limit=1]',
                f'item replace entity {PLAYER} weapon.mainhand with minecraft:carrot_on_a_stick'],
+        mount=['rotate @e[type=minecraft:pig,limit=1] 0 0', f'ride {PLAYER} mount @e[type=minecraft:pig,limit=1]'],
         ticks=90, steps={10: ['look 30 10'],
                          30: ['mouse right click'], 50: ['look -20 10'], 75: ['key shift down'], 79: ['key shift up']}),
     # Mounting turns the rider (AbstractHorse.addPassenger's absSnapRotationTo; a boat's yaw when boarding): the
@@ -434,8 +440,8 @@ SCENARIOS = {
         ticks=50, steps={0: ['look 0 45'], 5: ['mouse right click'], 12: ['click-slot 30 shift'],
                          16: ['click-slot 0 shift'], 20: ['click-slot 31 shift'], 24: ['click-slot 0 shift'],
                          28: ['click-slot 32 shift'], 32: ['click-slot 0 shift'], 40: ['key e tap']}),
-    # Real-time tick rate: two minutes of standing and walking, measured from the capture's
-    # tick-ends against the wall clock (a client must average 20 a second; catch-up after a stall is bounded).
+    # Two minutes of standing and walking: the packets of each of its ticks. The harness doesn't measure the
+    # ticks against the wall clock.
     'timing_long': dict(
         ticks=2400, steps=merge(every(100, 2300, 200, 'key w down'), every(140, 2340, 200, 'key w up'),
                                 every(160, 2360, 200, 'key s down'), every(190, 2390, 200, 'key s up'))),
@@ -701,11 +707,11 @@ SCENARIOS = {
     # player stands. The portal goes once the player is through: left at the spawn point, it sends the next client
     # to join (after the last scenario, before any reset) straight into the End.
     'end_portal_drop': dict(
-        setup=[f'setblock 0 {FLOOR} 3 minecraft:end_portal'],
+        setup=[f'setblock 0 {FLOOR} 3 minecraft:end_portal'], enters='minecraft:the_end',
         ticks=120, steps={0: [f'command tp @s 0.5 {FLOOR + 6} 3.5'],
                           100: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
     'end_portal_inside': dict(
-        ticks=110, steps={0: [f'command setblock 0 {FLOOR + 1} 0 minecraft:end_portal'],
+        enters='minecraft:the_end', ticks=110, steps={0: [f'command setblock 0 {FLOOR + 1} 0 minecraft:end_portal'],
                           5: [f'command execute in minecraft:overworld run setblock 0 {FLOOR + 1} 0 minecraft:air'],
                           90: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
     # Mobs' and projectiles' pushes: a shulker's bullets (levitation), a ghast's fireball, a breeze's
@@ -813,11 +819,12 @@ SCENARIOS = {
         ticks=90, steps={0: ['look 0 10'], 5: ['mouse left click'], 25: ['mouse left click'], 40: ['key ctrl down', 'key w down'],
                          42: ['mouse right down'], 70: ['mouse right up'], 75: ['key w up', 'key ctrl up']}),
     # A happy ghast with a harness, ridden: up, forward, down.
-    # Mounted in the setup, facing 0: left alone, the mob turned at random before the mount, so the two clients'
-    # rides differed.
+    # Turned to 0 and mounted after the settle: left alone, the mob turned at random before the mount, so the two
+    # clients' rides differed.
     'happy_ghast_ride': dict(
         setup=[f'summon minecraft:happy_ghast 0.5 {FLOOR + 1} 3.5 {{PersistenceRequired:1b,Rotation:[0f,0f],'
-               'equipment:{body:{id:"minecraft:white_harness",count:1}}}',
+               'equipment:{body:{id:"minecraft:white_harness",count:1}}}'],
+        mount=['rotate @e[type=minecraft:happy_ghast,limit=1] 0 0',
                f'ride {PLAYER} mount @e[type=minecraft:happy_ghast,limit=1]'],
         ticks=100, steps={8: ['key space down'],
                           28: ['key space up', 'key w down'], 60: ['key w up', 'key shift down'], 62: ['key shift up']}),
@@ -873,8 +880,9 @@ SCENARIOS = {
                                {t: ['mouse left click'] for t in range(20, 110, 12)},
                                {t: ['key w up'] for t in range(22, 110, 12)},
                                {t: ['key w down'] for t in range(25, 110, 12)}, {112: ['key w up']})),
-    # Keep-alive: 20 seconds standing, so a keep-alive (every 15 s) and its answer fall inside; run with
-    # WIRE_STREAM_LATENCY for a slow or changing connection.
+    # Keep-alive: 20 seconds standing, so a keep-alive (every 15 s) and its answer fall inside: the replay compares
+    # the answer's tick and id, a live run leaves keep-alives out. Run with WIRE_STREAM_LATENCY for a slow or
+    # changing connection.
     'keepalive_idle': dict(ticks=400, steps={200: ['key w down'], 204: ['key w up']}),
     # Options both clients start with (WIRE_STREAM_OPTIONS): Auto-Jump walking into a step
     # (autoJump:true), toggled sprint and sneak tapped on and off (toggleSprint:true,toggleCrouch:true).
@@ -1674,6 +1682,9 @@ class ClientCounts:
 
     def __init__(self, capture):
         self.capture, self.offset, self.accepted, self.ticks = capture, 0, 0, 0
+        # The player's entity id (the play Login's), the vehicle the server last set it riding (SetPassengers), and
+        # the dimensions of the Respawns it was sent, in order.
+        self.me, self.vehicle, self.respawns = None, None, []
 
     def update(self):
         with open(self.capture, 'rb') as f:
@@ -1686,6 +1697,26 @@ class ClientCounts:
                 e = json.loads(line)
                 self.accepted += e.get('name') == 'accept_teleportation'
                 self.ticks += e.get('name') == 'client_tick_end'
+            elif b'"s2c"' in line and (b'"login"' in line or b'"set_passengers"' in line or b'"respawn"' in line):
+                e = json.loads(line)
+                if e.get('state') != 'play' or 'data' not in e:
+                    continue
+                payload = bytes.fromhex(e['data'])
+                if e['name'] == 'login':
+                    self.me = wire_stream.self_id([e])
+                elif e['name'] == 'set_passengers' and self.me is not None:
+                    r = wire_stream.Reader(payload)
+                    vehicle = r.varint()
+                    passengers = [r.varint() for _ in range(r.varint())]
+                    if self.me in passengers:
+                        self.vehicle = vehicle
+                    elif vehicle == self.vehicle:
+                        self.vehicle = None
+                elif e['name'] == 'respawn':
+                    # CommonPlayerSpawnInfo: the dimension type (a registry id), then the dimension's key.
+                    r = wire_stream.Reader(payload)
+                    r.varint()
+                    self.respawns.append(r.string())
         return self
 
 
@@ -1705,17 +1736,33 @@ def settle(counts, accepted, timeout=120):
         time.sleep(0.2)
 
 
-def forget_player(directory, level, others):
+def saved_logout(server, left_before, timeout=60):
+    """Wait until the server has logged the player out (its `left the game` line after `left_before` of them) and
+    saved the world: PlayerList.remove writes the player's file on the server thread after that line, and
+    `save-all flush` runs on the same thread after it, so its `Saved the game` comes once the file is written."""
+    deadline = time.time() + timeout
+    while sum(f'{PLAYER} left the game' in line for line in server.lines) <= left_before:
+        if time.time() > deadline:
+            raise Failed(f'the server never logged {PLAYER} out')
+        time.sleep(0.2)
+    saved_before = sum('Saved the game' in line for line in server.lines)
+    server.console('save-all flush')
+    while sum('Saved the game' in line for line in server.lines) <= saved_before:
+        if time.time() > deadline:
+            raise Failed('the server never saved after the logout')
+        time.sleep(0.2)
+
+
+def forget_player(directory, level):
     """The next client joins as a new player: Steve's saved data from this one (last death, portal cooldown,
     spawn point, stats, advancements) would otherwise reach it in its first Login and Respawn, and the server would
     treat it differently from the first client (end_portal: a Respawn with the first client's death location, and
-    the portal taken at another tick)."""
-    for root in [directory, *others]:
-        # 26.3 keeps them under players/ (LevelResource.PLAYER_DATA_DIR...); 1.21.11 (behind ViaVersion) at the top.
-        for kind in ('players/data', 'players/stats', 'players/advancements', 'playerdata', 'stats', 'advancements'):
-            for saved in (root / level / kind).glob('*'):
-                if saved.is_file():
-                    saved.unlink()
+    the portal taken at another tick). Only the scratch server's world: the one run() started."""
+    # 26.3 keeps them under players/ (LevelResource.PLAYER_DATA_DIR...); 1.21.11 (behind ViaVersion) at the top.
+    for kind in ('players/data', 'players/stats', 'players/advancements', 'playerdata', 'stats', 'advancements'):
+        for saved in (directory / level / kind).glob('*'):
+            if saved.is_file():
+                saved.unlink(missing_ok=True)
 
 def play_all(client, server, scenarios, scripts, sunrise, capture):
     counts = ClientCounts(capture)
@@ -1734,10 +1781,37 @@ def play_all(client, server, scenarios, scripts, sunrise, capture):
         for command in commands:
             server.console(command)
         settle(counts, accepted)
+        if spec.get('mount'):
+            mount(server, counts, spec['mount'])
+        respawns = len(counts.update().respawns)
         path = scripts / f'{name}-{"sunrise" if sunrise else "vanilla"}.json'
         path.write_text(json.dumps(script(name, spec, sunrise)))
         client.play(path, name, timeout=max(60, spec['ticks'] / 20 + 30))
+        if spec.get('enters') and spec['enters'] not in counts.update().respawns[respawns:]:
+            raise Failed(f'{counts.capture.stem}: {name} never took the player into {spec["enters"]}')
         time.sleep(0.5)
+
+
+# Client ticks between the mount's SetPassengers and the scenario: the vehicle's first moves are the client's.
+MOUNT_SETTLE = 10
+
+
+def mount(server, counts, commands, timeout=60):
+    """`mount`: commands that seat the player, run after the settle's teleport (a teleport takes the player off
+    its vehicle); the scenario starts MOUNT_SETTLE ticks after the server set the player riding."""
+    counts.update().vehicle = None
+    for command in commands:
+        server.console(command)
+    deadline = time.time() + timeout
+    while counts.update().vehicle is None:
+        if time.time() > deadline:
+            raise Failed(f'{counts.capture.stem}: the server never set the player riding')
+        time.sleep(0.1)
+    ticks = counts.ticks
+    while counts.update().ticks < ticks + MOUNT_SETTLE:
+        if time.time() > deadline:
+            raise Failed(f'{counts.capture.stem}: the client stopped ticking')
+        time.sleep(0.1)
 
 
 # WIRE_STREAM_TRANSFER=1: after the scenarios the server transfers each client back to its own
@@ -1823,6 +1897,7 @@ def run(args, out):
             phase = float(os.environ['WIRE_STREAM_PHASE']) if os.environ.get('WIRE_STREAM_PHASE') else None
             stop = net_capture.start_background(listen, f'127.0.0.1:{port}', capture, full=True, phase=phase)
             client = None
+            left_before = sum(f'{PLAYER} left the game' in line for line in server.lines)
             try:
                 if who != 'vanilla':
                     # WIRE_STREAM_EXTRAS=key:value,...: the Sunrise client's sunrise-extras.txt.
@@ -1842,9 +1917,11 @@ def run(args, out):
                     if who != 'vanilla' and client.game.log.exists():
                         shutil.copy(client.game.log, out / f'{who}-client.log')
                     client.close()
-                time.sleep(2)
                 stop.set()
-                forget_player(directory, props.get('level-name', 'world'), [work / 'server2'] if proxy else [])
+            # Before the next client joins: its first Login must not carry this one's saved player.
+            if client:
+                saved_logout(server, left_before)
+            forget_player(directory, props.get('level-name', 'world'))
             captures[who] = capture
     finally:
         server.stop()
@@ -1870,55 +1947,97 @@ def anchored_diffs(v, h, ticks, anchor, problems, names=('vanilla', 'Sunrise')):
     return wire_stream.compare_answered(v, h, ticks, av, ah)
 
 
-def compare(captures, scenarios, replayed=False):
+def compare(captures, scenarios, replayed=False, uncertain=None):
     """Each scenario's problems, the second client's stream against the first's (`captures` in that order).
-    `replayed`: both clients got the same server stream on the same ticks (wire_replay.py), so no tick is
-    realigned to an answer and the replies to the server's packets compare with their fields and ticks."""
+
+    `replayed`: both clients got the same server stream (wire_replay.py), checked here, so nothing is renumbered or
+    realigned: every tick's packets, the frame's answers in their place among them, compare byte for byte, and the
+    network thread's answers by tick and bytes (wire_stream's `exact`). `uncertain` is the replay's timing record
+    ({scenario: [why its delivery ticks are not known to be vanilla's]}, REPLAY_TIMING): such a scenario is
+    inconclusive, its differences listed; None (no record) leaves every scenario inconclusive.
+
+    Live (not `replayed`): ids and sequences are renumbered per client, a scenario's answer tick is realigned
+    (`anchor`) and the frame's answers compare by name and order only; a live match is not an exact pass."""
     (ref, ref_name), (new, new_name) = [(who, CLIENTS[who]) for who in captures]
-    runs = {}
+    runs, inputs = {}, {}
     for who, capture in captures.items():
         entries = [e for e in net_capture.load(capture) if e.get('conn') == 1 and 'name' in e]
-        found = wire_stream.scenarios(entries)
+        found = wire_stream.scenarios(entries, exact=replayed)
         if len(found) != len(scenarios):
             raise Failed(f'{who}: {len(found)} marked scenarios in the capture, expected {len(scenarios)}')
         runs[who] = dict(zip(scenarios, found))
+        if replayed:
+            inputs[who] = wire_stream.shared_input(entries)
+    if replayed and inputs[ref] != inputs[new]:
+        at = next(i for i, (a, b) in enumerate(itertools.zip_longest(inputs[ref], inputs[new])) if a != b)
+        raise Failed(f'the replayed captures did not get the same server packets (first difference at play packet '
+                     f'{at}): nothing compares exactly')
     results = []
     for name in scenarios:
         v, h = runs[ref][name], runs[new][name]
         ticks = SCENARIOS[name]['ticks'] + PRELUDE
         problems = []
-        anchor = None if replayed else SCENARIOS[name].get('anchor')
-        for i, vt, ht in anchored_diffs(v, h, ticks, anchor, problems, (ref_name, new_name)):
+        if replayed:
+            if uncertain is None:
+                problems.append(f'{INCONCLUSIVE} no delivery-timing record with the replay capture '
+                                f'({REPLAY_TIMING}): when Sunrise took the server\'s packets is unknown')
+            for why in (uncertain or {}).get(name, []):
+                problems.append(f'{INCONCLUSIVE} {why}')
+            diffs = wire_stream.compare(v, h, ticks, key='wire')
+        else:
+            diffs = anchored_diffs(v, h, ticks, SCENARIOS[name].get('anchor'), problems, (ref_name, new_name))
+        wire = lambda run, i: run[i]['wire'] if i < len(run) else None  # noqa: E731
+        for i, vt, ht in diffs:
             problems.append(f'  tick {i}:\n  {ref_name}:\n{wire_stream.describe(vt)}\n  {new_name}:\n'
                             f'{wire_stream.describe(ht)}')
-            problems += wire_stream.field_diff(vt, ht, (ref_name, new_name))
+            problems += wire_stream.field_diff(vt, ht, (ref_name, new_name), (wire(v, i), wire(h, i)))
         if replayed:
-            # The same keep-alives, pings and teleports reached both on the same ticks: each reply's tick and
-            # fields (a pong's id) compare. Only the chunk batch's rate is each client's own measurement.
-            frame = lambda run: [(i, n, f if n != 'chunk_batch_received' else None)  # noqa: E731
-                                 for i, t in enumerate(run[:ticks + 1]) for n, f in t['frame']]
+            problems += network_answers(v, h, ticks, (ref_name, new_name))
         else:
             # The server decides when keep-alives and chunk batches come; the others answer what the scenario did.
+            # Order only: a diagnostic of the live run, not an exact comparison.
             frame = lambda run: [n for t in run[:ticks + 1] for n, _ in t['frame']  # noqa: E731
                                  if n not in ('keep_alive', 'chunk_batch_received')]
-        if frame(v) != frame(h):
-            problems.append(f'  frame packets: {ref_name} {frame(v)}, {new_name} {frame(h)}')
-        # An answer can belong inside a tick for both (a teleport's handler sends a dig abort between two pongs):
-        # only a difference is one.
-        misplaced = lambda run: [(i, t['misplaced']) for i, t in enumerate(run[:ticks + 1]) if t['misplaced']]  # noqa: E731
-        if misplaced(h) != misplaced(v):
-            problems.append(f'  answers inside a tick: {ref_name} {misplaced(v)}, {new_name} {misplaced(h)}')
+            if frame(v) != frame(h):
+                problems.append(f'  frame packets: {ref_name} {frame(v)}, {new_name} {frame(h)}')
+            # An answer can belong inside a tick for both (a teleport's handler sends a dig abort between two
+            # pongs): only a difference is one.
+            misplaced = lambda run: [(i, t['misplaced']) for i, t in enumerate(run[:ticks + 1]) if t['misplaced']]  # noqa: E731
+            if misplaced(h) != misplaced(v):
+                problems.append(f'  answers inside a tick: {ref_name} {misplaced(v)}, {new_name} {misplaced(h)}')
         results.append((name, problems))
     return results
 
 
+# The network thread's answer whose body is the client's own measurement: ChunkBatchReceived's rate comes from how
+# long the client took over the batch's chunks (ChunkBatchSizeCalculator), so the replay can't make it the same.
+MEASURED = {'chunk_batch_received'}
+
+
+def network_answers(v, h, ticks, names):
+    """Replay: the network thread's answers (keep-alive, chunk batch), which may land anywhere within a tick: their
+    ticks, names and bytes in order. A measured body that differs is reported as not verified (inconclusive)."""
+    ref_name, new_name = names
+    answers = lambda run: [(i, n, b) for i, t in enumerate(run[:ticks + 1]) for n, b in t['frame_wire']]  # noqa: E731
+    a, b = answers(v), answers(h)
+    if [(i, n, d if n not in MEASURED else None) for i, n, d in a] != \
+            [(i, n, d if n not in MEASURED else None) for i, n, d in b]:
+        return [f'  network-thread answers (tick, packet, bytes): {ref_name} {a}, {new_name} {b}']
+    measured = [(x, y) for x, y in zip(a, b) if x[2] != y[2]]
+    return [f'{INCONCLUSIVE} {x[1]} at tick {x[0]} carries each client\'s own timing measurement, not verified: '
+            f'{ref_name} {x[2]}, {new_name} {y[2]}' for x, y in measured]
+
+
+# Beside a replay's sunrise.jsonl: its delivery-timing record (wire_replay.py), read again by --compare-only.
+REPLAY_TIMING = 'timing.json'
 INCONCLUSIVE = '  inconclusive:'
 
 
-def verdict(problems):
+def verdict(problems, exact=True):
+    """`exact`: a replay's comparison; a live one without differences is a `match`, not a pass."""
     if not problems:
-        return 'pass'
-    return 'INCONCLUSIVE' if problems[0].startswith(INCONCLUSIVE) else 'FAIL'
+        return 'pass' if exact else 'match (live)'
+    return 'INCONCLUSIVE' if any(p.startswith(INCONCLUSIVE) for p in problems) else 'FAIL'
 
 
 def main():
@@ -1951,18 +2070,28 @@ def main():
     # Vanilla against Sunrise: vanilla plays the live server, then its server stream is replayed to Sunrise
     # (tools/wire_replay.py), so both clients got the same answers on the same ticks and the server's timing and
     # randomness leave the comparison. --live plays Sunrise against the live server instead, as do a Grim server
-    # and a transfer, which judge or move Sunrise itself.
+    # and a transfer, which judge or move Sunrise itself, and a required resource pack: the replay serves no pack,
+    # so the clients' answers to it are compared live.
     replayed = (args.clients == ['vanilla', 'sunrise'] and not args.live and not args.compare_only
-                and not os.environ.get('WIRE_STREAM_GRIM') and not os.environ.get('WIRE_STREAM_TRANSFER'))
-    replay_capture = False
+                and not os.environ.get('WIRE_STREAM_GRIM') and not os.environ.get('WIRE_STREAM_TRANSFER')
+                and not os.environ.get('WIRE_STREAM_RESOURCE_PACK'))
+    replay_capture, uncertain = False, None
     if args.compare_only:
         captures = {who: out / f'{who}.jsonl' for who in args.clients}
         if 'sunrise' in captures and not args.live and (out / 'replay' / 'sunrise.jsonl').exists():
             captures['sunrise'] = out / 'replay' / 'sunrise.jsonl'
             replay_capture = True
+            timing = out / 'replay' / REPLAY_TIMING
+            if timing.exists():
+                record = json.loads(timing.read_text())
+                if record.get('scenarios') != args.scenarios:
+                    sys.exit(f'FAIL: {timing} is for the scenarios {record.get("scenarios")}, not {args.scenarios}')
+                uncertain = record['uncertain']
     else:
-        shutil.rmtree(out, ignore_errors=True)
-        out.mkdir(parents=True)
+        if out.exists() and (not out.is_dir() or any(out.iterdir())):
+            sys.exit(f'FAIL: {out} is not an empty folder: give --out a new one, or remove it first (a run writes '
+                     'only into an empty folder, never over earlier captures)')
+        out.mkdir(parents=True, exist_ok=True)
         try:
             if replayed:
                 import wire_replay
@@ -1979,7 +2108,7 @@ def main():
             return
     try:
         if not replayed:
-            results = compare(captures, args.scenarios, replay_capture)
+            results = compare(captures, args.scenarios, replay_capture, uncertain)
     except Failed as e:
         sys.exit(f'FAIL: {e}')
     if os.environ.get('WIRE_STREAM_TRANSFER'):
@@ -1994,11 +2123,13 @@ def main():
             for check, _ in violations:
                 counts[check] = counts.get(check, 0) + 1
             print(f'Grim violations, {CLIENTS[who]}: {len(violations)} {counts}')
-    how = 'replayed vanilla server stream' if replayed else 'live server'
+    exact = replayed or replay_capture
+    how = ('replayed vanilla server stream: exact' if exact
+           else 'live server: aligned to its answers, a match is not an exact pass')
     print(f'\nserverbound play streams, {CLIENTS[args.clients[0]]} vs {CLIENTS[args.clients[1]]} ({how}); '
           f'captures in {out}')
     for name, problems in results:
-        print(f'  {verdict(problems)}  {name}')
+        print(f'  {verdict(problems, exact and name != "transfer_back")}  {name}')
         for p in problems:
             print(p)
     if any(p for _, p in results):

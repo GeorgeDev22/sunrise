@@ -744,6 +744,7 @@ impl Game<'_> {
                 // A held edit modifier (`key super down`) and A/C/V/X: the
                 // open book's Select All, Copy, Paste or Cut.
                 if self.book.is_some() && arg(2)? != "up" {
+                    let tap = arg(2)? == "tap";
                     // The physical modifier first, as the window's (KeyboardHandler's modifiers):
                     // a Ctrl or Shift held from here on is what the book's shortcuts and
                     // selection read, not the gameplay mappings it never reaches.
@@ -761,10 +762,14 @@ impl Game<'_> {
                         sunrise_client::clipboard::edit_shortcut(letter, edit, shift, false)
                     {
                         self.book_shortcut(shortcut);
-                        return ok();
+                    } else {
+                        // The rest of the press goes to the book, as the window's (`book_key`).
+                        self.book_input(Some(key), None);
                     }
-                    // The rest of the press goes to the book, as the window's (`book_key`).
-                    self.book_input(Some(key), None);
+                    // A tap lets go again: a modifier it pressed doesn't stay held.
+                    if tap {
+                        self.press_modifier_key(key, false);
+                    }
                     return ok();
                 }
                 // KeyboardHandler.keyPress: the debug keys see the physical key first.

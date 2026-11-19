@@ -11,6 +11,12 @@ client processes the server's packets at the start of a frame (Minecraft.runTick
 the ticks), so none of them lands between two packets of one tick. Keep-alive answers and chunk batch
 acknowledgements are the exception: the network thread sends them (ClientCommonPacketListenerImpl.handleKeepAlive,
 ClientPacketListener.handleChunkBatchFinished), so they may land anywhere.
+
+`exact` (a replay, tools/wire_replay.py: both clients got the same server packets): nothing is renumbered. Each
+tick's `wire` holds its packets' bytes, the frame's answers among them in the order they were sent, and compares
+byte for byte (floats by their bits); entity ids are named through the shared server stream (`self`, then e1, e2...
+in the order the server added them), the same on both sides, for reading only. The network thread's answers stay
+in `frame` with their bytes in `frame_wire`.
 """
 import struct
 
@@ -128,6 +134,42 @@ def decode(name, data):
     return {'raw': r.rest()} if data else {}
 
 
+def is_mark(name, data):
+    """Whether a serverbound play packet is the /wire-mark command itself (not its bytes inside another packet)."""
+    if name != 'chat_command':
+        return False
+    try:
+        return Reader(data).string() == 'wire-mark'
+    except (ValueError, UnicodeDecodeError):
+        return False
+
+
+def wire_key(name, data):
+    """What of a serverbound packet two clients that got the same server packets must send alike: its bytes, but
+    for a chat message's or signed command's timestamp (Instant.now) and salt (a random long)."""
+    if name in ('chat', 'chat_command_signed'):
+        r = Reader(data)
+        r.string()
+        return data[:r.pos].hex() + '|' + data[r.pos + 16:].hex()
+    return data.hex()
+
+
+def server_entities(entries):
+    """{entity id: name} by the server's AddEntity order (e1, e2...), the player's own id as `self`."""
+    names = {self_id(entries): 'self'}
+    for e in entries:
+        if e.get('dir') == 's2c' and e.get('state') == 'play' and e.get('name') == 'add_entity':
+            entity = Reader(bytes.fromhex(e['data'])).varint()
+            names.setdefault(entity, f'e{len(names)}')
+    return names
+
+
+def shared_input(entries):
+    """The server's play packets in order: two replayed captures must have got the same."""
+    return [(e['name'], e.get('data')) for e in entries if e.get('dir') == 's2c' and e.get('state') == 'play'
+            and 'name' in e]
+
+
 def self_id(entries):
     """The player's entity id: the first field (an Int) of the clientbound Login."""
     for e in entries:
@@ -136,50 +178,63 @@ def self_id(entries):
     return None
 
 
-def scenarios(entries):
+def scenarios(entries, exact=False):
     """One list of ticks for each /wire-mark in the play stream, in order (the ticks after a mark run to the
-    next mark); a tick is {'packets': [(name, fields)], 'frame': [(name, fields)], 'misplaced': [name]}.
+    next mark); a tick is {'packets': [(name, fields)], 'wire': [(name, bytes)], 'frame': [(name, fields)],
+    'frame_wire': [(name, bytes)], 'misplaced': [name]}.
+
+    Live (`exact` false):
 
     A click's state id becomes `stale`: how far it is behind the last one the server sent for that container
     (0 = up to date). The ids themselves count every change the server made since the login, so two runs
     whose earlier scenarios differed number the same click differently. Prediction sequences are numbered from
-    the client's last one before the scenario for the same reason (number_sequences)."""
+    the client's last one before the scenario for the same reason (number_sequences), and other entities are
+    named by their first appearance in the client's own packets (name_entities).
+
+    `exact`: none of that (see the module's doc)."""
     me = self_id(entries)
+    shared = server_entities(entries) if exact else None
     play = [e for e in entries if e.get('state') == 'play' and 'name' in e and e.get('dir') in ('c2s', 's2c')]
     runs, current, server_state = [], None, {}
     for e in play:
         name = e['name']
         if e['dir'] == 's2c':
-            if name in ('container_set_content', 'container_set_slot'):
+            if not exact and name in ('container_set_content', 'container_set_slot'):
                 r = Reader(bytes.fromhex(e.get('data', '')))
                 container = r.varint()
                 server_state[container] = r.varint()
             continue
-        fields = decode(name, bytes.fromhex(e.get('data', '')))
-        if name == 'container_click':
-            last = server_state.get(fields['container'], fields['state'])
-            fields = {'container': fields['container'], 'stale': last - fields.pop('state'), **fields}
-        if name == 'chat_command' and fields.get('command') == 'wire-mark':
+        data = bytes.fromhex(e.get('data', ''))
+        if is_mark(name, data):
             current = [new_tick()]
             runs.append(current)
             continue
         if current is None:
             continue
+        fields = decode(name, data)
+        if not exact and name == 'container_click':
+            last = server_state.get(fields['container'], fields['state'])
+            fields = {'container': fields['container'], 'stale': last - fields.pop('state'), **fields}
         tick = current[-1]
-        if 'entity' in fields and fields['entity'] == me:
+        if exact and isinstance(fields.get('entity'), int):
+            fields['entity'] = shared.get(fields['entity'], fields['entity'])
+        elif 'entity' in fields and fields['entity'] == me:
             fields['entity'] = 'self'
-        if name in FRAME:
+        if name in FRAME and not (exact and name in ASYNC):
             tick['frame'].append((name, fields))
+            tick['frame_wire'].append((name, wire_key(name, data)))
             if name in ASYNC and tick['packets']:
                 tick['misplaced'].append(name)
             continue
         tick['packets'].append((name, fields))
+        tick['wire'].append((name, wire_key(name, data)))
         if name == 'client_tick_end':
             current.append(new_tick())
-    before = 0
-    for run in runs:
-        name_entities(run)
-        before = number_sequences(run, before)
+    if not exact:
+        before = 0
+        for run in runs:
+            name_entities(run)
+            before = number_sequences(run, before)
     return runs
 
 
@@ -205,7 +260,7 @@ def first_frame(run, name):
 
 
 def new_tick():
-    return {'packets': [], 'frame': [], 'misplaced': []}
+    return {'packets': [], 'wire': [], 'frame': [], 'frame_wire': [], 'misplaced': []}
 
 
 def name_entities(run):
@@ -218,15 +273,15 @@ def name_entities(run):
                 fields['entity'] = names.setdefault(entity, f'e{len(names) + 1}')
 
 
-def compare(vanilla, sunrise, ticks):
+def compare(vanilla, sunrise, ticks, key='packets'):
     """The ticks 0..ticks where the two streams differ: [(tick, vanilla packets, Sunrise packets)]. Fields
-    compare exactly, floats included: they are what vanilla's client sends."""
+    compare exactly, floats included: they are what vanilla's client sends. `key` 'wire': by the packets' bytes
+    (an exact scenarios()); the decoded packets are what is returned either way."""
     out = []
+    at = lambda run, i, k: run[i][k] if i < len(run) else None  # noqa: E731
     for i in range(ticks + 1):
-        v = vanilla[i]['packets'] if i < len(vanilla) else None
-        h = sunrise[i]['packets'] if i < len(sunrise) else None
-        if v != h:
-            out.append((i, v, h))
+        if at(vanilla, i, key) != at(sunrise, i, key):
+            out.append((i, at(vanilla, i, 'packets'), at(sunrise, i, 'packets')))
     return out
 
 
@@ -274,15 +329,19 @@ def describe(packets):
     return '\n'.join(lines)
 
 
-def field_diff(v, h, names=('vanilla', 'Sunrise')):
-    """One line per differing field of packets paired by position, with the exact values."""
+def field_diff(v, h, names=('vanilla', 'Sunrise'), wire=None):
+    """One line per differing field of packets paired by position, with the exact values. `wire`: the two ticks'
+    (name, bytes) lists; a packet whose bytes differ where no decoded field does (a float's sign of zero, a NaN's
+    bits) gets its bytes."""
     a, b = names
     lines = []
     for i, ((vn, vf), (hn, hf)) in enumerate(zip(v or [], h or [])):
         if vn != hn:
             lines.append(f'    #{i}: {a} {vn}, {b} {hn}')
             continue
-        for k in sorted(set(vf) | set(hf)):
-            if vf.get(k) != hf.get(k):
-                lines.append(f'    #{i} {vn}.{k}: {a} {vf.get(k)!r}, {b} {hf.get(k)!r}')
+        fields = [k for k in sorted(set(vf) | set(hf)) if vf.get(k) != hf.get(k)]
+        for k in fields:
+            lines.append(f'    #{i} {vn}.{k}: {a} {vf.get(k)!r}, {b} {hf.get(k)!r}')
+        if not fields and wire and wire[0] and wire[1] and wire[0][i] != wire[1][i]:
+            lines.append(f'    #{i} {vn} bytes: {a} {wire[0][i][1]}, {b} {wire[1][i][1]}')
     return lines

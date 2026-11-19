@@ -13,8 +13,10 @@ The scenarios are the ones of that vanilla run, in its order. Sunrise runs --hea
 WIRE_STREAM_WINDOWED=1. DIR gets
 sunrise.jsonl (its capture) and a copy of vanilla.jsonl, compared as test_wire_stream_parity.py --compare-only
 does. A server packet that reached vanilla just before its next tick-end was taken a tick later (REPLAY_LATE), and
-the replay does the same; one a little earlier may have been taken on either tick: such packets are listed
-(REPLAY_EDGE), and a difference right after one is not evidence on its own.
+the replay does the same; one a little earlier may have been taken on either tick (REPLAY_EDGE). A pass needs
+evidence that Sunrise took every packet on vanilla's tick: a scenario with such an edge packet, a packet sent after
+Sunrise had passed its tick, or (phased) one sent late, is inconclusive. DIR/timing.json keeps that record with the
+capture, so test_wire_stream_parity.py --compare-only reaches the same verdict.
 """
 import argparse
 import json
@@ -34,10 +36,10 @@ import net_capture  # noqa: E402
 import test_wire_stream_parity as ws  # noqa: E402
 import wire_stream  # noqa: E402
 
-MARK = 'wire-mark'.encode().hex()
 # A server packet that reached vanilla less than REPLAY_LATE before its next tick-end came after that tick's frame
 # had started (measured: 0.2, 1.9, 2.1, 5.3 and 8.6 ms before it, taken a tick later; 10.5 ms before it, taken on
-# that tick), so the replay gives it to Sunrise after that tick too. Up to REPLAY_EDGE the tick is uncertain: listed.
+# that tick), so the replay gives it to Sunrise after that tick too. Up to REPLAY_EDGE the tick is uncertain: the
+# scenario is inconclusive.
 REPLAY_LATE = 0.0095
 REPLAY_EDGE = 0.012
 # A phased capture's packets reach the client `phase` after a tick-end, give or take this; a later one came
@@ -81,7 +83,7 @@ class Plan:
             if r['dir'] == 'c2s':
                 if r['state'] != 'play':
                     self.steps.append(('await', r['name']))
-                elif MARK in r.get('data', ''):
+                elif wire_stream.is_mark(r['name'], bytes.fromhex(r.get('data', ''))):
                     mark, ticks, sent = mark + 1, 0, 0
                 elif r['name'] == 'client_tick_end':
                     ticks, sent, last_end = ticks + 1, 0, r['t']
@@ -129,12 +131,12 @@ class Replay(threading.Thread):
         self.cond = threading.Condition()
         self.mark, self.ticks, self.sent = -1, 0, 0
         self.received = []
-        self.edges = []
         self.done = threading.Event()
         self.error = None
-        # The marks whose packets went out after the client had passed the tick vanilla took them on: when
-        # Sunrise took them is unknown.
-        self.overrun = set()
+        self.reader = None
+        # {mark: [why]}: what makes the tick Sunrise took a packet on unknown in that scenario (an edge packet,
+        # one sent after the client had passed the tick vanilla took it on, one sent late after its phase point).
+        self.uncertain = {}
 
     def run(self):
         out = open(self.capture, 'w')
@@ -143,7 +145,8 @@ class Replay(threading.Thread):
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.session = net_capture.Session(1, out, net_capture.load_names(), threading.Lock(), True)
             self.sock = sock
-            threading.Thread(target=self.read, daemon=True).start()
+            self.reader = threading.Thread(target=self.read, daemon=True)
+            self.reader.start()
             for step in self.plan.steps:
                 if step[0] == 'await':
                     self.wait(lambda name=step[1]: name in self.received, f'the client never sent {step[1]}')
@@ -154,8 +157,9 @@ class Replay(threading.Thread):
                     self.wait(lambda gate=gate: (self.mark, self.ticks, self.sent) >= gate,
                               f'the client never reached mark {gate[0]} tick {gate[1]}', timeout=600)
                     with self.cond:
-                        if (self.mark, self.ticks) > gate[:2] and gate[0] >= 0:
-                            self.overrun.add(gate[0])
+                        if (self.mark, self.ticks) > gate[:2]:
+                            self.doubt(gate[0], f"{row['name']} went out after Sunrise had passed tick {gate[1]}, "
+                                       'the one vanilla took it on')
                     if self.phase is not None:
                         with self.cond:
                             ended = self.end_times.get(gate[:2])
@@ -163,28 +167,42 @@ class Replay(threading.Thread):
                             delay = ended + self.phase - time.time()
                             if delay > 0:
                                 time.sleep(delay)
-                            elif delay < -0.02 and gate[0] >= 0:
+                            elif delay < -0.02:
                                 self.late += 1
+                                self.doubt(gate[0], f"{row['name']} went out {-delay * 1000:.0f} ms after its phase "
+                                           f'point on tick {gate[1]}')
                 if edge:
-                    self.edges.append((gate, row['name']))
+                    self.doubt(gate[0], f"{row['name']} reached vanilla {REPLAY_LATE * 1000:.1f}-"
+                               f'{REPLAY_EDGE * 1000:.0f} ms before the end of tick {gate[1]}: it may have taken it '
+                               'on either tick')
                 self.send(row['id'], bytes.fromhex(row['data']))
         except Exception as e:  # noqa: BLE001 - reported to the runner
-            self.error = e
+            with self.cond:
+                self.error = self.error or e
+                self.cond.notify_all()
         finally:
             self.done.set()
 
+    def doubt(self, mark, why):
+        """Before the first mark a packet's tick only shifts the settle; from a mark on, that scenario's verdict."""
+        if mark >= 0:
+            self.uncertain.setdefault(mark, []).append(why)
+
     def wait(self, ready, message, timeout=120):
         with self.cond:
-            if not self.cond.wait_for(ready, timeout):
+            if not self.cond.wait_for(lambda: self.error is not None or ready(), timeout):
                 raise TimeoutError(message)
+            if self.error is not None:
+                raise self.error
 
     def send(self, packet_id, payload):
         s = self.session
         body = varint(packet_id) + payload
         if s.threshold >= 0:
             body = (varint(len(body)) + zlib.compress(body)) if len(body) >= s.threshold else varint(0) + body
-        self.sock.sendall(varint(len(body)) + body)
+        # Recorded before the client can have it: its answer can't come first in the capture.
         s.record('clientbound', packet_id, payload)
+        self.sock.sendall(varint(len(body)) + body)
         pending = getattr(s, 'pending_threshold', None)
         if pending is not None:
             s.threshold, s.pending_threshold = pending, None
@@ -215,7 +233,7 @@ class Replay(threading.Thread):
                     with self.cond:
                         if state != 'play':
                             self.received.append(name)
-                        elif name == 'chat_command' and MARK in body[p:].hex():
+                        elif wire_stream.is_mark(name, body[p:]):
                             self.mark, self.ticks, self.sent = self.mark + 1, 0, 0
                             self.end_times[(self.mark, 0)] = self.last_end
                         elif name == 'client_tick_end':
@@ -227,11 +245,16 @@ class Replay(threading.Thread):
                         self.cond.notify_all()
         except OSError:
             return
+        except Exception as e:  # noqa: BLE001 - reported to the runner, as the sender's are
+            with self.cond:
+                self.error = self.error or e
+                self.cond.notify_all()
 
 
 def replay(vanilla, scenarios, bin_dir, out, phase=None):
     """Plays `vanilla` (a run's vanilla.jsonl, of `scenarios` in that order) back to Sunrise from `bin_dir`;
-    `out` gets sunrise.jsonl and a copy of vanilla.jsonl. Each scenario's problems, as `compare` gives them."""
+    `out` gets sunrise.jsonl, a copy of vanilla.jsonl and the delivery-timing record (ws.REPLAY_TIMING). Each
+    scenario's problems, as `compare` gives them."""
     out = Path(out)
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise ws.Failed(f'{out} is not an empty folder: the replay writes its captures only into a new one')
@@ -250,7 +273,7 @@ def replay(vanilla, scenarios, bin_dir, out, phase=None):
             accepted += 1
         elif r.get('dir') == 'c2s' and r.get('state') == 'play' and r.get('name') == 'client_tick_end':
             ticks += 1
-        elif r.get('dir') == 'c2s' and MARK in r.get('data', ''):
+        elif r.get('dir') == 'c2s' and wire_stream.is_mark(r.get('name'), bytes.fromhex(r.get('data', ''))):
             vanilla_accepts.append(accepted)
             window_ticks.append(ticks)
             ticks = 0
@@ -270,8 +293,10 @@ def replay(vanilla, scenarios, bin_dir, out, phase=None):
     scripts.mkdir()
     client = None
     try:
+        # WIRE_STREAM_EXTRAS: the same sunrise-extras.txt as a live Sunrise client's.
+        extras = os.environ.get('WIRE_STREAM_EXTRAS', '').replace(',', '\n') or None
         client = ws.SunriseClient(Path(bin_dir).resolve(), lab.LOCAL / 'sunrise-client' / lab.VERSION,
-                                  work / 'sunrise', f'127.0.0.1:{replay.port}', scripts)
+                                  work / 'sunrise', f'127.0.0.1:{replay.port}', scripts, extras)
         counts = ws.ClientCounts(out / 'sunrise.jsonl')
         for index, (name, need) in enumerate(zip(scenarios, vanilla_accepts)):
             ws.settle(counts, need)
@@ -287,6 +312,8 @@ def replay(vanilla, scenarios, bin_dir, out, phase=None):
     finally:
         if client:
             client.close()
+        if replay.reader is not None:
+            replay.reader.join(30)
         # Sunrise's own log, kept beside the capture.
         for log in (work / 'sunrise').glob('*.log'):
             shutil.copy(log, out / f'sunrise-{log.name}')
@@ -298,15 +325,14 @@ def replay(vanilla, scenarios, bin_dir, out, phase=None):
                 os.environ[var] = value
     if replay.error:
         raise ws.Failed(f'replay: {replay.error}')
+    if replay.reader is not None and replay.reader.is_alive():
+        raise ws.Failed("replay: the receiver never saw Sunrise's connection close")
     if replay.late:
         print(f'replay: {replay.late} packets went out more than 20 ms after their phase point (Sunrise was ahead)')
-    if replay.edges:
-        print(f'packets vanilla got {REPLAY_LATE * 1000:.0f}-{REPLAY_EDGE * 1000:.0f} ms before a tick-end (their tick is uncertain): '
-              + ', '.join(f'{n} at mark {g[0]} tick {g[1]}' for g, n in replay.edges if g[0] >= 0))
-    results = ws.compare({'vanilla': out / 'vanilla.jsonl', 'sunrise': out / 'sunrise.jsonl'}, scenarios, True)
-    return [(name, [f'{ws.INCONCLUSIVE} a server packet reached Sunrise after the tick vanilla took it on, so '
-                    'which tick Sunrise took it on is unknown', *problems] if index in replay.overrun else problems)
-            for index, (name, problems) in enumerate(results)]
+    uncertain = {scenarios[mark]: why for mark, why in sorted(replay.uncertain.items()) if mark < len(scenarios)}
+    (out / ws.REPLAY_TIMING).write_text(json.dumps({'scenarios': list(scenarios), 'uncertain': uncertain}, indent=1))
+    return ws.compare({'vanilla': out / 'vanilla.jsonl', 'sunrise': out / 'sunrise.jsonl'}, scenarios, True,
+                      uncertain)
 
 
 def main():

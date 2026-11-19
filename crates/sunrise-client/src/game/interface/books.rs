@@ -2233,5 +2233,8 @@ mod agent_book_key_tests {
         assert_ne!(page_edit.cursor, page_edit.highlight, "Select All");
         game.replay_line("key shift down", &NoLoop);
         assert!(game.has_shift_down(), "the selection reads the held Shift");
+        game.replay_line("key shift up", &NoLoop);
+        game.replay_line("key shift tap", &NoLoop);
+        assert!(!game.has_shift_down(), "a tap lets the modifier go");
     }
 }
