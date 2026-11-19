@@ -2,8 +2,8 @@
 //! script, the one the vanilla client plays in `VanillaTickScript.java`, so the two clients' serverbound
 //! streams can be compared tick by tick. The harness writes the scenario to PATH (JSON `{"name", "ticks",
 //! "steps": {"TICK": [LINE...]}}`, LINE a sunrise-ctl line: `key w down`, `mouse left click`, `look 90 0`,
-//! `close`, or one of the script's own: `click-slot`, `mouse-move`, `menu-button`, `select-trade`, `beacon`,
-//! `open-stats`, below), then creates PATH with the extension `go`. From the next client tick the script
+//! or one of the script's own: `click-slot`, `mouse-move`, `menu-button`, `select-trade`, `beacon`,
+//! `open-stats`, `close`, below), then creates PATH with the extension `go`. From the next client tick the script
 //! plays: its first tick sends `/wire-mark`, which marks it in the capture, then each tick's lines act
 //! before the tick runs, as a player's input in the frame before it; when its ticks have run, the client
 //! writes the scenario's name to PATH with the extension `done`.
@@ -144,6 +144,16 @@ impl Game<'_> {
             }
             if line.trim() == "open-stats" {
                 self.open_stats();
+                continue;
+            }
+            // `close`: the open screen's own close, as the vanilla driver's `screen.onClose()` (a sign
+            // editor sends its text, a container its close), and nothing with no screen open.
+            // sunrise-ctl's `close` sends a container close whatever is open.
+            if line.trim() == "close" {
+                if !clicks.is_empty() {
+                    self.remote_menu_clicks(&std::mem::take(&mut clicks));
+                }
+                self.close_screen();
                 continue;
             }
             if let Some((dx, dy)) = tick_script_mouse_move(&line) {
