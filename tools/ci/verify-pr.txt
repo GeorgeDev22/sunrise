@@ -1,0 +1,4 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client --lib --tests -- -D warnings
+cargo test --locked -p sunrise-client -p sunrise-game --lib --bins --tests -- shulker_arrow_tests
+python3 tools/parity.py --fresh --timeout 5400 bounced_projectile_tick_order tick_order arrow arrow_wind_charge arrow_hit_sound
