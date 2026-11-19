@@ -8883,9 +8883,11 @@ impl Game<'_> {
                 .for_each(sunrise_client::input_queue::ClickQueue::clear);
             return;
         }
+        // handleKeybinds: the inventory, swap and drop keys, then the attack, use and pick.
+        self.remote_queued_keys();
         let (attack, use_item) = (self.left, self.right);
         input.tick(&mut RemoteInputWorld(self), attack, use_item);
-        self.remote_queued_keys();
+        self.remote_count_miss_time();
         if let Some(r) = self.remote.as_mut() {
             input.merge_queued(std::mem::take(&mut r.input));
             r.input = input;
