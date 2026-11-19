@@ -285,8 +285,26 @@ impl Game<'_> {
             r.passenger_index = passengers.iter().position(|&p| p == me).unwrap_or(0);
         }
         if passengers.contains(&me) {
+            // handleSetEntityPassengersPacket takes every passenger off and puts them back
+            // (ejectPassengers, startRiding), so each list naming the player runs
+            // AbstractHorse.addPassenger: a horse's, camel's or llama's rider turns to its
+            // view at the start of the tick (absSnapRotationTo(getViewYRot(0), getViewXRot(0));
+            // a LivingEntity's view yaw is its head's, yHeadRotO).
+            if let Some(m) = self.mobs.iter().find(|m| {
+                m.id == vehicle_id && sunrise_client::mobs::equine::is_equine(m.species())
+            }) {
+                self.yaw = m.previous_head_yaw % 360.0;
+                self.pitch = m.previous_head_pitch.clamp(-90.0, 90.0) % 360.0;
+                self.rope_rot_old = (self.yaw, self.pitch);
+            }
             if self.riding != Some(vehicle_id) {
                 self.riding = Some(vehicle_id);
+                // ClientPacketListener.handleSetEntityPassengersPacket: boarding a boat
+                // faces the boat's way.
+                if let Some(b) = self.boats.iter().find(|b| b.id == vehicle_id) {
+                    self.yaw = b.yaw;
+                    self.rope_rot_old.0 = b.yaw;
+                }
                 // ClientPacketListener.handleSetEntityPassengersPacket: boarding says how to get off,
                 // on the overlay and to the narrator.
                 let key = if self.cushions.iter().any(|c| c.id == vehicle_id) {
@@ -975,6 +993,32 @@ mod tests {
                 }
             }
             assert_eq!(answers, [[1.5, 64.0, 1.5]]);
+        });
+    }
+
+    /// AbstractHorse.addPassenger on this client: a passenger list naming the player snaps it to the
+    /// horse's view (absSnapRotationTo(getViewYRot(0), getViewXRot(0))), whatever way the player
+    /// faced. A horse whose head faces -180 at pitch 0 turns a rider at (0, 25) to (-180, 0).
+    #[test]
+    #[ignore = "daily"]
+    fn a_rider_turns_to_its_horses_view_on_the_passenger_list() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            use sunrise_client::motion::PlayerMotion;
+            let root =
+                std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
+            let (_peer, _writer) = crate::game::remote::tests::connect_menu_test(game);
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+            game.remote.as_mut().unwrap().entity_id = 7;
+            let types = MobTypes::load(&root).unwrap();
+            let horse = std::sync::Arc::new(types.types["minecraft:horse"].clone());
+            let mut m = Mob::new(8, horse, Vec3::new(0.5, 64.0, 2.5), -180.0);
+            m.previous_head_yaw = -180.0;
+            m.previous_head_pitch = 0.0;
+            game.mobs.clear();
+            game.mobs.push(m);
+            (game.yaw, game.pitch) = (0.0, 25.0);
+            game.remote_set_passengers(8, &[7]);
+            assert_eq!((game.yaw, game.pitch), (-180.0, 0.0));
         });
     }
 
