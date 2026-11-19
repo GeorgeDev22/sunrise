@@ -1,0 +1,4 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client --all-targets -- -D warnings
+python3 tools/parity.py --fresh falling_first_tick
+python3 tools/parity.py --fresh tick_order
