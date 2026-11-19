@@ -91,6 +91,8 @@ jobs:
           if [ -f tools/ci/harness-names.txt ]; then all=$(cat tools/ci/harness-names.txt); else all=$(python3 tools/parity.py --all --list); fi
           names=$(printf '%s\n' $all | grep -E '^[a-z0-9_]+$' | awk -v s=${{ matrix.shard }} '(NR-1) % 10 == s' | tr '\n' ' ')
           echo "$names" > reports/names.txt
+          # A shard with no names would run every harness: it has nothing to do.
+          if [ -z "${names// /}" ]; then echo "no harnesses for this shard" > reports/parity.log; exit 0; fi
           python3 tools/ci/with_xvfb.py python3 tools/parity.py --fresh -j 2 --timeout 3600 $names > reports/parity.log 2>&1 || true
           python3 tools/parity.py --status > reports/status.txt 2>&1 || true
           grep -E "^(PASS|FAIL) " reports/parity.log | cut -d' ' -f1-3 || true
