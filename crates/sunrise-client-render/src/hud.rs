@@ -220,6 +220,71 @@ fn check_fetched_size(width: u64, height: u64) -> Result<()> {
     Ok(())
 }
 
+/// A pack image may claim no side an atlas would refuse, nor more pixels than
+/// the largest atlas holds: the PNG reader alone would trust the header and
+/// allocate it, as its own limit covers one row.
+pub(crate) fn check_pack_size(width: u32, height: u32) -> Result<()> {
+    use crate::atlas_sources::MAX_SPRITE_SIDE;
+    if i64::from(width.max(height)) > MAX_SPRITE_SIDE {
+        return Err(OverSizeLimit(format!(
+            "a {width}x{height} image exceeds the {MAX_SPRITE_SIDE}-pixel sprite side"
+        ))
+        .into());
+    }
+    if u64::from(width) * u64::from(height) > u64::from(MAX_ATLAS_SIZE).pow(2) {
+        return Err(OverSizeLimit(format!(
+            "a {width}x{height} image has more pixels than a {MAX_ATLAS_SIZE}x{MAX_ATLAS_SIZE} atlas"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// The most bytes any one buffer of a pack image may take (the decoder's, its RGBA copy, its
+/// frames made square): 8192x8192 RGBA, 256 MiB. That is far past the panorama faces and
+/// animated strips packs ship, where the 16384x16384 pixels [`check_pack_size`] lets through
+/// would hold 1 GiB per buffer, two buffers per image and several images loading in parallel.
+pub(crate) const MAX_IMAGE_BYTES: usize = 256 << 20;
+
+/// A pack image refused for its size: past a side, pixel or byte limit, or a buffer the
+/// allocator would not give.
+#[derive(Debug)]
+pub struct OverSizeLimit(String);
+
+impl std::fmt::Display for OverSizeLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OverSizeLimit {}
+
+/// The bytes of a buffer the product of `factors` long, refused (an overflow too) past
+/// `budget`.
+pub(crate) fn image_bytes(factors: &[usize], budget: usize) -> Result<usize> {
+    factors
+        .iter()
+        .try_fold(1usize, |bytes, &factor| bytes.checked_mul(factor))
+        .filter(|&bytes| bytes <= budget)
+        .ok_or_else(|| {
+            OverSizeLimit(format!(
+                "an image buffer of {factors:?} is over the {budget}-byte size limit"
+            ))
+            .into()
+        })
+}
+
+/// An empty buffer with room for the product of `factors` values of `T`, refused past `budget`
+/// bytes or when the allocator refuses it: a load error rather than an abort.
+pub(crate) fn image_buffer<T>(factors: &[usize], budget: usize) -> Result<Vec<T>> {
+    let bytes = image_bytes(&[factors, &[size_of::<T>()]].concat(), budget)?;
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(bytes / size_of::<T>())
+        .map_err(|e| OverSizeLimit(format!("an image buffer of {bytes} bytes: {e}")))?;
+    Ok(buffer)
+}
+
 /// A WebP image as RGBA8. Still frames and animations both decode; an
 /// animation gives its first frame, as an animated PNG would.
 fn decode_webp(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
@@ -298,14 +363,22 @@ pub fn decode_image_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
 
 /// A PNG in memory as RGBA pixels.
 pub fn decode_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
+    decode_bytes_within(data, MAX_IMAGE_BYTES)
+}
+
+/// [`decode_bytes`], each of its buffers held to `budget` bytes.
+fn decode_bytes_within(data: &[u8], budget: usize) -> Result<(u32, u32, Vec<u8>)> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
     decoder.ignore_checksums(true);
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info()?;
-    let mut bytes = vec![0; reader.output_buffer_size().ok_or("image too large")?];
+    check_pack_size(reader.info().width, reader.info().height)?;
+    let size = reader.output_buffer_size().unwrap_or(usize::MAX);
+    let mut bytes = image_buffer(&[size], budget)?;
+    bytes.resize(size, 0);
     let info = reader.next_frame(&mut bytes)?;
     let channels = info.color_type.samples();
-    let mut rgba = Vec::with_capacity((info.width * info.height * 4) as usize);
+    let mut rgba = image_buffer(&[info.width as usize, info.height as usize, 4], budget)?;
     for p in bytes[..info.buffer_size()].chunks_exact(channels) {
         rgba.extend(match channels {
             4 => [p[0], p[1], p[2], p[3]],
@@ -372,20 +445,37 @@ pub(crate) fn decode_resource(source: &ResourceSource, name: &str) -> Result<(u3
 }
 /// A packed atlas image: sprite name, size and RGBA pixels.
 type PackedImage = (String, u32, u32, Vec<u8>);
-/// A frame of an animated strip at `x, y`, nearest-resampled to the longer
-/// side of the frame: array layers are square, as `Sprites::load` keeps them
-/// for the world's sprite arrays.
-fn strip_frame(pixels: &[u8], stride: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
+/// A frame at `x, y`, sampled as if squared to its longer side and then resized
+/// to `output_side`, without making the intermediate square. The output is held
+/// to `budget` bytes before it is made.
+pub(crate) fn strip_frame(
+    pixels: &[u8],
+    stride: u32,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    output_side: u32,
+    budget: usize,
+) -> Result<Vec<u8>> {
     let side = w.max(h);
-    let mut out = Vec::with_capacity((side * side * 4) as usize);
-    for row in 0..side {
-        let source_row = y + row * h / side;
-        for column in 0..side {
-            let at = ((source_row * stride + x + column * w / side) * 4) as usize;
+    let mut out = image_buffer(&[output_side as usize, output_side as usize, 4], budget)?;
+    // Keep the two nearest-neighbour roundings when shrinking a rectangular frame.
+    let index = |i| {
+        if output_side == side {
+            i
+        } else {
+            i * side / output_side
+        }
+    };
+    for row in 0..output_side {
+        let source_row = y + index(row) * h / side;
+        for column in 0..output_side {
+            let at = ((source_row * stride + x + index(column) * w / side) * 4) as usize;
             out.extend_from_slice(&pixels[at..at + 4]);
         }
     }
-    out
+    Ok(out)
 }
 /// The `animation` section of a texture's `.mcmeta`.
 pub(crate) fn animation_of(mcmeta: Option<&str>) -> Option<AnimationMetadata> {
@@ -398,7 +488,7 @@ pub(crate) fn animation_of(mcmeta: Option<&str>) -> Option<AnimationMetadata> {
 fn first_frame(
     (w, h, pixels): (u32, u32, Vec<u8>),
     animation: Option<&AnimationMetadata>,
-) -> (u32, u32, Vec<u8>) {
+) -> Result<(u32, u32, Vec<u8>)> {
     let [fw, fh] = animation.map_or([w.min(h) as i32; 2], |meta| {
         meta.frame_size(w as i32, h as i32)
     });
@@ -407,9 +497,10 @@ fn first_frame(
             if fw > 0 && fh > 0 && w % fw == 0 && h % fh == 0 && (fw, fh) != (w, h) =>
         {
             let side = fw.max(fh);
-            (side, side, strip_frame(&pixels, w, 0, 0, fw, fh))
+            let frame = strip_frame(&pixels, w, 0, 0, fw, fh, side, MAX_IMAGE_BYTES)?;
+            Ok((side, side, frame))
         }
-        _ => (w, h, pixels),
+        _ => Ok((w, h, pixels)),
     }
 }
 /// `image` inside a one-texel border copied from its opposite edges, the
@@ -539,7 +630,13 @@ fn cit_sprite(
     // Only an animation is cut to its first frame: a still CIT texture is drawn whole, and
     // armour layers are twice as wide as they are tall.
     let (w, h, pixels) = match &animation {
-        Some(animation) => first_frame(image, Some(animation)),
+        Some(animation) => match first_frame(image, Some(animation)) {
+            Ok(image) => image,
+            Err(e) => {
+                log::warn!("skipped custom item texture {}: {e}", path);
+                return None;
+            }
+        },
         None => image,
     };
     if !fits(w, h) {
@@ -693,6 +790,20 @@ fn atlas_sprites(
                     // (a server pack's `wynn/...` as well as `item/...`).
                     let mcmeta = root.read_to_string(&format!("{file}.mcmeta")).ok();
                     let animation = material.animation.as_ref();
+                    let image = if animation.is_some()
+                        || path.starts_with("block/")
+                        || path.starts_with("item/")
+                    {
+                        match first_frame(material.image, animation) {
+                            Ok(image) => image,
+                            Err(error) => {
+                                log::warn!("skipped GUI texture {file}: {error}");
+                                continue;
+                            }
+                        }
+                    } else {
+                        material.image
+                    };
                     if animation.is_some() {
                         animated.push(name.clone());
                     }
@@ -702,14 +813,7 @@ fn atlas_sprites(
                     {
                         flags.insert(name.clone(), texture_flags);
                     }
-                    if animation.is_some()
-                        || path.starts_with("block/")
-                        || path.starts_with("item/")
-                    {
-                        first_frame(material.image, animation)
-                    } else {
-                        material.image
-                    }
+                    image
                 }
                 None => material.image,
             };
@@ -1335,6 +1439,8 @@ impl HudAtlas {
                 animation.is_some() || name.starts_with("block/") || name.starts_with("item/");
             let (w, h, pixels) = if frames {
                 first_frame(image, animation.as_ref())
+                    .map_err(|e| log::warn!("skipped GUI texture {}: {e}", path))
+                    .ok()?
             } else {
                 image
             };
@@ -3319,7 +3425,7 @@ mod tests {
         let animation = animation_of(Some(meta)).expect("the first JSON value is metadata");
         assert_eq!(animation.frame_size(8, 4), [2, 2]);
         let pixels = (0..8 * 4).flat_map(|i| [i as u8, 0, 0, 255]).collect();
-        let (_, height, first) = first_frame((8, 4, pixels), Some(&animation));
+        let (_, height, first) = first_frame((8, 4, pixels), Some(&animation)).unwrap();
         assert_eq!(height, 2);
         assert_eq!(first.len(), 2 * 2 * 4);
     }
@@ -3489,6 +3595,89 @@ mod tests {
             refused.to_string().contains("too large to decode"),
             "{refused}"
         );
+    }
+
+    /// A pack PNG is refused by the side its header claims when no atlas would
+    /// take it: the reader sizes the whole pixel buffer from that header, and
+    /// its own limit covers one row.
+    #[test]
+    fn a_pack_png_claiming_a_side_no_atlas_takes_is_refused() {
+        let png = |width: u32| {
+            let mut bytes = Vec::new();
+            let mut encoder = png::Encoder::new(&mut bytes, width, 1);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&vec![0; width as usize]).unwrap();
+            writer.finish().unwrap();
+            bytes
+        };
+        assert_eq!(decode_bytes(&png(32_768)).unwrap().0, 32_768);
+        let refused = decode_bytes(&png(40_000)).map(|(width, height, _)| (width, height));
+        assert!(
+            refused.as_ref().is_err_and(|e| e.is::<OverSizeLimit>()),
+            "{refused:?}"
+        );
+    }
+
+    /// A header within the side limit can still claim gigabytes: 32768 x 32768
+    /// is refused by its pixel count before the reader sizes a buffer from it.
+    #[test]
+    fn a_pack_png_claiming_more_pixels_than_an_atlas_is_refused() {
+        let mut header = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut header, 32_768, 32_768);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            // No pixels, only an empty IDAT: `read_info` reads up to the image data.
+            writer.write_chunk(png::chunk::IDAT, &[]).unwrap();
+        }
+        let refused = decode_bytes(&header).map(|(width, height, _)| (width, height));
+        assert!(
+            refused.as_ref().is_err_and(|e| e.is::<OverSizeLimit>()),
+            "{refused:?}"
+        );
+    }
+
+    /// The decoder's buffer and the RGBA copy are each held to the byte budget before they are
+    /// made: a 64x64 grey PNG decodes to 4096 bytes and converts to 16384.
+    #[test]
+    fn a_pack_png_past_the_byte_budget_is_refused_before_its_buffers() {
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 64, 64);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[7; 64 * 64]).unwrap();
+        }
+        let over =
+            |budget| decode_bytes_within(&png, budget).is_err_and(|e| e.is::<OverSizeLimit>());
+        assert_eq!(
+            decode_bytes_within(&png, 64 * 64 * 4).unwrap().2.len(),
+            64 * 64 * 4
+        );
+        assert!(over(64 * 64 * 4 - 1), "the RGBA copy");
+        assert!(over(64 * 64 - 1), "the decoder's buffer");
+    }
+
+    /// A narrow frame widens to a square: its bytes are held to the budget before it is made, and
+    /// a size no address holds is refused rather than wrapped.
+    #[test]
+    fn a_strip_frame_made_square_is_held_to_the_budget() {
+        let pixels = vec![9; 64 * 2 * 4];
+        let over = |w, budget| {
+            strip_frame(&pixels, 64, 0, 0, w, 1, w, budget).is_err_and(|e| e.is::<OverSizeLimit>())
+        };
+        assert_eq!(
+            strip_frame(&pixels, 64, 0, 0, 64, 1, 64, 64 * 64 * 4)
+                .unwrap()
+                .len(),
+            64 * 64 * 4
+        );
+        assert!(over(64, 64 * 64 * 4 - 1));
+        assert!(over(u32::MAX, usize::MAX));
     }
 
     /// Only the network path reads WebP and JPEG: a resource pack's texture
