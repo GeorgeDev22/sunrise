@@ -16,6 +16,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
+pub mod folder;
 pub mod native_build;
 
 /// The checksum list's asset name.

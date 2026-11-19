@@ -390,8 +390,6 @@ pub struct SunriseOptionsInfo {
     pub max_view_distance: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lod_distance: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anticheat: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

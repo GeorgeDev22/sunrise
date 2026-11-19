@@ -10,8 +10,7 @@
 use mod_api::__private::native::BuiltMod;
 use mod_api::Side;
 use mod_api::{
-    EntityTickListenedEvent, EntityTickPostEvent, EntityTickPreEvent, Flow, Hooks, ModEntry,
-    ServerHost,
+    EntityTickListenedEvent, EntityTickPostEvent, EntityTickPreEvent, Hooks, HostSide, ModEntry,
 };
 
 const ID: &str = "hot_paths_listener";
@@ -25,17 +24,15 @@ struct Listener;
 
 #[mod_api::__subscriptions]
 impl Hooks for Listener {
-    fn entity_tick_listened(&self, _: &mut dyn ServerHost, event: &mut EntityTickListenedEvent) {
+    fn entity_tick_listened(&self, _: HostSide<'_>, event: &mut EntityTickListenedEvent) {
         event.listened = true;
     }
-    fn entity_tick_pre(&self, _: &mut dyn ServerHost, _: &mut EntityTickPreEvent<'_>) -> Flow {
-        Flow::Continue
-    }
-    fn entity_tick_post(&self, _: &mut dyn ServerHost, _: &mut EntityTickPostEvent<'_>) {}
+    fn entity_tick_pre(&self, _: HostSide<'_>, _: &mut EntityTickPreEvent<'_>) {}
+    fn entity_tick_post(&self, _: HostSide<'_>, _: &mut EntityTickPostEvent<'_>) {}
 }
 
 fn main() {
-    sunrise_guest_stack::prepare_main();
+    sunrise_mod_host::prepare_main_stack();
     sunrise_mod_host::exit_if_compile_child();
     let startup = sunrise_client::entry::prepare();
     std::hint::black_box(&sunrise_mod_package::holder::CAPABILITY);

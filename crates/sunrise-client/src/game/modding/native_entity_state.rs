@@ -220,23 +220,25 @@ impl Game<'_> {
 
     /// Entity.isOnFire: remaining ticks or the client's synced flag, unless fire immune.
     pub(super) fn entity_is_on_fire(&self, entity: EntityRef) -> Option<bool> {
-        let (ticks, immune) =
-            match self.native_target_body(self.native_entity_read_target(entity)?)? {
-                Body::Player(p) => (p.fire_ticks, false),
-                Body::Mob(m) => (m.fire_ticks, m.kind.flags.fire_immune),
-                Body::Other(Target::Stand(id)) => (
-                    self.armor_stands.iter().find(|s| s.id == id)?.fire_ticks,
-                    false,
-                ),
-                Body::Other(Target::Item(id)) => {
-                    let item = self.dropped.iter().find(|i| i.id == id)?;
-                    (
-                        item.fire_ticks,
-                        self.stack_can_be_hurt_by(&item.stack, "minecraft:in_fire") == Some(false),
-                    )
-                }
-                Body::Other(_) => return None,
-            };
+        let (ticks, immune) = match self
+            .native_entity_read_target(entity)
+            .and_then(|target| self.native_target_body(target))
+        {
+            Some(Body::Player(p)) => (p.fire_ticks, p.mod_fire_immune),
+            Some(Body::Mob(m)) => (m.fire_ticks, m.fire_immune()),
+            Some(Body::Other(Target::Stand(stand))) => {
+                let stand = self.armor_stands.iter().find(|s| s.id == stand)?;
+                (stand.fire_ticks, stand.mod_fire_immune)
+            }
+            Some(Body::Other(Target::Item(item))) => {
+                let item = self.dropped.iter().find(|i| i.id == item)?;
+                (
+                    item.fire_ticks,
+                    self.stack_can_be_hurt_by(&item.stack, "minecraft:in_fire") == Some(false),
+                )
+            }
+            _ => (0, self.client_tracked_player_fire_immunity(entity)?),
+        };
         let synced = !self.is_logical_server()
             && self
                 .remote
@@ -245,15 +247,86 @@ impl Game<'_> {
         Some(!immune && (ticks > 0 || synced))
     }
 
-    /// Whether the entity's type never burns (`EntityType.fireImmune`):
-    /// players and mobs.
+    /// `Entity.fireImmune`: effective immunity on the side of the host.
     pub(super) fn entity_fire_immune(&self, entity: EntityRef) -> Option<bool> {
-        match self.native_entity_body(entity)? {
-            Body::Player(_) => Some(false),
-            Body::Mob(m) => Some(sunrise_client::mobs::spawn_rules::fire_immune(m.species())),
-            Body::Other(_) => None,
+        match self
+            .native_entity_read_target(entity)
+            .and_then(|target| self.native_target_body(target))
+        {
+            Some(Body::Player(p)) => Some(p.mod_fire_immune),
+            Some(Body::Mob(m)) => Some(m.fire_immune()),
+            Some(Body::Other(Target::Stand(id))) => self
+                .armor_stands
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.mod_fire_immune),
+            Some(Body::Other(Target::Dragon(_))) => Some(true),
+            _ => self.client_tracked_player_fire_immunity(entity),
         }
     }
+
+    fn client_tracked_player_fire_immunity(&self, entity: EntityRef) -> Option<bool> {
+        let (kind, _) = self.native_client_tracked(entity)?;
+        (kind == "minecraft:player").then_some(())?;
+        self.remote
+            .as_ref()?
+            .tracked_fire_immunity(i32::try_from(entity.id()).ok()?)
+    }
+
+    pub(super) fn entity_set_fire_immunity(&mut self, entity: EntityRef, immune: bool) -> bool {
+        self.native_entity_target(entity)
+            .is_some_and(|target| self.set_fire_immunity_for(target, immune))
+    }
+
+    pub(super) fn entity_set_client_fire_immunity(
+        &mut self,
+        entity: EntityRef,
+        immune: bool,
+    ) -> bool {
+        if let Some(target) = self.native_client_entity_target(entity) {
+            return self.set_fire_immunity_for(target, immune);
+        }
+        if self.client_tracked_player_fire_immunity(entity).is_none() {
+            return false;
+        }
+        self.remote
+            .as_mut()
+            .is_some_and(|remote| remote.set_tracked_fire_immunity(entity.id() as i32, immune))
+    }
+
+    fn set_fire_immunity_for(&mut self, target: Target, immune: bool) -> bool {
+        let server = self.is_logical_server();
+        let (grant, ticks) = match target {
+            Target::Mob(id) => {
+                let Some(mob) = self.mobs.iter_mut().find(|m| m.id == id && !m.removed) else {
+                    return false;
+                };
+                mob.needs_sync |= server && mob.mod_fire_immune != immune;
+                (&mut mob.mod_fire_immune, &mut mob.fire_ticks)
+            }
+            Target::Stand(id) => {
+                let Some(stand) = self.armor_stands.iter_mut().find(|s| s.id == id) else {
+                    return false;
+                };
+                (&mut stand.mod_fire_immune, &mut stand.fire_ticks)
+            }
+            Target::Player | Target::Guest(_) => {
+                let Some(player) = self.native_player_body_mut(target) else {
+                    return false;
+                };
+                (&mut player.mod_fire_immune, &mut player.fire_ticks)
+            }
+            _ => return false,
+        };
+        *grant = immune;
+        // Remote mobs and stands keep the server's fire bit in this field. Mask it
+        // while rendering, but keep the copy so revocation needs no new packet.
+        if immune && (server || matches!(target, Target::Player)) {
+            *ticks = (*ticks).min(0);
+        }
+        true
+    }
+
     /// The ticks the entity burns for (`Entity.getRemainingFireTicks`):
     /// players, mobs, armor stands and items.
     pub(super) fn entity_fire_ticks(&self, entity: EntityRef) -> Option<i32> {
@@ -724,6 +797,61 @@ mod tests {
             crate::game::native_entity_refs::tests::bind_local_player(game, 20, 123);
             let player = game.entity(20).unwrap();
             test(game, player);
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_granted_player_does_not_burn_or_take_damage_in_lava() {
+        use std::sync::Arc;
+        use sunrise_client::{chunk::Chunk, motion::MotionWorld};
+        use sunrise_core::geometry::Vec3;
+
+        with_player(|game, player| {
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let lava = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:lava")
+                .unwrap();
+            assert!(game.world.set_stored(0, 64, 0, lava));
+            game.player.as_mut().unwrap().position = Vec3::new(0.5, 64.0, 0.5);
+            let tick_lava = |game: &mut Game<'_>| {
+                let mut world = MotionWorld {
+                    entities: &[],
+                    player: game.player.as_mut().unwrap(),
+                    scene: &mut game.world,
+                    assets: &game.pack.assets,
+                    collision_binding: game.collision,
+                    resources: game.motion,
+                    health: &game.health_resources,
+                    tag_items: None,
+                    loop_context: &game.loop_context,
+                    damage_hooks: &game.damage_hooks,
+                    block_registries: None,
+                };
+                world.fluid_base_tick().unwrap();
+                assert!(world.player.is_in_lava());
+                world.tick_environment_damage().unwrap();
+            };
+            let health = |game: &Game<'_>| game.player.as_ref().unwrap().health.health();
+            let before = health(game);
+            assert_eq!(player.fire_immune(game), Some(false));
+            assert!(player.set_fire_immunity(game, true));
+            assert_eq!(player.fire_immune(game), Some(true));
+            game.hurt_player_by("minecraft:on_fire", 2.0);
+            assert_eq!(health(game), before, "direct fire damage is also refused");
+            tick_lava(game);
+            assert_eq!(player.is_on_fire(game), Some(false));
+            assert_eq!(health(game), before);
+
+            assert!(player.set_fire_immunity(game, false));
+            tick_lava(game);
+            assert_eq!(player.is_on_fire(game), Some(true));
+            assert!(health(game) < before);
         });
     }
 
@@ -1361,34 +1489,36 @@ mod tests {
                 g.player =
                     Some(PlayerMotion::new(g.motion, sunrise_core::geometry::Vec3::ZERO).unwrap());
                 let local = g.entity(7).unwrap();
-                // The packet a server sends: it makes the client's own copy of the stand, which a bare
-                // `spawn_entity` (the tracking half of `handleAddEntity`) does not.
-                let stand_kind = g
-                    .remote
-                    .as_ref()
-                    .unwrap()
-                    .builtin
-                    .get("minecraft:entity_type")
-                    .unwrap()
-                    .id("minecraft:armor_stand")
+                // Spawn actual renderable client copies through the normal packet path.
+                for (id, name) in [(15, "minecraft:armor_stand"), (16, "minecraft:zombie")] {
+                    let kind = g
+                        .remote
+                        .as_ref()
+                        .unwrap()
+                        .builtin
+                        .get("minecraft:entity_type")
+                        .unwrap()
+                        .id(name)
+                        .unwrap();
+                    g.handle_packet(sunrise_protocol::packets::play::Clientbound::AddEntity(
+                        sunrise_protocol::packets::play::AddEntity {
+                            id,
+                            uuid: id as u128,
+                            kind,
+                            position: [0.0; 3],
+                            velocity: [0.0; 3],
+                            pitch: 0,
+                            yaw: 0,
+                            head_yaw: 0,
+                            data: 0,
+                        },
+                    ))
                     .unwrap();
-                g.handle_packet(sunrise_protocol::packets::play::Clientbound::AddEntity(
-                    sunrise_protocol::packets::play::AddEntity {
-                        id: 15,
-                        uuid: 15,
-                        kind: stand_kind,
-                        position: [0.0; 3],
-                        velocity: [0.0; 3],
-                        pitch: 0,
-                        yaw: 0,
-                        head_yaw: 0,
-                        data: 0,
-                    },
-                ))
-                .unwrap();
+                }
                 let stand = g.entity(15).unwrap();
+                let zombie = g.entity(16).unwrap();
                 for flag in [1, 0] {
-                    for id in [7, 15] {
+                    for id in [7, 15, 16] {
                         g.handle_packet(
                             sunrise_protocol::packets::play::Clientbound::SetEntityData(
                                 sunrise_protocol::packets::play::SetEntityData {
@@ -1411,6 +1541,31 @@ mod tests {
                         stand.is_on_fire(&*g as &dyn mod_api::ClientHost),
                         Some(flag != 0)
                     );
+                    assert!(local.set_client_fire_immunity(g, true));
+                    assert_eq!(local.fire_immune(g), Some(true));
+                    assert_eq!(local.is_on_fire(g), Some(false));
+                    assert!(local.set_client_fire_immunity(g, false));
+                    assert_eq!(local.is_on_fire(g), Some(flag != 0));
+                    // Revoking while the server flag is unchanged must reveal the
+                    // existing flame again, both in the handle and in the draw state.
+                    for (grant, burning) in [(true, false), (false, flag != 0)] {
+                        assert!(zombie.set_client_fire_immunity(g, grant));
+                        assert!(stand.set_client_fire_immunity(g, grant));
+                        assert_eq!(zombie.is_on_fire(g), Some(burning));
+                        assert_eq!(stand.is_on_fire(g), Some(burning));
+                        assert_eq!(
+                            g.mobs.iter().find(|m| m.id == 16).unwrap().is_on_fire(),
+                            burning
+                        );
+                        assert_eq!(
+                            g.armor_stands
+                                .iter()
+                                .find(|s| s.id == 15)
+                                .unwrap()
+                                .is_on_fire(),
+                            burning
+                        );
+                    }
                 }
                 g.player.as_mut().unwrap().fire_ticks = 2;
                 assert_eq!(

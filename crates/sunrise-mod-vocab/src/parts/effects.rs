@@ -34,6 +34,11 @@ pub enum MobEffectPartError {
         /// The concrete Rust Part type name.
         part: String,
     },
+    /// The effect key does not resolve to a requested registry slot.
+    InvalidKey {
+        /// The unresolved effect key.
+        effect: crate::EffectKey,
+    },
 }
 
 impl dyn crate::Registrar + '_ {

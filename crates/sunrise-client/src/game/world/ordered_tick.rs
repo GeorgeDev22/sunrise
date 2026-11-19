@@ -39,6 +39,10 @@ pub(super) struct OrderedTicks {
     /// The falling blocks (id, join) that ended a tick still falling with a part listening to
     /// `falling_tick`, delivered after the pass.
     pub(super) falling_ticked: Vec<(u32, JoinSeq)>,
+    /// Whether the entity tick hooks are heard this tick, and which types are told alone: the
+    /// server's unsimulated entities of those types are told at their place in this order
+    /// (game/modding/native_ticks.rs).
+    pub(super) told: super::native_ticks::Told,
 }
 
 /// The batches of the other kinds, in the order they tick.
@@ -68,6 +72,9 @@ enum Pending {
     Orb,
     Tnt,
     Falling,
+    /// An entity the server keeps without simulating it (a display, a marker, an interaction),
+    /// of a type a mod named: only told its tick.
+    Other,
 }
 
 /// The lowest join number in a batch, or none when it is empty.
@@ -82,6 +89,7 @@ impl Game<'_> {
         let pending_buf = std::mem::take(&mut self.ordered.pending_buf);
         let mut falling_ticked = std::mem::take(&mut self.ordered.falling_ticked);
         falling_ticked.clear();
+        let told = self.native_tick_told();
         let firsts = [
             first_join(&self.armor_stands),
             first_join(&self.boats),
@@ -109,6 +117,7 @@ impl Game<'_> {
             lava_random: None,
             pending_buf,
             falling_ticked,
+            told,
         };
     }
 
@@ -131,7 +140,7 @@ impl Game<'_> {
             // Orbs are announced after their tick, always; TNT and falling
             // blocks that joined since the last packets wait for them.
             let right_pass = match kind {
-                Pending::Orb => !late,
+                Pending::Orb | Pending::Other => !late,
                 _ => late == (j >= announced),
             };
             if right_pass && wanted(j) {
@@ -143,6 +152,14 @@ impl Game<'_> {
         self.falling
             .iter()
             .for_each(|e| offer(e.join, Pending::Falling));
+        // Only while a mod hears entity ticks and named the type: otherwise none is offered.
+        let told = self.ordered.told;
+        if told.listening() {
+            self.others
+                .iter()
+                .filter(|o| super::native_ticks::other_ticks(&o.kind) && told.alone_kind(&o.kind))
+                .for_each(|o| offer(o.join, Pending::Other));
+        }
         pending.sort_unstable_by_key(|&(j, _)| j);
         // EntityGetter.getEntityCollisions: the boxes that stop these moves (a
         // boat, a shulker, a happy ghast held still), gathered once for the
@@ -197,6 +214,15 @@ impl Game<'_> {
                         if let Err(e) = self.tick_one_falling(i, &nearby) {
                             first_error.get_or_insert(e);
                         }
+                    }
+                }
+                Pending::Other => {
+                    let Some(i) = self.others.locate(join) else {
+                        continue;
+                    };
+                    let at = self.others[i].position;
+                    if entity_ticking(at.x.floor() as i32, at.z.floor() as i32) {
+                        self.native_other_tick_alone(told, i);
                     }
                 }
                 Pending::Orb => {
@@ -390,6 +416,114 @@ mod tests {
             );
             assert_eq!(game.orbs.iter().map(|o| o.age).collect::<Vec<_>>(), [1, 1]);
         });
+    }
+
+    /// A listener's calls, in order: the phase and the entities told.
+    type Heard = std::sync::Arc<std::sync::Mutex<Vec<(&'static str, Vec<u32>)>>>;
+
+    /// Hears every entity tick, naming `named` to `entity_tick_each`.
+    struct Displays {
+        named: &'static [&'static str],
+        heard: Heard,
+    }
+
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for Displays {
+        fn entity_tick_listened(
+            &self,
+            _: mod_api::HostSide<'_>,
+            event: &mut mod_api::EntityTickListenedEvent,
+        ) {
+            event.listened = true;
+        }
+        fn entity_tick_pre(
+            &self,
+            _: mod_api::HostSide<'_>,
+            event: &mut mod_api::EntityTickPreEvent<'_>,
+        ) {
+            let entities = event.entities.to_vec();
+            self.heard.lock().unwrap().push(("pre", entities));
+        }
+        fn entity_tick_post(
+            &self,
+            _: mod_api::HostSide<'_>,
+            event: &mut mod_api::EntityTickPostEvent<'_>,
+        ) {
+            let entities = event.entities.to_vec();
+            self.heard.lock().unwrap().push(("post", entities));
+        }
+        fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+            for kind in self.named {
+                r.entity_tick_each(kind);
+            }
+        }
+    }
+
+    /// Two text displays, which the server keeps without simulating them, through a level's
+    /// entity phase: their ids and what the listener heard.
+    fn display_ticks(named: &'static [&'static str]) -> (Vec<u32>, Vec<(&'static str, Vec<u32>)>) {
+        let heard = Heard::default();
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+            "display-ticks",
+            Box::new(Displays {
+                named,
+                heard: heard.clone(),
+            }),
+        )]
+        .into();
+        let mut ids = Vec::new();
+        mod_platform::testing::with_mods(mods, || {
+            super::super::native_entity_refs::tests::with_game(|game| {
+                game.build_registries();
+                game.set_allow_commands(true);
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                game.block_ticks
+                    .add_empty_chunk(ChunkPos::new(0, 0))
+                    .unwrap();
+                for x in [4, 12] {
+                    assert!(
+                        game.run_command(&format!("summon text_display {x} 70 4 {{text:\"x\"}}"))
+                    );
+                }
+                ids = game.others.iter().map(|o| o.id).collect();
+                game.tickets.update(None);
+                game.begin_ordered_ticks();
+                game.run_ordered_ticks(sunrise_client::join_seq::JoinSeq::MAX, false)
+                    .unwrap();
+                game.native_others_tick_family(game.ordered.told, game.ordered.born);
+            });
+        });
+        let heard = std::mem::take(&mut *heard.lock().unwrap());
+        (ids, heard)
+    }
+
+    /// Displays of a type a mod named are told one by one at their place in the join order, each
+    /// Pre right before its Post.
+    #[test]
+    #[ignore = "daily"]
+    fn named_displays_are_told_at_their_place_in_the_join_order() {
+        let (ids, heard) = display_ticks(&["minecraft:text_display"]);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(
+            heard,
+            [
+                ("pre", vec![ids[0]]),
+                ("post", vec![ids[0]]),
+                ("pre", vec![ids[1]]),
+                ("post", vec![ids[1]]),
+            ]
+        );
+    }
+
+    /// With no display type named, the displays are told once as a family; the walk itself
+    /// offers none of them.
+    #[test]
+    #[ignore = "daily"]
+    fn unnamed_displays_are_told_once_for_the_family() {
+        let (ids, heard) = display_ticks(&[]);
+        assert_eq!(heard, [("pre", ids.clone()), ("post", ids)]);
     }
 
     #[test]

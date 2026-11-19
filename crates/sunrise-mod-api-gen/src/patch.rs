@@ -1493,15 +1493,15 @@ fn mirror(
         .filter(|(ident, _)| !reserved.contains(&ident.to_string()))
         .filter(|(ident, _)| !only_public || public.contains(&ident.to_string()))
         .map(|(ident, cfg)| quote!(#(#cfg)* pub use #original::#ident;));
-    let uses = uses(&items).into_iter().filter(|item| {
-        // A `use` naming a child mirror or a copy would collide with it.
-        let mut names = Vec::new();
-        collect_names(&item.tree, &mut names);
-        // In a lower crate only the listed functions' modules are widened, so an import of a
-        // private item elsewhere would not resolve: keep only what the copies and helpers name.
-        let wanted = used
-            .is_none_or(|used| names.is_empty() || names.iter().any(|name| used.contains(name)));
-        wanted && !names.iter().any(|name| reserved.contains(name))
+    let uses = uses(&items).into_iter().filter_map(|item| {
+        let mut item = item.clone();
+        item.tree = filter_use_tree(item.tree, None, &|name| {
+            // A `use` naming a child mirror or a copy would collide with it. In a lower
+            // crate, only the listed functions' modules are widened: other private imports
+            // wouldn't resolve, so keep only names the copies and helpers refer to.
+            !reserved.contains(name) && used.is_none_or(|used| used.contains(name))
+        })?;
+        Some(item)
     });
     let mut children = Vec::new();
     for (name, child) in &tree.children {
@@ -1706,13 +1706,38 @@ fn bridge_trait(
     ))
 }
 
-fn collect_names(tree: &syn::UseTree, out: &mut Vec<String>) {
+/// Filter individual bindings, preserving paths and unnameable imports that can affect resolution.
+fn filter_use_tree(
+    tree: syn::UseTree,
+    prefix: Option<&syn::Ident>,
+    keep: &impl Fn(&str) -> bool,
+) -> Option<syn::UseTree> {
+    use syn::UseTree::*;
     match tree {
-        syn::UseTree::Path(path) => collect_names(&path.tree, out),
-        syn::UseTree::Name(name) => out.push(name.ident.to_string()),
-        syn::UseTree::Rename(rename) => out.push(rename.rename.to_string()),
-        syn::UseTree::Glob(_) => {}
-        syn::UseTree::Group(group) => group.items.iter().for_each(|tree| collect_names(tree, out)),
+        Path(mut path) => {
+            path.tree = Box::new(filter_use_tree(*path.tree, Some(&path.ident), keep)?);
+            Some(Path(path))
+        }
+        Group(mut group) => {
+            group.items = group
+                .items
+                .into_iter()
+                .filter_map(|item| filter_use_tree(item, prefix, keep))
+                .collect();
+            (!group.items.is_empty()).then_some(Group(group))
+        }
+        Name(ref name) => {
+            let binding = if name.ident == "self" {
+                prefix.unwrap_or(&name.ident)
+            } else {
+                &name.ident
+            };
+            keep(&binding.to_string()).then_some(tree)
+        }
+        Rename(ref rename) => {
+            (rename.rename == "_" || keep(&rename.rename.to_string())).then_some(tree)
+        }
+        Glob(_) => Some(tree),
     }
 }
 
@@ -1908,16 +1933,18 @@ mod tests {
 
     #[test]
     fn a_lower_crate_mirror_keeps_only_the_imports_its_copies_and_helpers_name() {
-        let dir = std::env::temp_dir().join(format!("fnr-pruned-imports-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("lib.rs");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
         std::fs::write(
             &file,
-            "use std::sync::Arc; use std::rc::Rc; use child::Private; use std::collections::*;",
+            "use glam::{Mat4, Vec3};
+             use child::{self, Private, Reserved, Visible as Alias, tools::{Lookup as _, Gone}, missing::{Private}};
+             use std::rc::Rc;
+             use std::collections::*;",
         )
         .unwrap();
         let mut source = Source {
-            root: dir.clone(),
+            root: dir.path().to_owned(),
             loaded: BTreeSet::new(),
             files: BTreeMap::from([("fixture".to_owned(), vec![file])]),
             parsed: BTreeMap::new(),
@@ -1928,15 +1955,25 @@ mod tests {
             hashes: BTreeMap::new(),
             stale: None,
         };
-        let used = BTreeSet::from(["Arc".to_owned()]);
-        let out = mirror(&mut source, "fixture", &Tree::default(), &[], Some(&used)).unwrap();
+        let used = BTreeSet::from_iter(["Mat4", "child", "Alias", "Reserved"].map(str::to_owned));
+        let tree = Tree {
+            own: BTreeSet::from(["Reserved".to_owned()]),
+            ..Tree::default()
+        };
+        let out = mirror(&mut source, "fixture", &tree, &[], Some(&used)).unwrap();
         let parsed: syn::File = syn::parse2(out).unwrap();
         let imports: Vec<String> = uses(&parsed.items)
             .iter()
             .map(|item| item.tree.to_token_stream().to_string())
             .collect();
-        assert_eq!(imports, ["std :: sync :: Arc", "std :: collections :: *"]);
-        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(
+            imports,
+            [
+                "glam :: { Mat4 }",
+                "child :: { self , Visible as Alias , tools :: { Lookup as _ } }",
+                "std :: collections :: *",
+            ]
+        );
     }
 
     #[test]

@@ -115,6 +115,29 @@ fn an_ordinary_listener_still_replaces_the_delta() {
 
 mod root {
     mod runtime {
+        /// The stand-in for the real runtime's refusal: these fixtures run in `World`, where
+        /// nothing is refused.
+        pub(super) struct Refusal;
+        impl Refusal {
+            pub(super) fn report(&self) {}
+        }
+        pub(super) fn outside_world() -> bool {
+            false
+        }
+        pub(super) fn refusable<T>(_: bool, call: impl FnOnce() -> T) -> Result<T, Refusal> {
+            Ok(call())
+        }
+
+        pub(super) fn listening_kind_owner(
+            hook: super::HookId,
+            kind: &str,
+        ) -> Option<&'static super::ModEntry> {
+            let (namespace, _) = kind.split_once(':')?;
+            super::listening(hook)
+                .map(|(_, entry)| entry)
+                .find(|entry| entry.id == namespace)
+        }
+
         pub(super) struct ListenerScope;
         impl ListenerScope {
             pub(super) fn new() -> Self {

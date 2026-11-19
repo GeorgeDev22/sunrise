@@ -4,6 +4,7 @@ use mod_api::{ChunkDataLoadEvent, ChunkDataSaveEvent, ChunkDiskHost, Hooks};
 use std::sync::atomic::AtomicUsize;
 #[path = "../../../sunrise-mod-wasm/tests/fixture/src/chunk_disk.rs"]
 mod fixture;
+mod writer_stack;
 
 #[derive(Default)]
 struct Listener {

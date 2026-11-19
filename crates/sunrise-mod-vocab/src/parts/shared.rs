@@ -62,7 +62,7 @@ pub struct Parts {
     pub(crate) settings: Vec<(&'static str, crate::SettingSpec)>,
     /// Block parts, and block entity parts as the block parts they also are.
     pub(crate) blocks: HashMap<Box<str>, Vec<Attached<dyn BlockPart>>>,
-    /// Block entity parts by block, for the hooks asked by block (`block_entity`, `screen`).
+    /// Block entity parts by block, for the hooks asked by block (`block_entity`).
     pub(crate) block_entities: HashMap<Box<str>, Vec<Attached<dyn BlockEntityPart>>>,
     /// Block entity parts by block entity type, for the hooks asked by the entity
     /// (`block_entity_tick`, `menu_button`): its type id need not be its block's id.

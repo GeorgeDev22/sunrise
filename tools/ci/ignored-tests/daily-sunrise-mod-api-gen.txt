@@ -42,6 +42,7 @@ sunrise-mod-api-gen retained_knockback_entries_apply_hook_edits_cancel_and_deleg
 sunrise-mod-api-gen sunrise_stage_scans_through_its_child test:scan_child daily child-process
 sunrise-mod-api-gen surface::tests::the_real_tree_exports lib daily slow
 sunrise-mod-api-gen wire::tests::every_crossing_method_has_one_distinct_call_name lib daily slow
+sunrise-mod-api-gen wire::tests::an_unrelated_hook_added_to_the_catalog_moves_no_subscription_name_or_id lib daily slow
 sunrise-mod-api-gen surface::tests::every_crossing_method_lists_one_distinct_call_name lib daily slow
 sunrise-mod-api-gen surface::tests::the_recipe_placement_protocol_is_pinned_to_the_shapes_it_carries lib daily slow
 sunrise-mod-api-gen surface::tests::the_surface_export_names_the_calls_the_games_table_holds lib daily slow

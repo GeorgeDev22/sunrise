@@ -41,10 +41,14 @@ fn a_mods_jars_layer_under_its_files_in_mod_order() {
     fs::create_dir_all(base.join("assets/minecraft/atlases")).unwrap();
     fs::write(
         base.join("assets/minecraft/atlases/blocks.json"),
-        r#"{"sources": [{"type": "directory", "source": "block"}]}"#,
+        r#"{"sources": [{"type": "directory", "source": "block", "prefix": "block/"}]}"#,
     )
     .unwrap();
-    let atlas = |source: &str| format!("{{\"sources\": [{{\"source\": \"{source}\"}}]}}");
+    let atlas = |source: &str| {
+        format!(
+            "{{\"sources\": [{{\"type\": \"directory\", \"source\": \"{source}\", \"prefix\": \"\"}}]}}"
+        )
+    };
     // A jar in the store as the launcher names it: `<sha512>.jar`, with
     // entries in any namespace (a jar is not fenced as a mod's files are).
     let jar = |name: &str, entries: &[(&str, String)]| {
@@ -924,19 +928,36 @@ fn creative_tabs_keep_vanilla_items_missing_from_search() {
         names: BTreeMap::new(),
     };
     let mut doc: J = serde_json::from_str(
-        r#"{"tabs":[{"type":"SEARCH","items":["{count:1,id:\"minecraft:stone\"}"]}]}"#,
+        r#"{"schema":4,"item_features":{},"potion_features":{},"tabs":[{"id":"minecraft:search","type":"SEARCH","build":[],"search_metadata":[]}]}"#,
     )
     .unwrap();
     plan.creative_tabs(&mut doc).unwrap();
-    let doc: serde_json::Value = serde_json::to_value(doc).unwrap();
+    let catalog =
+        sunrise_items::creative_catalog::Catalog::parse(&serde_json::to_value(doc).unwrap())
+            .unwrap();
+    let built = catalog.build(
+        sunrise_items::creative_catalog::Parameters {
+            features: &[],
+            operator: false,
+            holders: &Default::default(),
+            items: &crate::items::Items::empty(),
+        },
+        None,
+        |_, _, _| {},
+    );
+    assert_eq!(catalog.tabs()[1].id, "test:restricted");
     assert_eq!(
-        doc["tabs"][1]["items"],
-        serde_json::json!([
-            "{count:1,id:\"minecraft:barrier\"}",
-            "{count:1,id:\"minecraft:command_block\"}",
-            "{count:1,id:\"minecraft:written_book\"}",
-            "{count:1,id:\"minecraft:knowledge_book\"}",
-        ])
+        built[1]
+            .display
+            .iter()
+            .map(|stack| stack.item.as_ref())
+            .collect::<Vec<_>>(),
+        [
+            "minecraft:barrier",
+            "minecraft:command_block",
+            "minecraft:written_book",
+            "minecraft:knowledge_book"
+        ],
     );
 }
 
@@ -4027,6 +4048,22 @@ fn creative_tabs_come_on_their_own_page() {
     )
     .unwrap();
     let mut creative = crate::creative::Creative::load(&root).unwrap();
+    let lists = creative.catalog().build(
+        sunrise_items::creative_catalog::Parameters {
+            operator: false,
+            features: &["minecraft:vanilla".into()],
+            holders: &Default::default(),
+            items: &crate::items::Items::empty(),
+        },
+        None,
+        |_, _, _| {},
+    );
+    creative.publish(
+        lists,
+        Default::default(),
+        Default::default(),
+        &crate::creative::Names::default(),
+    );
     assert_eq!(creative.pages(), 2);
     let i = creative
         .tabs
@@ -4056,11 +4093,11 @@ fn creative_tabs_come_on_their_own_page() {
     let search = creative.tabs.iter().position(|t| t.search).unwrap();
     creative.select(search);
     creative.set_page(1);
-    assert_eq!((creative.selected, creative.page), (search, 1));
+    assert_eq!((creative.selected_index(), creative.page), (search, 1));
     creative.select(0);
     // Page 1 shows the mod's tab and the right-hand ones, not vanilla's.
     creative.set_page(1);
-    assert_eq!(creative.selected, i);
+    assert_eq!(creative.selected_index(), i);
     let shown: Vec<&str> = creative
         .tabs
         .iter()
@@ -7944,6 +7981,67 @@ fn declared_offsets_resolve_modes_and_publish_only_declared_shape_channels() {
             assert_eq!(offsets[0].get("channels"), Some(&Tag::Byte(9)));
         } else {
             assert!(tag.get("shape_offsets").is_none());
+        }
+        fs::remove_dir_all(base.parent().unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn plain_block_properties_replace_template_facts_and_face_rule() {
+    for value in [true, false] {
+        let declaration = format!(
+            r#"{{"template":"minecraft:test","item":false,"properties":{{"instrument":"CUSTOM_HEAD","ignited_by_lava":{value},"replaceable":{value},"skip_same_block_faces":{value}}}}}"#
+        );
+        let (base, mods) = block_base(&format!("plain-properties-{value}"), &[&declaration]);
+        let plan = Plan::new(&base, &mods).unwrap();
+        let row = format!(
+            r#"{{"ignited_by_lava":{},"replaceable":{}}}"#,
+            !value, !value
+        );
+        let mut gameplay: J =
+            serde_json::from_str(&format!(r#"{{"states":[{row},{row}]}}"#)).unwrap();
+        plan.json("gameplay-facts.json", &mut gameplay).unwrap();
+        let Some(J::Arr(rows)) = gameplay.get("states") else {
+            panic!("states")
+        };
+        for row in &rows[2..] {
+            assert_eq!(row.get("ignited_by_lava"), Some(&J::Bool(value)));
+            assert_eq!(row.get("replaceable"), Some(&J::Bool(value)));
+        }
+        let template_flags = if value { 16 } else { 16 | 4 };
+        let mut properties = Tag::Compound(Compound::from([(
+            "blocks".into(),
+            Tag::Compound(Compound::from([(
+                "minecraft:test".into(),
+                Tag::Byte(template_flags),
+            )])),
+        )]));
+        plan.nbt(&mut properties);
+        assert_eq!(
+            properties.get("blocks").unwrap().get("testmod:test"),
+            Some(&Tag::Byte(if value { 16 | 4 } else { 16 }))
+        );
+        let mut definitions: J =
+            serde_json::from_str(r#"{"minecraft:test":{"rule":"bars"}}"#).unwrap();
+        plan.json("render-definitions.json", &mut definitions)
+            .unwrap();
+        assert_eq!(
+            definitions.at("testmod:test/rule"),
+            Some(&mut J::Str(
+                if value { "same_block" } else { "never" }.into()
+            ))
+        );
+        let mut behaviour: J = serde_json::from_str(
+            r#"{"states":[[0,0,0,0,0,0,0,0,"HARP"],[0,0,0,0,0,0,0,0,"HARP"]],"blocks":[],"items":{}}"#,
+        )
+        .unwrap();
+        plan.json("block-behaviours.json", &mut behaviour).unwrap();
+        let Some(J::Arr(rows)) = behaviour.get("states") else {
+            panic!("states")
+        };
+        for row in &rows[2..] {
+            let J::Arr(row) = row else { panic!("row") };
+            assert_eq!(row[8], J::Str("CUSTOM_HEAD".into()));
         }
         fs::remove_dir_all(base.parent().unwrap()).unwrap();
     }

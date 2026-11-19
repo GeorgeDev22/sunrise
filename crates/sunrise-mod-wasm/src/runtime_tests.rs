@@ -2433,6 +2433,48 @@ fn a_frame_lending_two_sources_for_one_trait_is_refused_in_debug() {
     }
 }
 
+// The policy follows the engine the settings build, and Pulley's guest stack is its own heap
+// allocation: a runaway recursion on an ordinary 2 MiB thread ends in a stack-overflow trap.
+#[test]
+fn the_stack_policy_follows_the_engine_and_pulley_traps_on_an_ordinary_stack() {
+    use sunrise_guest_stack::GuestEngine;
+    let engine = wasmtime::Engine::new(&crate::runtime::engine_config()).unwrap();
+    assert_eq!(
+        crate::runtime::guest_engine() == GuestEngine::Interpreter,
+        engine.is_pulley()
+    );
+    let mut config = crate::runtime::engine_config();
+    config.target("pulley64").unwrap();
+    config.max_wasm_stack(GuestEngine::Interpreter.wasm_stack().min(1024 * 1024));
+    config.async_stack_size(GuestEngine::Interpreter.wasm_stack().min(1024 * 1024));
+    let pulley = wasmtime::Engine::new(&config).unwrap();
+    assert!(pulley.is_pulley());
+    let wasm = wat::parse_str(
+        r#"(module (func $down (export "down") (param i32) (result i32)
+            local.get 0 i32.const 1 i32.add call $down))"#,
+    )
+    .unwrap();
+    let module = wasmtime::Module::new(&pulley, wasm).unwrap();
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            let mut store = wasmtime::Store::new(&pulley, ());
+            store.set_epoch_deadline(u64::MAX);
+            let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+            let down = instance
+                .get_typed_func::<i32, i32>(&mut store, "down")
+                .unwrap();
+            let error = down.call(&mut store, 0).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<wasmtime::Trap>(),
+                Some(&wasmtime::Trap::StackOverflow)
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 /// Context switches the named thread has made: each tick of an epoch thread is one.
 #[cfg(target_os = "linux")]
 fn switches_of(name: &str) -> u64 {

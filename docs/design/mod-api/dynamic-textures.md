@@ -44,7 +44,7 @@ client tick, for example), not from inside a draw.
 In the HUD atlas, as a pool of fixed slots in three size classes, `DYNAMIC_TEXTURE_CLASSES`: 64 x 64, 256 x 256 and
 1024 x 1024. An image takes a slot of the smallest class whose side holds both its width and its height.
 
-`HudAtlas::build_over_with_dynamic_textures(root, defaults, pool)` packs the slots as empty images beside the
+`HudAtlas::build_over_with_dynamic_textures(root, defaults, game, pool)` packs the slots as empty images beside the
 atlas's other run-time slots (maps, skins, pack icons), and only when `pool` is true. The game passes
 `resource_tables::dynamic_texture_pool()`, true when any client mod is loaded, native or wasm, with no mixin and no
 opt-in (the rule of #4437), and asks it again at every resource reload. A game with no mod packs no slot and its

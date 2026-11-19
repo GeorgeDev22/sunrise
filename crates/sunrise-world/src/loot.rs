@@ -28,7 +28,10 @@ use std::{
     path::Path,
     sync::{Arc, Mutex, Weak},
 };
-use sunrise_core::random::{LegacyRandom, RandomSource};
+use sunrise_core::{
+    identifier::Identifier,
+    random::{LegacyRandom, RandomSource},
+};
 use {
     crate::{lazy_json::LazyJson, native_load_context::LoadContext},
     sunrise_core::nbt::{Compound, Tag},
@@ -264,6 +267,10 @@ pub struct LootData {
     items: HashMap<String, ItemFacts>,
     /// Enchantments in registry (identifier) order.
     enchantments: Vec<Enchantment>,
+    /// Part answers resolved for this world registry snapshot, shared in meaning with
+    /// the items engine's selection table, never with another world's answers.
+    primary_answers: crate::enchantment_answers::AnswerTable,
+    support_answers: crate::enchantment_answers::AnswerTable,
     /// Tag files' layers by (registry, tag id).
     tags: HashMap<(String, String), crate::tag_layers::TagLayers>,
     /// Smelting recipes in recipe id order: (ingredient, result, result count).
@@ -605,6 +612,10 @@ pub fn shared_tables(root: &Path, overlay: &PackOverlay) -> io::Result<Arc<LootT
         use std::hash::{DefaultHasher, Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         root.hash(&mut hasher);
+        if let Ok(metadata) = root.join("registries.json").metadata() {
+            metadata.len().hash(&mut hasher);
+            metadata.modified().ok().hash(&mut hasher);
+        }
         overlay.conditions.hash(&mut hasher);
         let data = root.join("data");
         let mut namespaces: Vec<_> = fs::read_dir(&data)
@@ -632,7 +643,7 @@ pub fn shared_tables(root: &Path, overlay: &PackOverlay) -> io::Result<Arc<LootT
     if let Some(tables) = held(&mut LOADED.lock().unwrap_or_else(|e| e.into_inner())) {
         return Ok(tables);
     }
-    let tables = types::load_files(root, overlay, "loot_table")?;
+    let tables = load_resources::load_ordered_kind(root, overlay, "loot_table")?;
     let tables: LootTables = tables.into_iter().collect();
     let mut loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
     // Another thread may have loaded the same tables meanwhile: keep one.
@@ -738,7 +749,7 @@ impl LootData {
     ) -> io::Result<Self> {
         let all = root.join("data");
         let tables = shared_tables(root, overlay)?;
-        let modifiers = types::load_files(root, overlay, "item_modifier")?;
+        let modifiers = load_resources::load_ordered_kind(root, overlay, "item_modifier")?;
         let predicates = load_predicates(root, overlay)?;
         let items = defaults
             .entries()
@@ -833,10 +844,28 @@ impl LootData {
             predicates: Arc::new(predicates),
             items,
             enchantments,
+            primary_answers: Default::default(),
+            support_answers: Default::default(),
             tags,
             smelting: Vec::new(),
         };
         binding.snapshot(&mut loaded)?;
+        // Both enchantment engines bind the same item holder identities before
+        // a part can leave an unchanged default out of the shared answer table.
+        for enchantment in &mut loaded.enchantments {
+            for set in std::iter::once(&mut enchantment.supported).chain(&mut enchantment.primary) {
+                let bind = |holder: &mut Value| {
+                    if let Value::String(id) = holder {
+                        *id = crate::enchantment_answers::canonical_item_holder(id);
+                    }
+                };
+                if let Value::Array(members) = set {
+                    members.iter_mut().for_each(bind);
+                } else {
+                    bind(set);
+                }
+            }
+        }
         loaded.holder_sets = binding;
         Ok(loaded)
     }
@@ -844,6 +873,15 @@ impl LootData {
     pub fn copies_entity_nbt(&self) -> bool {
         self.copies_entity_nbt
     }
+    /// The primary-item answers resolved for this enchantment registry snapshot.
+    pub fn primary_answers(&self) -> &crate::enchantment_answers::AnswerTable {
+        &self.primary_answers
+    }
+    /// The support answers resolved for this enchantment registry snapshot.
+    pub fn support_answers(&self) -> &crate::enchantment_answers::AnswerTable {
+        &self.support_answers
+    }
+
     /// Attach prepared instances to this private, not-yet-published snapshot.
     pub fn set_global_modifiers(&mut self, modifiers: Arc<global_modifiers::GlobalLootModifiers>) {
         self.global_modifiers = modifiers;
@@ -854,6 +892,10 @@ impl LootData {
 
     pub fn predicates(&self) -> &Arc<HashMap<String, Value>> {
         &self.predicates
+    }
+
+    pub fn item_modifiers(&self) -> &HashMap<String, Value> {
+        &self.modifiers
     }
 
     /// The table snapshot used by this loot data.
@@ -958,7 +1000,20 @@ impl LootData {
         }
     }
     fn item_in(&self, item: &str, set: &Value) -> bool {
-        self.holder_set("item", set).iter().any(|i| i == item)
+        let matches = |holder: &str| match holder.strip_prefix('#') {
+            Some(tag) => self.tag("item", tag).iter().any(|id| id == item),
+            None => holder == item,
+        };
+        match set {
+            Value::String(holder) => matches(holder),
+            Value::Array(holders) => holders.iter().filter_map(Value::as_str).any(matches),
+            _ => false,
+        }
+    }
+    fn supports(&self, item: &str, enchantment: &Enchantment) -> bool {
+        self.support_answers
+            .answer(item, &enchantment.name)
+            .unwrap_or_else(|| self.item_in(item, &enchantment.supported))
     }
     fn facts(&self, item: &str) -> ItemFacts {
         self.items.get(item).copied().unwrap_or(ItemFacts {
@@ -1469,9 +1524,7 @@ impl<R: RandomSource> Context<'_, R> {
                 };
                 let options: Vec<usize> = options
                     .into_iter()
-                    .filter(|&i| {
-                        !check || data.item_in(&stack.item, &data.enchantments[i].supported)
-                    })
+                    .filter(|&i| !check || data.supports(&stack.item, &data.enchantments[i]))
                     .collect();
                 if !options.is_empty() {
                     let pick = self
@@ -1880,8 +1933,18 @@ impl<R: RandomSource> Context<'_, R> {
             // SetComponentsFunction: the patch's components, applied when the
             // stack becomes an item (trim on worn armour, see `mobs::finalize`).
             "minecraft:set_components" => {
-                for (id, value) in f["components"].as_object().into_iter().flatten() {
-                    let tag = if value.is_null() {
+                for (key, value) in f["components"].as_object().into_iter().flatten() {
+                    // DataComponentPatch parses the identifier after peeling off `!`.
+                    let (prefix, name) = key
+                        .strip_prefix('!')
+                        .map_or(("", key.as_str()), |name| ("!", name));
+                    let Ok(id) = Identifier::parse(name) else {
+                        continue;
+                    };
+                    let id = format!("{prefix}{id}");
+                    let tag = if prefix == "!" {
+                        Some(Tag::Compound(Default::default()))
+                    } else if value.is_null() {
                         None
                     } else {
                         // CustomData uses TagParser's lenient codec: an SNBT
@@ -1896,7 +1959,7 @@ impl<R: RandomSource> Context<'_, R> {
                         };
                         Some(tag)
                     };
-                    stack.components.push((id.clone(), tag));
+                    stack.components.push((id, tag));
                 }
             }
             // A validated registered function transforms only this stack.
@@ -1933,9 +1996,14 @@ impl<R: RandomSource> Context<'_, R> {
         let mut available: Vec<(usize, i32)> = Vec::new();
         for &i in source {
             let e = &data.enchantments[i];
-            let primary = data.item_in(item, &e.supported)
-                && e.primary.as_ref().is_none_or(|p| data.item_in(item, p));
-            if !primary && !book {
+            let primary = data
+                .primary_answers
+                .answer(item, &e.name)
+                .unwrap_or_else(|| {
+                    book || (data.supports(item, e)
+                        && e.primary.as_ref().is_none_or(|p| data.item_in(item, p)))
+                });
+            if !primary {
                 continue;
             }
             for level in (1..=e.max_level).rev() {
@@ -2426,6 +2494,63 @@ mod namespace_tests {
                 ("test:value".into(), Some(Tag::List(vec![Tag::Byte(7)]))),
             ]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn component_aliases_and_removals_follow_json_member_order() {
+        let root =
+            std::env::temp_dir().join(format!("sunrise-ordered-loot-patch-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("items.json"), r#"{"minecraft:bread":{}}"#).unwrap();
+        fs::write(
+            root.join("registries.json"),
+            r#"{"minecraft:data_component_type":{"entries":{"minecraft:villager_food":{}}}}"#,
+        )
+        .unwrap();
+        let defaults = crate::item_defaults::read(&root).unwrap();
+        let load = |patch| {
+            let files = [("loot_table/test:meal".to_owned(), vec![format!(r#"{{"pools":[{{"rolls":1,"entries":[{{"type":"minecraft:item","name":"minecraft:bread","modifier":{{"type":"minecraft:set_components","components":{{{patch}}}}}}}]}}]}}"#).into_bytes()])];
+            LootData::load(&root, &PackOverlay::new(&files), &defaults)
+        };
+        let roll = |patch| {
+            let data = load(patch).unwrap();
+            data.roll("test:meal", &mut LegacyRandom::new(1), 0.0, None, None)[0]
+                .components
+                .clone()
+        };
+        let food = (
+            "minecraft:villager_food".into(),
+            Some(Tag::compound([("nutrition", Tag::Byte(7))])),
+        );
+        let removal = (
+            "!minecraft:villager_food".into(),
+            Some(Tag::Compound(Default::default())),
+        );
+        assert_eq!(
+            roll(r#""minecraft:villager_food":{"nutrition":7},"!villager_food":{}"#),
+            [removal]
+        );
+        assert_eq!(
+            roll(r#""!villager_food":{},"minecraft:villager_food":{"nutrition":7}"#),
+            [food]
+        );
+        for (patch, expected) in [
+            (
+                r#""!villager_food":0"#,
+                "removal of minecraft:villager_food requires an object",
+            ),
+            (
+                r#""other:unknown":{}"#,
+                "unknown component ID other:unknown",
+            ),
+        ] {
+            let error = load(patch)
+                .err()
+                .expect("the malformed patch must refuse loading")
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2954,6 +3079,96 @@ mod namespace_tests {
 #[cfg(test)]
 mod native_kinds_tests {
     use super::*;
+
+    fn enchantable_probe(name: &str, item: &str, modifier: Value) -> LootData {
+        let mut data = table(
+            name,
+            &serde_json::json!({"pools":[{"rolls":1,"entries":[{
+                "type":"minecraft:item", "name":item, "modifier":[modifier]
+            }]}]})
+            .to_string(),
+        );
+        data.items.insert(
+            item.into(),
+            ItemFacts {
+                max_stack: 64,
+                enchantable: Some(1),
+                ..Default::default()
+            },
+        );
+        data.enchantments.push(Enchantment {
+            name: "test:sharp".into(),
+            supported: serde_json::json!(["test:probe"]),
+            primary: None,
+            exclusive: Value::Null,
+            max_level: 1,
+            weight: 1,
+            min_cost: (0, 0),
+            max_cost: (100, 0),
+            slots: vec![],
+            effects: Value::Null,
+        });
+        data
+    }
+
+    #[test]
+    fn world_loot_selection_reads_and_retires_its_primary_snapshot() {
+        let mut data = enchantable_probe(
+            "primary_snapshot",
+            "test:probe",
+            serde_json::json!({"type":"minecraft:enchant_with_levels","levels":30}),
+        );
+        data.enchantments[0].supported = Value::Null;
+        let roll = |data: &LootData| {
+            data.roll("minecraft:test", &mut LegacyRandom::new(1), 0.0, None, None)[0]
+                .enchantments
+                .clone()
+        };
+        assert!(roll(&data).is_empty());
+        data.primary_answers().install(HashMap::from([(
+            "test:probe".into(),
+            HashMap::from([("test:sharp".into(), true)]),
+        )]));
+        assert_eq!(roll(&data), [("test:sharp".into(), 1)]);
+        // Retiring the world's answer restores the vanilla outcome.
+        data.primary_answers().clear();
+        assert!(roll(&data).is_empty());
+    }
+
+    #[test]
+    fn world_random_enchantment_respects_support_only_when_compatibility_is_requested() {
+        for (item, supported) in [("test:probe", true), ("minecraft:enchanted_book", false)] {
+            for compatible in [true, false] {
+                let data = enchantable_probe(
+                    "support_snapshot",
+                    item,
+                    serde_json::json!({
+                        "type":"minecraft:enchant_randomly", "only_compatible":compatible
+                    }),
+                );
+                let roll = || {
+                    data.roll("minecraft:test", &mut LegacyRandom::new(1), 0.0, None, None)[0]
+                        .enchantments
+                        .clone()
+                };
+                let answers = data.support_answers();
+                for answer in [None, Some(false), Some(true), None] {
+                    match answer {
+                        Some(value) => answers.install(HashMap::from([(
+                            item.into(),
+                            HashMap::from([("test:sharp".into(), value)]),
+                        )])),
+                        None => answers.clear(),
+                    }
+                    if !compatible || answer.unwrap_or(supported) {
+                        assert_eq!(roll(), [("test:sharp".into(), 1)]);
+                    } else {
+                        assert!(roll().is_empty(), "{item}, {answer:?}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn weight_totals_pool_and_enchantments() {

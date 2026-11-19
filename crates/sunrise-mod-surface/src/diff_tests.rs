@@ -3,6 +3,78 @@
 use super::*;
 use crate::*;
 
+#[test]
+fn engine_catalogs_share_the_diff_and_note_gate() {
+    let point = |signature_hash: &str| {
+        EngineItem::new(
+            "point:game::tick".into(),
+            EngineContract::Point {
+                name: "game_tick".into(),
+                signature_hash: signature_hash.into(),
+            },
+        )
+    };
+    let old = functions(vec![]).with_engine_items(vec![
+        point("old"),
+        EngineItem::new(
+            "loop:entities.tick".into(),
+            EngineContract::Loop {
+                entry: "Game::tick_entities".into(),
+                generic: "tick_entities_with".into(),
+                slot: "Slot".into(),
+                side: "server".into(),
+            },
+        ),
+    ]);
+    let new = functions(vec![]).with_engine_items(vec![
+        point("new"),
+        EngineItem::new(
+            "internal:fn:game::step".into(),
+            EngineContract::Internal {
+                signature: "fn step()".into(),
+                signature_hash: "step".into(),
+                shape_only: false,
+                opaque_reason: None,
+            },
+        ),
+    ]);
+    let mut report = diff(&old, &new);
+    assert_eq!(
+        report
+            .changes
+            .iter()
+            .map(|c| (c.id.as_str(), c.kind, c.class))
+            .collect::<Vec<_>>(),
+        [
+            ("loop:entities.tick", ChangeKind::Removed, Class::Breaking),
+            ("point:game::tick", ChangeKind::Changed, Class::Breaking),
+            ("internal:fn:game::step", ChangeKind::Added, Class::Advisory),
+        ]
+    );
+    assert_eq!(report.changes[1].what, ["signature hash: `old` → `new`"]);
+    assert_eq!(report.undeclared().count(), 2);
+    assert!(
+        report
+            .attach(
+                &Note {
+                    file: "tick.toml".into(),
+                    why: "Tick moved.".into(),
+                    migrate: None
+                },
+                &["loop:entities.tick".into(), "point:game::tick".into()],
+            )
+            .is_empty()
+    );
+    assert_eq!(report.undeclared().count(), 0);
+
+    let only_internal = functions(vec![]).with_engine_items(vec![new.engine_items[0].clone()]);
+    let report = diff(&only_internal, &functions(vec![]));
+    assert_eq!(report.verdict, Verdict::Advisory);
+    assert_eq!(report.undeclared().count(), 0);
+    assert_eq!(report.changes[0].kind, ChangeKind::Removed);
+    assert_eq!(report.changes[0].class, Class::Advisory);
+}
+
 fn hook(name: &str, side: Side, arguments: &[(&str, &str)]) -> Hook {
     Hook::new(
         format!("hook:{name}"),

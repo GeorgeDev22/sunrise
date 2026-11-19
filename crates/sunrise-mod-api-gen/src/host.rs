@@ -408,6 +408,9 @@ pub(super) fn areas_source(root: &Path) -> Result<String, String> {
 /// Generate every area impl explicitly. Full-path calls plus a hard recursion lint
 /// refuse a missing inherent implementation instead of inheriting a trait default.
 pub(super) fn game_forwarders(root: &Path) -> Result<String, String> {
+    // The gated methods with no refusal-shaped `Result`: a refused call unwinds out of them
+    // (#3123).
+    let mut unwinding = std::collections::BTreeSet::new();
     let mut code = String::from(
         "use crate::game::Game;\nuse crate::game::api_values::{call_stack_write, call_state_write, call_write, TryIntoApi, TryIntoEngine};\nuse mod_api::*;\n",
     );
@@ -436,7 +439,9 @@ pub(super) fn game_forwarders(root: &Path) -> Result<String, String> {
                 ) {
                     return Err(format!("{name}: unknown access level {level}"));
                 }
-                let (setup, args, checked_write) = boundary_arguments(&entry.sig, name)?;
+                let read_stack = entry.attrs.iter().any(|a| a.path().is_ident("read_stack"));
+                let (setup, args, checked_write) =
+                    boundary_arguments(&entry.sig, name, read_stack)?;
                 let static_call = entry.attrs.iter().any(|a| a.path().is_ident("static_call"));
                 let args = if static_call {
                     args
@@ -514,6 +519,9 @@ pub(super) fn game_forwarders(root: &Path) -> Result<String, String> {
                 let typed_access_error = result_error(&entry.sig.output).filter(|error| {
                     outer_type(error, "LevelReadError") || outer_type(error, "LevelWriteError")
                 });
+                if typed_access_error.is_none() {
+                    unwinding.insert(format!("{}::{name}", area.stem));
+                }
                 let access = if let Some(error) = typed_access_error {
                     let error = error.to_token_stream();
                     format!(
@@ -585,10 +593,48 @@ pub(super) fn game_forwarders(root: &Path) -> Result<String, String> {
             }
         }
     }
+    check_unwinding(root, &unwinding)?;
     let parsed = syn::parse_file(&code).map_err(|e| e.to_string())?;
     let imports = standard_imports(&parsed);
     let parsed = syn::parse_file(&(imports + &code)).map_err(|e| e.to_string())?;
     Ok(prettyplease::unparse(&parsed))
+}
+
+/// Where the gated methods that may unwind are listed, one `area::method` per line. The list
+/// only shrinks: `tools/ci/check_unwinding_methods.py` refuses a line added since the base.
+const UNWINDING_METHODS: &str = "crates/sunrise-mod-api-gen/unwinding-methods.txt";
+
+/// A gated method that returns no `Result` with a refusal error (`LevelReadError` or
+/// `LevelWriteError`, whose `Unavailable` the forwarder returns) can only refuse a wrong-phase
+/// call by unwinding. A new one is refused unless it is listed; a listed one that has gained a
+/// refusal, or is gone, must leave the list.
+fn check_unwinding(
+    root: &Path,
+    unwinding: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let path = root.join(UNWINDING_METHODS);
+    crate::rerun_if_changed(&path.display());
+    let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let listed: std::collections::BTreeSet<String> = text
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let added: Vec<_> = unwinding.difference(&listed).cloned().collect();
+    if !added.is_empty() {
+        return Err(format!(
+            "gated methods without a refusal-shaped Result: return `Result<_, LevelReadError>` or `Result<_, LevelWriteError>` so a wrong-phase call refuses instead of unwinding; the list in {UNWINDING_METHODS} only shrinks:\n{}",
+            added.join("\n")
+        ));
+    }
+    let stale: Vec<_> = listed.difference(unwinding).cloned().collect();
+    if !stale.is_empty() {
+        return Err(format!(
+            "remove these from {UNWINDING_METHODS}: each now returns a refusal-shaped Result or is gone:\n{}",
+            stale.join("\n")
+        ));
+    }
+    Ok(())
 }
 
 /// API records whose game representation is owned by another crate. Conversions are
@@ -658,11 +704,6 @@ fn result_error(output: &syn::ReturnType) -> Option<&Type> {
     Some(error)
 }
 
-/// A borrowed `&ItemStack`: outside a checked write, the method only reads it.
-fn read_only_stack(ty: &Type) -> bool {
-    matches!(ty, Type::Reference(reference) if outer_type(&reference.elem, "ItemStack"))
-}
-
 fn outer_type(ty: &Type, expected: &str) -> bool {
     matches!(ty, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == expected))
 }
@@ -674,6 +715,7 @@ fn outer_type(ty: &Type, expected: &str) -> bool {
 fn boundary_arguments(
     sig: &syn::Signature,
     method: &str,
+    read_stack: bool,
 ) -> Result<(String, String, bool), String> {
     let mutable = sig
         .receiver()
@@ -703,11 +745,18 @@ fn boundary_arguments(
             args.push(name);
             continue;
         }
+        let is_borrowed_stack = |ty: &Type| matches!(ty, Type::Reference(reference) if outer_type(&reference.elem, "ItemStack"));
+        let optional_read_stack = read_stack
+            && matches!(&*arg.ty, Type::Path(path)
+            if outer_type(&arg.ty, "Option") && path.path.segments.last().is_some_and(|segment|
+                matches!(&segment.arguments, syn::PathArguments::AngleBracketed(args)
+                    if matches!(args.args.first(), Some(syn::GenericArgument::Type(ty)) if is_borrowed_stack(ty)))));
         let conversion = if text {
             format!("{name}.try_into_engine(&())")
-        } else if !checked_write && read_only_stack(&arg.ty) {
-            // Only a write imposes resident maxima: a stack vanilla stores (damage above its
-            // maximum, say) still answers a read.
+        } else if optional_read_stack {
+            format!("{name}.map(crate::game::api_values::stack_value).transpose()")
+        } else if (!checked_write || read_stack) && is_borrowed_stack(&arg.ty) {
+            // A detached stack used as input need not fit a resident slot.
             format!("crate::game::api_values::stack_value({name})")
         } else {
             format!("{name}.try_into_engine(self.items())")
@@ -1198,7 +1247,7 @@ mod tests {
         let method = entry(
             "fn read(&self, ingredient: &Ingredient) -> Result<Arc<[ItemKey]>, IngredientKeysError>;",
         );
-        let (setup, _, checked_write) = boundary_arguments(&method.sig, "read").unwrap();
+        let (setup, _, checked_write) = boundary_arguments(&method.sig, "read", false).unwrap();
         assert!(!checked_write);
         assert!(setup.contains("return Err(mod_api::NoBackend::no_backend())"));
         assert!(!setup.contains("Default::default()"));
@@ -1207,7 +1256,7 @@ mod tests {
     #[test]
     fn borrowed_stacks_are_read_without_write_validation_outside_checked_writes() {
         let read = entry("fn item_resource_damageable(&self, stack: &ItemStack) -> bool;");
-        let (setup, args, checked_write) = boundary_arguments(&read.sig, "read").unwrap();
+        let (setup, args, checked_write) = boundary_arguments(&read.sig, "read", false).unwrap();
         assert!(!checked_write);
         assert!(setup.contains("crate::game::api_values::stack_value(stack)"));
         assert!(!setup.contains("try_into_engine"));
@@ -1215,11 +1264,11 @@ mod tests {
         let write = entry(
             "fn living_apply_consume_effect(&mut self, stack: &ItemStack) -> Result<bool, StackWriteError>;",
         );
-        let (setup, _, checked_write) = boundary_arguments(&write.sig, "write").unwrap();
+        let (setup, _, checked_write) = boundary_arguments(&write.sig, "write", false).unwrap();
         assert!(checked_write);
         assert!(setup.contains("stack.try_into_engine(self.items())?"));
         let owned = entry("fn drop_at(&mut self, stack: ItemStack) -> bool;");
-        let (setup, _, _) = boundary_arguments(&owned.sig, "owned").unwrap();
+        let (setup, _, _) = boundary_arguments(&owned.sig, "owned", false).unwrap();
         assert!(setup.contains("stack.try_into_engine(self.items())"));
     }
 
@@ -1362,14 +1411,14 @@ mod tests {
     #[test]
     fn text_arguments_refuse_before_even_checked_stack_writes() {
         let text = entry("fn set_text(&mut self, text: &Text) -> Result<(), TextFormError>;");
-        let (setup, args, checked) = boundary_arguments(&text.sig, "set_text").unwrap();
+        let (setup, args, checked) = boundary_arguments(&text.sig, "set_text", false).unwrap();
         assert!(!checked);
         assert!(setup.contains("text.try_into_engine(&())?"));
         assert_eq!(args, "&text");
         let mixed = entry(
             "fn update(&mut self, stack: ItemStack, text: Option<&Text>) -> Result<Text, Refused>;",
         );
-        let (setup, args, checked) = boundary_arguments(&mixed.sig, "update").unwrap();
+        let (setup, args, checked) = boundary_arguments(&mixed.sig, "update", false).unwrap();
         assert!(checked);
         assert!(setup.contains("stack.try_into_engine(self.items())?"));
         assert!(setup.contains("text.try_into_engine(&())?"));

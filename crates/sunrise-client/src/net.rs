@@ -136,11 +136,10 @@ pub enum Event {
     ServerLinks(Vec<cfg::ServerLink>),
     /// The connection ended. `from_server`: the server gave the reason (or
     /// the connection was refused for good), rather than the connection
-    /// failing (auto-reconnect retries only failures and shutdowns).
+    /// failing.
     Disconnected {
         reason: String,
-        /// The reason's translation key, when it had one
-        /// (`reconnect::allowed` classifies by it).
+        /// The reason's translation key, when it had one.
         key: Option<String>,
         from_server: bool,
     },
@@ -233,27 +232,10 @@ use std::path::PathBuf;
 
 impl Session {
     /// A number of its own for each connection, never 0: entity ids are per connection, so what
-    /// is kept by id goes when it changes (`sunrise_hooks::players::PlayerModels::connection`).
+    /// is kept by id goes when it changes.
     pub fn serial(&self) -> u64 {
         self.serial
     }
-    /// The negotiated wire release, once the connection has been established.
-    pub fn server_version(&self) -> sunrise_protocol::adapter::ServerVersion {
-        self.writer.lock().unwrap().as_ref().map_or(
-            sunrise_protocol::adapter::ServerVersion::Current,
-            QueuedWriter::server_version,
-        )
-    }
-
-    /// Secure-chat enforcement synchronized later than login on older servers.
-    pub fn legacy_secure_chat_enforcement(&self) -> Option<bool> {
-        self.writer
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(QueuedWriter::legacy_secure_chat_enforcement)
-    }
-
     /// Start connecting in the background, as `auth`'s account when there is one.
     pub fn connect(
         address: &str,
@@ -408,8 +390,13 @@ impl Session {
             });
             thread_payloads.close();
             thread_far.cancel();
-            let from_server = result.is_ok();
-            let why = result.unwrap_or_else(|e| e);
+            let (why, from_server) = match result {
+                Ok(why) => (why, true),
+                Err(why) => {
+                    let from_server = why.from_server;
+                    (why, from_server)
+                }
+            };
             if let Some(w) = thread_writer.lock().unwrap().take() {
                 w.shutdown();
             }
@@ -767,19 +754,19 @@ fn tr(lang: &Language, key: &str) -> String {
 }
 
 /// Why a connection ended: the shown text and, when the reason was a
-/// translatable component or a known Sunrise error, its translation key —
-/// the auto-reconnect classifies by key (`reconnect::allowed`), the
-/// English keyword scan of the text is the fallback for plain reasons.
+/// translatable component or a known Sunrise error, its translation key.
 #[derive(Clone)]
 pub struct Reason {
     pub text: String,
     pub key: Option<String>,
+    from_server: bool,
 }
 impl Reason {
     fn plain(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             key: None,
+            from_server: false,
         }
     }
     /// A vanilla key's text in the session's language, with the key.
@@ -787,6 +774,7 @@ impl Reason {
         Self {
             text: tr(lang, key),
             key: Some(key.to_owned()),
+            from_server: false,
         }
     }
     /// A Sunrise key's text with a `%s` argument filled.
@@ -803,6 +791,7 @@ impl Reason {
             Ok(v) => Self {
                 text: json_text(&v, lang),
                 key: v["translate"].as_str().map(str::to_owned),
+                from_server: true,
             },
             Err(_) => Self::plain(reason_json),
         }
@@ -822,6 +811,7 @@ impl Reason {
         Self {
             text: plain(tag, lang),
             key,
+            from_server: true,
         }
     }
 }
@@ -868,24 +858,6 @@ fn connect_tcp(
         .set_read_timeout(Some(read_timeout))
         .map_err(|e| e.to_string())?;
     Ok((c, host, port))
-}
-
-/// Whether joining servers of older releases is on (roadmap `older-servers`): off by default while the
-/// adapter is incomplete; `SUNRISE_OLDER_SERVERS=1` turns it on.
-pub fn older_servers_enabled() -> bool {
-    std::env::var_os("SUNRISE_OLDER_SERVERS").is_some_and(|v| v == "1")
-}
-
-/// The older release a server speaks, by its status ping, when Sunrise can translate it; `None` for the
-/// pinned version, an unknown one, a failed ping, or with the feature off.
-fn older_server(address: &str) -> Option<sunrise_protocol::adapter::ServerVersion> {
-    use sunrise_protocol::adapter::ServerVersion;
-    if !older_servers_enabled() {
-        return None;
-    }
-    let (json, _) = ping(address, Duration::from_secs(5)).ok()?;
-    let protocol = i32::try_from(json["version"]["protocol"].as_i64()?).ok()?;
-    ServerVersion::from_protocol(protocol).filter(|v| *v != ServerVersion::Current)
 }
 
 /// `Connection.exceptionCaught`: a read that timed out ends with
@@ -938,8 +910,6 @@ fn run(
             Some(code) => join_friend(code, lang, send)?,
             None => {
                 let Some(target) = parse_address(address) else {
-                    // A refusal: never retried (`sunrise.multiplayer
-                    // .invalid_address` is in reconnect's key list).
                     return Err(Reason::keyed_arg(
                         "sunrise.multiplayer.invalid_address",
                         lang,
@@ -959,12 +929,6 @@ fn run(
             c.writer
                 .write_raw(&token)
                 .map_err(|e| Reason::plain(e.to_string()))?;
-        }
-        if !address.starts_with(FRIEND)
-            && let Some(version) = older_server(address)
-        {
-            log::info!("Joining {address} as a {} server", version.name());
-            c.adapt(version);
         }
         (host, port, c)
     };
@@ -1019,8 +983,7 @@ fn run(
                             let hash = server_hash(&hello.server_id, &secret, &hello.public_key);
                             // The session service's refusal: the wrapped
                             // `disconnect.loginFailedInfo` text is shown, and
-                            // the inner key (the reason's own) classifies
-                            // (`reconnect::allowed`).
+                            // the reason retains the inner key.
                             crate::auth::join_server(account, &hash).map_err(|err| {
                                 let (reason, key) = match err.reason() {
                                     Ok(key) => (tr(lang, key), Some(key.to_owned())),
@@ -1032,6 +995,7 @@ fn run(
                                         lang,
                                     ),
                                     key,
+                                    from_server: false,
                                 }
                             })
                         });
@@ -1135,6 +1099,8 @@ fn receive_play(
     recorder: &RecorderSlot,
     payloads: &Arc<crate::raw_payloads::Transport>,
 ) -> Result<Reason, Reason> {
+    // ClientPacketListener.chunkBatchSizeCalculator.
+    let mut batch = sunrise_protocol::chunk_batch::ChunkBatchSize::default();
     loop {
         let (id, payload) = reader
             .recv()
@@ -1171,6 +1137,18 @@ fn receive_play(
         };
         match packet {
             play::Clientbound::KeepAlive(k) => reply(play::Serverbound::KeepAlive(k)),
+            // ClientPacketListener.handleChunkBatchStart and handleChunkBatchFinished run on the network
+            // thread (no ensureRunningOnSameThread): each batch is timed as it arrives and answered at once,
+            // before what waits for the game thread, with the rate ChunkBatchSizeCalculator derives.
+            play::Clientbound::ChunkBatchStart(_) => batch.on_batch_start(),
+            play::Clientbound::ChunkBatchFinished(p) => {
+                batch.on_batch_finished(p.size);
+                reply(play::Serverbound::ChunkBatchReceived(
+                    play::ChunkBatchReceived {
+                        chunks_per_tick: batch.desired_chunks_per_tick(),
+                    },
+                ));
+            }
             play::Clientbound::BundleDelimiter(_) => {}
             play::Clientbound::ResourcePackPush(p) => {
                 let _ = send.send(Event::PackPush(p));
@@ -1866,6 +1844,8 @@ mod tests {
             let (client, server) = sunrise_protocol::connection::Pipe::pair();
             let mut client = Connection::local(client);
             send_identity(&mut client, &identity).unwrap();
+            // Closed before reading, so a packet too many shows as one more read, not a wait.
+            drop(client);
             let mut server = Connection::local(server);
             for (channel, data) in expected {
                 let (id, body) = server.recv().unwrap();
@@ -1876,6 +1856,7 @@ mod tests {
                 };
                 assert_eq!((p.channel.as_str(), p.data), (channel, data));
             }
+            assert!(server.recv().is_err(), "a packet after the expected ones");
         }
     }
 
@@ -2191,7 +2172,10 @@ mod tests {
             if server_brand == b"\xff" {
                 // A registered brand uses its own string codec: malformed
                 // bytes fail the session rather than continuing negotiation.
-                assert!(server.recv().unwrap_err().is_end_of_stream());
+                let error = server
+                    .recv()
+                    .expect_err("malformed brand must end the session");
+                assert!(error.is_end_of_stream());
                 drop(server);
                 drop(session);
                 continue;
@@ -2666,6 +2650,66 @@ mod tests {
         let (event, _ping_credit) = events.recv_timeout_owned(timeout).unwrap().into_parts();
         assert!(
             matches!(event, Event::Packet(p) if *p == play::Clientbound::Ping(cfg::Ping { id: 7 }))
+        );
+        writer.lock().unwrap().take().unwrap().shutdown();
+        assert!(thread.join().unwrap().is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// ClientPacketListener.handleChunkBatchStart and handleChunkBatchFinished: the
+    /// receive loop answers a batch itself, with the game's queue never read.
+    #[test]
+    fn the_network_thread_answers_each_chunk_batch_once() {
+        let (root, data) = empty_item_data("chunk-batch");
+        let (client, server) = sunrise_protocol::connection::Pipe::pair();
+        let (mut reader, writer) = Connection::local(client).split();
+        let writer = Arc::new(Mutex::new(Some(QueuedWriter::new(writer).unwrap())));
+        // Held and never polled: nothing the game thread does can answer.
+        let (send, _events) = event_channel();
+        let thread_writer = writer.clone();
+        let thread = std::thread::spawn(move || {
+            receive_play(
+                &mut reader,
+                &thread_writer,
+                &Arc::new(AtomicBool::new(false)),
+                &Language::new(),
+                &send,
+                &Cookies::default(),
+                &crate::lod_net::Inbox::default(),
+                &data,
+                &Arc::new(Mutex::new(None)),
+                &crate::raw_payloads::Transport::empty(),
+            )
+        });
+        let mut server = Connection::local(server);
+        let keep_alive = |id| play::Clientbound::KeepAlive(cfg::KeepAlive { id }).encode();
+        let next = |server: &mut Connection| {
+            let (id, body) = server.recv().unwrap();
+            play::Serverbound::decode(id, &body).unwrap()
+        };
+        // The start sends nothing: the first answer is the keep-alive after it.
+        server
+            .send(&play::Clientbound::ChunkBatchStart(Empty).encode())
+            .unwrap();
+        server.send(&keep_alive(1)).unwrap();
+        assert_eq!(
+            next(&mut server),
+            play::Serverbound::KeepAlive(cfg::KeepAlive { id: 1 })
+        );
+        // An empty first batch leaves the starting average: 7e6 / 2e6 chunks a tick.
+        let finished = play::Clientbound::ChunkBatchFinished(play::ChunkBatchFinished { size: 0 });
+        server.send(&finished.encode()).unwrap();
+        server.send(&keep_alive(2)).unwrap();
+        assert_eq!(
+            next(&mut server),
+            play::Serverbound::ChunkBatchReceived(play::ChunkBatchReceived {
+                chunks_per_tick: 3.5
+            })
+        );
+        // Exactly one answer: the next is the keep-alive sent after the finish.
+        assert_eq!(
+            next(&mut server),
+            play::Serverbound::KeepAlive(cfg::KeepAlive { id: 2 })
         );
         writer.lock().unwrap().take().unwrap().shutdown();
         assert!(thread.join().unwrap().is_err());

@@ -39,7 +39,7 @@ in `.local/minecraft/26.3/sources/server/`.
 | `sunrise-ctl memory`, `status`, `stats`, `bench`, `fly … raw` | Live control replies (`control.rs:529-689`, `commands.rs:344-597`). | **Stay** as live state for agents and the benchmark driver. Captures reuse their producers; `FrameStats` feeds `health`. |
 | Dedicated `server-status`, supervisor metrics, Prometheus | `game/dedicated/status.rs:132-173`; supervisor 1 Hz samples `crates/sunrise-server/src/supervisor.rs:619-680`; `/api/v1/metrics/prometheus` (`api.rs:51-65`). | **Stay** for live external monitoring. `health` uses the same field names (`tps`, `mspt`, `rss`, `cpu`). Exporting counters there is a later PR (§3.6). |
 | `/debug start\|stop`, `/jfr`, `/perf` | Vanilla commands (`game/commands/extra.rs:1006-1163`); `/perf` is listed but has no executor. | **Stay.** They are vanilla parity, not this platform; `/perf` is a separate parity item. Remote profiling borrows its permission level (§4.2). |
-| F3+2/F3+3 charts, performance overlay | `debug_chart.rs`, `perf_overlay.rs`. | **Stay** (live UI). |
+| F3+2/F3+3 charts, performance overlay | `debug_chart.rs`; crate `sunrise-perf-overlay`. | **Stay** (live UI). |
 | `render-capture` / `scene_replay` | Input fixture: mesh state + camera, hundreds of MB to 1.45 GB, built from Mojang assets (spec B). | **Stays separate.** A scene capture is a renderer input, not a measurement. `scene_replay --json` results can be stored as a `bench` entry referencing the scene by `corpus_id`. |
 | `SUNRISE_OCCLUSION_PROFILE` | Subsystem log lines every few seconds (`game/occlusion_culling.rs:856`). | **Fold when next touched**, as counters (§3.6). Nothing reads them yet. |
 | `examples/*_bench.rs`, `*_profile.rs` | Microbenchmarks. | **Stay**, out of scope. |

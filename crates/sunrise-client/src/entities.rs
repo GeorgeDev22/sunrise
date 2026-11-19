@@ -849,7 +849,9 @@ pub struct ExperienceOrb {
     /// `ExperienceOrb.DATA_VALUE`: an int that a save or command can leave at
     /// 0 or below, which a pickup turns into no experience.
     pub value: i32,
-    pub age: u32,
+    /// `ExperienceOrb.age`: ticks lived, signed (a save can start it below 0);
+    /// the orb is discarded at 6000.
+    pub age: i32,
     pub on_ground: bool,
     /// `ExperienceOrb.count`: orbs merged into this one; each pickup gives
     /// `value` once and takes one off.
@@ -1256,6 +1258,7 @@ impl ExperienceOrb {
         }
         // ExperienceOrb.tick applies block effects after moving, before drag.
         let discarded = server
+            && !burnt_out
             && self.apply_lava_contact_damage_inner(
                 world,
                 fluids,
@@ -1287,7 +1290,8 @@ impl ExperienceOrb {
         if self.on_ground && wanted.y < -0.03 {
             self.velocity.y = -wanted.y * 0.4;
         }
-        self.age += 1;
+        // `++age` on a Java int.
+        self.age = self.age.wrapping_add(1);
         let step = OrbMove {
             from,
             moved,
@@ -1327,9 +1331,6 @@ impl ExperienceOrb {
         on_sound: &mut dyn FnMut([f64; 3], f32),
         invulnerable: &mut dyn FnMut(&mut W) -> bool,
     ) -> bool {
-        if self.health <= 0 {
-            return true;
-        }
         let contacts = orb_lava_contacts(self.previous, self.position, wanted, |p| {
             let fluid = fluids.fluid(world.block(p.x, p.y, p.z));
             if !fluid
@@ -1537,6 +1538,41 @@ mod level_up_sound {
     }
 }
 
+/// The `PaintingVariant.DIRECT_CODEC` definition used by the registry and renderer.
+#[derive(Clone, Debug)]
+pub struct PaintingVariant {
+    pub id: std::sync::Arc<str>,
+    pub asset: String,
+    pub width: i32,
+    pub height: i32,
+    pub title: Option<serde_json::Value>,
+    pub author: Option<serde_json::Value>,
+}
+
+impl PaintingVariant {
+    pub fn decode(id: &str, value: &serde_json::Value) -> Result<Self, String> {
+        let axis = |field: &str| {
+            value[field]
+                .as_i64()
+                .filter(|n| (1..=16).contains(n))
+                .map(|n| n as i32)
+                .ok_or_else(|| format!("{field} must be an integer in 1..=16"))
+        };
+        let asset = value["asset_id"].as_str().ok_or("asset_id is required")?;
+        let asset = sunrise_core::identifier::Identifier::parse(asset)
+            .map_err(|error| format!("asset_id: {error}"))?
+            .to_string();
+        Ok(Self {
+            id: id.into(),
+            asset: asset.trim_start_matches("minecraft:").to_owned(),
+            width: axis("width")?,
+            height: axis("height")?,
+            title: value.get("title").cloned(),
+            author: value.get("author").cloned(),
+        })
+    }
+}
+
 /// A painting (`Painting`, a `HangingEntity`): the block it hangs in, the
 /// 2D data value of the direction it faces, and its variant.
 #[derive(Clone, Debug)]
@@ -1739,6 +1775,8 @@ pub struct ArmorStand {
     /// When it joined its list ([`crate::join_seq`]); set by the list, not by the spawn site.
     pub join: crate::join_seq::JoinSeq,
     pub fire_ticks: i32,
+    /// Unsaved fire immunity granted on this logical side.
+    pub mod_fire_immune: bool,
     pub health: f32,
     pub id: u32,
     pub position: Vec3,
@@ -1979,11 +2017,15 @@ impl ArmorStand {
         }
         best
     }
+    /// `Entity.isOnFire`: an immune stand does not count as burning.
+    pub fn is_on_fire(&self) -> bool {
+        !self.mod_fire_immune && self.fire_ticks > 0
+    }
     /// `EntityRenderer.getPackedLightCoords` for the cell `light_probe` chose:
     /// the level's sky light over the cell's block light, at 15 block light
     /// while the stand `isOnFire`. `light` is the level's packed light.
     pub fn render_light(&self, light: u8) -> u32 {
-        let block = if self.fire_ticks > 0 { 15 } else { light & 15 };
+        let block = if self.is_on_fire() { 15 } else { light & 15 };
         (u32::from(light >> 4) * 16) | ((u32::from(block) * 16) << 8)
     }
     /// The body's yaw `alpha` of the way through the tick
@@ -2020,6 +2062,7 @@ impl ArmorStand {
             pitch: 0.0,
             join: Default::default(),
             fire_ticks: 0,
+            mod_fire_immune: false,
             health: 20.0,
             id,
             position,
@@ -2132,6 +2175,8 @@ impl ArmorStand {
         }
         if water {
             self.fire_ticks = 0;
+        } else if self.mod_fire_immune {
+            self.fire_ticks = self.fire_ticks.min(0);
         }
         if self.fire_ticks > 0 {
             if self.fire_ticks % 20 == 0
@@ -2146,13 +2191,17 @@ impl ArmorStand {
             }
             self.fire_ticks -= 1;
         }
-        if lava {
+        if lava && !self.mod_fire_immune {
             self.fire_ticks = self.fire_ticks.max(300);
         }
-        let fire = crate::motion::environment::fire_contact(world, registry, self.bounds()) > 0.0;
         // The fire block reaches a stand through `applyEffectsFromBlocks`,
         // which a NoGravity stand does not feel (measured beside the server).
-        if fire && !self.invisible && !self.marker && !self.no_gravity {
+        if !self.mod_fire_immune
+            && !self.invisible
+            && !self.marker
+            && !self.no_gravity
+            && crate::motion::environment::fire_contact(world, registry, self.bounds()) > 0.0
+        {
             if self.fire_ticks > 0 {
                 if !invulnerable(world, "minecraft:in_fire") {
                     self.health -= 0.15;
@@ -5230,24 +5279,46 @@ mod orb_lava_tests {
                 "client orb in lava must not play burn sound"
             );
             assert_eq!(client_orb.health, 5);
+        });
+    }
 
-            // Dead orb (health <= 0) takes no contact damage and emits no sound
-            let mut dead_orb = sample_orb(Vec3::new(20.5, 4.1, 20.5), 0);
-            sounds.clear();
-            let mut dead_draws = 0;
-            let discarded = dead_orb.apply_lava_contact_damage(
-                world,
-                fluids,
-                Vec3::ZERO,
-                &mut || {
-                    dead_draws += 1;
-                    0.5
-                },
-                &mut |pos, pitch| sounds.push((pos, pitch)),
-            );
-            assert!(discarded, "dead orb remains discarded");
-            assert!(sounds.is_empty(), "dead orb must not play burn sound");
-            assert_eq!(dead_draws, 0, "dead orb must not consume random float");
+    #[test]
+    #[ignore = "daily"]
+    fn nonpositive_health_orbs_age_in_air_and_take_damage_in_lava() {
+        with_fixture(|world, facts, collision, fluids, assets| {
+            let lava = assets.registry.default_state("minecraft:lava").unwrap();
+            world.set(20, 4, 20, lava).unwrap();
+            for health in [0, -3] {
+                for (y, fire_ticks, ticks, damage, burn_sounds) in
+                    [(6.0, 0, 20, 0, 0), (4.1, 0, 1, 4, 1), (4.1, 20, 1, 1, 0)]
+                {
+                    let mut orb = sample_orb(Vec3::new(20.5, y, 20.5), health);
+                    orb.no_gravity = true;
+                    orb.fire_ticks = fire_ticks;
+                    let mut sounds = 0;
+                    for _ in 0..ticks {
+                        assert_eq!(
+                            orb.tick(
+                                world,
+                                facts,
+                                collision,
+                                None,
+                                true,
+                                &mut || 0.5,
+                                None,
+                                fluids,
+                                crate::test_resources::server_loop_context(),
+                                &mut |_, _| sounds += 1,
+                            ),
+                            damage == 0,
+                            "Health {health}, Y {y}, Fire {fire_ticks}"
+                        );
+                    }
+                    assert_eq!(orb.age, ticks);
+                    assert_eq!(orb.health, health - damage);
+                    assert_eq!(sounds, burn_sounds);
+                }
+            }
         });
     }
 

@@ -7,8 +7,7 @@ use crate::*;
 #[sunrise_mod_api_macros::host_area]
 pub trait PlayerSessionBackend {
     /// Side: server.
-    /// The IP address the player connects from, without the port (behind a
-    /// Velocity proxy, the address the proxy forwards). Displaced connected
+    /// The IP address the player connects from, without the port. Displaced connected
     /// players keep their address; an acting player with no known connection
     /// has an empty address. None for a stale or unavailable player.
     #[access(WorldOnly)]
@@ -100,8 +99,7 @@ pub trait PlayerSessionBackendMut {
     /// again. Hovering the shown name gives the real one, which stays in the
     /// log, commands, selectors and the server's events. Kept until a mod
     /// sets it again or the server stops (also if they leave and come back).
-    /// Plain text: the mod checks it (`Messages::text_allowed`, its length,
-    /// other players' names). False when the server list is unavailable,
+    /// Plain text: the mod checks it (its length, other players' names). False when the server list is unavailable,
     /// the handle is stale or the player isn't online.
     #[access(WorldOnly)]
     fn player_set_nickname(&mut self, player: PlayerRef, nickname: Option<&str>) -> bool;

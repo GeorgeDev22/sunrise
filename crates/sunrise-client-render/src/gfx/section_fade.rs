@@ -25,7 +25,7 @@ pub(super) fn section_instance(origin: [f32; 3], fade: u32, visibility: f32) -> 
 }
 /// `SectionRenderDispatcher.RenderSection.getVisibility`: how far through its fade-in a section
 /// uploaded `elapsed_ms` ago is.
-pub(super) fn chunk_visibility(elapsed_ms: u64, fade_ms: u64) -> f32 {
+pub fn chunk_visibility(elapsed_ms: u64, fade_ms: u64) -> f32 {
     if elapsed_ms >= fade_ms {
         1.0
     } else {
@@ -33,7 +33,7 @@ pub(super) fn chunk_visibility(elapsed_ms: u64, fade_ms: u64) -> f32 {
     }
 }
 /// `Util.toMillis`: `Mth.floor(seconds * 1000.0)`.
-pub(super) fn fade_millis(seconds: f32) -> u64 {
+pub fn fade_millis(seconds: f32) -> u64 {
     (f64::from(seconds) * 1000.0).floor().max(0.0) as u64
 }
 /// `chunk_visibility` at `now` of a section first uploaded at `uploaded`
@@ -44,6 +44,17 @@ pub(super) fn section_visibility(uploaded: Option<&Instant>, fade_ms: u64, now: 
         let elapsed = now.saturating_duration_since(t).as_millis() as u64;
         chunk_visibility(elapsed, fade_ms)
     })
+}
+/// `LevelRenderer.isSectionCompiledAndVisible` for one section: it has its mesh
+/// (`compiled`), and `getVisibility` from its first upload `uploaded` (none: whole, or
+/// fading in over far terrain) has reached `CHUNK_VISIBILITY_THRESHOLD`.
+pub(super) fn compiled_and_visible(
+    compiled: bool,
+    uploaded: Option<&Instant>,
+    fade_ms: u64,
+    now: Instant,
+) -> bool {
+    compiled && section_visibility(uploaded, fade_ms, now) >= CHUNK_VISIBILITY_THRESHOLD
 }
 /// What a section's fade depends on besides the section itself
 /// (`SectionGpu::drawn_faded`): the time, the chunk fade-in time, the sections'
@@ -57,4 +68,4 @@ pub(super) struct FadeInputs<'a> {
     pub(super) retiring: &'a crate::fast_hash::FxHashSet<super::SectionKey>,
 }
 /// `LevelRenderer.CHUNK_VISIBILITY_THRESHOLD`: a section's block entities wait for it.
-pub(super) const CHUNK_VISIBILITY_THRESHOLD: f32 = 0.3;
+pub const CHUNK_VISIBILITY_THRESHOLD: f32 = 0.3;

@@ -5,11 +5,9 @@ Create a project, edit its JSON files, then build and run it.
 
 ## Create and package your mod
 
+Install the tool first ([Install the mod tool](../start/install-tool.md)).
+
 ```sh
-# A prebuilt binary for Linux x86_64/aarch64, macOS x86_64/arm64 or Windows x86_64:
-cargo binstall --git https://github.com/sunrise-org/sunrise cargo-sunrise-mod
-# Or build it from source, without cargo-binstall:
-cargo install --git https://github.com/sunrise-org/sunrise cargo-sunrise-mod
 cargo sunrise-mod new my-mod        # a content mod: manifest, one block with its model, loot and recipe
 cd my-mod
 cargo sunrise-mod run               # build my-mod.smod, then start the game with it turned on
@@ -35,17 +33,42 @@ cargo sunrise-mod check target/sunrise-mod/my_mod.smod   # the registry's checks
   `#[mod_api::sunrise_mod]`. Compile it with `sunrise-launcher native-build <path> --trust-native-code`
   ([writing hooks](../start/writing-hooks.md)). Any other `--template` is refused.
 - `build` packs the checked project into `target/sunrise-mod/<id>.smod`: `sunrise-mod.toml`, `assets/`,
-  `data/`, optional `icon.png` and, for code, the root Cargo project. It validates content with the same
-  checks as the game; without `--wasm`, it does not compile code. Native code requires both `Cargo.toml` and `[native]`; inconsistent
-  declarations and a manifest without capability `registries` are refused.
-- `run` builds, then starts `sunrise-client` (on `PATH`, or `--game PATH`, or `SUNRISE_CLIENT`) with
-  `--dev-mod target/sunrise-mod/<id>.smod`, always on. Arguments after `--` go to the game. The game reads content once
-  at start, so rebuild and run again after an edit.
+  `data/`, optional `icon.png` and, for code, the root Cargo project. It reads content with the game's own package
+  rules and runs the reference checks of `check` below. If `target/` or `target/sunrise-mod/` is a symlink, the build
+  refuses it without touching the previous package. Otherwise, once the build reaches output cleanup, it removes the
+  previous `<id>.smod` before running the reference checks. Earlier failures, such as a manifest or SDK error,
+  can leave the previous package in place. A content build compiles nothing; a native build compiles against the pinned SDK, and `--wasm` compiles the
+  module before packaging. Native code requires
+  both `Cargo.toml` and `[native]`; inconsistent declarations and a manifest without capability `registries` are refused.
+- For content mods, `run` builds, then starts `sunrise-client` (on `PATH`, or `--game PATH`, or `SUNRISE_CLIENT`) with
+  `--dev-mod target/sunrise-mod/<id>.smod`, always on. Native projects use the pinned SDK's game. Use `--jars <dir>`
+  to choose a folder of [original Java jars](#java-jars-as-external-assets). Arguments after `--` go to the game.
+  The game reads content once at start, so run again after an edit.
+- `check` in a project folder runs the package rules, the render pipeline shader checks and offline reference checks.
+  It checks references to IDs in namespaces the manifest owns, not to vanilla or other mods. It checks these forms:
+  - Models in blockstate `variants` and `multipart`, model `parent` and `textures` fields, and model references in
+    item definitions. The game's model decoder reads one model and ignores trailing input.
+  - Ingredients and results in built-in shaped, shapeless, cooking, stonecutting, smithing and transmute recipes.
+    Recipe `#tag` ingredients, custom recipe types, components and other opaque data are not checked.
+  - Tag `values` are checked for direct IDs under `tags/block`, `tags/item`, `tags/fluid` (including
+    `flowing_` forms) and `tags/entity_type`. Required nested `#tag` references are checked in those folders
+    plus `tags/worldgen/biome` and `tags/worldgen/structure`. Tag files can be in any namespace, including
+    `minecraft`; other tag folders, optional entries and removals are not checked.
+  - Loot item entries' `name` and block-state conditions' `block` fields. Recipes, tags, loot tables and loot pools
+    that `neoforge:conditions` may disable are left alone.
+
+  A missing reference is an **error** (exit 1) only when the tool has enough information to confirm it. Otherwise,
+  it can **warn** without failing: a `[[jar]]` layer, dependency or atlas source may supply the resource, an inline
+  composite child may override a texture, or a local recipe filter may remove the recipe or swap the reference.
+  The tool does not fetch dependencies or check registry entries declared in code.
+  It also checks for blockstates on blocks with `render_shape` set to `MODEL` and warns about missing local loot
+  tables, item definitions or English names, or registry content on a client-only package. Reference diagnostics name
+  the source file, the relevant field or member index, and the ID.
 - `check <file>` runs what the registry runs: the file's size and SHA-256, its manifest and content, and a signature
   with `--key <public key> --signature <file>.minisig`. It reads `.smod`, `.spack`, resource pack `.zip`
   and `.sshader` files.
 - `registry build|review|check|list|release|page` is the registry repository's CI ([the registry index](../reference/registry-index.md)).
-- `use-jar <path>` records an original Java jar as an external asset/data source, without copying it into the mod
+- `use-jar <path>` records and caches an original Java jar as an external asset/data source, without copying it into the mod
   ([Java jars as external assets](#java-jars-as-external-assets)).
 
 ## Vegetation behaviour is independent of the template
@@ -115,9 +138,7 @@ license_url = "https://..."  # optional: makes the license a link
 credits = "..."              # optional: thanks, shown under the authors
 homepage = "https://..."     # optional: the Mods screen's Homepage button
 issues = "https://..."       # optional: the Mods screen's Issues button
-api = "0.2"                  # content mods
 side = "both"
-capabilities = ["registries"]
 namespaces = []              # optional: more namespaces the mod's files use (below)
 
 [properties]                 # optional: values other mods read (reference/manifest.md)
@@ -129,8 +150,8 @@ authors, credits and description, as NeoForge's mod list does. A link must be `h
 characters; the others are plain text. The screen has no switch: a mod runs or not by what the launcher and
 `sunrise-mods.txt` say.
 
-Unknown keys are refused, so a typo is an error, not a silently ignored permission. The shared manifest
-uses exactly `api = "0.2"` and `capabilities = ["registries"]`, with `side = "client"` (the default), `"both"` or `"server"`.
+Unknown keys are refused, so a typo is an error that names the nearest valid key. `side` is `"client"` (the default), `"both"` or `"server"`.
+`api` and `capabilities` are not written: `cargo sunrise-mod build` puts `api = "0.2"` and `capabilities = ["registries"]` into the package. A manifest that does write them must write exactly those values, and is refused with both values otherwise.
 Code mods add `[native]` for exact build pins and optional raw injections ([Injections](../concepts/injections.md)); their id and version come only
 from this manifest, not Cargo metadata ([Native mods](native-mods/02-the-package.md)). Both content and code mods support `[dependencies]`: use `base = "^1.2"` for a required dependency or
 `extra = { version = "^2", optional = true }` for an optional one. Missing required dependencies, incompatible installed versions and cycles refuse startup. Content layers load after their dependencies; an absent optional dependency is ignored. Both kinds may include a fixed-name `icon.png` at the top level, with no
@@ -157,10 +178,19 @@ leaves the file byte-for-byte unchanged; a hash already listed with another ID o
 not another entry. Use `[[jar]]` tables rather than an inline `jar = [...]` array when adding further jars with the command.
 The list is ordered: new references are appended, not sorted.
 
-Jar bytes stay external. The launcher finds the exact hash locally or asks before downloading that exact file from
-Modrinth. Its `assets/` and `data/` are passive pack layers below the Sunrise mod's own files; a player-local runtime
-cache is not part of the mod package. Do not copy a jar or its extracted files into the mod's source or `.smod`.
-A jar reference supplies assets and data, not the original Java behavior: port that behavior through the mod API.
+`use-jar` stores the exact file as `<sha512>.jar` in the usual game home's `jars/` directory (`SUNRISE_HOME` if set,
+otherwise `sunrise` in your platform's data folder). Run `cargo sunrise-mod run` after adding the jar; `run` verifies
+and stages only the jars in your manifest in `target/sunrise-mod/run/home/jars/` before building. The first run copies
+each original while checking its SHA-512, using space for one extra copy per jar. Later runs still verify the original.
+On Unix, `run` reuses a matching staged copy only after checking its link count to confirm it is independent.
+On other platforms, it writes a fresh copy. Editing or replacing the original cannot change the staged bytes.
+Leave the game's `--home` unset to use this development home; the staging path must not go through directory links.
+To read originals from a different folder, supply its `<sha512>.jar` files with `cargo sunrise-mod run --jars <dir>`.
+Neither command downloads jars.
+
+Jar bytes stay external. The original's `assets/` and `data/` are passive pack layers below the Sunrise mod's own
+files. Do not copy a jar or its extracted files into the mod's source or `.smod`. A jar reference supplies assets
+and data, not the original Java behavior: port that behavior through the mod API.
 
 ### Content mods (API 0.2)
 
@@ -277,6 +307,17 @@ The model and **declared** outline, collision and interaction shapes follow the 
 block-local; the position is applied at query time. The occlusion cache uses the outline after applying
 its column offset at `(0, 0, 0)`, as vanilla's state cache does.
 This works on both sides and does not require a hook.
+
+`instrument` takes any vanilla `NoteBlockInstrument` constant name (for example `HARP` or `FLUTE`);
+native and wasm declarations use `NoteInstrument`. A note block reads ordinary instruments from the block
+below it and head instruments (`ZOMBIE` through `CUSTOM_HEAD`) from the block above it. `CUSTOM_HEAD`
+is silent without a skull block entity above the note block with a `note_block_sound`.
+`ignited_by_lava` sets lava's ignition flag; a subscribed per-position `ignited_by_lava` hook still answers
+first. `replaceable` controls replacement by block placement and by features that check replaceability;
+the usual refusal when the hand holds the block's own item still applies. `skip_same_block_faces: true`
+hides model faces against any state of this same block, as glass does; `false` disables the template's render
+definition skip rule. Leaf and ice graphics options can still hide faces based on the template class.
+Unset values inherit the template. These are load-time properties on both sides, with no new hook.
 
 `destroy_overlay: false` hides the breaking crack (`destroy_stage_0` to `9`) on the block, for one broken by use
 (a feast or a cake taken apart bite by bite). It is read once at load into the block's facts, and only the overlay
@@ -723,10 +764,34 @@ lang file's `itemGroup.<mod id>.<file name>` (`creative_tab/gems.json` →
 `itemGroup.ruby.gems`) translates any title. A mod's items join the search tab
 under their names.
 
-A file only makes new tabs. To put items into a tab the mod doesn't own, such as
-vanilla's `minecraft:ingredients` or another mod's, a native mod listens to the
-client hook `build_creative_mode_tab_contents` (NeoForge's
-`BuildCreativeModeTabContentsEvent`) and pushes its stacks for that `tab`.
+A file only makes new tabs. To edit a registered tab's contents, listen to
+`build_creative_mode_tab_contents` (NeoForge's `BuildCreativeModeTabContentsEvent`,
+`hook_version = 2` for named injections). It fires for every tab on the
+logical side building its catalog. Match the tab id (for example,
+`minecraft:ingredients`) and use the event's `edit` handle with that side's
+Host. To append a count-one stack to both lists, pass
+`CreativeTabPlacement::Last` and `CreativeTabVisibility::Both` to `edit.insert`.
+You can also insert first, before or after a matching stack, read the current
+entries, remove a stack, or remove matching entries with a mod-side predicate.
+Matching ignores counts and uses exact item and components. Edits to both lists
+change parent first; a search error does not undo the parent edit. Feature
+filtering happens after listeners finish. An editor retained outside its active
+callback returns `CreativeTabEditError::Stale`, including during setup and reload.
+
+From either side of an open world, call
+`host.creative_tabs(CreativeTabPermissions::Normal)` to read the catalog for
+ordinary players, or request `Operator` explicitly to include operator
+generator output. The choice does not grant permission. During setup and reload,
+the read returns `CreativeTabReadError::Unavailable`. The returned snapshot includes
+every registered tab, even empty or special tabs. Use
+`tab.contains(host, &stack)` for exact membership in that tab's search list and
+`snapshot.tabs_showing(host, &stack)` for category tabs that display it. Use the
+originating world's Host so redundant component patches compare against its
+item prototypes. The game
+builds only on demand, keeps one complete snapshot per side, and does not
+rebuild just because tags changed. A same-parameter read from a build listener
+sees completed tabs and the previous contents of the remaining tabs;
+a different-parameter read returns `CreativeTabReadError::Reentrant`.
 
 Unknown component types fail content loading unless a code mod registers them.
 Item-id-specific behaviour does not follow a template: a copy of the trident does not throw.
@@ -771,7 +836,8 @@ chunk, `/summon <id>:<name>` makes one, and it has its template's row in `entity
 it. A world opened without the
 mod keeps the saved ones as they are, frozen in place. A dispenser does not throw it.
 
-A code mod can launch a thrown type with
+A code mod can spawn a thrown type at a position with a velocity of its own through
+`LevelRef::spawn_entity` with `SpawnBody::Thrown` ([spawning from a level](world/spawning.md#spawning-from-a-level)), or launch one with
 `host.spawn_projectile_from_rotation(owner, &entity_type, &stack, offset, power, inaccuracy)`.
 This is the owner-based `Projectile.spawnProjectileFromRotation` operation, not a summon:
 ownership is set before shooting and the existing launch hook runs after insertion.
@@ -801,13 +867,16 @@ baby age scaling and the template's extra baby factors; cube sizes, pufferfish a
 their renderer rules. The usual visibility, 32-block radius cap and distance fade still apply.
 
 A living type copies a mob, the way NeoForge's `EntityType.Builder.of(Zombie::new, ...)` makes a type of a vanilla
-class: `minecraft:zombie`, `minecraft:villager`, `minecraft:wandering_trader`, or one of the tameable mobs
+class: `minecraft:zombie`, `minecraft:skeleton`, `minecraft:drowned`, `minecraft:villager`,
+`minecraft:wandering_trader`, or one of the tameable mobs
 (`TamableAnimal`), `minecraft:wolf`, `minecraft:cat` and `minecraft:parrot`. A tameable type tames with its template's
 item, then sits, follows and teleports to its owner, and fights for it, as its template does. Its owner, sitting state
 and its template's own fields (a wolf's collar, a cat's or a parrot's variant) save and load under the type's id. A
 tamed wolf type's hits are its owner's, as a wolf's are. A parrot type rides a player's shoulder and comes back off
 as itself; drawing it there is its mod's (an [entity layer](client/entity-layers.md)), as vanilla draws only its own
-parrot there. Every living type is tracked to clients as far, and as often, as its template. It has no `item` or
+parrot there. A skeleton type draws and shoots the bow it holds, keeps out of the sun and flees wolves, and one that holds none
+fights in melee; a drowned type goes to water, swims, and throws a trident it holds or fights in melee, as a drowned
+does. Every living type is tracked to clients as far, and as often, as its template. It has no `item` or
 `damage`. `attributes`
 sets default attribute values that differ from its template's (`EntityAttributeCreationEvent`), by attribute id, and
 only for attributes the template has; one it lacks stops the content root's build:
@@ -932,6 +1001,30 @@ template's, with `template` added and its attributes in place of the template's.
 a client mod registers a renderer for it ([entity renderers](client/entity-renderers.md)); the content declaration
 inherits the template's goals.
 
+#### Block entity containers
+
+A code mod declares a block entity's `ModContainer` with `Registrar::block_container`. The
+container's `faces` say which slots each side reaches; `inputs` lists the slots insertion may use.
+Per-slot `insert_rules` provide static admission, with missing entries treated as `Any`.
+
+For state-dependent admission, implement `BlockEntityPart::can_place_item`
+(vanilla's `Container.canPlaceItem`). Its `CanPlaceItemEvent` gives the server part the block
+entity's saved data and current slots, the queried slot index and the offered stack. Returning
+`Some(true)` or `Some(false)` replaces the declared rule for that slot; `None` keeps it. Face
+and input-slot rules and stack limits still apply. Hoppers and hopper minecarts, droppers,
+default `ITEMS` and `STORAGE` insertion, and nonempty offers from `/loot insert` and
+`/loot replace block` use this query. `/item replace block` keeps its direct slot-write behavior.
+The default `STORAGE.space_for` does not ask the part: for subscribed slots it counts
+physical room after face and input checks. An actual insert asks with its remaining offer
+before applying the stack limit.
+
+The query has no Host and may run for a slot that is never written. Seed a filter from the
+accepted write, not from the query. Default capability writes to mod-owned storage are
+silent: they do not emit `contents_changed` on their own. Use an explicit `set_changed`
+notice or seed in a provider that owns the accepted write. Menu clicks and quick-move
+still use the declared rules and `menu_slot_rules` (vanilla's `Slot.mayPlace`); they do not
+ask the block entity part.
+
 #### Menu types
 
 A mod menu type (vanilla's `MenuType`) is declared in `data/<id>/sunrise/menu/<name>.json`: its container's slot count
@@ -1013,8 +1106,6 @@ Some Java mods ship their files under other names than their mod id (Towns and T
 
 ```toml
 id = "t_and_t"
-api = "0.2"
-capabilities = ["registries"]
 namespaces = ["kaisyn", "towns_and_towers"]
 ```
 
@@ -1024,12 +1115,14 @@ recipes, names and loot. Blocks, items, creative tabs, mob effects, entity types
 For example, a package with ID `ported_farmersdelight` and
 `namespaces = ["farmersdelight"]` can declare `farmersdelight:cooking_pot`
 and its `farmersdelight:` block entity type without changing saved-world IDs.
-The namespace collision fence applies. `minecraft`, `c` and
-`sunrise` cannot be listed. Two mods that are on may not own the same namespace (one's id or listed namespace being
-the other's): the game keeps the first in load order and leaves the other's content out, with "mods A and B both use
-the namespace N; turn one of them off" in the log. Paths use vanilla's resource characters, at most 65,536 files, 16
-MiB each and 512 MiB in all. A mod whose content is refused is left out, with the reason in the log. The game reads
-this content into its block and item tables (`sunrise_client::mod_content`, [modpacks.md](https://github.com/sunrise-org/sunrise/blob/main/docs/modpacks.md)). A tag entry
+`minecraft`, `c` and `sunrise` cannot be listed. When two packages list the same extra namespace, the first
+admitted package owns it; the game leaves the later package's content out and logs the conflict. A package's
+primary namespace is its ID. Listing another package's ID as an extra namespace is a load error, regardless of
+load order.
+
+Paths use vanilla's resource characters, at most 65,536 files, 16 MiB each and 512 MiB in all. A mod whose
+content is refused is left out, with the reason in the log. The game reads this content into its block and item
+tables (`sunrise_client::mod_content`, [modpacks.md](https://github.com/sunrise-org/sunrise/blob/main/docs/modpacks.md)). A tag entry
 naming an id nobody registers (a block a port left out, another mod's item) is dropped, so the rest of the tag
 loads; vanilla would drop the whole tag.
 

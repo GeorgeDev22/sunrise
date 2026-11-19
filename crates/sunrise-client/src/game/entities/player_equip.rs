@@ -70,7 +70,13 @@ impl Game<'_> {
             return;
         }
         self.native_on_equip(slot, new);
-        let Some(at) = self.player.as_ref().map(|p| p.position) else {
+        // The equip sound plays at the player: none for one in another level than this one.
+        let Some(at) = self
+            .player
+            .as_ref()
+            .filter(|_| self.acting_in_level_in_place())
+            .map(|p| p.position)
+        else {
             return;
         };
         let at = [at.x, at.y, at.z];

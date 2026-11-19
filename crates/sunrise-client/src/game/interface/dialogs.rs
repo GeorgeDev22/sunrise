@@ -911,7 +911,7 @@ impl Game<'_> {
                     open.focus = Some(input);
                     open.dragging = Some(input);
                     if let Some(v) = open.values.get_mut(input) {
-                        *v = InputValue::Slider(ui::slider_value(x, w, cursor.0));
+                        *v = InputValue::Slider(ui::slider_value(x, w, cursor.0) as f32);
                     }
                 }
                 Part::Button {
@@ -1058,7 +1058,7 @@ impl Game<'_> {
             _ => None,
         });
         if let (Some([sx, _, sw, _]), Some(value)) = (slider, open.values.get_mut(input)) {
-            *value = InputValue::Slider(ui::slider_value(sx, sw, x));
+            *value = InputValue::Slider(ui::slider_value(sx, sw, x) as f32);
         }
     }
 

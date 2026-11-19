@@ -241,10 +241,15 @@ impl Game<'_> {
             Target::Crystal(id) => {
                 return Some(corners(self.crystals.iter().find(|c| c.id == id)?.bounds()));
             }
+            Target::Cushion(id) => self.cushions.iter().find(|c| c.id == id)?.bounds(),
             Target::Frame(id) => self.item_frames.iter().find(|f| f.id == id)?.bounds(),
             Target::Painting(id) => self.paintings.iter().find(|p| p.id == id)?.bounds(),
             _ => return None,
         };
+        // A position that came off the wire can be NaN or infinite: no box.
+        if lo.iter().chain(&hi).any(|v| !v.is_finite()) {
+            return None;
+        }
         Some([lo, hi])
     }
     /// The height of the entity's eyes above its feet (`Entity.getEyeHeight`).

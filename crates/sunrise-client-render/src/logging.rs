@@ -32,12 +32,12 @@ pub fn data_dir() -> PathBuf {
     sunrise_mod_package::selection::data_dir_with(|key| std::env::var_os(key))
 }
 
-/// `--home DIR`, set once at start; it wins over `SUNRISE_HOME`.
-static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// The resolved game and overlay cache homes, set once at startup.
+static HOME: std::sync::OnceLock<(PathBuf, PathBuf)> = std::sync::OnceLock::new();
 
-/// Makes `game_home` return `home` for the rest of the run (`--home`).
-pub fn set_game_home(home: PathBuf) {
-    let _ = HOME.set(home);
+/// Records the game home and the base folder for the content overlay cache.
+pub fn set_game_home(home: PathBuf, cache_home: PathBuf) {
+    let _ = HOME.set((home, cache_home));
 }
 
 /// `--player-dir DIR` (#4952), set once at start: one player's own files, when several games
@@ -92,13 +92,27 @@ fn shared_dir_of(
 /// Where the launcher runs the game and keeps its saves: `--home`, else `SUNRISE_HOME`, else
 /// `sunrise` in the platform data folder (https://github.com/sunrise-org/sunrise-launcher/blob/main/src/backend.rs `game_home`).
 pub fn game_home() -> PathBuf {
-    if let Some(home) = HOME.get() {
+    if let Some((home, _)) = HOME.get() {
         return home.clone();
     }
     match std::env::var_os("SUNRISE_HOME").filter(|h| !h.is_empty()) {
         Some(h) => PathBuf::from(h),
         None => data_dir().join("sunrise"),
     }
+}
+
+/// The content overlay's `.sunrise-cache`: in the private home when `--home` or
+/// `SUNRISE_HOME` names one, else in the game folder. Without startup (e.g. in tests),
+/// use a named `SUNRISE_HOME` or the working directory.
+pub fn cache_dir() -> PathBuf {
+    if let Some((_, cache_home)) = HOME.get() {
+        return cache_home.join(".sunrise-cache");
+    }
+    match std::env::var_os("SUNRISE_HOME").filter(|home| !home.is_empty()) {
+        Some(home) => PathBuf::from(home),
+        None => std::env::current_dir().unwrap_or_default(),
+    }
+    .join(".sunrise-cache")
 }
 
 /// `logs/` and `crash-reports/` of a game folder.

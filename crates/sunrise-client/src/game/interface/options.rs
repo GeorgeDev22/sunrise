@@ -593,7 +593,7 @@ impl Game<'_> {
         self.hold_fullbright();
         let s = &self.settings;
         if let Some(r) = self.renderer.as_mut() {
-            r.gamma = s.gamma;
+            r.gamma = s.gamma as f32;
             r.improved_transparency = s.improved_transparency;
             r.set_present_mode(s.vsync, s.sunrise.present_mode);
             r.animated_textures = s.sunrise.animated_textures;
@@ -630,7 +630,7 @@ impl Game<'_> {
                 &Self::options_path().with_file_name(sunrise_client::graphics::HDR_MARKER),
             );
         }
-        let mut volumes = s.volumes;
+        let mut volumes = s.volumes.map(|gain| gain as f32);
         volumes[0] = 1.0;
         sunrise_client::settings::set_source_volumes(volumes);
         super::narrator::sync(s);

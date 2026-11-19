@@ -2,5 +2,7 @@
 //! dependencies again for every file. A new test file goes in this folder with a `mod` line here.
 
 mod cli;
+#[path = "../common/mod.rs"]
+mod common;
 mod fixtures;
 mod native_build;

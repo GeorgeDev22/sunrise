@@ -18,7 +18,8 @@ fn empty_slot_draws_icon_but_a_filled_slot_does_not() {
                 slot_moves: Default::default(),
                 key: (1, 2, 3),
                 window: 1,
-                block: "test:block".into(),
+                menu: "test:menu".into(),
+                block: Some("test:block".into()),
                 screen: mod_api::Screen {
                     slots: vec![Some(mod_api::ScreenSlot {
                         position: [8.0, 18.0],
@@ -63,9 +64,7 @@ fn empty_slot_draws_icon_but_a_filled_slot_does_not() {
 
 struct IconScreen(Arc<AtomicBool>);
 #[mod_api::sunrise_part]
-impl mod_api::BlockPart for IconScreen {}
-#[mod_api::sunrise_part]
-impl mod_api::BlockEntityPart for IconScreen {
+impl mod_api::MenuPart for IconScreen {
     fn screen(
         &self,
         _: &dyn mod_api::Host,
@@ -102,12 +101,7 @@ impl mod_api::Hooks for IconMod {
                 ..Default::default()
             },
         );
-        let kind = r
-            .block_entity_type("machine")
-            .blocks(&["icon_open:machine"])
-            .build();
-        r.block_entity_part(&kind, IconScreen(self.0.clone()))
-            .unwrap();
+        r.menu_part("minecraft:generic_9x1", IconScreen(self.0.clone()));
     }
     fn blocks(&self, _: &mod_api::RegistrationContext, event: &mut mod_api::BlocksEvent<'_>) {
         event

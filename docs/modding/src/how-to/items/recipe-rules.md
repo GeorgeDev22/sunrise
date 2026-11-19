@@ -27,8 +27,8 @@ One malformed recipe of a known type refuses the **whole recipe load**, with an
 error naming its file and the reason. A failed reload keeps the previous active
 recipes and does not publish a partial table; a dedicated server stops startup
 with that error. A file whose load conditions are false is skipped quietly before
-its recipe type is looked up. An unregistered condition type in a registered
-namespace is a load error; foreign-namespace condition handling is unchanged.
+its recipe type is looked up. An unregistered condition type anywhere in the
+conditions list is a load error, regardless of its namespace or nesting.
 Unregistered recipe types retain their existing behavior pending owner registration.
 
 `LevelRef::recipe_for` returns `Ok(None)` when no recipe matches. Mod-defined

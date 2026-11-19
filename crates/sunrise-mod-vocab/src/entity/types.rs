@@ -115,9 +115,8 @@ pub struct ServerPlayer {
     /// (`living_incoming_damage`, `living_knockback`) give for the player; 0 when not known.
     /// API @API:server_player_entity_id@.
     pub entity_id: i32,
-    /// The IP address the player connects from, without the port (behind
-    /// a Velocity proxy, the address the proxy forwards; empty when not
-    /// known).
+    /// The IP address the player connects from, without the port (empty
+    /// when not known).
     pub address: String,
 }
 

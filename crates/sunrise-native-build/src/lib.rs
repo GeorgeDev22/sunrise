@@ -33,9 +33,11 @@ mod registry_lock;
 pub mod registry_plan;
 mod registry_runtime;
 pub mod registry_rustc;
+mod registry_shared;
 pub mod rust;
 mod slots;
 
+pub use mixins_patch::MixinsIdentity;
 pub use prebuilt::{Refusal, compiling};
 pub use registry_inventory::Inventory as RegistryInventory;
 
@@ -65,8 +67,7 @@ pub const CLIENT: &str = if cfg!(windows) {
     "sunrise-client"
 };
 
-/// horizon-mixins, for bundles that don't name the revision they were tested with.
-const MIXINS_GIT: &str = "https://github.com/horizon-rust/horizon-mixins";
+/// The horizon-mixins revision this tool ships with.
 pub const MIXINS_REV: &str = sunrise_mod_package::mixins_tool::REV;
 
 /// `native-build --mixins-from-source`: this process builds the horizon-mixins tool from its
@@ -193,10 +194,12 @@ impl Bundle {
 
     /// Whether horizon-mixins reads source to transform the game.
     pub fn needs_mixins(&self) -> bool {
-        !self.native().mixin.is_empty()
-            || !self.native().module.is_empty()
-            || !self.native().bridge.is_empty()
-            || !self.native().state.is_empty()
+        self.manifest.native.as_ref().is_some_and(|native| {
+            !native.mixin.is_empty()
+                || !native.module.is_empty()
+                || !native.bridge.is_empty()
+                || !native.state.is_empty()
+        })
     }
 }
 
@@ -235,21 +238,6 @@ pub fn scan_bundles(folder: &Path) -> Result<Vec<Bundle>, String> {
 
 pub fn bundle_in(dir: &Path) -> Result<Option<Bundle>, String> {
     package::read(dir)
-}
-
-pub fn is_revision(text: &str) -> bool {
-    text.len() == 40 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-/// Appends `text` to the build log, the way a compiler warning reads.
-pub fn log_warning(text: &str) {
-    if let Ok(mut log) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path())
-    {
-        let _ = writeln!(log, "warning: {text}");
-    }
 }
 
 /// Every file under `dir`, by its path relative to `dir` (with `/`), sorted. A symlink is refused:
@@ -372,6 +360,8 @@ fn run_checked(
         let mut tail = std::collections::VecDeque::new();
         let mut errors = Vec::new();
         let mut blocked = false;
+        // Noted as the output arrives: later lines can push the linker's note out of `tail`.
+        let mut libraries = false;
         for text in BufReader::new(child.stderr.take().expect("piped"))
             .lines()
             .map_while(Result::ok)
@@ -381,6 +371,7 @@ fn run_checked(
             }
             line(&text);
             blocked |= rust::blocked_by_app_control(&text);
+            libraries |= rust::missing_system_libraries(&text);
             if text.starts_with("error") && errors.len() < 4 {
                 errors.push(text.clone());
             }
@@ -423,6 +414,10 @@ fn run_checked(
         let tail: Vec<String> = tail.into();
         let error =
             diagnostics::with_internals_hint(failure(what, &status.to_string(), &errors, &tail));
+        let error = match libraries {
+            true => with_system_libraries(error),
+            false => error,
+        };
         Err(Ran {
             error: match blocked {
                 true => with_app_control(error),
@@ -480,6 +475,11 @@ fn app_control(error: String) -> String {
 
 fn with_app_control(error: String) -> String {
     format!("{}\n\n{error}", rust::smart_app_control())
+}
+
+/// `error` led by what to install when the build's link could not find udev or ALSA.
+fn with_system_libraries(error: String) -> String {
+    format!("{}\n\n{error}", rust::system_libraries())
 }
 
 /// [`run`]'s error: the `errors` lines not already among the last ones (`tail`), then those.
@@ -546,29 +546,6 @@ fn diagnostic(text: &str) -> Option<String> {
         line += &format!(" ({file})");
     }
     Some(line)
-}
-
-/// horizon-mixins at commit `rev`, built once with the launcher's cargo (`cargo install --locked`);
-/// `on_build` hears only when it is built.
-pub fn tool(rust: &dyn Toolchain, rev: &str, on_build: &impl Fn()) -> Result<PathBuf, String> {
-    let dir = root().join("tools").join(&rev[..12]);
-    let bin = dir
-        .join("bin")
-        .join(format!("horizon-mixins{}", std::env::consts::EXE_SUFFIX));
-    if !bin.is_file() {
-        on_build();
-        let mut cmd = rust.command(&rust.cargo());
-        rust::low_priority(&mut cmd);
-        rust.configure_cargo(&mut cmd);
-        cmd.args([
-            "install", "--locked", "--git", MIXINS_GIT, "--rev", rev, "--root",
-        ])
-        .arg(&dir)
-        .arg("horizon-mixins-cli");
-        run(cmd, "Building horizon-mixins", |_| {})?;
-    }
-    host::mark_used(&dir)?;
-    Ok(bin)
 }
 
 /// External mixins traverse ordinary module declarations, not generated OUT_DIR includes.
@@ -685,20 +662,28 @@ pub fn sync(from: &Path, to: &Path) -> Result<(), String> {
     let new = files(from)?;
     let old = if to.is_dir() { files(to)? } else { Vec::new() };
     for (name, path) in &new {
-        let target = to.join(name);
-        if fs::read(&target).ok() != fs::read(path).ok() {
-            fs::create_dir_all(target.parent().unwrap_or(to)).map_err(|e| e.to_string())?;
-            fs::copy(path, &target)
-                .and_then(|_| fs::File::options().write(true).open(&target))
-                .and_then(|file| file.set_modified(std::time::SystemTime::now()))
-                .map_err(|e| format!("{}: {e}", target.display()))?;
-        }
+        copy_changed(path, &to.join(name))?;
     }
     for (name, path) in old {
         if new.binary_search_by(|(n, _)| n.cmp(&name)).is_err() {
             let _ = fs::remove_file(path);
         }
     }
+    Ok(())
+}
+
+/// Writes `from` over `to` when their bytes differ, with the current time (see [`sync`]).
+fn copy_changed(from: &Path, to: &Path) -> Result<(), String> {
+    if fs::read(to).ok() == fs::read(from).ok() {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::copy(from, to)
+        .and_then(|_| fs::File::options().write(true).open(to))
+        .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+        .map_err(|e| format!("{}: {e}", to.display()))?;
     Ok(())
 }
 
@@ -1053,6 +1038,35 @@ mod tests {
         // An error still among the last lines isn't said twice.
         let e = failure("horizon-mixins", "exit status: 1", &errors, &errors);
         assert!(e.contains("The end of its output") && e.matches("alsa-sys").count() == 1);
+    }
+
+    /// The linker's note comes before more output than the error keeps, so the hint is decided
+    /// as the output arrives.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "daily"]
+    fn a_link_missing_udev_or_alsa_leads_with_what_to_install() {
+        let _guard = log_lock();
+        clear_log().unwrap();
+        // rustc's output linking a native mod's patch library in a shell without either library
+        // (Rust 1.99.1 with rust-lld, 2026-11-19), then more lines than the error's end keeps.
+        let script = |library: &str| {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", &format!(
+                "echo 'error: linking with `cc` failed: exit status: 1' >&2
+                 echo '  = note: rust-lld: error: unable to find library {library}' >&2
+                 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13; do echo \"warning: build failed, waiting ($i)\" >&2; done
+                 exit 101"
+            )]);
+            run(cmd, "Compiling the mod", |_| {}).unwrap_err()
+        };
+        for library in ["-ludev", "-lasound"] {
+            let e = script(library);
+            assert!(e.starts_with(&rust::system_libraries()), "{e}");
+            assert!(!e.contains("unable to find library"), "{e}");
+        }
+        let e = script("-lasound_extra");
+        assert!(e.starts_with("Compiling the mod failed"), "{e}");
     }
 
     /// Smart App Control refusing a build script (#5911): cargo names the crate, Windows' reason

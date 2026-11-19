@@ -123,6 +123,35 @@ fn rains_at(world: &World, biomes: &Biomes, x: i32, y: i32, z: i32) -> bool {
 }
 
 impl Game<'_> {
+    /// Polytone GPU particles, before the frame's quads are built: any pending clear, the
+    /// renderer's verdict on each shader and on the quads drawn here, then the heightmap for the readers that draw (a custom shader's `Sampler1`,
+    /// and the surface rain drawn as quads dies under), every half second.
+    pub(super) fn polytone_gpu_decide(&mut self, camera: glam::DVec3) {
+        // A mod's clear asked since the last frame goes first: cleared records read nothing.
+        self.apply_mod_particle_clear();
+        let (world, properties) = (&self.world, &self.pack.assets.properties);
+        let top = |x, z| motion_blocking_height(world, properties, x, z);
+        let source = sunrise_client::particles::polytone_gpu::HeightmapSource {
+            size: sunrise_client::gfx::POLYTONE_HEIGHTMAP_SIZE,
+            min_y: world.bottom_y(),
+            top: &top,
+        };
+        let renderer = self.renderer.as_mut().map(|r| r as _);
+        self.particles
+            .polytone_gpu_decide(renderer, camera, &source);
+    }
+
+    /// After the frame's quads (and any clear in their extraction): the records of the types
+    /// the renderer draws with their own shader go to it.
+    pub(super) fn polytone_gpu_particles(&mut self, camera: glam::DVec3, alpha: f64) {
+        let world = &self.world;
+        let renderer = self.renderer.as_mut().map(|r| r as _);
+        self.particles
+            .polytone_gpu_hand_over(renderer, camera, alpha as f32, &|b| {
+                world.light(b[0], b[1], b[2])
+            });
+    }
+
     /// `GameRenderer`'s cardinal light: the level's type uses the Nether's diffuse lights.
     pub(super) fn nether_lighting(&self) -> bool {
         self.dimension_type().cardinal_light == CardinalLight::Nether
@@ -530,7 +559,7 @@ impl Game<'_> {
         let fire = || self.pack.assets.registry.default_state("minecraft:fire");
         let on_fire = self.camera_type.is_first_person()
             && !spectator
-            && p.fire_ticks > 0
+            && p.is_on_fire()
             && (!modded
                 || fire().is_none_or(|fire| {
                     self.screen_effect_kept(
@@ -634,6 +663,15 @@ impl Game<'_> {
         Some((TrackingTarget::Entity(id), mob_tracking_body(mob)))
     }
 
+    /// `Hud.updateVignetteBrightness`, from the local player's eye: `Gui.tick` runs it on every tick
+    /// the game isn't paused, frozen level or not.
+    pub(in crate::game) fn tick_vignette(&mut self) {
+        if let Some(e) = self.eye_position() {
+            let brightness = self.eye_brightness(e);
+            self.screen_fx.tick_vignette(brightness);
+        }
+    }
+
     pub(super) fn tick_particles(&mut self) {
         // A client mod's `clear_particles`, before this tick adds any.
         self.apply_mod_particle_clear();
@@ -641,9 +679,13 @@ impl Game<'_> {
         let mut laps = sunrise_client::spans::laps();
         let eye = self.eye_position();
         if let Some(e) = eye {
-            let brightness = self.eye_brightness(e);
+            // A client of a server eases the vignette in `tick_hud`, frozen level or not.
+            if self.remote.is_none() {
+                let brightness = self.eye_brightness(e);
+                self.screen_fx.tick_vignette(brightness);
+            }
             let inside_portal = self.client_portal_effect();
-            self.screen_fx.tick(brightness, inside_portal);
+            self.screen_fx.tick_portal(inside_portal);
             // LocalPlayer.aiStep: processPortalCooldown after the transition
             // effect (a local world's player counts down in handlePortal).
             if self.remote.is_some() && self.portals.player.cooldown > 0 {
@@ -954,6 +996,28 @@ impl Game<'_> {
         });
         if let Some(renderer) = &mut self.renderer {
             renderer.set_animation_inputs(day_time, [rain, thunder], Some(&frame), screen);
+        }
+    }
+}
+
+/// The packs' expression uniforms on core shaders (`shader_modifiers`, wiki "Shaders").
+impl Game<'_> {
+    /// Whether an installed pack core shader reads expression uniforms this frame. Fullbright
+    /// excludes the lightmap only. The frame's expression context is made only when needed.
+    pub(in crate::game) fn reads_pack_expressions(&mut self) -> bool {
+        self.renderer
+            .as_mut()
+            .is_some_and(|r| r.reads_pack_expressions())
+    }
+
+    /// Evaluate the installed pack pipelines' expression uniforms from `frame`, skipping the
+    /// lightmap under fullbright. Values are uploaded when each pipeline prepares its draw.
+    pub(in crate::game) fn evaluate_pack_expressions(
+        &mut self,
+        frame: Option<&sunrise_client::environment::Frame>,
+    ) {
+        if let (Some(frame), Some(renderer)) = (frame, self.renderer.as_mut()) {
+            renderer.evaluate_pack_expressions(frame);
         }
     }
 }

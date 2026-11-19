@@ -192,7 +192,8 @@ pub fn foreign(path: &str) -> Option<Foreign> {
 
 /// The checked-in [`CROSSING_FOREIGN`] layouts, written by `cargo run -p xtask -- mod-api` from
 /// the locked source. Staging also runs where Cargo may not be yet, so it reads this file.
-const CROSSING_FOREIGN_FILE: &str = "crates/sunrise-mod-api-gen/crossing-foreign.json";
+/// Path relative to the source tree being staged, not the tool's checkout.
+pub const CROSSING_FOREIGN_FILE: &str = "crates/sunrise-mod-api-gen/crossing-foreign.json";
 
 /// One [`CROSSING_FOREIGN`] type's layout, as its crate's source declares it.
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -203,10 +204,12 @@ struct ForeignLayout {
 }
 
 /// The [`CROSSING_FOREIGN`] entries of `internals.json`, from the checked-in layouts.
-pub fn foreign_internals() -> Vec<Internal> {
+pub fn foreign_internals(root: &Path) -> Result<Vec<Internal>, String> {
+    let path = root.join(CROSSING_FOREIGN_FILE);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let layouts: Vec<ForeignLayout> =
-        serde_json::from_str(include_str!("../crossing-foreign.json")).expect("foreign layouts");
-    layouts
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(layouts
         .into_iter()
         .map(|layout| Internal {
             path: layout.path,
@@ -222,7 +225,7 @@ pub fn foreign_internals() -> Vec<Internal> {
             opaque_reason: None,
             refs: BTreeMap::new(),
         })
-        .collect()
+        .collect())
 }
 
 /// Write the [`CROSSING_FOREIGN`] layouts of `root`'s checkout, read from the source of each
@@ -1325,7 +1328,8 @@ pub(crate) mod tests {
 
     #[test]
     fn listed_winit_types_cross_by_copy_and_the_rest_of_winit_stays_opaque() {
-        let mut internals = foreign_internals();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut internals = foreign_internals(&root).unwrap();
         assert_eq!(internals.len(), CROSSING_FOREIGN.len());
         internals.push(internal(
             "sunrise_client::Held",

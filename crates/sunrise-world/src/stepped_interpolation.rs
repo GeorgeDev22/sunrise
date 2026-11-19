@@ -93,6 +93,12 @@ pub struct SteppedInterpolation {
     current_step_ticks: f32,
     remaining_ticks: f32,
     speed: f32,
+    /// `AbstractInterpolationHandler.lastPositionAndRotation`: where the
+    /// handler last left the entity.
+    placed: PosRot,
+    /// The turn the entity made by itself since then, which the next step
+    /// adds to the target and its steps.
+    turn: (f32, f32),
 }
 
 /// `Mth.wrapDegrees(float)`.
@@ -128,6 +134,8 @@ impl SteppedInterpolation {
             current_step_ticks: 0.0,
             remaining_ticks: 0.0,
             speed: 1.0,
+            placed: PosRot::default(),
+            turn: (0.0, 0.0),
         }
     }
     /// `hasActiveInterpolation`.
@@ -187,6 +195,8 @@ impl SteppedInterpolation {
             yaw,
             pitch,
         };
+        // setLastPositionAndRotation.
+        self.placed = entity;
         Start::Interpolating
     }
     /// `cancel` (`InterpolationData.reset`).
@@ -197,30 +207,78 @@ impl SteppedInterpolation {
     }
     /// `AbstractInterpolationHandler.interpolate`, once a client tick: where
     /// the entity is put, or None when there is nothing to walk (and the
-    /// handler resets). The client moves the entity only this way, so the
-    /// deltas `adjustInterpolationTargetFromDeltas` adds are none for the
-    /// position and +0.0 for the rotation.
+    /// handler resets). An entity the client moves only this way needs
+    /// nothing before it; one it also moves itself (the mount it drives) has
+    /// [`Self::follow`] first.
     pub fn interpolate(&mut self) -> Option<PosRot> {
         if !self.active() {
             self.cancel();
             return None;
         }
-        // `addRotation(0.0F, 0.0F)`: no turn, but a -0.0 angle becomes 0.0.
-        self.add_rotation(0.0, 0.0);
+        // adjustInterpolationTargetFromDeltas' addRotation: the entity's own
+        // turn `follow` measured, else +0.0, which still makes a -0.0 angle 0.0.
+        let (yaw, pitch) = std::mem::take(&mut self.turn);
+        self.add_rotation(yaw, pitch);
         // doInterpolate: getNewPositionAndRotation, then advance by the
         // level's relative tick speed (1 at the normal tick rate).
         let at = self.new_position();
         self.advance(1.0);
+        // setLastPositionAndRotation: the rotation setRot applied (setXRot clamps the
+        // pitch, an angle that isn't finite is kept), so only the entity's own turns move
+        // the steps later.
+        let mut placed = PosRot {
+            position: at.position,
+            ..self.placed
+        };
+        placed.set_rot(at.yaw, at.pitch);
+        self.placed = placed;
         Some(at)
     }
-    /// `InterpolationData.addRotation`: the target, every step left and the
-    /// one being walked from.
-    fn add_rotation(&mut self, yaw: f32, pitch: f32) {
-        let steps = self.remaining.iter_mut().map(|(step, _)| step);
-        for r in [&mut self.target, &mut self.last].into_iter().chain(steps) {
-            r.yaw += yaw;
-            r.pitch += pitch;
+    /// `adjustInterpolationTargetFromDeltas`, at the start of `interpolate`:
+    /// what the entity, now at `entity`, moved and turned by itself since the
+    /// handler last put it carries the target and its steps along, the move
+    /// only where `fits` says the entity fits at the moved target
+    /// (`adjustInterpolationPosition`'s `noCollision`).
+    pub fn follow(&mut self, entity: PosRot, fits: impl FnOnce([f64; 3]) -> bool) {
+        if !self.active() {
+            return;
         }
+        let moved: [f64; 3] = [0, 1, 2].map(|i| entity.position[i] - self.placed.position[i]);
+        if moved.iter().map(|d| d * d).sum::<f64>() > f64::from(1.0e-5_f32) {
+            let to = [0, 1, 2].map(|i| self.target.position[i] + moved[i]);
+            if fits(to) {
+                self.add_delta(moved);
+            }
+        }
+        // The client's yaw may be a whole turn from the handler's.
+        self.turn = (
+            wrap_degrees(entity.yaw - self.placed.yaw),
+            entity.pitch - self.placed.pitch,
+        );
+        // Where `interpolate`'s setRot starts from.
+        self.placed = entity;
+    }
+    /// `InterpolationData.addDelta`: the target, every step left and the
+    /// step being walked from move by `delta`.
+    fn add_delta(&mut self, delta: [f64; 3]) {
+        let shift = |p: &mut PosRot| {
+            for (axis, d) in p.position.iter_mut().zip(delta) {
+                *axis += d;
+            }
+        };
+        shift(&mut self.target);
+        self.remaining.iter_mut().for_each(|(step, _)| shift(step));
+        shift(&mut self.last);
+    }
+    /// `InterpolationData.addRotation`: the same for a turn.
+    fn add_rotation(&mut self, yaw: f32, pitch: f32) {
+        let turn = |p: &mut PosRot| {
+            p.yaw += yaw;
+            p.pitch += pitch;
+        };
+        turn(&mut self.target);
+        self.remaining.iter_mut().for_each(|(step, _)| turn(step));
+        turn(&mut self.last);
     }
     /// `InterpolationData.addStep`.
     fn add_step(&mut self, step: PosRot, ticks: i32) {
@@ -330,6 +388,23 @@ mod tests {
         assert_eq!(seen, [0.1, 0.2, 0.3]);
         assert!(!h.active());
         assert_eq!(entity.position[0], 0.3);
+    }
+
+    /// adjustInterpolationTargetFromDeltas: a move the entity makes by itself between
+    /// steps carries the target along where the entity fits there, and stays out
+    /// where it doesn't.
+    #[test]
+    fn the_entitys_own_move_carries_the_target_where_it_fits() {
+        for (fits, target, second) in [(true, 3.5, 2.5), (false, 3.0, 2.0)] {
+            let mut h = SteppedInterpolation::new(3);
+            h.interpolate_to(at(0.0), Some(Path::Linear([3.0, 0.0, 0.0])), None);
+            let first = h.interpolate().unwrap();
+            assert!((first.position[0] - 1.0).abs() < 1e-6);
+            h.follow(at(1.5), |_| fits);
+            assert!((h.heading(at(1.5)).position[0] - target).abs() < 1e-6);
+            let next = h.interpolate().unwrap();
+            assert!((next.position[0] - second).abs() < 1e-6, "{fits}: {next:?}");
+        }
     }
 
     #[test]

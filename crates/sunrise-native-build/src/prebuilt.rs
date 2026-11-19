@@ -1,6 +1,6 @@
 //! Native mods compile and link against the pinned prebuilt game.
 //! Unsupported inputs and unavailable SDKs are refused, never rebuilt locally.
-use super::{Target, api, dependencies, internals};
+use super::{MixinsIdentity, Target, api, dependencies, internals};
 use crate::host::{tr, trf};
 use crate::rust::Toolchain;
 use sha2::{Digest, Sha256};
@@ -639,8 +639,8 @@ pub fn compile(
     // Each mod is its own library: told which one starts, and how far through them.
     on_mod: &dyn Fn(&str, usize, usize),
 ) -> Result<(PathBuf, Vec<PathBuf>), String> {
-    let mut names = std::collections::HashSet::new();
-    names.insert(dylib_name("sunrise_patch").to_ascii_lowercase());
+    let mixins = MixinsIdentity::resolve(projects.iter().map(|project| project.bundle), None)?;
+    let mut names = reserved_library_names();
     for item in fs::read_dir(package.runtime.join("deps")).map_err(|e| e.to_string())? {
         names.insert(
             item.map_err(|e| e.to_string())?
@@ -687,6 +687,7 @@ pub fn compile(
             super::registry_compile::Options {
                 consent,
                 adapter: &std::env::current_exe().map_err(|e| e.to_string())?,
+                mixins: &mixins,
             },
         )?;
         // The Storage page's Build files row ages this unit by its last use.
@@ -788,6 +789,7 @@ pub fn compile(
         &rlibs,
         &crate_names,
         &sdk,
+        &mixins,
         |edition| rustc(rust, game, out, edition),
     )?;
     let mut installed = runtime_libraries(rust, &sdk, game)?;
@@ -992,6 +994,18 @@ pub fn compile_mod<'a>(
 
 /// Refuses mod `id`'s library file `name` when another library already takes it. Names compare
 /// without case, as Windows' and macOS's default file systems do.
+/// The library files the build makes beside the mods': the patch library, and the one the registry
+/// route links the mods' registry crates from when it writes one. Lowercase, as compared.
+fn reserved_library_names() -> std::collections::HashSet<String> {
+    [
+        dylib_name("sunrise_patch"),
+        dylib_name(super::registry_shared::CRATE),
+    ]
+    .into_iter()
+    .map(|name| name.to_ascii_lowercase())
+    .collect()
+}
+
 fn check_library_name(
     names: &mut std::collections::HashSet<String>,
     name: &str,
@@ -1184,6 +1198,11 @@ mod tests {
     fn library_names_are_case_insensitive_and_entry_lints_are_checked() {
         let mut names = std::collections::HashSet::new();
         super::check_library_name(&mut names, "Example.dll", "one").unwrap();
+        // A mod library taking the shared registry library's file is refused, naming both.
+        let mut reserved = super::reserved_library_names();
+        let file = super::dylib_name("Sunrise_Registry_Shared");
+        let error = super::check_library_name(&mut reserved, &file, "taker").unwrap_err();
+        assert!(error.contains("taker") && error.contains(&file), "{error}");
         assert!(
             super::check_library_name(&mut names, "example.dll", "two")
                 .unwrap_err()

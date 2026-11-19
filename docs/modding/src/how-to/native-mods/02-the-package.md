@@ -22,19 +22,34 @@ A native mod has no `rust-toolchain.toml`: the pinned Sunrise commit decides the
 There is no input `native/` or `rust/` directory, `sunrise-native.json` or hand-written `horizon-mixin.toml`.
 The launcher writes the tool's manifest and stages the crate itself; those internal paths are not package layouts.
 
-The manifest keeps the [content fields](../content-mods.md#the-manifest), including the exact `api = "0.2"`
-contract and `capabilities = ["registries"]`. A native mod adds:
+The manifest keeps the [content fields](../content-mods.md#the-manifest), except that
+`api` and `capabilities` are written by `cargo sunrise-mod build` into the package, not by you. A native mod adds:
 
 ```toml
 [native]
 game = "26.3"
 sunrise = "<exact 40-character lowercase Sunrise commit>"
-mixins = "<exact 40-character lowercase horizon-mixins commit>"
 ```
 
-Replace the placeholders with exact commits; the native template fills them in.
+Never write the commit by hand. `cargo sunrise-mod new <path> --template native` fills it in from the SDK of the
+build it pins, and `cargo sunrise-mod update` moves it when you pin a newer build ([Install the mod
+tool](../../start/install-tool.md), [In a mod project](../../reference/sdk/03-in-a-project.md#the-pin)).
+Leave `[native] mixins` out to use the horizon-mixins revision in the pinned SDK. For a mod that uses mixins,
+an explicit `mixins = "<exact 40-character lowercase horizon-mixins commit>"` must match that revision; it
+does not override it. See [The pin](../../reference/sdk/03-in-a-project.md#the-pin).
 Unknown fields are refused. `icon.png` has no manifest key: when present it must be a valid,
 nonzero square PNG, at most 512 × 512 pixels and 256 KiB encoded. It is optional for both content
 and code mods; the scaffold does not create one.
 
-Injections belong in the same manifest as top-level `[[inject]]` tables. Changing game code itself is `[[native.mixin]]` ([Mixins](../../concepts/native-route/2-mixins.md)). See [Injections](../../concepts/injections.md) for the available forms and fields.
+Injections belong in the same manifest as top-level `[[inject]]` tables. See [Injections](../../concepts/injections.md)
+for the available forms and fields. To change game code itself, add `[[native.mixin]]` to `sunrise-mod.toml` and
+run `cargo sunrise-mod build`. Neither `internals sync` nor `inject update` is a step of a mixin build.
+
+## What a mixin cannot target
+
+For an unsupported macro in the game body or a `RETURN` target with `?`, use `HEAD` or hook a call to that
+function. Select sites outside closures, and use `AFTER_CALL` instead of `WRAP_OPERATION` to observe a call on a
+struct literal. Bind a plain `Self` result using the concrete impl type. If a lower-crate helper needs an import
+from a group, refer to the imported name explicitly or use its accessible full path. See
+[Mixins: what a mixin cannot target](../../concepts/native-route/2-mixins.md#what-a-mixin-cannot-target) for the
+reasons, selector spelling and other alternatives.

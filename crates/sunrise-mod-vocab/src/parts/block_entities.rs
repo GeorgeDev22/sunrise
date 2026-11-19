@@ -48,6 +48,14 @@ pub(crate) fn resolved_block_entity_types()
     installed().map_or(&EMPTY, |installed| &installed.resolved_block_entity_types)
 }
 
+/// Whether this type has a Part subscribing to `hook`.
+pub fn block_entity_type_listens(hook: HookId, id: &str) -> bool {
+    has_part_hook(hook)
+        && parts(hook, "block entity routing")
+            .for_hook(hook)
+            .is_some_and(|table| !table.block_entity_kind(|| Some(id)).is_empty())
+}
+
 impl HookParts {
     pub(crate) fn block_entity<'k>(
         &self,

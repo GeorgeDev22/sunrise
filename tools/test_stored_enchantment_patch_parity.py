@@ -83,7 +83,7 @@ def main():
                     binaries.append(Path(row['executable']))
         assert len(binaries) == 1, 'expected one actual stack-codec probe'
         binary_hash = lab.digest(binaries[0], 'sha256')
-        run([binaries[0], inputs, observed], 'rust', cwd=scratch, env=env)
+        run([binaries[0], inputs, observed, lab.RESOURCES.resolve()], 'rust', cwd=scratch, env=env)
         assert binary_hash == lab.digest(binaries[0], 'sha256'), 'probe changed'
     java = [line.split('\t') for line in expected.read_text(encoding='utf-8').splitlines()]
     rust = [line.split('\t') for line in observed.read_text(encoding='utf-8').splitlines()]

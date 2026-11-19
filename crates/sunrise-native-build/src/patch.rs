@@ -5,7 +5,7 @@
 //! against the prebuilt game and the mods, and the generated `main` installs each copy through
 //! its point's replacement slot. What can't take this route is refused by name; nothing here
 //! falls back to compiling the game.
-use super::{Bundle, api, prebuilt::Identity};
+use super::{Bundle, MixinsIdentity, api, prebuilt::Identity};
 use crate::host::trf;
 use crate::rust::Toolchain;
 use std::collections::HashMap;
@@ -144,9 +144,10 @@ pub fn build(
     rlibs: &HashMap<&str, PathBuf>,
     crates: &HashMap<&str, String>,
     sdk: &Identity,
+    mixins: &MixinsIdentity,
     rustc: impl Fn(&str) -> std::process::Command,
 ) -> Result<Option<Patch>, String> {
-    let Some(prepared) = prepare(rust, game, out, projects, sdk)? else {
+    let Some(prepared) = prepare(rust, game, out, projects, sdk, mixins)? else {
         return Ok(None);
     };
     // The patched crates, against the prebuilt game and the mods.
@@ -394,18 +395,18 @@ pub fn prepare<'a>(
     out: &Path,
     projects: &[api::Project<'a>],
     sdk: &Identity,
+    mixins: &MixinsIdentity,
 ) -> Result<Option<Prepared<'a>>, String> {
     let bundles: Vec<&Bundle> = projects
         .iter()
         .map(|project| project.bundle)
         .filter(|bundle| {
             bundle.needs_mixins()
-                || bundle.manifest.native.as_ref().is_some_and(|n| {
-                    !n.state.is_empty()
-                        || !n.bridge.is_empty()
-                        || !n.module.is_empty()
-                        || !n.r#loop.is_empty()
-                })
+                || bundle
+                    .manifest
+                    .native
+                    .as_ref()
+                    .is_some_and(|n| !n.r#loop.is_empty())
         })
         .collect();
     if bundles.is_empty() {
@@ -432,7 +433,7 @@ pub fn prepare<'a>(
     let tool = if rows.is_empty() {
         None
     } else {
-        Some(super::mixins_patch::tool(rust, &|| {})?)
+        Some(super::mixins_patch::tool(rust, mixins)?)
     };
     let source = super::source(sdk.commit())?;
     let started = std::time::Instant::now();
@@ -529,7 +530,7 @@ pub fn prepare<'a>(
             "mod".into(),
             toml::Value::Table(toml::Table::from_iter([
                 ("id".into(), bundle.manifest.id.clone().into()),
-                ("version".into(), bundle.manifest.version.clone().into()),
+                ("version".into(), bundle.manifest.version.to_string().into()),
             ])),
         );
         manifest.insert(

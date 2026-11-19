@@ -26,7 +26,21 @@ fn every_import_of_a_built_greeter_is_an_export_of_the_std_member() {
     tool(dir, &["wasm-std", std_member.to_str().unwrap()]);
     tool(dir, &["new", "greeter", "--template", "wasm"]);
     let greeter = dir.join("greeter");
+    // A link at the build's output is replaced, not written through.
+    #[cfg(unix)]
+    let outside = {
+        let outside = dir.join("outside");
+        std::fs::write(&outside, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&outside, greeter.join("mod.wasm")).unwrap();
+        outside
+    };
     tool(&greeter, &["build", "--wasm"]);
+    #[cfg(unix)]
+    {
+        assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+        let written = std::fs::symlink_metadata(greeter.join("mod.wasm")).unwrap();
+        assert!(written.is_file(), "mod.wasm is still a link");
+    }
 
     let mut exports = BTreeSet::new();
     for payload in Parser::new(0).parse_all(&std::fs::read(&std_member).unwrap()) {

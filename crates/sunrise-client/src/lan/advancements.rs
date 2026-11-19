@@ -55,7 +55,18 @@ impl ServerAdvancements {
         recipes: BTreeMap<String, Box<str>>,
         groups: HashMap<String, i32>,
     ) -> Self {
-        let tree = Tree::shared(&resources.join("data"), overlay);
+        Self::from_tree(
+            Tree::shared(&resources.join("data"), overlay),
+            recipes,
+            groups,
+        )
+    }
+
+    pub(super) fn from_tree(
+        tree: std::sync::Arc<Tree>,
+        recipes: BTreeMap<String, Box<str>>,
+        groups: HashMap<String, i32>,
+    ) -> Self {
         let kids = tree.children();
         let layout = tree.layout();
         let displays = RecipeIndex::from_serialized(&recipes);

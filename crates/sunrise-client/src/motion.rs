@@ -385,6 +385,8 @@ pub struct PlayerMotion {
     /// swimming is not left in the swimming box in the seat (#4427).
     pub is_passenger: bool,
     pub fire_ticks: i32,
+    /// Unsaved fire immunity granted on this logical side.
+    pub mod_fire_immune: bool,
     pub air: i32,
     pub respiration: i32,
 
@@ -538,7 +540,7 @@ pub struct PlayerMotion {
     /// it travels on the server: `isLocalInstanceAuthoritative` is false, so
     /// its moves check no fall damage.
     pub server_copy: bool,
-    /// A speculative anticheat replay, whose native callbacks must not escape.
+    /// A tick played again (`replayed_tick`), whose native callbacks must not escape.
     pub(crate) replaying: bool,
     /// The span of `events` a wall hit on the server's copy pushed (sound and
     /// damage): `server_travel` keeps them while it drops the simulated moves.
@@ -631,7 +633,13 @@ impl PlayerMotion {
             ticks
         };
     }
+    pub fn is_on_fire(&self) -> bool {
+        !self.mod_fire_immune && self.fire_ticks > 0
+    }
     pub fn ignite_for_ticks(&mut self, ticks: i32) -> Result<()> {
+        if self.mod_fire_immune {
+            return Ok(());
+        }
         let scaled = (f64::from(ticks) * self.attribute("minecraft:burning_time")?).ceil() as i32;
         self.set_remaining_fire_ticks(self.fire_ticks.max(scaled));
         self.ticks_frozen = 0;
@@ -1266,9 +1274,8 @@ impl MotionWorld<'_, '_, '_> {
             player.sprint_input_tick_with_window(keys, sprint_window)
         })
     }
-    /// A client's tick played again by the server's movement prediction: the
-    /// client's own keys, and the sprinting it said it had (its
-    /// ServerboundPlayerCommandPacket comes before the tick's move).
+    /// A client's tick played again: the client's own keys, and the sprinting it said it had
+    /// (its ServerboundPlayerCommandPacket comes before the tick's move). Mods' callbacks don't fire.
     pub fn replayed_tick(&mut self, keys: crate::sprint::Keys, sprinting: bool) -> Result<()> {
         self.player.replaying = true;
         let result = self.local_tick(keys, |player, _| {
@@ -1869,15 +1876,14 @@ impl MotionWorld<'_, '_, '_> {
     /// 4), as ordinary lava does to the player.
     fn lava_cauldron_inside(&mut self) -> Result<()> {
         self.player.ticks_frozen = 0;
-        self.player.ignite_for_ticks(300)?;
-        self.environment_hurt("minecraft:lava", 4.0)
+        self.lava_ignite_and_hurt()
     }
     /// `LayeredCauldronBlock.entityInside`: on a server, a burning player
     /// asks for the cauldron's `handleEntityOnFireInside` (runBefore
     /// EXTINGUISH, so while still burning), then EXTINGUISH
     /// (`Entity.clearFire`) puts the fire out.
     fn layered_cauldron_inside(&mut self, pos: BlockPos) {
-        if self.player.fire_ticks > 0 && !self.player.spectator {
+        if self.player.is_on_fire() && !self.player.spectator {
             self.player
                 .events
                 .push(MotionEvent::CauldronExtinguish { pos });
@@ -2064,13 +2070,14 @@ impl MotionWorld<'_, '_, '_> {
         }
         Ok(())
     }
-    /// `Entity.move(MoverType.SHULKER_BOX or SHULKER, movement)`: a shulker
-    /// box's or a shulker's lid pushed the player. An ordinary move — the
-    /// collision scan steps and reads the ground flag — whose end writes the
-    /// ground state (`Entity.setOnGroundWithMovement`): a lid lifting the body
-    /// off the ground leaves it airborne, and the next tick's gravity lands it
-    /// on the lid again instead of the client holding it on a stale ground.
-    pub fn lid_push(&mut self, mover: MoverType, movement: Vec3) -> Result<()> {
+    /// `Entity.move(MoverType.SHULKER_BOX, SHULKER or PISTON, movement)`: a
+    /// shulker box's or a shulker's lid, or a piston, pushed the player. An
+    /// ordinary move (a piston's limited by `limitPistonMovement`): the
+    /// collision scan steps and reads the ground flag, and the move's end writes
+    /// the ground and collision state (`Entity.setOnGroundWithMovement`), so a
+    /// push lifting the body off the ground or sideways leaves it airborne until
+    /// the next tick's own move lands it again.
+    pub fn block_push(&mut self, mover: MoverType, movement: Vec3) -> Result<()> {
         let gate = crate::move_gate::armed(
             self.loop_context,
             self.player.entity_id as u32,
@@ -3113,7 +3120,7 @@ impl crate::block_contact::InsideWalk for PlayerInside<'_, '_, '_, '_> {
                 // The burning player melts the snow it is told about, at the
                 // contact, as vanilla destroys it there; the collector's
                 // extinguish applies at the flush, after every contact.
-                if self.m.player.fire_ticks > 0 && self.melt_step.is_none_or(|s| s == step) {
+                if self.m.player.is_on_fire() && self.melt_step.is_none_or(|s| s == step) {
                     self.melt_step.get_or_insert(step);
                     self.m
                         .player
@@ -4284,6 +4291,50 @@ mod tests {
             w.player.hurt_log
         );
         assert_eq!(w.player.health.health(), 20.0);
+    }
+
+    /// `Entity.move(PISTON, …)` for the local player: a sideways push leaves it
+    /// off the ground until its own move lands it again (the flags
+    /// `sendChanges` sends after the block entities ticked), and one tick's
+    /// pushes along an axis stop at 0.51 (`limitPistonMovement`).
+    #[test]
+    #[ignore = "daily"]
+    fn a_piston_push_leaves_the_local_player_off_the_ground_within_its_budget() {
+        let Some(v) = crate::test_fixtures::vanilla() else {
+            return;
+        };
+        let (assets, render, binding, resources) = (&v.assets, &v.render, &v.collision, &v.motion);
+        // On the scene's floor, clear of its stepped pyramid (|x|, |z| <= 10 from y = 4).
+        let mut scene = World::test_scene(assets, render, 2).unwrap();
+        let start = Vec3::new(20.5, 4.0, 20.5);
+        let mut player = PlayerMotion::new(resources, start).unwrap();
+        player.client_side = true;
+        player.ground.on_ground = true;
+        let mut world = MotionWorld {
+            tag_items: None,
+            block_registries: None,
+            loop_context: crate::test_resources::server_loop_context(),
+            damage_hooks: &crate::health::DamageHooks::NONE,
+            entities: &[],
+            player: &mut player,
+            scene: &mut scene,
+            assets,
+            collision_binding: binding,
+            resources,
+            health: &resources.health,
+        };
+        for _ in 0..2 {
+            world
+                .block_push(MoverType::Piston, Vec3::new(0.0, 0.0, 0.3))
+                .unwrap();
+        }
+        assert!(!player.ground.on_ground);
+        assert!(!player.collision.horizontal);
+        assert!(
+            (player.position.z - (start.z + 0.51)).abs() < 1e-9,
+            "{}",
+            player.position.z
+        );
     }
 
     #[test]

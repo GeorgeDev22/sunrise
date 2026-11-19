@@ -28,7 +28,7 @@ use mod_api::{
 use std::{
     cell::Cell,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -182,21 +182,63 @@ pub(crate) fn test_engine() -> Engine {
     Engine::new(without_threads(&mut wasmtime::Config::new())).unwrap()
 }
 
+/// A fixture build may name the Wasmtime target in `SUNRISE_FIXTURE_TARGET` (a Pulley one), so a
+/// host with a Cranelift backend can run the interpreter's path. Game builds never read it.
+fn fixture_target(config: &mut wasmtime::Config) {
+    #[cfg(feature = "runtime-fixture")]
+    if let Ok(target) = std::env::var("SUNRISE_FIXTURE_TARGET") {
+        config.target(&target).expect("a Wasmtime target");
+    }
+    #[cfg(not(feature = "runtime-fixture"))]
+    let _ = config;
+}
+
+/// Whether mod code runs as native code or in Pulley, read from the engine the settings below
+/// build (Wasmtime picks Pulley where Cranelift has no backend for the host, as on 32-bit).
+/// This is the one place the guest stack policy is decided: the workers' reservation, the stack
+/// check and the bound on the guest's own stack all follow it, and the entry points settle it
+/// through [`install_stack_policy`] before they start a worker.
+pub fn guest_engine() -> sunrise_guest_stack::GuestEngine {
+    use sunrise_guest_stack::GuestEngine;
+    static DECIDED: OnceLock<GuestEngine> = OnceLock::new();
+    *DECIDED.get_or_init(|| {
+        let mut config = wasmtime::Config::new();
+        without_threads(&mut config);
+        fixture_target(&mut config);
+        // A host that cannot build the engine refuses at `engine()` with the reason.
+        match Engine::new(&config) {
+            Ok(engine) if engine.is_pulley() => GuestEngine::Interpreter,
+            _ => GuestEngine::Native,
+        }
+    })
+}
+
+/// Settles the process's guest stack policy from [`guest_engine`]. Call it before any
+/// guest-capable thread starts.
+pub fn install_stack_policy() -> Result<(), &'static str> {
+    sunrise_guest_stack::set_engine(guest_engine())
+}
+
 /// The settings of the engine mods run on, without its epoch ticker.
 pub(crate) fn engine_config() -> wasmtime::Config {
+    let policy = guest_engine();
     let mut config = wasmtime::Config::new();
     without_threads(&mut config);
+    fixture_target(&mut config);
     config.epoch_interruption(ENGINE_CONFIG.1);
-    config.max_wasm_stack(sunrise_guest_stack::GUEST_STACK_BYTES);
+    // Native: the thread's own stack, bounded below its reservation. Pulley: its heap stack.
+    config.max_wasm_stack(policy.wasm_stack());
     // Wasmtime validates this bound even for synchronous engines. No async
     // support or fiber execution is enabled by setting its size.
-    config.async_stack_size(
-        sunrise_guest_stack::GUEST_STACK_BYTES + sunrise_guest_stack::HOST_HEADROOM,
-    );
+    config.async_stack_size(policy.wasm_stack() + sunrise_guest_stack::HOST_HEADROOM);
     config
 }
 
+/// The one place an engine for mod code is built: the process's stack policy is settled here, from
+/// the engine itself, before any worker or guest check can settle it as native code. A policy
+/// decided differently earlier refuses by name.
 pub(crate) fn engine() -> wasmtime::Result<Engine> {
+    install_stack_policy().map_err(wasmtime::Error::msg)?;
     let config = engine_config();
     let engine = Engine::new(&config)?;
     let ticker = TICKER

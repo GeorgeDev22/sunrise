@@ -151,17 +151,12 @@ pub(super) struct AdvState {
     pub(super) changed: BTreeSet<usize>,
     pub(super) unlocked: Vec<String>,
     pub(super) announced: Vec<Text>,
-    /// The tree being read on another thread since the world opened
-    /// (`prefetch_advancement_tree`), taken by the first `advancement_tree`.
-    pub(super) pending_tree: Option<std::thread::JoinHandle<Arc<Tree>>>,
     /// `inventory_changed`'s criteria by item, built for `tree`.
     inventory_index: Option<(Arc<Tree>, Arc<adv::InventoryIndex>)>,
 }
 impl AdvState {
-    /// Drop the prefetched tree and the index built for the old one (a
-    /// `/reload` rebuilt the tree).
+    /// Drop the index built for the previous tree after a new one is installed.
     pub(super) fn reset_tree(&mut self) {
-        self.pending_tree = None;
         self.inventory_index = None;
     }
 }
@@ -365,16 +360,8 @@ impl Game<'_> {
     /// The advancement tree, loaded once.
     pub(super) fn advancement_tree(&mut self) -> Arc<Tree> {
         if self.adv.tree.list.is_empty() {
-            let tree = match self.adv.pending_tree.take().map(|h| h.join()) {
-                Some(Ok(tree)) => tree,
-                _ => {
-                    let overlay = self.pack_files();
-                    Tree::shared(&self.options.resources.join("data"), &overlay)
-                }
-            };
-            self.adv.tree = tree;
-            // With the tree, while the world loads: built on the first
-            // inventory change it cost that tick ~10 ms.
+            let overlay = self.pack_files();
+            self.adv.tree = Tree::shared(&self.options.resources.join("data"), &overlay);
             self.inventory_index();
         }
         self.adv.tree.clone()
@@ -397,39 +384,6 @@ impl Game<'_> {
         }));
         self.adv.inventory_index = Some((tree, index.clone()));
         index
-    }
-    /// Start reading the advancement files on another thread while the world
-    /// loads. The first tick's first criterion trigger used to read and parse
-    /// all of them on the game thread (about 60 ms).
-    pub(super) fn prefetch_advancement_tree(&mut self, stack: &super::functions::PackStack) {
-        if !self.adv.tree.list.is_empty() || self.adv.pending_tree.is_some() {
-            return;
-        }
-        let data = self.options.resources.join("data");
-        // The world's packs' advancements go over the game's own, and a
-        // native mod's contributed files are already among them: the tables
-        // were built for this open (`stage_world_tables`), so the hook is
-        // asked once, not again here.
-        let files = match &self.world_tables {
-            Some(tables) => tables.files.clone(),
-            None => super::functions::content_overlay(stack),
-        };
-        let conditions = match &self.world_tables {
-            Some(tables) => tables.conditions.clone(),
-            None => sunrise_world::conditions::LoadConditions::vanilla(),
-        };
-        self.adv.pending_tree = std::thread::Builder::new()
-            .name("sunrise-advancements".into())
-            .spawn(move || {
-                Tree::shared(
-                    &data,
-                    &sunrise_world::loot::PackOverlay {
-                        conditions: &conditions,
-                        files: &files,
-                    },
-                )
-            })
-            .ok();
     }
     pub(super) fn load_advancements(&mut self) {
         if self.adv.loaded || self.remote.is_some() || self.no_player_here() {
@@ -459,7 +413,11 @@ impl Game<'_> {
         }
     }
     pub(super) fn save_advancements(&self) {
-        if !self.adv.loaded || self.remote.is_some() || self.no_player_here() {
+        if !self.adv.loaded
+            || self.remote.is_some()
+            || self.no_player_here()
+            || self.crash_save.holds_interrupted(self.lan_acting)
+        {
             return;
         }
         let Some(path) = self.adv_path() else {
@@ -469,11 +427,8 @@ impl Game<'_> {
             .adv
             .progress
             .to_json(&self.adv.tree, sunrise_world::DATA_VERSION);
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         if let Ok(text) = serde_json::to_string_pretty(&json) {
-            let _ = std::fs::write(path, text);
+            let _ = sunrise_client::save::write_durable(&path, text.as_bytes());
         }
     }
     /// The player as predicates see it.
@@ -687,8 +642,7 @@ impl Game<'_> {
         EntityView {
             kind: "minecraft:player".into(),
             position: [p.position.x, p.position.y, p.position.z],
-            // Entity.isOnFire on a server: remainingFireTicks (players aren't fire immune).
-            on_fire: p.fire_ticks > 0,
+            on_fire: p.is_on_fire(),
             sneaking: p.pose == sunrise_client::pose::Pose::Crouching,
             // Input.shift: the held key, as `BlockItem.place`'s sneaking reads it.
             input_sneak: self.keys.held(Action::Sneak),
@@ -828,7 +782,7 @@ impl Game<'_> {
             movement,
             kind: m.kind.id.clone(),
             position: [m.position.x, m.position.y, m.position.z],
-            on_fire: m.fire_ticks > 0,
+            on_fire: m.fire_ticks > 0 && !m.mod_fire_immune,
             baby: m.is_baby(),
             on_ground: m.on_ground,
             equipment,
@@ -1279,6 +1233,13 @@ impl Game<'_> {
     /// `InventoryChangeTrigger`, checked when the inventory changes.
     pub(super) fn check_inventory_trigger(&mut self) {
         use std::hash::{Hash, Hasher};
+        // A player in another level than the one in place has their criteria and rewards
+        // judged in their own level, from their own tick (`tick_advancements`, which sees the
+        // changed inventory as `broadcastChanges` does): judging here would drop a reward in
+        // this level.
+        if !self.acting_in_level_in_place() {
+            return;
+        }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for s in self
             .inventory
@@ -2346,7 +2307,7 @@ impl Game<'_> {
     /// `RecipeToast`s: up to five stack in 32-pixel slots, the rest queue. `hidden` (F1)
     /// keeps them timing out without drawing them.
     pub(super) fn draw_toasts(&mut self, batch: &mut HudBatch, hidden: bool) {
-        let multiplier = f64::from(self.settings.notification_display_time);
+        let multiplier = self.settings.notification_display_time;
         let mut sound_played = false;
         let mut i = 0;
         while i < self.adv.toasts.len() {
@@ -3390,8 +3351,10 @@ mod structure_tag_tests {
             &[],
             &[],
         );
-        let (tables, _, _) = game.stage_world_tables(&stack, false, &root).unwrap();
-        game.world_tables = tables;
+        game.world_tables = game
+            .stage_world_tables(&stack, false, &root)
+            .unwrap()
+            .tables;
         assert!(game.world_tables.is_some());
         assert!(holds(&game, "#mypack:village", "minecraft:igloo"));
         assert!(holds(&game, "#mypack:village", "minecraft:village_plains"));

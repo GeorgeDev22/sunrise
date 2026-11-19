@@ -106,7 +106,6 @@ pub fn start<G>(
     } = startup;
     runtime_environment::capture(&launch);
     sunrise_threads::configure_allocator();
-    sunrise_chat_filter::install();
     sunrise_look::give();
     // OptiFine's and Polytone's pack formats (platform, docs/layers.md), before any pack loads.
     sunrise_client::pack_formats::install();
@@ -124,7 +123,10 @@ pub fn start<G>(
     // The text crates ship (`sunrise_hooks::lang`), loaded with the game's own languages.
     sunrise_client::lang::install_crate_files(sunrise_hooks::lang::engine::all());
     sunrise_client::spans::startup::init(std::time::Instant::now());
-    logging::set_game_home(launch.context.home.clone());
+    logging::set_game_home(
+        launch.context.home.clone(),
+        launch.cache_home().to_path_buf(),
+    );
     // The dedicated server logs in its own folder, as vanilla's does; the game in its home.
     let (home, side, thread) = if launch
         .rest

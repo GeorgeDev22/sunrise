@@ -1416,7 +1416,7 @@ pub fn catalog(root: &Path) -> Result<Vec<Internal>, String> {
 /// `internals.json` has them: what a crossing rule over the game reads.
 pub fn rule_catalog(root: &Path) -> Result<Vec<Internal>, String> {
     let mut entries = catalog(root)?;
-    entries.extend(crate::crossing::foreign_internals());
+    entries.extend(crate::crossing::foreign_internals(root)?);
     Ok(entries)
 }
 

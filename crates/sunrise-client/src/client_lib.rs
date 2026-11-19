@@ -139,7 +139,6 @@ pub mod old_world;
 pub mod osk;
 pub mod patrol;
 pub mod perf_net;
-pub mod perf_overlay;
 pub mod pick_item;
 pub mod player_sync;
 pub mod portal_sections;
@@ -152,7 +151,6 @@ pub mod raw_payloads;
 pub mod realms;
 pub mod recipe_book;
 pub mod recipe_book_screen;
-pub mod reconnect;
 pub mod save;
 // The carrier ownership store: an internal storage layer of this
 // library, used by the game crate's transfers (game/world/), like
@@ -186,6 +184,7 @@ pub mod telemetry;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 pub mod text_display;
+pub mod text_grammar;
 pub mod tick_chunk_membership;
 pub mod ticket_levels;
 pub mod title;

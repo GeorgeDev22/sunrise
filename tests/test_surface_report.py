@@ -2,6 +2,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -64,7 +65,8 @@ class GateTests(unittest.TestCase):
 class ReportTests(unittest.TestCase):
     """report() against a stub sunrise-stage whose behaviour each test sets."""
 
-    def run_report(self, base_export=0, diff_exit=0, gate_on=False, head_export=0, diff_err=""):
+    def run_report(self, base_export=0, diff_exit=0, gate_on=False, head_export=0, diff_err="",
+                   with_internals=False):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             tool = work / "sunrise-stage"
@@ -81,7 +83,8 @@ exit {diff_exit}
 """)
             tool.chmod(0o755)
             (work / "base").mkdir()
-            code, text = surface_report.report(str(tool), work / "base", work / "head", work, gate_on)
+            code, text = surface_report.report(str(tool), work / "base", work / "head", work, gate_on,
+                                               with_internals=with_internals)
             return code, text, (work / "calls").read_text()
 
     def test_a_base_the_head_tool_cannot_read_passes_with_one_line(self):
@@ -106,9 +109,17 @@ exit {diff_exit}
 
     def test_the_diff_decides_and_the_gate_is_passed_on(self):
         code, text, calls = self.run_report()
-        self.assertEqual((code, text), (0, "Surface: report\n"))
+        self.assertEqual(code, 0)
+        self.assertIn("CI does not compare listed internals", text)
+        self.assertIn("--with-internals", text)
+        self.assertIn("Surface: report\n", text)
         self.assertNotIn("--gate", calls)
-        self.assertIn(f"--notes ", calls)
+        self.assertNotIn("--with-internals", calls)
+        exports = [call.split() for call in calls.splitlines() if call.startswith("surface ")]
+        self.assertEqual(len(exports), 2)
+        for call in exports:
+            self.assertIn("--with-points-and-loops", call)
+        self.assertIn("--notes ", calls)
         code, text, calls = self.run_report(diff_exit=1, gate_on=True)
         self.assertEqual(code, 1)
         self.assertIn("fn:a", text)
@@ -116,6 +127,82 @@ exit {diff_exit}
         # An unreadable note (exit 2) fails too.
         code, _, _ = self.run_report(diff_exit=2)
         self.assertEqual(code, 1)
+
+    def test_the_audit_exports_internals_on_both_sides(self):
+        code, text, calls = self.run_report(with_internals=True)
+        self.assertEqual((code, text), (0, "Surface: report\n"))
+        exports = [call for call in calls.splitlines() if call.startswith("surface ")]
+        self.assertEqual(len(exports), 2)
+        for call in exports:
+            self.assertIn("--with-internals", call.split())
+
+
+@unittest.skipUnless(os.environ.get("SUNRISE_STAGE_TOOL"), "set SUNRISE_STAGE_TOOL to test the real gate")
+class EngineCatalogGateTests(unittest.TestCase):
+    ITEMS = [
+        {"id": "point:sunrise_client::game::Game::tick", "kind": "point", "hash": "point-1",
+         "name": "tick", "signature_hash": "old-point"},
+        {"id": "loop:entities.tick", "kind": "loop", "hash": "loop-1", "entry": "Game::tick_entities",
+         "generic": "tick_entities_with", "slot": "TickSlot", "side": "server"},
+        {"id": "internal:fn:sunrise_client::game::Game::tick [feature = \"fixture\"]",
+         "kind": "internal", "hash": "internal-1", "signature": "fn tick(&self)",
+         "signature_hash": "old-internal"},
+    ]
+
+    def compare(self, old, new, *, notes=()):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            for name, records in (("base", old), ("head", new)):
+                (work / f"{name}.json").write_text(json.dumps({"schema": 2, "hash": name, "engine_items": records}))
+            if notes:
+                changes = work / "head" / surface_report.NOTES
+                changes.mkdir(parents=True)
+                (changes / "engine-change.toml").write_text(f'ids = {json.dumps(notes)}\nwhy = "Use the new sites."\n')
+            return surface_report.compare(os.environ["SUNRISE_STAGE_TOOL"], work / "base", work / "head", work, True,
+                                          with_internals=True)
+
+    def test_undeclared_point_and_loop_removals_fail_and_declared_removals_pass(self):
+        code, text = self.compare(self.ITEMS, [])
+        self.assertEqual(code, 1, text)
+        ids = [item["id"] for item in self.ITEMS[:2]]
+        for record in ids:
+            self.assertIn(f"- {record} (removed)", text)
+            self.assertIn(f"breaking change without a change note: {record}", text)
+        code, text = self.compare(self.ITEMS, [], notes=ids)
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("breaking change without a change note:", text)
+
+    def test_undeclared_internal_removal_is_advisory_and_listed(self):
+        internal = self.ITEMS[2]
+        code, text = self.compare([internal], [])
+        self.assertEqual(code, 0, text)
+        self.assertIn("Surface: advisory (0 breaking, 0 conditional, 0 additive, 1 advisory;", text)
+        self.assertIn("Listed internals (advisory): 0 added, 1 removed, 0 changed", text)
+        self.assertIn(f"- {internal['id']} (removed)", text)
+        self.assertNotIn("breaking change without a change note:", text)
+
+    def test_additions_pass_and_each_kind_has_a_count(self):
+        code, text = self.compare([], self.ITEMS)
+        self.assertEqual(code, 0, text)
+        self.assertIn("0 breaking, 0 conditional, 2 additive, 1 advisory", text)
+        for kind in ("Injection points", "Published loops", "Listed internals (advisory)"):
+            self.assertIn(f"{kind}: 1 added, 0 removed, 0 changed", text)
+
+    def test_changed_contracts_keep_their_ids(self):
+        point, loop, internal = self.ITEMS
+        code, text = self.compare(self.ITEMS, [
+            dict(point, hash="point-2", signature_hash="new-point"),
+            dict(loop, hash="loop-2", slot="NewTickSlot"),
+            dict(internal, hash="internal-2", signature="fn tick(&mut self)", signature_hash="new-internal"),
+        ])
+        self.assertEqual(code, 1, text)
+        self.assertIn("2 breaking, 0 conditional, 0 additive, 1 advisory", text)
+        for item, detail in zip(self.ITEMS, ("`old-point` → `new-point`", "`TickSlot` → `NewTickSlot`",
+                                            "`fn tick(&self)` → `fn tick(&mut self)`")):
+            self.assertIn(f"- {item['id']} (changed)", text)
+            self.assertIn(detail, text)
+        self.assertNotIn("(removed)", text)
+        self.assertNotIn("(added)", text)
 
 
 class SummaryTests(unittest.TestCase):
@@ -148,7 +235,7 @@ class SummaryTests(unittest.TestCase):
 class MainTests(unittest.TestCase):
     """main(): the base it fetches, what it prints, what it writes to the job summary."""
 
-    def run_main(self, event="pull_request", pr="", **patches):
+    def run_main(self, event="pull_request", pr="", argv=(), **patches):
         with tempfile.TemporaryDirectory() as directory:
             summary_file = Path(directory) / "summary.md"
             env = {"SUNRISE_STAGE_TOOL": "/no/tool", "EVENT": event, "PR": pr,
@@ -157,7 +244,7 @@ class MainTests(unittest.TestCase):
                     contextlib.ExitStack() as stack:
                 for name, value in patches.items():
                     stack.enter_context(mock.patch.object(surface_report, name, value))
-                code = surface_report.main()
+                code = surface_report.main(argv)
             return code, out.getvalue(), summary_file.read_text()
 
     def test_an_unfetchable_base_reports_and_passes(self):
@@ -182,10 +269,19 @@ class MainTests(unittest.TestCase):
         code, out, summary = self.run_main(
             base_commit=lambda *a: ("abcd", ""),
             unpack=lambda sha, into: fetched.append(sha),
-            report=lambda *a: (1, "Surface: breaking\n"))
+            report=lambda *a, **kw: (1, "Surface: breaking\n"))
         self.assertEqual((code, fetched), (1, ["abcd"]))
         self.assertRegex(out, r"^Surface: breaking\nBase abcd; fetch \d+\.\ds, total \d+\.\ds\n$")
         self.assertTrue(summary.startswith("### Mod API surface\n\n```text\nSurface: breaking\nBase abcd"))
+
+    def test_local_audit_uses_the_supplied_trees_without_fetching(self):
+        with mock.patch.object(surface_report, "report", return_value=(0, "Surface: advisory\n")) as report, \
+             mock.patch.object(surface_report, "base_commit") as find_base:
+            code, out, _ = self.run_main(argv=["--with-internals", "--trees", "before", "after"])
+        self.assertEqual((code, out), (0, "Surface: advisory\n"))
+        self.assertEqual(report.call_args.args[1:3], (Path("before"), Path("after")))
+        self.assertTrue(report.call_args.kwargs["with_internals"])
+        find_base.assert_not_called()
 
 
 if __name__ == "__main__":

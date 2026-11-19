@@ -2,60 +2,110 @@ use std::{path::Path, process::Command};
 
 #[test]
 #[ignore = "daily"]
-fn run_refuses_code_mods_without_building() {
+fn run_of_a_native_mod_without_resources_says_how_to_make_them_before_building() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target")
-        .join(format!("native-run-refusal-{}", std::process::id()));
+        .join(format!("native-run-resources-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    // A native mod's folder, made by hand: the resources are asked for before anything is fetched or built.
     let project = dir.join("machine");
-    let executable = env!("CARGO_BIN_EXE_cargo-sunrise-mod");
-    // An empty folder as the SDK base: `new` writes the project, then names the SDK it could not
-    // fetch, and nothing reaches the network.
-    let no_sdk = dir.join("no-sdk");
-    std::fs::create_dir_all(&no_sdk).unwrap();
-    let created = Command::new(executable)
-        .env("SUNRISE_SDK_BASE", &no_sdk)
-        .args([
-            "new",
-            project.to_str().unwrap(),
-            "--template",
-            "native",
-            "--sunrise",
-        ])
-        .arg("0123456789abcdef0123456789abcdef01234567")
-        .output()
-        .unwrap();
-    assert!(!created.status.success(), "{created:?}");
-    assert!(
-        String::from_utf8_lossy(&created.stderr).contains("SHA256SUMS"),
-        "{created:?}"
-    );
-    assert!(project.join("Cargo.toml").is_file());
-    assert!(!project.join("target").exists());
-
-    let refused = Command::new(executable)
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = 'machine'\nversion = '0.1.0'\n",
+    )
+    .unwrap();
+    let manifest = include_str!("../template/native/sunrise-mod.toml")
+        .replace("{id}", "machine")
+        .replace("{name}", "Machine");
+    std::fs::write(
+        project.join("sunrise-mod.toml"),
+        format!(
+            "{manifest}\n[native]\ngame = \"26.3\"\nsunrise = \"{0}\"\nmixins = \"{0}\"\n",
+            "a".repeat(40)
+        ),
+    )
+    .unwrap();
+    let refused = Command::new(env!("CARGO_BIN_EXE_cargo-sunrise-mod"))
         .current_dir(&project)
-        .args(["run", "--game"])
-        .arg(dir.join("must-not-start"))
+        .arg("run")
         .output()
         .unwrap();
     assert!(!refused.status.success(), "{refused:?}");
     let error = String::from_utf8(refused.stderr).unwrap();
-    assert!(
-        error.contains("code mods run through the launcher's native build"),
-        "{error}"
-    );
-    assert!(
-        error.contains("sunrise-launcher native-build . --trust-native-code"),
-        "{error}"
-    );
-    assert!(
-        error.contains("docs/modding/src/how-to/native-mods.md"),
-        "{error}"
-    );
+    assert!(error.contains("--resources <folder>"), "{error}");
+    assert!(error.contains("sunrise-prepare --prepare"), "{error}");
     assert!(
         !project.join("target").exists(),
-        "run must refuse before building"
+        "run must stop before building"
     );
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "daily"]
+fn content_run_keeps_the_previous_package_on_jar_refusal_and_starts_with_the_staged_home() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use sunrise_mod_package::Package;
+
+    const SHA512: &str = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+                          2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f";
+    let scratch = tempfile::tempdir().unwrap();
+    let project = scratch.path().join("garden");
+    fs::create_dir(&project).unwrap();
+    let manifest = project.join("sunrise-mod.toml");
+    let text = "id = 'garden'\nname = 'Garden'\nversion = '0.1.0'\napi = '0.2'\ncapabilities = ['registries']\n";
+    fs::write(&manifest, text).unwrap();
+    let previous = Package::pack_directory(&project).unwrap();
+    let output = project.join("target/sunrise-mod/garden.smod");
+    fs::create_dir_all(output.parent().unwrap()).unwrap();
+    fs::write(&output, &previous).unwrap();
+    fs::write(
+        &manifest,
+        format!("{text}\n[[jar]]\nid = 'original'\nversion = '1.0'\nsha512 = '{SHA512}'\n"),
+    )
+    .unwrap();
+
+    let source = scratch.path().join("originals");
+    fs::create_dir(&source).unwrap();
+    let game = scratch.path().join("fake-game");
+    fs::write(
+        &game,
+        format!("#!/bin/sh\nset -eu\ntouch launched\ntest \"$1\" = --dev-mod\ntest -f \"$2\"\ntest \"$(cat \"$SUNRISE_HOME/jars/{SHA512}.jar\")\" = abc\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&game, fs::Permissions::from_mode(0o700)).unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_cargo-sunrise-mod"))
+            .current_dir(&project)
+            .env("SUNRISE_HOME", scratch.path().join("player-home"))
+            .arg("run")
+            .arg("--game")
+            .arg(&game)
+            .arg("--jars")
+            .arg(&source)
+            .output()
+            .unwrap()
+    };
+
+    let refused = run();
+    assert!(!refused.status.success(), "{refused:?}");
+    let error = String::from_utf8(refused.stderr).unwrap();
+    assert!(
+        error.contains("original") && error.contains(SHA512),
+        "{error}"
+    );
+    assert!(!project.join("launched").exists());
+    assert_eq!(fs::read(&output).unwrap(), previous);
+
+    fs::write(source.join(format!("{SHA512}.jar")), b"abc").unwrap();
+    let ran = run();
+    assert!(ran.status.success(), "{ran:?}");
+    assert!(project.join("launched").is_file());
+    assert_eq!(
+        Package::read(&output).unwrap().manifest.jar[0].sha512(),
+        SHA512
+    );
 }

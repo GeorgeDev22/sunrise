@@ -29,9 +29,12 @@
 use super::{BlockEntity, BlockStateId, Game, machines::HopperState, maps::MapData};
 use mod_api::{Transaction, TransactionLifecycle, TransactionSeal};
 use std::collections::{BTreeMap, HashMap};
-use sunrise_client::{items::ItemStack, world::BlockEntityExtras};
+use sunrise_client::{
+    items::ItemStack, living_attributes::ModifierChanges, world::BlockEntityExtras,
+};
 use sunrise_core::position::BlockPos;
 use sunrise_mod_runtime::attachments::{Attachments, Holder};
+use sunrise_world::level::flags;
 
 #[path = "transactions/decision.rs"]
 pub(in crate::game) mod decision;
@@ -69,6 +72,20 @@ pub(super) struct OpenTransactions {
 }
 
 impl OpenTransactions {
+    pub(super) fn journal_modifier_changes(&mut self, id: u32, changes: ModifierChanges) {
+        if let Some(level) = self.last_mut() {
+            level.modifier_changes.entry(id).or_default().merge(changes);
+        }
+    }
+
+    pub(super) fn keep_explicit_modifier_write(&mut self, mob: u32, attribute: &str, id: &str) {
+        for level in self.iter_mut() {
+            if let Some(changes) = level.modifier_changes.get_mut(&mob) {
+                changes.keep_explicit_write(attribute, id);
+            }
+        }
+    }
+
     /// The journaled-write epoch.
     pub(in crate::game) fn writes(&self) -> u64 {
         self.writes
@@ -104,6 +121,32 @@ impl Drop for ClosingPhase<'_, '_> {
     }
 }
 
+struct KeptBlock {
+    state: BlockStateId,
+    flags: i32,
+    /// Replay LevelWriteHost writes through the direct host's block-entity creation path.
+    level_host: bool,
+    /// A level-host write only hid the entity from other reads. At commit
+    /// the real Level.setBlock still has to run its removal side effects.
+    replay_removal: bool,
+}
+
+/// Preserve requested updates, and suppress an effect only if every write
+/// suppressed it. Other bits describe the final write (e.g. moved by piston).
+fn merge_block_update_flags(earlier: i32, later: i32) -> i32 {
+    const REQUESTED: i32 =
+        flags::UPDATE_NEIGHBORS | flags::UPDATE_CLIENTS | flags::UPDATE_IMMEDIATE;
+    const SUPPRESSED: i32 = flags::UPDATE_INVISIBLE
+        | flags::UPDATE_KNOWN_SHAPE
+        | flags::UPDATE_SUPPRESS_DROPS
+        | flags::UPDATE_SKIP_SHAPE_UPDATE_ON_WIRE
+        | flags::UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS
+        | flags::UPDATE_SKIP_ON_PLACE;
+    ((earlier | later) & REQUESTED)
+        | ((earlier & later) & SUPPRESSED)
+        | (later & !(REQUESTED | SUPPRESSED))
+}
+
 /// One open transaction.
 #[derive(Default)]
 pub(super) struct Level {
@@ -123,8 +166,10 @@ pub(super) struct Level {
     /// transaction first wrote it, for a block entity not kept whole in `block_entities`: a
     /// move through a container keeps the slot it touches, not the entity's whole saved data.
     slots: HashMap<(Pos, usize), KeptSlot>,
-    /// Each block's state before this transaction first wrote it.
-    blocks: HashMap<Pos, BlockStateId>,
+    /// Each block's original state and the combined update flags of its writes.
+    blocks: HashMap<Pos, KeptBlock>,
+    /// Level.random before the first transactional level write drew from it.
+    level_random: Option<sunrise_core::random::LegacyRandom>,
     /// Composter-local random streams before this depth first evaluated their layers.
     composter_randoms: ComposterRandoms,
     /// Each quart cell before this transaction first wrote it.
@@ -142,6 +187,8 @@ pub(super) struct Level {
     /// Each mob's or armor stand's equipment before this transaction first
     /// wrote it (#932), told apart for the way back.
     equipment: HashMap<u32, KeptEquipment>,
+    /// Live modifier diffs, also kept for rebuilds that write no slot.
+    modifier_changes: HashMap<u32, ModifierChanges>,
     /// Each chested mob's item list's length before `entity_slots` first grew it to its slots
     /// in this transaction.
     mob_lengths: HashMap<u32, usize>,
@@ -262,7 +309,6 @@ struct KeptPlayer {
 
 /// A mob's or an armor stand's equipment as a transaction first wrote it
 /// (#932): the same eight slots, restored their own way.
-#[derive(Clone)]
 enum KeptEquipment {
     Mob(Vec<Option<ItemStack>>),
     Stand(Vec<Option<ItemStack>>),
@@ -298,8 +344,10 @@ pub(super) enum After {
 
     /// `ServerLevel.destroyBlockProgress`: breaker id, position, stage. Sent once, at the root commit.
     BreakProgress(i32, [i32; 3], i32),
-    /// The block's new state, set with its updates (`Level.setBlock`, `UPDATE_ALL`).
+    /// The block's final state, set with the combined update flags.
     Block(Pos),
+    /// A validated level write host effect; never published on abort.
+    LevelWrite(Box<super::journal_level_write::PendingWrite>),
     /// Save, remesh and resend a changed biome column.
     Biome((i32, i32)),
     /// Deferred interaction effects, replayed in the same root-commit order.
@@ -308,14 +356,27 @@ pub(super) enum After {
     Drop([i32; 3], ItemStack),
     /// `Player.drop(stack, false)` by the player with this UUID: what no longer fits.
     PlayerDrop(u128, ItemStack),
-    GivePickup(u128),
+    /// `/give`'s pickup sound for the player with this UUID, in the level that was in place
+    /// when the stack was accepted (a command run for a borrowed player swaps it in).
+    GivePickup(u128, super::Dim),
     InventoryTrigger(u128),
-    GiveRest(u128, ItemStack, Option<[i32; 4]>),
+    /// What did not fit of a `/give` to the player `uuid`, thrown in the level `dim` that was in
+    /// place when it was accepted; at `eye`, the player's eyes then, if they are dead or gone
+    /// by the commit.
+    GiveRest {
+        uuid: u128,
+        rest: ItemStack,
+        owner: Option<[i32; 4]>,
+        dim: super::Dim,
+        eye: [f64; 3],
+    },
     PlayerEquip(u128, String, Option<ItemStack>),
     /// An item split off an item entity, dropped where it is (`Block.popResource`'s delay).
     Spawn([f64; 3], ItemStack),
     /// The item entity with this id was emptied: removed, unless it holds items again.
     Emptied(u32),
+    /// A component-only mob equipment write must reach the normal tracker even if the mob is idle.
+    EquipmentSync(u32),
     /// `LivingEntity.onEquipItem`'s sound and equip/unequip game event, at the entity `who`
     /// is: what an equipment write through a transaction tells the world only at the root
     /// commit, so an abort stays quiet (#932).
@@ -517,8 +578,19 @@ impl Game<'_> {
                 outer
                     .removed_block_entities
                     .extend(level.removed_block_entities);
-                for (pos, state) in level.blocks {
-                    outer.blocks.entry(pos).or_insert(state);
+                for (pos, block) in level.blocks {
+                    outer
+                        .blocks
+                        .entry(pos)
+                        .and_modify(|kept| {
+                            kept.flags = merge_block_update_flags(kept.flags, block.flags);
+                            kept.level_host = block.level_host;
+                            kept.replay_removal |= block.replay_removal;
+                        })
+                        .or_insert(block);
+                }
+                if outer.level_random.is_none() {
+                    outer.level_random = level.level_random;
                 }
                 for (chunk, randoms) in level.composter_randoms {
                     let kept = outer.composter_randoms.entry(chunk).or_default();
@@ -543,6 +615,9 @@ impl Game<'_> {
                 }
                 for (id, kept) in level.equipment {
                     outer.equipment.entry(id).or_insert(kept);
+                }
+                for (id, changes) in level.modifier_changes {
+                    outer.modifier_changes.entry(id).or_default().merge(changes);
                 }
                 if outer.board.is_none() {
                     outer.board = level.board;
@@ -738,12 +813,11 @@ impl Game<'_> {
     /// the list: the entity is kept whole instead, length and all.
     pub(super) fn journal_block_entity_slot(&mut self, pos: Pos, slot: usize) {
         self.transactions.writes = self.transactions.writes.wrapping_add(1);
-        let exists = self
-            .world
-            .block_entities
-            .get(&pos)
-            .is_some_and(|entity| slot < entity.slots().len());
-        if !exists {
+        let entity = self.world.block_entities.get(&pos);
+        // Claiming an opaque row changes the saved compound as well as the slot.
+        if entity.is_none_or(|entity| slot >= entity.slots().len())
+            || matches!(entity, Some(BlockEntity::Mod(m)) if m.has_opaque_item_slot(slot))
+        {
             return self.journal_block_entity(pos);
         }
         let Some(level) = self.transactions.last_mut() else {
@@ -753,11 +827,7 @@ impl Game<'_> {
             return;
         }
         level.slots.entry((pos, slot)).or_insert_with(|| KeptSlot {
-            stack: self
-                .world
-                .block_entities
-                .get(&pos)
-                .and_then(|entity| entity.slots().get(slot).cloned().flatten()),
+            stack: entity.and_then(|entity| entity.slots()[slot].clone()),
             generation: self.world.block_entities.generation(&pos),
         });
     }
@@ -937,8 +1007,8 @@ impl Game<'_> {
             level.board = Some(self.score.board.clone());
         }
     }
-    /// Keeps mob `id`'s equipment as it is, if a transaction is open and hasn't yet (#932):
-    /// an abort puts every slot back and makes the attribute map over again.
+    /// Keeps the slots at their first write. Equipment collection records any
+    /// actual modifier edits separately; a quiet edit does not run it.
     pub(super) fn journal_equipment(&mut self, id: u32) {
         let Some(level) = self.transactions.last_mut() else {
             return;
@@ -946,7 +1016,8 @@ impl Game<'_> {
         if level.equipment.contains_key(&id) {
             return;
         }
-        let kept = if let Some(mob) = self.mobs.iter().find(|m| m.id == id && !m.removed) {
+        let mob = || self.mobs.iter().find(|m| m.id == id && !m.removed);
+        let kept = if let Some(mob) = mob() {
             KeptEquipment::Mob(mob.equipment_stacks().iter().cloned().collect())
         } else if let Some(stand) = self.armor_stands.iter().find(|a| a.id == id) {
             KeptEquipment::Stand(stand.equipment.iter().cloned().collect())
@@ -969,14 +1040,57 @@ impl Game<'_> {
     /// state, and set with its updates at the root commit; otherwise at once
     /// (`Level.setBlock`).
     pub(super) fn journal_set_block(&mut self, pos: [i32; 3], state: BlockStateId) -> bool {
+        self.journal_set_block_flags(pos, state, sunrise_world::level::flags::UPDATE_ALL, false)
+    }
+    /// The root commit replays one write per position with the combined update flags.
+    pub(super) fn journal_set_block_flags(
+        &mut self,
+        pos: [i32; 3],
+        state: BlockStateId,
+        flags: i32,
+        level_host: bool,
+    ) -> bool {
         let Some(level) = self.transactions.last_mut() else {
-            return self.level_set(pos, state).is_ok();
+            return self.level_set_with_flags(pos, state, flags).is_ok();
         };
         let key = (pos[0], pos[1], pos[2]);
         let old = self.world.block(pos[0], pos[1], pos[2]);
-        level.blocks.entry(key).or_insert(old);
+        level
+            .blocks
+            .entry(key)
+            .and_modify(|kept| {
+                kept.flags = merge_block_update_flags(kept.flags, flags);
+                kept.level_host = level_host;
+            })
+            .or_insert(KeptBlock {
+                state: old,
+                flags,
+                level_host,
+                replay_removal: false,
+            });
         level.after.push(After::Block(key));
         self.world.set_stored(pos[0], pos[1], pos[2], state)
+    }
+    /// Hide a replaced block entity from staged reads, without dropping its
+    /// contents until the real write. Fluid pickup/pour instead rolls its own
+    /// drops against the old entity before journalling the removal.
+    pub(super) fn journal_block_replacement(&mut self, pos: Pos) {
+        self.journal_remove_block_entity(pos);
+        if let Some(block) = self
+            .transactions
+            .last_mut()
+            .and_then(|level| level.blocks.get_mut(&pos))
+        {
+            block.replay_removal = true;
+        }
+    }
+    pub(super) fn journal_set_level_random(&mut self, random: sunrise_core::random::LegacyRandom) {
+        if let Some(level) = self.transactions.last_mut() {
+            level
+                .level_random
+                .get_or_insert_with(|| (*self.world.random).clone());
+        }
+        *self.world.random = random;
     }
     /// Keep the original cell without publishing the tentative write.
     pub(in crate::game) fn journal_biome(&mut self, pos: [i32; 3], old: u16) {
@@ -1006,6 +1120,7 @@ impl Game<'_> {
             After::Composter(effects) => self.commit_composter_effects(effects),
             After::FluidWrite(written) => self.commit_fluid_write(*written),
             After::FluidEffects(effects) => self.commit_fluid_effects(*effects),
+            After::LevelWrite(write) => self.commit_level_write(*write),
             After::Changed(pos) => self.container_changed(pos),
             After::Capabilities(pos) => self.world.capability_generations.invalidate(pos),
 
@@ -1043,16 +1158,45 @@ impl Game<'_> {
             After::Drop(pos, stack) => {
                 self.spawn_item(stack, pos.map(|p| f64::from(p) + 0.5), [0.0; 3], 10);
             }
-            After::GivePickup(uuid) => {
-                self.native_as_player(uuid, |g| g.give_pickup());
-            }
-            After::InventoryTrigger(uuid) => {
+            After::GivePickup(uuid, dim) => {
                 self.native_as_player(uuid, |g| {
-                    g.check_inventory_trigger();
+                    let back = g.enter_command_level(dim);
+                    g.give_pickup();
+                    if let Some(back) = back {
+                        g.enter_command_level(back);
+                    }
                 });
             }
-            After::GiveRest(uuid, stack, owner) => {
-                self.native_as_player(uuid, |g| g.give_remainder(stack, owner));
+            After::InventoryTrigger(uuid) => {
+                self.native_as_player(uuid, |g| g.check_inventory_trigger());
+            }
+            After::GiveRest {
+                uuid,
+                rest,
+                owner,
+                dim,
+                eye,
+            } => {
+                let mut rest = Some(rest);
+                self.native_as_player(uuid, |g| {
+                    let back = g.enter_command_level(dim);
+                    if let Some(rest) = rest.take() {
+                        g.give_remainder(rest, owner);
+                    }
+                    if let Some(back) = back {
+                        g.enter_command_level(back);
+                    }
+                });
+                // The stack was accepted (the command succeeded, `give_stack` returned no
+                // rest): a player who died or left since, so it was not thrown, still has it
+                // land where they were.
+                if let Some(rest) = rest {
+                    let back = self.enter_command_level(dim);
+                    self.give_remainder_unheld(rest, owner, eye);
+                    if let Some(back) = back {
+                        self.enter_command_level(back);
+                    }
+                }
             }
             After::PlayerEquip(uuid, slot, stack) => {
                 self.native_as_player(uuid, |g| {
@@ -1074,6 +1218,11 @@ impl Game<'_> {
                     .position(|e| e.id == id && e.stack.count == 0);
                 if let Some(i) = emptied {
                     self.remove_dropped(i);
+                }
+            }
+            After::EquipmentSync(id) => {
+                if let Some(mob) = self.mobs.iter_mut().find(|m| m.id == id && !m.removed) {
+                    mob.needs_sync = true;
                 }
             }
             After::Equip {
@@ -1105,12 +1254,17 @@ impl Game<'_> {
                         continue;
                     }
                     let now = self.world.block(pos.0, pos.1, pos.2);
-                    let was = level.blocks[&pos];
-                    // A block entity the transaction removed comes back where a later write
-                    // there put back a block of the kind that had it.
+                    let KeptBlock {
+                        state: was,
+                        flags,
+                        level_host,
+                        replay_removal,
+                    } = level.blocks[&pos];
+                    // Restore an entity that the real write must remove with its side effects,
+                    // or that survives because a later write returned it to the old block kind.
                     let b = self.res.behaviours();
                     if level.removed_block_entities.contains(&pos)
-                        && b.block(now) == b.block(was)
+                        && (replay_removal || b.block(now) == b.block(was))
                         && let Some(kept) = level.block_entities.get(&pos)
                     {
                         self.restore_removed_block_entity(pos, kept);
@@ -1118,7 +1272,15 @@ impl Game<'_> {
                     if now != was {
                         // The stored state back, so the one real write sees the change.
                         self.world.set_stored(pos.0, pos.1, pos.2, was);
-                        let _ = self.level_set([pos.0, pos.1, pos.2], now);
+                        let pos = [pos.0, pos.1, pos.2];
+                        if level_host {
+                            self.with_level(|_, level, ticks| {
+                                level.native_set_block(ticks, pos, now, flags);
+                            });
+                            let _ = self.process_level_events();
+                        } else {
+                            let _ = self.level_set_with_flags(pos, now, flags);
+                        }
                     }
                 }
                 After::Biome(key) if !biome_columns.insert(key) => {}
@@ -1160,8 +1322,8 @@ impl Game<'_> {
         self.scratch_roll_back(std::mem::take(&mut level.scratch_kept));
         // Discard deferred effects before undoing tentative action storage.
         level.after.clear();
-        // Each mob's equipment goes back as it was, and the attribute map is
-        // made over it again (#932).
+        // Restore slots and undo only their recorded modifier edits. Explicit
+        // attribute writes survive an abort, and no item query runs here.
         let equipment = std::mem::take(&mut level.equipment);
         for (id, kept) in equipment {
             match kept {
@@ -1172,7 +1334,6 @@ impl Game<'_> {
                     for (slot, stack) in stacks.into_iter().enumerate() {
                         mob.set_equipment_stack(slot, stack);
                     }
-                    self.collect_mob_equipment_attributes(id);
                 }
                 // An armor stand keeps no live attribute map of its gear; the
                 // plain write puts its slots back as they were.
@@ -1184,6 +1345,12 @@ impl Game<'_> {
                         stand.equipment.set(slot, stack);
                     }
                 }
+            }
+        }
+
+        for (id, changes) in std::mem::take(&mut level.modifier_changes) {
+            if let Some(mob) = self.mobs.iter_mut().find(|m| m.id == id && !m.removed) {
+                super::living_attributes::undo_mob_modifiers(&self.motion.attributes, mob, changes);
             }
         }
 
@@ -1269,8 +1436,11 @@ impl Game<'_> {
                 );
             }
         }
-        for (pos, state) in level.blocks {
-            self.world.set_stored(pos.0, pos.1, pos.2, state);
+        for (pos, block) in level.blocks {
+            self.world.set_stored(pos.0, pos.1, pos.2, block.state);
+        }
+        if let Some(random) = level.level_random {
+            *self.world.random = random;
         }
         // The shapes are back: the neighbours that read them (a fluid beside it) are told, as
         // the publish told them.

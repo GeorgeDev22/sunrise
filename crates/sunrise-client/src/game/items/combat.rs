@@ -481,13 +481,14 @@ impl Game<'_> {
                 // LivingEntity.hurtServer reached resolvePlayerResponsibleForDamage:
                 // every hit that got past the cooldown, absorbed or blocked too.
                 MotionEvent::Health(HealthEvent::Criterion { source, .. }) => {
-                    let motion = self.motion;
-                    if let Some(d) = motion.health.damage.definition(*source) {
+                    // The world's frozen registry, the one the hit's source id is of.
+                    let damage = &self.health_resources.damage;
+                    if let Some(name) = damage.definition(*source).map(|d| d.name.clone()) {
                         match recorded.take() {
-                            Some((t, id)) if t == d.name => {
+                            Some((t, id)) if t == name => {
                                 self.resolve_player_responsible_for_player(id, None)
                             }
-                            _ => self.commit_pending_hurt_memories(&d.name, None),
+                            _ => self.commit_pending_hurt_memories(&name, None),
                         }
                     }
                     continue;
@@ -611,7 +612,9 @@ impl Game<'_> {
             self.combat.in_combat = false;
         }
     }
-    fn damage_in_tag(&self, name: &str, tag: &str) -> bool {
+    /// Whether damage type `name` is in `tag` (with or without its `minecraft:`) in the
+    /// world's frozen registry, the one that holds the world's datapack types and tags.
+    pub(in crate::game) fn damage_in_tag(&self, name: &str, tag: &str) -> bool {
         let damage = &self.health_resources.damage;
         damage.id(name).is_some_and(|id| {
             damage.in_tag(id, tag) || damage.in_tag(id, &format!("minecraft:{tag}"))

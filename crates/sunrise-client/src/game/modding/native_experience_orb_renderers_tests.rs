@@ -79,7 +79,7 @@ const CAMERA: glam::DVec3 = glam::DVec3::new(0.5, 64.0, -4.5);
 const FEET: [f64; 3] = [0.5, 64.0, 0.5];
 const ALPHA: f32 = 0.5;
 const VALUE: i32 = 11;
-const AGE: u32 = 6;
+const AGE: i32 = 6;
 
 /// How high above the entity's position a vertex is, in blocks.
 fn above(v: &Vertex) -> f32 {

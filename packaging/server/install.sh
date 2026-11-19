@@ -23,6 +23,17 @@ ARCHIVE=
 # Sunrise's release public keys, base64, space-separated: copy of crates/sunrise-release-sign/release-keys.txt
 # (rotation adds a key there first; keep the two in step).
 RELEASE_KEYS="r53xb3cuafGxZSicLz06KC+xXp9NJdPH8snNmXo5pAc="
+# sunrise-verify, the release checker the install pins: its SHA-256 per platform,
+# from release verifier@VERIFIER_VERSION. "unpinned" until the first verifier release exists.
+# >>> verifier pin (tools/ci/pin_verifier.py rewrites this block; do not edit it by hand)
+VERIFIER_VERSION=unpinned
+VERIFIER_SHA256_linux_x86_64=unpinned
+VERIFIER_SHA256_linux_aarch64=unpinned
+VERIFIER_SHA256_macos_arm64=unpinned
+VERIFIER_SHA256_macos_x64=unpinned
+VERIFIER_SHA256_windows_x64=unpinned
+VERIFIER_SHA256_windows_arm64=unpinned
+# <<< verifier pin
 
 die() { echo "sunrise install: $*" >&2; exit 1; }
 

@@ -5,15 +5,11 @@ impl Items {
     /// station rules and loot functions are built from), for tools that need
     /// tag membership.
     pub fn tags_only(root: &Path, overlay: &PackOverlay, defaults: &ItemDefaults) -> Result<Self> {
-        let enchantments = Arc::new(crate::enchant::Enchantments::load_with(
-            root, overlay, defaults,
-        )?);
         let mut items = Self {
             items: HashMap::new(),
             block_items: Default::default(),
             component_registry: component_registry(
                 root,
-                &enchantments,
                 &load_tags(root, "entity_type", overlay)?,
             )?,
             component_defaults: component_defaults(defaults)?,
@@ -34,8 +30,12 @@ impl Items {
             predicates: Default::default(),
             songs: HashMap::new(),
             instruments: HashMap::new(),
-            enchantments,
+            enchantments: Default::default(),
         };
+        items.install_registries(
+            crate::enchant::Enchantments::load_with(root, overlay, defaults)?,
+            HashMap::new(),
+        );
         load_component_damage_registry(root, overlay, &mut items)?;
         Ok(items)
     }
@@ -126,7 +126,6 @@ pub(super) fn block_items(root: &Path) -> Result<HashMap<String, String>> {
 /// Registry metadata used by ingredient component codecs at the load boundary.
 pub(super) fn component_registry(
     root: &Path,
-    enchantments: &crate::enchant::Enchantments,
     entity_tags: &HashMap<String, HashSet<String>>,
 ) -> Result<Arc<sunrise_client_core::registries::Registries>> {
     let mut registry = sunrise_client_core::registries::Registries::default();
@@ -145,11 +144,6 @@ pub(super) fn component_registry(
                 .ids = entries.keys().cloned().collect();
         }
     }
-    registry.enchantments = enchantments
-        .list
-        .iter()
-        .map(|entry| entry.id.to_string())
-        .collect();
     // The prepared entity table includes content-mod types, unlike a vanilla-only
     // command export. Re-read it for each catalog/load, including pack reload.
     let path = root.join("entity-types.json");

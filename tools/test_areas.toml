@@ -162,7 +162,7 @@ about = "LAN host and guests, the multiplayer client, the protocol, dedicated se
 paths = [
   "crates/sunrise-client/src/lan/*", "crates/sunrise-client/src/net.rs", "crates/sunrise-client/src/*_net.rs",
   "crates/sunrise-client/src/game/network/*", "crates/sunrise-protocol/*", "crates/sunrise-server*",
-  "crates/sunrise-friends/*", "crates/sunrise-relay/*", "crates/sunrise-anticheat/*", "tools/lan_e2e.py",
+  "crates/sunrise-friends/*", "crates/sunrise-relay/*", "tools/lan_e2e.py",
 ]
 cargo = [
   { package = "sunrise-client-lib", target = "lib", filter = "lan::" },

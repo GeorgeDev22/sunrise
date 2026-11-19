@@ -165,7 +165,6 @@ max_viewed_ticking_chunks = 441
 max_viewed_loaded_chunks_per_level = 16384
 max_viewed_ticking_chunks_per_level = 3528
 admin_feedback_to_ops = true # operators see each other's commands ([name: ...]); false: only the log
-accept_older_clients = false # true: 26.2 clients join too (see below; work in progress)
 
 [world]
 name = "world"
@@ -189,7 +188,8 @@ parallel_tick = false        # reserved: parallel phases are disabled in this fo
 
 [backups]
 every = "6h"                 # 30m, 6h, 1d...; "0" turns automatic backups off
-keep = 12                    # automatic backups kept; backups made by hand are never deleted
+keep = 12                    # 1–1000 automatic backups kept; backups made by hand are never deleted
+                             # Fix an invalid value directly here: config set must load this file first.
 
 [updates]
 keep = 1                     # other releases kept by updates, besides the one in use and the one rollback goes to
@@ -215,18 +215,6 @@ On by default, as vanilla: when an operator runs a command that reports to admin
 the other operators read `[name: ...]` in gray, and the console logs it. Players who aren't operators never see it
 either way. `false` keeps it to the console's log (`logs/latest.log`): nobody in game sees an operator's commands,
 while each operator still reads their own command's answer.
-
-### Older clients: `accept_older_clients`
-
-Off by default, a Sunrise setting with no vanilla equivalent: a vanilla server, and Sunrise's, turn away a client of
-any other release. With `accept_older_clients = true` a 26.2 client may join too. Sunrise renumbers its packets and
-the blocks, items, entities, particles and sounds in them both ways, with no proxy in between; what 26.3 added and
-26.2 lacks is shown as the nearest thing 26.2 has (a poplar log as a birch log, a wool slab as a stone slab), and
-what has no such thing (a cushion) isn't shown. The server list shows the server as joinable for 26.2.
-
-This is work in progress (#10404): the packets whose layout changed between 26.2 and 26.3 aren't translated yet,
-so for now a 26.2 player gets through the login and is then told that 26.2 can't be translated yet, before the
-server sends anything it would misread. 26.3 clients are served exactly as before, whatever the setting.
 
 ### Seeing further: `max_view_distance`
 
@@ -297,28 +285,6 @@ Use the absolute engine path printed by the build. Build on the same OS and arch
 export folder, set `engine.path` to it, restart, and keep the old folder for manual rollback. The supervisor does
 not auto-update or rebuild a pinned engine path, and there is no compatibility handshake yet (follow-up #6304).
 Native mods run unsandboxed: only build code you have read and trust.
-
-### Behind a Velocity proxy
-
-A network can put one Velocity proxy in front of several servers: the proxy signs the players in with their
-Microsoft accounts, and the servers behind it trust what it forwards. To run Sunrise as one of them:
-
-1. Set `online_mode = false` in `server.toml` and keep the server's port reachable only from the proxy (bind it
-   to `127.0.0.1` or put it on a private network).
-2. Put the proxy's forwarding secret, the one in Velocity's `forwarding.secret`, into a file `forwarding.secret`
-   in the server folder, and set `player-info-forwarding-mode = "modern"` in `velocity.toml`.
-3. Restart the server. The log says `Velocity player information forwarding is on`.
-
-Players then join with the UUID, name, skin and address the proxy forwards. Anyone who connects without going
-through the proxy is refused, and so is a login signed with another secret. With the file in place but
-`online_mode = true` the file is ignored (with a warning), and an empty file stops the start, because an empty
-secret could be signed by anyone. How the exchange works: [velocity-forwarding.md](velocity-forwarding.md).
-
-Bedrock players that join through Geyser and Floodgate arrive with a Floodgate UUID (`00000000-0000-0000-0009-` and
-the Xbox id), which is never on `whitelist.json`. With `white-list=true`, list that prefix in a file
-`whitelist-bypass.txt` beside server.properties (one UUID prefix per line, `#` comments, at least 8 characters) and
-everyone whose UUID starts with it passes the whitelist. Bans and the player limit still apply. The log says
-`whitelist-bypass.txt: 1 UUID prefix(es) skip the whitelist`.
 
 ## 5. Commands
 
@@ -429,6 +395,11 @@ A running server takes the difficulty, the default game mode, the whitelist, the
 player limit and the backup settings at once; the rest applies at its next start, and `config set` says which. `--json` prints that as `saved`, `applied`
 and `restart`.
 
+A crash save keeps the last saved files (`players/data/<uuid>.dat`, stats and advancements) of a player whose turn
+the panic interrupted, such as a mod's hook panicking while it handled that player's action: the half-done turn can
+hold an item taken but not yet placed. The log says so with a `player's turn` warning, and the panic still
+ends the server. Single player keeps the owner's file the same way.
+
 The server restarts the game by itself if it crashes: after 5 s, then waiting longer each time, up to 5
 minutes. It keeps the crash report and gives up after 5 crashes in 10 minutes, and `status` says why.
 
@@ -477,14 +448,17 @@ make a login link, and no one else can. Never put it on the open internet.
 
 Everything the panel does goes through the control API ([api/server.md](api/server.md)), which a moderation bot
 (a Discord `!ban`), a monitoring tool or a script can call too. It listens on a free port of `127.0.0.1` and
-writes the address and a fresh token to `.sunrise/api.json` at every start. For a program that runs elsewhere
-or keeps its settings, fix both in `server.toml`:
+writes the address and a fresh token to `.sunrise/api.json` at every start. For a program that needs a fixed
+address, set `bind` in `server.toml`:
 
 ```toml
 [api]
 bind = "127.0.0.1:8131"      # or your tailnet address, 100.x.y.z:8131
-token = "a long random string only the bot knows"
+token = ""                   # empty: generate a fresh token at every start
 ```
+
+If the program needs a fixed token too, set `token` to a private random string of at least 16 printable ASCII
+characters without spaces.
 
 The same rules as the panel's hold: a tailnet or loopback address, unless `allow_public = true` (the token is then
 all that guards the server, and it warns at every start). The API can't change `[engine]`, `[panel]`, `[api]` or
@@ -504,7 +478,7 @@ enabled = true                                     # false pauses it and keeps t
 
 The lines of each 2 seconds are drawn as one picture of the in-game chat (transparent, shadowed letters, colours
 included), and a channel gets at most one post every 2 seconds (more when Discord asks for it: a burst beyond 20
-lines is counted, not drawn). Only `chat` is forwarded, never a message the server's chat filter held back. Posts
+lines is counted, not drawn). Only `chat` is forwarded. Posts
 never ping: they allow no mention, and an `@everyone` typed in game reaches Discord defused. Every post comes
 from the webhook's own name and avatar (set them in Discord), never a player's; players' addresses are never sent,
 and a player is always named by their account's name (a nickname only next to it). The server only makes outgoing HTTPS calls to Discord;
@@ -801,39 +775,6 @@ most 8, as many as the machine has cores). It applies at the next start. It is t
 environment variable `SUNRISE_PARALLEL_TICK=1`, for a host that gives you no way to set one (a game panel
 with a fixed startup command). With the setting off, a `SUNRISE_PARALLEL_TICK` already in the server's
 environment still applies.
-
-Natural mob spawning is one of those phases: the spawn attempts of the chunks around your players run on the helper
-threads, and the server thread then takes what they found, in order, if the mob caps still allow it. It has vanilla's odds
-and caps but not the random draws of one vanilla level, so a world does not spawn the same mobs with the setting on as off.
-It stays on one thread while a native mod listens to spawns, with fewer than 512 chunks to try (about two players' worth) and
-on a machine with one core ([how it works](parallel-natural-spawning.md)).
-
-### Mob AI far from players: `[entities] dab`
-
-Off by default, because it is not vanilla's behaviour: mobs far from every player react more slowly. It is
-Pufferfish's "dynamic activation of brain", with the same names and defaults. Add the section to `server.toml`:
-
-```toml
-[entities]
-dab = true                    # false (the default): every mob thinks every tick, as in vanilla
-dab_start_distance = 12       # blocks; a mob this close to the nearest player is never slowed
-dab_max_tick_freq = 20        # ticks; the longest wait between two AI ticks
-dab_activation_dist_mod = 8   # raise it to slow far mobs less, lower it to slow them more
-```
-
-A mob farther than `dab_start_distance` from the nearest player (squared distance `d²`) runs its AI on the ticks where
-`age % interval == 0`, with `interval = clamp(d² >> dab_activation_dist_mod, 1, dab_max_tick_freq)`: 14 ticks at
-60 blocks with the defaults, 20 from about 71 blocks. Only the decisions wait: goals and targets, the brains of villagers,
-piglins, axolotls and the like, and each species' `customServerAiStep`. A far mob still moves (its navigation, move,
-look and jump controls run), falls, floats, is pushed, takes damage and effects, and its despawn check runs.
-
-Never slowed: withers and wardens; a mob with a target or anger, or hurt in the last two seconds; raiders in a raid; a
-mob that is ridden, riding, carrying a passenger or on a lead; a tamed mob that is not sitting.
-
-Unlike Pufferfish, it applies to every mob (Pufferfish limits the brain part to villagers, axolotls, hoglins,
-zombified piglins and goats and has an entity blacklist), and a level with no player counts as far away. It applies at
-the next start, and is the same switch as the environment variables `SUNRISE_DAB=1`, `SUNRISE_DAB_START_DISTANCE`,
-`SUNRISE_DAB_MAX_TICK_FREQ` and `SUNRISE_DAB_ACTIVATION_DIST_MOD`.
 
 ## When something goes wrong
 

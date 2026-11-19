@@ -1089,7 +1089,7 @@ impl Panic {
 pub fn should_panic(m: &Mob) -> bool {
     m.last_damage
         .is_some_and(|(d, t)| d.causes_panic() && i64::from(m.age) - t <= 40)
-        || m.fire_ticks > 0 && !m.kind.flags.fire_immune
+        || m.is_on_fire()
 }
 impl Goal for Panic {
     goal_clone!();
@@ -1100,7 +1100,7 @@ impl Goal for Panic {
         let wanted = if self.environmental {
             m.last_damage.is_some_and(|(d, t)| {
                 super::armadillo::environmental(d.kind) && i64::from(m.age) - t <= 40
-            }) || m.fire_ticks > 0 && !m.kind.flags.fire_immune
+            }) || m.is_on_fire()
         } else {
             should_panic(m)
         };

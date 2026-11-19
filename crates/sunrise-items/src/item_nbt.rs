@@ -109,27 +109,25 @@ pub fn item_from_nbt(tag: &Tag) -> Option<crate::items::ItemStack> {
     })
 }
 pub fn encode_items(slots: &[Option<crate::items::ItemStack>], items: &crate::items::Items) -> Tag {
-    encode_items_using(slots, |stack| item_to_nbt(stack, items))
+    Tag::List(encode_items_using(slots, |stack| item_to_nbt(stack, items)))
 }
 
-/// Save an inventory with the stack encoder owned by its persistence boundary.
+/// Encode the occupied slot rows with the stack encoder owned by their persistence boundary.
 pub fn encode_items_using(
     slots: &[Option<crate::items::ItemStack>],
     encode: impl Fn(&crate::items::ItemStack) -> Tag,
-) -> Tag {
-    Tag::List(
-        slots
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| {
-                let mut tag = encode(s.as_ref()?);
-                if let Tag::Compound(entries) = &mut tag {
-                    entries.insert("Slot".into(), Tag::Byte(i as i8));
-                }
-                Some(tag)
-            })
-            .collect(),
-    )
+) -> Vec<Tag> {
+    slots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let mut tag = encode(s.as_ref()?);
+            if let Tag::Compound(entries) = &mut tag {
+                entries.insert("Slot".into(), Tag::Byte(i as i8));
+            }
+            Some(tag)
+        })
+        .collect()
 }
 pub fn decode_items(tag: Option<&Tag>, size: usize) -> Vec<Option<crate::items::ItemStack>> {
     let mut slots = vec![None; size];

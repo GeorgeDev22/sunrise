@@ -87,7 +87,7 @@ fn package_snapshot(
         .collect();
     mod_api::PackageInfo::new(
         manifest.id.clone(),
-        manifest.version.clone(),
+        manifest.version.to_string(),
         kind,
         manifest.side,
         std::iter::once(&manifest.id)

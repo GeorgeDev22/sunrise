@@ -88,13 +88,38 @@ pub trait LevelBlocksBackendMut {
         state: BlockState,
     ) -> Result<BlockState, LevelWriteError>;
     /// Side: server.
+    /// Ask `Block.getStateForPlacement(BlockPlaceContext)` without placing the block.
+    /// The placement-state parts see `block`'s default state, as in a real placement.
+    /// A registered answer belonging to another block is returned as given; an unknown
+    /// answer falls back to the block's own rule, as in a real placement.
+    /// The context is taken as written, with no target or click re-resolution. Nothing is
+    /// written, notified or loaded. No additional survival, obstruction or permission check
+    /// from `BlockItem.place` runs.
+    /// Only the level in play is queried. Returns `Err(LevelReadError::Stale)` for a
+    /// stale handle or closed level, and `Err(LevelReadError::Unavailable)` for a parked
+    /// level, an unavailable host or load phase, or a state that the API cannot represent.
+    ///
+    /// Returns `Ok(None)` for vanilla's `null`, a part's `Some(None)`, an unknown block
+    /// or item key, an unloaded or out-of-bounds destination, or a non-finite hit or
+    /// rotation. `None` in `context.item` means an empty hand.
+    #[access(WorldOnly)]
+    fn level_state_for_placement(
+        &mut self,
+        level: LevelRef,
+        block: BlockKey,
+        context: &PlacementContext,
+    ) -> Result<Option<BlockState>, LevelReadError>;
+    /// Side: server.
     /// Write `state` at `pos` as a placement does and run `Block.setPlacedBy` for it, with no
     /// player: a bed places its head, a door its upper half, a tall plant its top. The write
     /// is `level_set_block`'s with `NEIGHBORS | CLIENTS` (plus `KNOWN_SHAPE` when
     /// `update_neighbour_shapes` is false; without it the neighbours' shapes update, so fences
     /// and walls connect). `setPlacedBy` gets no placer and no item. Nothing else of
-    /// `BlockItem.place` runs: no survival or obstruction check, no sound, no game event, no
-    /// advancement. Errors and `Ok(false)` are `level_set_block`'s.
+    /// `BlockItem.place` runs: no survival or obstruction check, item placement sound, placement
+    /// game event or advancement. A carrier-transfer fence can refuse a direct placement write
+    /// (the origin, a companion or a callback write) with `Ok(false)`; neighbour updates follow
+    /// the level's normal rules. A completed wither pattern in an open Host transaction returns
+    /// `LevelWriteError::InTransaction`.
     #[access(WorldOnly)]
     fn level_place_block(
         &mut self,
@@ -102,6 +127,24 @@ pub trait LevelBlocksBackendMut {
         pos: [i32; 3],
         state: BlockState,
         update_neighbour_shapes: bool,
+    ) -> Result<bool, LevelWriteError>;
+    /// Side: server.
+    /// Run `Block.setPlacedBy` on the block currently at `pos`, without a placer. `stack` is
+    /// a detached item value (`None` is the empty stack); the block may inspect its components.
+    /// Write the initial state and load any block entity data before calling. The callback can
+    /// write companion cells and produce block-specific effects, but will not load stack NBT.
+    /// `Ok(false)` at an unloaded or out-of-height origin or on carrier-transfer refusal.
+    /// The fence check covers the origin and cells the callback writes directly, including
+    /// companions; neighbour updates follow the level's normal rules.
+    /// Stale or unavailable levels and invalid stacks return typed errors before any effects.
+    /// A placement that would summon a wither is refused while a Host transaction is open.
+    #[access(WorldOnly)]
+    #[read_stack]
+    fn level_set_placed_by(
+        &mut self,
+        level: LevelRef,
+        pos: [i32; 3],
+        stack: Option<&ItemStack>,
     ) -> Result<bool, LevelWriteError>;
     /// Side: server.
     /// Remove a block in place (`Level.removeBlock`), preserving its fluid.

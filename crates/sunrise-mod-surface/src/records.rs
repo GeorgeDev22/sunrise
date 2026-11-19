@@ -492,6 +492,50 @@ pub struct Capability {
     pub contract: CapabilityContract,
 }
 
+/// A point, loop or internal from the SDK's source catalogs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineItem {
+    pub id: String,
+    pub hash: String,
+    #[serde(flatten)]
+    pub contract: EngineContract,
+}
+
+impl EngineItem {
+    /// Seal a catalog row's contract independently of its identity.
+    pub fn new(id: String, contract: EngineContract) -> Self {
+        Self {
+            id,
+            hash: crate::contract_hash(&contract),
+            contract,
+        }
+    }
+}
+
+/// What can change on a catalog row without changing its identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EngineContract {
+    Point {
+        name: String,
+        signature_hash: String,
+    },
+    Loop {
+        entry: String,
+        generic: String,
+        slot: String,
+        side: String,
+    },
+    Internal {
+        signature: String,
+        signature_hash: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        shape_only: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opaque_reason: Option<String>,
+    },
+}
+
 /// An engine-owned tag that a package may extend. Documentation is outside the contract hash.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionTag {

@@ -35,6 +35,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
+use sunrise_core::crc32::Crc32;
 
 /// Where progress lines go: the terminal for the binary, the log pane for the launcher.
 pub type Log<'a> = &'a dyn Fn(&str);
@@ -60,7 +61,7 @@ pub const SCHEMA: i64 = 7;
 /// the preparer and fails when the output is not the one output-versions.txt gives this number
 /// (`python3 tools/prepare_output.py check`). The launcher reads this line from the version
 /// folder's sources: keep it on one line, as it is.
-pub const OUTPUT_VERSION: u32 = 4;
+pub const OUTPUT_VERSION: u32 = 5;
 
 /// Digest of this crate's sources (build.rs): the launcher prepares a version in-process when
 /// that version ships these same sources, and runs the version's own binary otherwise.
@@ -1220,9 +1221,8 @@ fn steps(
             }
         }
 
-        // The creative inventory (creative-inventory.json): every tab built by vanilla's
-        // CreativeModeTabs over the vanilla data pack's registries, with the search
-        // tab's tooltip lines and tags.
+        // The creative inventory recipes (creative-inventory.json): ordered generator
+        // rows and live-holder placeholders, plus search tooltip and tag metadata.
         run.stage();
         let creative = single(
             "the creative inventory",
@@ -1408,7 +1408,7 @@ fn extract_member(client: &mut Jar, name: &str, target: &Path) -> Result<(), Str
     drop(member);
     if target.is_file() && fs::metadata(target).map_err(|e| e.to_string())?.len() == size {
         let mut file = fs::File::open(target).map_err(|e| e.to_string())?;
-        let mut hash = crc32fast::Hasher::new();
+        let mut hash = Crc32::new();
         let mut buffer = [0; 16 * 1024];
         loop {
             let n = file.read(&mut buffer).map_err(|e| e.to_string())?;

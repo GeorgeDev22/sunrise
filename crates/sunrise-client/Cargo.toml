@@ -37,18 +37,12 @@ sunrise-optifine = { path = "../sunrise-optifine" }
 # The server thread ahead of the workers (MinecraftServer.spin's Thread.setPriority).
 sunrise-threads = { path = "../sunrise-threads" }
 sunrise-perf-format = { path = "../sunrise-perf-format" }
-sunrise-hdr = { path = "../sunrise-hdr" }
 sunrise-world = { path = "../sunrise-world" }
 sunrise-protocol = { path = "../sunrise-protocol" }
 # server.properties, eula.txt and the user lists, shared with sunrise-server.
 sunrise-server-files = { path = "../sunrise-server-files" }
 # The JDK's clock, for the LAN host's random seed and the probes.
 sunrise-java-properties = { path = "../sunrise-java-properties" }
-# The dedicated server's anticheat, off unless server.toml's [anticheat] turns it on (docs/anticheat.md).
-sunrise-anticheat = { path = "../sunrise-anticheat" }
-# The dedicated server's chat filter: [chat_filter], the slur list, mutes (docs/chat-filter.md);
-# `entry` installs it into the engine's hook (`sunrise_server_files::chat_guard`).
-sunrise-chat-filter = { path = "../sunrise-chat-filter" }
 # Shader packs: reading them and turning their GLSL into naga modules.
 sunrise-shaders = { path = "../sunrise-shaders" }
 # Sunrise's own shader packs: the format, the stages and the check (docs/shaders.md).
@@ -77,12 +71,11 @@ socket2 = { version = "0.6", default-features = false, features = ["all"] }
 sha1 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
-# server.toml's sections the dedicated server reads itself ([entities], [chat_filter]...).
+# server.toml's sections the dedicated server reads itself ([entities]...).
 toml = "1.1"
 # hlsl-out: the gfx.rs tests translate every shader as wgpu's DirectX 12 backend does. A normal feature,
 # not a dev-dependency's, so builds, tests and examples share one build of naga, wgpu and this crate.
 naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out"] }
-miniz_oxide = "0.8"
 ab_glyph = "0.2.32"
 log = "0.4"
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
@@ -94,7 +87,6 @@ sunrise-system = { path = "../sunrise-system" }
 # anonymous "I'm playing" ping is the Sunrise layer's (`sunrise-heartbeat`, in the official executable).
 sunrise-telemetry = { path = "../sunrise-telemetry", default-features = false }
 sunrise-bench = { path = "../sunrise-bench" }
-crc32fast = "1"
 zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 # Controllers (evdev + libudev on Linux, IOKit on macOS, Windows.Gaming.Input); the `controllers` feature.
 gilrs = { version = "0.11", optional = true }
@@ -102,7 +94,6 @@ gilrs = { version = "0.11", optional = true }
 sunrise-dualsense = { path = "../sunrise-dualsense", optional = true }
 # HTTPS to the Minecraft services (online-mode session join).
 ureq = { version = "2", default-features = false, features = ["tls"] }
-unicode-bidi = "0.3.18"
 # `LevelStorageAccess.estimateDiskSpace`: usable disk space, without unsafe code on Windows.
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
 # Mod file roots are descriptor-bound: no symlink race can leave a mod's area.
@@ -159,8 +150,6 @@ alloc-count = ["sunrise-threads/alloc-count"]
 # mimalloc with a tag on each block: `sunrise-ctl memory` lists the live heap by startup step and
 # thread (`heap_by_tag_mb`). For measuring only: each block costs 16 bytes more.
 alloc-census = ["sunrise-threads/alloc-census"]
-# Compatibility with earlier experiment commands: main already uses mimalloc.
-windows-mimalloc = []
 # Opt-in Windows heap experiment; see docs/windows-allocators.md.
 windows-segment-heap = []
 

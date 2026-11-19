@@ -39,8 +39,9 @@ fn head(game: &mut Game<'_>) -> ::core::ops::ControlFlow<()> {
 called on. With `cancellable = true` the helper returns `ControlFlow<()>`: `Break(())` makes the function
 return at once, and `Continue(())` lets it run. For a function that returns `R`, the helper returns `ControlFlow<R>`, and `Break(value)` returns `value`.
 
-When it builds, the build log shows `Function replacement: 1 functions patched by 1 mixins, without
-rebuilding the game (…)`.
+Run `cargo sunrise-mod build` from the mod project. Neither `internals sync` nor `inject update` is a
+step of a mixin build. The build log shows `Function replacement: … without rebuilding the game` when
+it compiles the patch.
 
 ## Writing a helper
 
@@ -67,12 +68,15 @@ The helper file holds exactly one function: private, safe, with no attributes an
 | `MODIFY_CONSTANT` | on one literal in the body | the new value |
 | `MODIFY_VARIABLE` | on one read or write of a local or parameter | the new value |
 | `MODIFY_EXPRESSION_VALUE` | on the value of one call in the body (`$value`) | the new value |
-| `WRAP_OPERATION` | around one call, which you get as `$operation` and may run or not. The receiver and arguments run at the call site, in order, before the wrapper. The wrapper's declared types are expected types for the game's own expressions, and the tool guards only part of that. Receiver: it must be a reference parameter of the target function (`engine.go`, declared as the parameter's own reference type); a computed receiver, a call result such as `res(ok)?.read` or `choose(1)?.read()`, is refused with `E_OPERATION_SIGNATURE` whatever it is declared as, by value or by reference, since `choose(1)?.read()` declared `Choice<i64>` is another call than the game's. Binding the receiver to a local in the game's code does not make it a row. Arguments: one that carries a `?`, an `unsafe` block, a `const` block or a try block is refused with `E_UNSUPPORTED_CONTROL_FLOW` (`scale(default_value(0.1)?)` declared `f32` converts `0.1` through `f32`); a plain block elsewhere in the call is not refused. Not guarded: an ordinary argument, such as the literal in `width(1)`, takes the type its binding declares, and a named receiver's type is compared by its spelling, so declare exactly the game's types. Wrapping a computed receiver is planned as follow-up work | the call's type; a callee that declares no return type gives `()`, so `impl FnOnce(A)` and `impl FnOnce(A) -> ()` are the same operation |
+| `WRAP_OPERATION` | around one call, which you get as `$operation` and may run or not. The receiver and arguments run at the call site, in order, before the wrapper. The wrapper's declared types are expected types for the game's own expressions, and the tool guards only part of that. Receiver: it must be a reference parameter of the target function (`engine.go`, declared as the parameter's own reference type); a computed receiver, such as a call result or a struct literal, is refused with `E_OPERATION_SIGNATURE` because its declared type can change which method the game calls. Binding the receiver to a local in the game's code does not make it a row. Arguments: one that carries a `?`, an `unsafe` block, a `const` block or a try block is refused with `E_UNSUPPORTED_CONTROL_FLOW` (`scale(default_value(0.1)?)` declared `f32` converts `0.1` through `f32`); a plain block elsewhere in the call is not refused. Not guarded: an ordinary argument, such as the literal in `width(1)`, takes the type its binding declares, and a named receiver's type is compared by its spelling, so declare exactly the game's types. See [what a mixin cannot target](#what-a-mixin-cannot-target) for alternatives | the call's type; a callee that declares no return type gives `()`, so `impl FnOnce(A)` and `impl FnOnce(A) -> ()` are the same operation |
 
 The other kinds act on one place in the body, which a `selector` names as source text. For a call, write the
 callee without arguments: `autosave_interval` or `self.next_autosave_interval`. A bare method name finds no method call: a method's selector writes its receiver as source text, `make()?.method`, and a count of 0 for a bare name called as a method here names that selector when it can be written. For
 `MODIFY_EXPRESSION_VALUE`, write the whole expression: `autosave_interval(rate)`. `MODIFY_VARIABLE` uses
 `variable` instead. `require` is how many matches the body has (inside `slice`, if set), and `ordinal` picks one, from 0.
+
+For a struct-literal receiver, omit whitespace outside literals and the trailing field comma. For example,
+use `selector = "ItemPlace::MenuSlot{menu,slot:n}.stack"` with `AFTER_CALL` to select the `.stack(host)` call.
 
 ## Fields
 
@@ -96,7 +100,7 @@ callee without arguments: `autosave_interval` or `self.next_autosave_interval`. 
 | `$value` | The value being changed: the return value, the expression's value, or the argument, constant or variable. |
 | `$arg0`, `$arg1`, … | An argument of the selected call (`WRAP_OPERATION`). |
 | `$args` | All arguments of the selected call, as a tuple (`MODIFY_ARGS`). |
-| `$receiver` | The receiver of a selected method call (`WRAP_OPERATION`); the first binding, and the operation's first parameter. It is a reference parameter of the target function, declared as that parameter's own reference type. A computed receiver (a call result) is refused: see `WRAP_OPERATION`. |
+| `$receiver` | The receiver of a selected method call (`WRAP_OPERATION`); the first binding, and the operation's first parameter. It is a reference parameter of the target function, declared as that parameter's own reference type. A computed receiver is refused: see `WRAP_OPERATION`. |
 | `$operation` | The selected call, as `impl FnOnce(args) -> result` (`WRAP_OPERATION`); the last binding. |
 | `$local:NAME:N`, `$local_ref:NAME:N`, `$local_mut:NAME:N` | The `N`th local named `NAME` in the body, from 0: by value, `&` or `&mut`. |
 
@@ -137,7 +141,17 @@ These functions are refused:
 
 The one generic function you can target is a [published loop's body](3-loops.md#mixins-on-the-loop).
 
-The tool plans against what the patch library compiles. The launcher gives it the build's cfg set (the target's options and the features the prebuilt game was built with), and it drops the items, statements, fields, variants, parameters and match arms under an inactive `cfg` and expands `cfg_attr`. A function with an inner `#[cfg(test)] fn helper()` or a `#[cfg(feature = "x")]` statement takes its mixins like any other. The features are the game crate's: a `feature` predicate is decided only in the game crate's own functions. In a function of a crate below it (`sunrise_world`, say) it stays undecided, since that crate's resolved features are not the game's, and is refused. `unix`, `target_os` and the other options hold for every crate. The tool decides only what the signed build vouches for: `feature` in the game crate (from the game's feature list), `test` (the patch library is not a test build, so it is off), and the target facts that follow from the validated target (`target_os`, `target_family`, `unix`, `windows`, `target_arch`, `target_pointer_width`, `target_endian`, `target_env`, `target_vendor`, `target_abi`), read from the printed set and compared on their full values. Everything that depends on compiler flags (`debug_assertions`, `overflow_checks`, `panic`, `target_feature`, `relocation_model`, `sanitize*`, `doc`, `miri`) or on the original build's build script (any custom name) is undecided in both directions, listed or not. A `cfg` the set cannot decide (`version(..)`, `accessible(..)`, an expression-level attribute, a `feature` outside the game crate, a flag-dependent or custom name) is refused with `E_UNSUPPORTED_CFG`. This reduces the source inside a function the route already lets a row target; a function that carries a `cfg` or `cfg_attr` of its own is still not replaceable, active or not.
+The tool plans against what the patch library compiles. The mod builder gives it the build's cfg set (the target's options and the features the prebuilt game was built with), and it drops the items, statements, fields, variants, parameters and match arms under an inactive `cfg` and expands `cfg_attr`. A function with an inner `#[cfg(test)] fn helper()` or a `#[cfg(feature = "x")]` statement takes its mixins like any other. The features are the game crate's: a `feature` predicate is decided only in the game crate's own functions. In a function of a crate below it (`sunrise_world`, say) it stays undecided, since that crate's resolved features are not the game's, and is refused. `unix`, `target_os` and the other options hold for every crate. The tool decides only what the signed build vouches for: `feature` in the game crate (from the game's feature list), `test` (the patch library is not a test build, so it is off), and the target facts that follow from the validated target (`target_os`, `target_family`, `unix`, `windows`, `target_arch`, `target_pointer_width`, `target_endian`, `target_env`, `target_vendor`, `target_abi`), read from the printed set and compared on their full values. Everything that depends on compiler flags (`debug_assertions`, `overflow_checks`, `panic`, `target_feature`, `relocation_model`, `sanitize*`, `doc`, `miri`) or on the original build's build script (any custom name) is undecided in both directions, listed or not. A `cfg` the set cannot decide (`version(..)`, `accessible(..)`, an expression-level attribute, a `feature` outside the game crate, a flag-dependent or custom name) is refused with `E_UNSUPPORTED_CFG`. This reduces the source inside a function the route already lets a row target; a function that carries a `cfg` or `cfg_attr` of its own is still not replaceable, active or not.
+
+## What a mixin cannot target
+
+| If the row is refused because… | Use this instead |
+| --- | --- |
+| The original game body uses a macro the tool cannot validate for a body hook. A macro in your helper, such as `println!`, `format!` or `log::info!`, is not subject to this check. | Use `HEAD` to leave the target body intact, or hook a call to that function. |
+| The selector lands inside a closure, which can run separately from the target function. | Select a site outside the closure, or target a replaceable function that the closure calls. |
+| `WRAP_OPERATION` would impose a type on a struct-literal receiver and could change method resolution. | Use `AFTER_CALL` to observe the call, or wrap a method on one of the target's reference parameters. |
+| `RETURN` cannot cover an implicit exit through `?`, or the target result type is unresolved. | For `?`, use `HEAD` or hook the caller. If the result is plain `Self`, use the concrete impl type in your `$value` binding and helper signature; projections such as `Self::Output` are not resolved. |
+| An import needed by the helper is not available in the copied scope. Lower-crate mirrors keep named imports used by the copies and helpers, not every sibling in a grouped `use`. | Name the item explicitly in the helper, or use its full path if it is accessible. A private item outside the copied scope may need a different target. |
 
 ## With other mods
 
