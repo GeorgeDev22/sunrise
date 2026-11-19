@@ -1879,6 +1879,53 @@ SCENARIOS = {
                f'item replace entity {PLAYER} hotbar.0 with minecraft:oak_boat', f'item replace entity {PLAYER} hotbar.1 with minecraft:minecart'],
         ticks=50, steps={0: ['look 0 45'], 5: ['mouse right click'], 15: ['key 2 tap', 'look -60 45'], 20: ['mouse right click'],
                          30: ['mouse left click'], 34: ['mouse left click']}),
+    # Section 27 (2026-11-19): input rates anticheats count, and interactions no scenario used yet.
+    'sneak_toggle_spam': dict(
+        ticks=60, steps=merge({0: ['key w down']}, {t: ['key shift tap'] for t in range(4, 44, 2)}, {50: ['key w up']})),
+    'hotbar_spam_attack': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.5), SWORD],
+        ticks=60, steps=merge({0: ['look 0 10']}, {t: [f'key {1 + t % 9} tap'] for t in range(2, 38)},
+                              {t: ['key 1 tap', 'mouse left click'] for t in (40, 50)})),
+    'offhand_swap_spam': dict(
+        setup=[SWORD, f'item replace entity {PLAYER} weapon.offhand with minecraft:shield'],
+        ticks=50, steps=merge({t: ['key f tap'] for t in range(2, 22)}, {30: ['mouse right down'], 40: ['mouse right up']})),
+    'drop_stack_ctrl_q': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:cobblestone 64',
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:dirt 16'],
+        ticks=50, steps={0: ['key w down'], 5: ['key q tap'], 10: ['key ctrl down'], 12: ['key q tap'], 14: ['key ctrl up'],
+                         16: ['key 2 tap'], 18: ['key ctrl down'], 20: ['key q tap'], 22: ['key ctrl up'], 30: ['key w up']}),
+    'door_use_spam': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_door[half=lower,facing=north]',
+               f'setblock 0 {FLOOR + 2} 2 minecraft:oak_door[half=upper,facing=north]'],
+        ticks=50, steps=merge({0: ['look 0 20']}, {t: ['mouse right click'] for t in range(2, 32)})),
+    'sneak_place_on_chest': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:chest',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:oak_planks 16'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 8: ['key e tap'], 14: ['key shift down'],
+                         18: ['mouse right click'], 22: ['mouse right click'], 26: ['key shift up']}),
+    'vault_trial_key': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:vault',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:trial_key 2'],
+        ticks=80, steps={0: ['look 0 30'], 4: ['mouse right click'], 40: ['mouse right click']}),
+    'lodestone_compass': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:lodestone',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:compass'],
+        ticks=50, steps={0: ['look 0 30'], 4: ['mouse right click'], 10: ['key w down'], 20: ['key w up'],
+                         22: ['look 90 0'], 30: ['look 180 0']}),
+    'decorated_pot_hit': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:decorated_pot',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 30'], 4: ['mouse right click'], 10: ['mouse left click'], 30: ['mouse left down'],
+                         40: ['mouse left up']}),
+    'ladder_top_jump': dict(
+        setup=[f'fill 0 {FLOOR + 1} 2 0 {FLOOR + 4} 2 minecraft:stone',
+               f'fill 0 {FLOOR + 1} 1 0 {FLOOR + 4} 1 minecraft:ladder[facing=north]'],
+        ticks=80, steps={0: ['key w down'], 30: ['key space down'], 50: ['key space up'], 60: ['key w up']}),
+    'sprint_while_using': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:bow',
+               f'item replace entity {PLAYER} hotbar.8 with minecraft:arrow 16'],
+        ticks=60, steps={0: ['key w down', 'key ctrl down'], 6: ['mouse right down'], 20: ['key ctrl up'],
+                         22: ['key ctrl down'], 34: ['mouse right up'], 50: ['key w up', 'key ctrl up']}),
     # Section 26 (2026-11-19): PvP techniques anticheats watch, beside a mob's hits (KNOCKBACK from FAR_HUSK).
     'jump_reset_kb': dict(
         setup=[FAR_HUSK, SWORD],

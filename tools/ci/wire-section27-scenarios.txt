@@ -1,0 +1,11 @@
+sneak_toggle_spam
+hotbar_spam_attack
+offhand_swap_spam
+drop_stack_ctrl_q
+door_use_spam
+sneak_place_on_chest
+vault_trial_key
+lodestone_compass
+decorated_pot_hit
+ladder_top_jump
+sprint_while_using
