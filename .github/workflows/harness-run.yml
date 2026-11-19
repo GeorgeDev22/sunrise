@@ -19,12 +19,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every harness (parity.py --all --list), every 30th per shard.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
+        # tools/ci/harness-names.txt when present, else every harness (parity.py --all --list); every 10th per shard.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: sunrise-org's main as origin/main (frame_identity diffs against it)
+        run: git fetch --no-tags https://github.com/sunrise-org/sunrise.git main:refs/remotes/origin/main
       - name: The pinned Rust (tools/ci/rust-version)
         id: rust
         run: echo "version=$(cat tools/ci/rust-version)" >> "$GITHUB_OUTPUT"
@@ -57,7 +60,7 @@ jobs:
           python3 tools/ci/wire_grim_fetch.py --mc "$RUNNER_TEMP/mc" --servers "$RUNNER_TEMP/servers" > "$RUNNER_TEMP/fetch.log" 2>&1 || { tail -5 "$RUNNER_TEMP/fetch.log"; exit 1; }
           python3 tools/lab.py prepare --minecraft-dir "$RUNNER_TEMP/mc" --server-jar "$RUNNER_TEMP/servers/server.jar" > "$RUNNER_TEMP/prepare.log" 2>&1 || { echo "lab prepare failed"; exit 1; }
           cargo build --locked --profile fast -p sunrise-prepare > "$RUNNER_TEMP/prepare-build.log" 2>&1 || { echo "sunrise-prepare build failed"; exit 1; }
-          target/fast/sunrise-prepare --minecraft-dir "$RUNNER_TEMP/mc" --server-jar "$RUNNER_TEMP/servers/server.jar" --root "$PWD" > "$RUNNER_TEMP/sunrise-prepare.log" 2>&1 || { echo "sunrise-prepare failed"; exit 1; }
+          target/fast/sunrise-prepare --minecraft-dir "$RUNNER_TEMP/mc" --server-jar "$RUNNER_TEMP/servers/server.jar" --root "$PWD" --complete > "$RUNNER_TEMP/sunrise-prepare.log" 2>&1 || { echo "sunrise-prepare failed"; exit 1; }
           ls .local
       - name: Prebuild what the harnesses build, with parity.py's profile so they reuse it
         env:
@@ -71,6 +74,8 @@ jobs:
           cargo build --profile fast -p sunrise-game --bin sunrise-client > "$L" 2>&1 || { tail -20 "$L"; exit 1; }
           cargo build -p sunrise-game --bin sunrise-client >> "$L" 2>&1 || { tail -20 "$L"; exit 1; }
           cargo build --locked -p sunrise-client-lib --example client_probe >> "$L" 2>&1 || { tail -20 "$L"; exit 1; }
+          cargo build --locked --profile fast -p sunrise-client-lib --example client_probe >> "$L" 2>&1 || { tail -20 "$L"; exit 1; }
+          cargo build --profile fast -p sunrise-game --bin sunrise-client -p sunrise-server --bin sunrise-server >> "$L" 2>&1 || { tail -20 "$L"; exit 1; }
           cargo test --locked --no-run -p sunrise-client --lib >> "$L" 2>&1 || { tail -20 "$L"; exit 1; }
           cargo test --locked --no-run -p sunrise-client-lib --lib >> "$L" 2>&1 || { tail -20 "$L"; exit 1; }
       - name: Harnesses (names and results only)
@@ -79,7 +84,8 @@ jobs:
           SUNRISE_TELEMETRY_URL: 'off'
         run: |
           mkdir -p reports
-          names=$(python3 tools/parity.py --all --list | awk -v s=${{ matrix.shard }} '(NR-1) % 30 == s' | tr '\n' ' ')
+          if [ -f tools/ci/harness-names.txt ]; then all=$(cat tools/ci/harness-names.txt); else all=$(python3 tools/parity.py --all --list); fi
+          names=$(printf '%s\n' $all | grep -E '^[a-z0-9_]+$' | awk -v s=${{ matrix.shard }} '(NR-1) % 10 == s' | tr '\n' ' ')
           echo "$names" > reports/names.txt
           python3 tools/ci/with_xvfb.py python3 tools/parity.py --fresh -j 2 --timeout 3600 $names > reports/parity.log 2>&1 || true
           python3 tools/parity.py --status > reports/status.txt 2>&1 || true
