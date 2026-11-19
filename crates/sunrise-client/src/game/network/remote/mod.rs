@@ -398,16 +398,26 @@ impl CartLerp {
     }
 }
 
+/// A mob's rotation set through `PosRot`'s setters, the ones
+/// test_stepped_interpolation_parity.py checks: `Entity.setRot` keeps the
+/// yaw within a turn, as a mount taken over next reports it (its draw lerps
+/// by the shortest angle, so the wrap does not spin it), and every setter
+/// discards an angle that isn't finite.
+fn rotate_mob(m: &mut Mob, set: impl FnOnce(&mut PosRot)) {
+    let mut rotation = PosRot {
+        position: [0.0; 3],
+        yaw: m.yaw,
+        pitch: m.head_pitch,
+    };
+    set(&mut rotation);
+    (m.yaw, m.head_pitch) = (rotation.yaw, rotation.pitch);
+}
+
 /// `SteppedInterpolationHandler.doInterpolate`'s `setPos` and `setRot` on a
-/// mob, through the entity's own `PosRot::set_rot` (the one
-/// test_stepped_interpolation_parity.py checks): the yaw within a turn, as a
-/// mount taken over next reports it; its draw lerps by the shortest angle, so
-/// the wrap does not spin it.
+/// mob.
 fn place_interpolated(m: &mut Mob, at: PosRot) {
     m.position = Vec3::new(at.position[0], at.position[1], at.position[2]);
-    let mut placed = at;
-    placed.set_rot(at.yaw, at.pitch);
-    (m.yaw, m.head_pitch) = (placed.yaw, placed.pitch);
+    rotate_mob(m, |r| r.set_rot(at.yaw, at.pitch));
 }
 
 /// The packet a living entity's move came in.
@@ -2811,9 +2821,9 @@ impl Game<'_> {
                             position[2],
                         );
                     }
+                    // moveOrInterpolateTo falls through to setRot.
                     if let Some((yaw, pitch)) = rotation {
-                        m.yaw += wrap_degrees(yaw - m.yaw);
-                        m.head_pitch = (pitch % 360.0).clamp(-90.0, 90.0);
+                        rotate_mob(m, |r| r.set_rot(yaw, pitch));
                     }
                     m.on_ground = on_ground;
                     return;
@@ -2830,8 +2840,13 @@ impl Game<'_> {
                     SteppedInterpolation::new(interval as i32)
                 });
                 if let Some(at) = stepped_move(handler, packet, entity, position, path, rotation) {
-                    // snapTo: setOldPosAndRot too.
-                    place_interpolated(m, at);
+                    // snapTo: setPosRaw, then setYRot and setXRot with the
+                    // packet's angles as they are, and setOldPosAndRot.
+                    m.position = Vec3::new(at.position[0], at.position[1], at.position[2]);
+                    rotate_mob(m, |r| {
+                        r.set_y_rot(at.yaw);
+                        r.set_x_rot(at.pitch);
+                    });
                     m.previous = m.position;
                     m.previous_yaw = m.yaw;
                     m.previous_head_pitch = m.head_pitch;

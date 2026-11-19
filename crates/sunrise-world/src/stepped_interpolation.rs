@@ -18,11 +18,25 @@ pub struct PosRot {
 
 impl PosRot {
     /// `Entity.setRot`, as `setPos`/`setRot` place an entity at a step: the
-    /// yaw kept within a turn (`yRot % 360.0F`), the pitch too and clamped to
-    /// ±90 (`setXRot`).
+    /// yaw kept within a turn (`yRot % 360.0F`), the pitch too, both through
+    /// `setYRot` and `setXRot`.
     pub fn set_rot(&mut self, yaw: f32, pitch: f32) {
-        self.yaw = yaw % 360.0;
-        self.pitch = (pitch % 360.0 % 360.0).clamp(-90.0, 90.0);
+        self.set_y_rot(yaw % 360.0);
+        self.set_x_rot(pitch % 360.0);
+    }
+    /// `Entity.setYRot` (`snapTo` calls it with the packet's yaw as it is):
+    /// a yaw that isn't finite is discarded, keeping the old one.
+    pub fn set_y_rot(&mut self, yaw: f32) {
+        if yaw.is_finite() {
+            self.yaw = yaw;
+        }
+    }
+    /// `Entity.setXRot`: the pitch within a turn and clamped to ±90; one that
+    /// isn't finite is discarded.
+    pub fn set_x_rot(&mut self, pitch: f32) {
+        if pitch.is_finite() {
+            self.pitch = (pitch % 360.0).clamp(-90.0, 90.0);
+        }
     }
     /// `PositionAndRotation.is`: the same rotation and `Vec3.equals`
     /// position (`Double.compare`, so -0.0 is not 0.0).
@@ -184,18 +198,29 @@ impl SteppedInterpolation {
     /// `AbstractInterpolationHandler.interpolate`, once a client tick: where
     /// the entity is put, or None when there is nothing to walk (and the
     /// handler resets). The client moves the entity only this way, so the
-    /// target never needs the deltas `adjustInterpolationTargetFromDeltas`
-    /// would add.
+    /// deltas `adjustInterpolationTargetFromDeltas` adds are none for the
+    /// position and +0.0 for the rotation.
     pub fn interpolate(&mut self) -> Option<PosRot> {
         if !self.active() {
             self.cancel();
             return None;
         }
+        // `addRotation(0.0F, 0.0F)`: no turn, but a -0.0 angle becomes 0.0.
+        self.add_rotation(0.0, 0.0);
         // doInterpolate: getNewPositionAndRotation, then advance by the
         // level's relative tick speed (1 at the normal tick rate).
         let at = self.new_position();
         self.advance(1.0);
         Some(at)
+    }
+    /// `InterpolationData.addRotation`: the target, every step left and the
+    /// one being walked from.
+    fn add_rotation(&mut self, yaw: f32, pitch: f32) {
+        let steps = self.remaining.iter_mut().map(|(step, _)| step);
+        for r in [&mut self.target, &mut self.last].into_iter().chain(steps) {
+            r.yaw += yaw;
+            r.pitch += pitch;
+        }
     }
     /// `InterpolationData.addStep`.
     fn add_step(&mut self, step: PosRot, ticks: i32) {
@@ -326,6 +351,20 @@ mod tests {
         // Four packets a tick apart: 12 ticks of steps, walked in fewer.
         assert!(ticks < 12, "{ticks}");
         assert_eq!(entity.position[0], 4.0);
+    }
+
+    #[test]
+    fn a_step_keeps_the_yaw_within_a_turn_and_a_snap_does_not() {
+        let mut r = PosRot::default();
+        r.set_rot(570.0, 100.0);
+        assert_eq!((r.yaw, r.pitch), (210.0, 90.0));
+        r.set_rot(-490.0, f32::NAN);
+        assert_eq!((r.yaw, r.pitch), (-130.0, 90.0));
+        r.set_rot(f32::INFINITY, -400.0);
+        assert_eq!((r.yaw, r.pitch), (-130.0, -40.0));
+        r.set_y_rot(570.0);
+        r.set_x_rot(f32::NEG_INFINITY);
+        assert_eq!((r.yaw, r.pitch), (570.0, -40.0));
     }
 
     #[test]

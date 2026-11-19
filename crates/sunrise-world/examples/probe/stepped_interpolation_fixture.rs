@@ -53,8 +53,10 @@ pub fn main() {
                 });
                 match handler.interpolate_to(entity, path, rotation) {
                     Start::Snap(at) => {
+                        // snapTo: setYRot and setXRot, no turn taken off.
                         entity.position = at.position;
-                        entity.set_rot(at.yaw, at.pitch);
+                        entity.set_y_rot(at.yaw);
+                        entity.set_x_rot(at.pitch);
                         "s"
                     }
                     Start::Unchanged => "k",
