@@ -38,6 +38,9 @@ const PARTS: &[&dyn Hooks] = &[
     // Frames per second and frame times over the game.
     #[cfg(feature = "sunrise-extras")]
     &sunrise_perf_overlay::HOOKS,
+    // Players' OptiFine capes, from OptiFine's cape server.
+    #[cfg(feature = "sunrise-extras")]
+    &sunrise_optifine_capes::HOOKS,
 ];
 /// The game started by hand without its prepared files: start it from the launcher, downloaded
 /// from Sunrise's website.
@@ -116,14 +119,19 @@ const STORES: &[&dyn settings::Store] = &[
     &sunrise_discord::SETTING,
     #[cfg(feature = "sunrise-extras")]
     &sunrise_perf_overlay::SETTING,
+    #[cfg(feature = "sunrise-extras")]
+    &sunrise_optifine_capes::SETTING,
 ];
-/// Their rows and pages in the options screens, in order: auto-reconnect's row above Discord's.
+/// Their rows and pages in the options screens, in order: auto-reconnect's row above Discord's,
+/// then OptiFine capes'.
 const PAGES: &[&dyn pages::Page] = &[
     #[cfg(feature = "sunrise-extras")]
     &sunrise_reconnect::SECTION,
     #[cfg(feature = "sunrise-extras")]
     &mod_audio::SECTION,
     &sunrise_discord::SECTION,
+    #[cfg(feature = "sunrise-extras")]
+    &sunrise_optifine_capes::SECTION,
     #[cfg(feature = "sunrise-extras")]
     &sunrise_perf_overlay::SECTION,
 ];
@@ -145,6 +153,10 @@ pub fn register() {
     let late = late.chain(std::iter::once(lang::register(LANG)));
     #[cfg(feature = "sunrise-extras")]
     let late = late.chain(std::iter::once(lang::register(sunrise_reconnect::LANG)));
+    #[cfg(feature = "sunrise-extras")]
+    let late = late.chain(std::iter::once(lang::register(
+        sunrise_optifine_capes::LANG,
+    )));
     let late = late.chain(PAGES.iter().copied().map(pages::register));
     for result in late.chain(LAYERS.iter().copied().map(hud::register)) {
         if let Err(e) = result {

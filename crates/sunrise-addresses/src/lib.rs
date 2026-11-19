@@ -56,6 +56,11 @@ pub const GAME_SOURCE_FILES: &str = "https://raw.githubusercontent.com/sunrise-o
 pub const SDK_RELEASE_LIST: &str =
     "https://api.github.com/repos/sunrise-org/sunrise/releases?per_page=100";
 
+/// OptiFine's cape server: a player's cape is `<this><name>.png`, a 404 when they have none. Plain
+/// HTTP, as OptiFine itself asks it: the server answers no HTTPS (`sunrise-optifine-capes`;
+/// `SUNRISE_OPTIFINE_CAPES` overrides it).
+pub const OPTIFINE_CAPES: &str = "http://s.optifine.net/capes/";
+
 /// The official Horizon Minecraft server's host, as a player types it to join (its SRV record
 /// leads to port 24454). Reached by name, never by IP address, which can shift. The Sunrise layer
 /// presents the client identity the server requires (`sunrise-official`).

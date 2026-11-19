@@ -1,9 +1,9 @@
 # Sunrise extras
 
 Optional conveniences built into the client: fullbright, dynamic lights, your own name tag, hiding block-break particles, auto-reconnect,
-Mouse Tweaks-style inventory controls, inventory sorting, a smooth chat and a music page. **Every one is off by default**: a fresh
-install looks and behaves exactly like vanilla 26.3, and turning an extra off
-again restores vanilla's behaviour completely.
+Mouse Tweaks-style inventory controls, inventory sorting, a smooth chat, a music page and OptiFine capes. **Every one but OptiFine
+capes is off by default**: a fresh install looks and behaves like vanilla 26.3 apart from the capes OptiFine gives players, and
+turning an extra off again restores vanilla's behaviour completely.
 
 ## Where they live
 
@@ -14,6 +14,7 @@ again restores vanilla's behaviour completely.
 | Dynamic lights: item glow, nearest sources | `crates/sunrise-client-render/src/dynamic_light.rs` (unit tested), `game/interface/dynamic_lights.rs`, `terrain.wgsl` and `entity.wgsl` (`dynamic_block_light`) |
 | HUD drawing (mods' panels, corner stacking) | `crates/sunrise-client/src/extras_hud.rs` |
 | Auto-reconnect: its setting, its row, the policy and the backoff | crate `sunrise-reconnect`, which the official executable registers ([forking.md](forking.md#modding-and-rendering)); the engine shows its countdown and connects again when it asks (`Hooks::retry`, `game/network/remote/connection.rs`) |
+| OptiFine capes: its setting, its row and the cape server's address | crate `sunrise-optifine-capes`, which the official executable registers; the engine asks the server it names for each drawn player's cape (`Hooks::optifine_capes`, `game/network/remote/mod.rs` `fn optifine_capes`), downloads them (`skins.rs` `Downloader::optifine_cape`) and lays them out by `sunrise-optifine`'s `capes.rs` |
 | Game glue (input hooks, per-frame update) | `crates/sunrise-client/src/game/interface/extras.rs`; each extra's own glue in a child module, `game/interface/extras/` |
 | Mouse Tweaks-style controls, sort buttons | `crates/sunrise-client/src/game/interface/extras/mouse_tweaks.rs`, `game/interface/extras/sorting.rs` |
 | Sort order and its clicks | `crates/sunrise-client/src/inv_sort.rs` (pure, unit tested) |
@@ -121,6 +122,28 @@ it is built in, else a note saying to install it from the Mods page.
   written to disk.
 - Only in the official executable (`sunrise-official`), which registers it: sunrise-client's own executable has
   no such row or setting, and never connects again by itself.
+
+### OptiFine capes (`optifineCapes`, default on)
+- A player who got a cape from OptiFine wears it, as OptiFine and the cape
+  mods for vanilla show it: the game asks OptiFine's cape server
+  (`http://s.optifine.net/capes/<name>.png`, plain HTTP: the server has no
+  HTTPS) for each player it draws, by name, the window's own player included.
+  The tooltip says that server learns the names of the players you see; off,
+  it is asked nothing.
+- Only valid names are asked (1 to 16 of `A-Z`, `a-z`, `0-9`, `_`), each once
+  for the session: a cape, a 404 and an answer that isn't a cape (anything but
+  a PNG of at most 256 KiB and 2048x1024 that decodes) are all kept. Capes are
+  never written to the disk cache.
+- An OptiFine cape is drawn over the player's Mojang cape, and on their
+  elytra too when its picture reaches the elytra's part of the layout (an old
+  22x17 cape doesn't: the elytra keeps its own texture). A picture sits on the
+  smallest 64·2^n by 32·2^n cape texture that holds it, so a 92x44 HD cape
+  keeps the 128x64 layout. Your Skin Customization screen's Cape switch hides
+  your own, as it does a Mojang cape.
+- `SUNRISE_OPTIFINE_CAPES` points the game at another cape server (a test's
+  own); it is read once.
+- Only in the official executable (`sunrise-official`), which registers it: sunrise-client's own executable asks
+  no cape server.
 
 ### Keep channels for UI sounds (`uiSoundReserve`, default off)
 - Positional sounds (a block breaking, a mob, an explosion) start only while at

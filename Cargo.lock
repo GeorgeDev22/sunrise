@@ -4823,6 +4823,7 @@ dependencies = [
  "sunrise-friends",
  "sunrise-game",
  "sunrise-heartbeat",
+ "sunrise-optifine-capes",
  "sunrise-perf-overlay",
  "sunrise-perf-share",
  "sunrise-platform",
@@ -4840,6 +4841,14 @@ dependencies = [
  "sunrise-connected",
  "sunrise-system",
  "zip",
+]
+
+[[package]]
+name = "sunrise-optifine-capes"
+version = "0.1.0"
+dependencies = [
+ "sunrise-addresses",
+ "sunrise-platform",
 ]
 
 [[package]]

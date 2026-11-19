@@ -1,0 +1,4 @@
+{
+  "sunrise.extras.optifine_capes": "OptiFine capes",
+  "sunrise.extras.optifine_capes.tooltip": "Shows the capes players got from OptiFine, without OptiFine. OptiFine's cape server is asked for the names of the players you see."
+}
