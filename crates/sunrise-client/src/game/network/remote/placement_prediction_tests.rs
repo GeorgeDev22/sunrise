@@ -1,8 +1,8 @@
 use super::*;
 use crate::game::native_entity_refs::tests::with_game_role;
 use mod_api::{
-    BlockPart, BlockState, CanSurviveEvent, CanSustainPlantEvent, Hooks, LevelSide,
-    MayPlaceOnEvent, Registrar, StateForPlacementEvent,
+    BlockPart, BlockState, CanSurviveEvent, CanSustainPlantEvent, FenceGateInWallEvent, Hooks,
+    LevelSide, MayPlaceOnEvent, Registrar, StateForPlacementEvent,
 };
 
 /// Every answer below is a client's: the hooks are asked by its placement prediction.
@@ -496,6 +496,20 @@ impl BlockPart for CountedSurvival {
     }
 }
 
+struct CountedWall;
+#[mod_api::sunrise_part]
+impl BlockPart for CountedWall {
+    fn fence_gate_in_wall(
+        &self,
+        level: LevelSide<'_>,
+        _: &mut FenceGateInWallEvent,
+    ) -> Option<bool> {
+        client(level);
+        GUIDE_ASKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(true)
+    }
+}
+
 struct GuideMod;
 #[mod_api::__subscriptions]
 impl Hooks for GuideMod {
@@ -504,11 +518,13 @@ impl Hooks for GuideMod {
         r.block_part(dirt, Counted);
         let dandelion = r.block_key("minecraft:dandelion");
         r.block_part(dandelion, CountedSurvival);
+        let glass = r.block_key("minecraft:glass");
+        r.block_part(glass, CountedWall);
     }
 }
 
-/// The controller guide's look at what a click would do (place a block, flip a lever) asks no
-/// placement or survival part; the click does.
+/// The controller guide's look at what a click would do asks no placement, survival or
+/// fence-gate wall-height part; the click does.
 #[test]
 #[ignore = "daily"]
 fn the_guide_s_look_asks_no_placement_or_survival_part_and_the_click_does() {
@@ -566,6 +582,26 @@ fn the_guide_s_look_asks_no_placement_or_survival_part_and_the_click_does() {
         let (result, _) = game.remote_block_reacts(&hit, None, true);
         assert!(result.consumes_action());
         assert!(GUIDE_ASKS.load(Ordering::Relaxed) > 0);
+
+        // Glass isn't a wall, but its Part lowers the predicted gate next to it.
+        game.yaw = 0.0; // Face south, so the gate checks its west and east neighbours.
+        game.world.set(8, 64, 0, stone).unwrap();
+        let glass = registry.default_state("minecraft:glass").unwrap();
+        game.world.set(9, 65, 0, glass).unwrap();
+        let gate = ItemStack::new("minecraft:oak_fence_gate", 1);
+        let hit = top_of(8, 0);
+        GUIDE_ASKS.store(0, Ordering::Relaxed);
+        assert!(game.remote_would_place(&hit, &gate));
+        assert_eq!(GUIDE_ASKS.load(Ordering::Relaxed), 0);
+        let placed = game
+            .remote_can_place(&hit, &gate)
+            .expect("the gate is placed");
+        let &(_, state) = placed
+            .changes
+            .iter()
+            .find(|(pos, _)| *pos == placed.pos)
+            .expect("the gate's predicted write");
+        assert_eq!(registry.state(state).unwrap().properties["in_wall"], "true");
     });
 }
 

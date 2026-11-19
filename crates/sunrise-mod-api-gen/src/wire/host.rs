@@ -456,6 +456,14 @@ fn event_input(
         }
     }
 }
+/// What a listener that did not answer returns: `Flow::Continue` for a `Flow` hook, the type's
+/// no-answer value for any other. One rule for both sides: the wasm Wire host's proxies (a
+/// refused or trapped guest call) and the native dispatch (a listener the phase gate refused,
+/// #3123) each pass how they spell the two values.
+pub(crate) fn refusal_value(is_flow: bool, flow_continue: &str, no_answer: &str) -> String {
+    if is_flow { flow_continue } else { no_answer }.to_owned()
+}
+
 /// What a proxy answers when its guest call answers nothing. `reason`, where there was a call,
 /// is the expression naming why (`crate::wasm_call_refusal()`, the including crate's). An
 /// isolated hook (#2414 ruling) unwinds instead: the isolated dispatch catches the unwind the
@@ -502,10 +510,10 @@ fn fallback(
                     None => format!("panic!(\"{}: wasm call refused or trapped\")", m.name),
                 }
             } else {
-                "mod_api::Flow::Continue".into()
+                refusal_value(true, "mod_api::Flow::Continue", "")
             }
         }
-        _ => "NoAnswer::no_answer()".into(),
+        _ => refusal_value(false, "", "NoAnswer::no_answer()"),
     }
 }
 

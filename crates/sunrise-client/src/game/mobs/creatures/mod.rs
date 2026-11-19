@@ -1223,9 +1223,18 @@ impl Game<'_> {
                         hook: "spawn_cluster_size",
                         part: Some(attached.type_name()),
                     });
-                attached
-                    .part()
-                    .spawn_cluster_size(self, lent, reason, spawner, vanilla)
+                // Called outside the world (a reload or setup) a refused Host call is no answer.
+                match mod_api::__private::contain_outside_world(|| {
+                    attached
+                        .part()
+                        .spawn_cluster_size(self, lent, reason, spawner, vanilla)
+                }) {
+                    Ok(answer) => answer,
+                    Err(refusal) => {
+                        refusal.report();
+                        None
+                    }
+                }
             })
         })
     }

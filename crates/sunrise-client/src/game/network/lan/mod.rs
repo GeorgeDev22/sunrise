@@ -4678,10 +4678,7 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn a_guest_who_left_has_no_menu_owners() {
-        use super::super::transactions::decision::{
-            Admission,
-            engine::{Owner, Target},
-        };
+        use super::super::transactions::decision::{Admission, engine::Target};
         use sunrise_client::lan::hub::HostEvent;
         use sunrise_client::menu::{Kind, Menu};
         super::super::native_guest_turn_tests::with_guests(|game| {
@@ -4702,10 +4699,10 @@ mod tests {
             assert!(!host.play.contains_key(&12));
             assert!(host.menus.contains_key(&13));
             assert!(matches!(
-                Target::admit(game, 12, Owner::Inventory),
+                Target::admit(game, 12),
                 Err(Admission::MissingHolder)
             ));
-            assert!(Target::admit(game, 13, Owner::Inventory).is_ok());
+            assert!(Target::admit(game, 13).is_ok());
         });
     }
 

@@ -116,6 +116,9 @@ pub struct HudAtlas {
     pub stars_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
     /// The packs' `core/lightmap` (with `core/screenquad`), when a pack replaces either stage.
     pub lightmap_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    /// Its Polytone expression uniforms (`shader_modifiers`), resolved when it loaded: the
+    /// blocks its stages read, with their programs.
+    pub lightmap_expressions: Vec<crate::polytone_post::ExpressionUniform>,
     /// The packs' Polytone screen sprite modifiers.
     pub sprite_modifiers: std::sync::Arc<sprite_modifiers::SpriteModifiers>,
     /// The packs' OptiFine random entity textures, whose variants this atlas packs.
@@ -1028,6 +1031,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             lightmap_shader: None,
+            lightmap_expressions: Vec::new(),
             sprite_modifiers: Default::default(),
             random_textures: Default::default(),
             emissive: Arc::default(),
@@ -1099,6 +1103,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             lightmap_shader: None,
+            lightmap_expressions: Vec::new(),
             sprite_modifiers: Default::default(),
             random_textures: Default::default(),
             emissive: Default::default(),
@@ -1609,6 +1614,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             lightmap_shader: None,
+            lightmap_expressions: Vec::new(),
             sprite_modifiers: Default::default(),
             random_textures,
             emissive,

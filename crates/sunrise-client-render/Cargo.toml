@@ -82,8 +82,6 @@ wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 audio = ["dep:cpal"]
 # Helpers sunrise-client's tests build their fixtures with.
 test-support = []
-# The `scene_replay` example's allocator counts allocations (sunrise-threads' `alloc-count`).
-alloc-count = ["sunrise-threads/alloc-count"]
 
 [lints]
 workspace = true

@@ -1851,7 +1851,7 @@ impl ParticleEngine {
                 // A GPU particle is only a record: it never becomes an engine particle.
                 let shader = || registry.gpu_shader(&name);
                 self.polytone_gpu
-                    .spawn(&def, shader, &particle, custom, seed as u64);
+                    .spawn(&name, &def, shader, &particle, custom, seed as u64);
                 return None;
             }
             return Some(particle);

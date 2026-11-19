@@ -1956,10 +1956,19 @@ impl HurtWorld for Environment<'_> {
             .level
             .attack()
             .player_source(&self.source.definition().name, self.causing);
+        // `applyItemBlocking` calls `hurtBlockingItem` with what the item stopped,
+        // nothing included (a hit from behind): the item is used all the same.
+        // Only a block a mod's hook turned off leaves it unused.
+        let reached =
+            vanilla <= 0.0 && matches!(&self.blocking, Some(b) if !b.bypassed && !b.pierce);
         let Some(block) =
             self.level
                 .shield_block(Hurting::Player(self.entity, source), damage, block)
         else {
+            if reached {
+                self.blocking_item_used = true;
+                self.shield_damage = shield_damage;
+            }
             return Ok(0.0);
         };
         self.blocking_item_used = true;

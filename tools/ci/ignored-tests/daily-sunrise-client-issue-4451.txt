@@ -1418,11 +1418,14 @@ sunrise-client game::native_hooks::base::screen_open_tests::an_interaction_key_r
 sunrise-client game::native_hooks::base::screen_open_tests::an_overlay_fires_init_post_after_it_opens lib daily resources
 sunrise-client game::native_hooks::base::screen_open_tests::an_overlay_fires_opening_before_it_opens lib daily resources
 sunrise-client game::native_hooks::base::screen_open_tests::an_overlay_fires_opening_then_closing_through_the_observer lib daily resources
+sunrise-client game::native_hooks::base::screen_open_tests::an_overlay_replaced_by_a_vanilla_screen_fires_its_init_post lib daily resources
 sunrise-client game::native_hooks::base::screen_open_tests::cancelling_opening_keeps_an_overlay_shut lib daily resources
 sunrise-client game::native_hooks::base::screen_open_tests::cancelling_opening_keeps_the_current_screen lib daily resources
 sunrise-client game::native_hooks::base::screen_open_tests::client_gui_state_matches_screen_init_hook lib daily resources
 sunrise-client game::native_hooks::base::screen_open_tests::no_mods_is_a_plain_assignment lib daily resources
+sunrise-client game::native_hooks::base::screen_open_tests::replacing_a_title_screen_opens_the_mods_screen_over_the_title lib daily resources
 sunrise-client game::native_hooks::base::screen_open_tests::replacing_opening_of_an_overlay_opens_the_mods_screen lib daily resources
+sunrise-client game::native_hooks::base::screen_open_tests::replacing_opening_opens_another_vanilla_screen_where_it_can lib daily resources
 sunrise-client game::native_hooks::base::screen_open_tests::replacing_opening_opens_the_mods_screen_instead lib daily resources
 sunrise-client game::native_hooks::base::screen_open_tests::the_creative_screen_excludes_its_two_tab_rows lib daily resources
 sunrise-client game::native_hooks::base::screen_open_tests::the_same_screen_again_fires_nothing lib daily resources

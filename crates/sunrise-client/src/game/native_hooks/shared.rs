@@ -67,6 +67,22 @@ enum ScreenDecision {
     Keep,
     /// `ModScreen`: this mod's own screen opens instead.
     ModScreen(&'static str),
+    /// `Vanilla`: this vanilla screen opens instead.
+    Vanilla(ScreenTarget),
+}
+
+/// The title screen a `ScreenOpening::Vanilla` target is (its id), or None
+/// for a world's screen.
+fn title_target_id(target: ScreenTarget) -> Option<&'static str> {
+    match target {
+        ScreenTarget::Title => Some("title"),
+        ScreenTarget::WorldSelect => Some("world_select"),
+        ScreenTarget::WorldCreate => Some("world_create"),
+        ScreenTarget::Multiplayer => Some("multiplayer"),
+        ScreenTarget::AddServer => Some("add_server"),
+        ScreenTarget::DirectConnect => Some("direct_connect"),
+        _ => None,
+    }
 }
 
 pub(super) fn observed_overlay_id(overlays: &[(bool, &'static str)]) -> Option<&'static str> {
@@ -135,6 +151,17 @@ impl Game<'_> {
                     screen = Screen::Mod;
                     owner = Some(mod_id);
                 }
+                ScreenDecision::Vanilla(target) => {
+                    before(self);
+                    self.open_screen_target(target);
+                    if self.title.is_some() {
+                        // A title screen: told here, so the frame's observer
+                        // doesn't announce it again.
+                        self.screen_state.observed = self.observed_now();
+                        self.shown_init_post();
+                    }
+                    return;
+                }
                 ScreenDecision::Open => {}
             }
         }
@@ -149,24 +176,34 @@ impl Game<'_> {
     }
     /// Whether a change of screen asks the screen hooks: a mod listens to
     /// `screen_opening` or `screen_closing`, on a client's own `Game` (not a
-    /// server's, not on a guest's behalf). Otherwise it is a plain assignment.
-    fn screen_hooks_heard(&self) -> bool {
+    /// server's, not on a guest's behalf, not the screen a mod's `Vanilla`
+    /// answer opens). Otherwise it is a plain assignment.
+    pub(in crate::game) fn screen_hooks_heard(&self) -> bool {
         (mod_api::__private::listened(mod_api::HookId::ScreenOpening)
             || mod_api::__private::listened(mod_api::HookId::ScreenClosing))
             && self.options.execution_role.is_client()
             && self.lan_acting.is_none()
+            && !self.screen_state.replacing
     }
     /// The hooks' answer to a change from `current` to `new`, for every path
     /// that changes the screen: `screen_change` (Opening, then Closing for
-    /// `current` when `closes`), and a `ModScreen` answer only where a mod's
-    /// screen can open (`mod_screen_blocked`), else the change goes ahead.
+    /// `current` when `closes`), then what `screen_decision` makes of it.
     fn decide_screen(
         &self,
         current: &ScreenView<'_>,
         new: &ScreenView<'_>,
         closes: bool,
     ) -> ScreenDecision {
-        match self.screen_change(current, new, true, closes) {
+        self.screen_decision(self.screen_change(current, new, true, closes))
+    }
+    /// What a mod's `screen_opening` answer does here: a `ModScreen` only
+    /// where a mod's screen can open (`mod_screen_blocked`), a `Vanilla`
+    /// target only where it opens (a title screen while the title shows, a
+    /// world's screen where a mod's could open in a world), else the change
+    /// goes ahead and the refused target is logged. Records whether a mod's
+    /// answer changed what shows (`ScreenState::answered`).
+    fn screen_decision(&self, answer: Option<Answered<ScreenOpening>>) -> ScreenDecision {
+        let decision = match answer {
             Some(Answered {
                 answer: ScreenOpening::Cancel,
                 ..
@@ -176,8 +213,69 @@ impl Game<'_> {
                 mod_id,
                 ..
             }) if !self.mod_screen_blocked() => ScreenDecision::ModScreen(mod_id),
+            Some(Answered {
+                answer: ScreenOpening::Vanilla(target),
+                mod_id,
+                ..
+            }) => {
+                let opens = match title_target_id(target) {
+                    // An overlay over the title would stay in front of it.
+                    Some(_) => self.title.is_some() && !self.screen_over_playing(),
+                    None => self.title.is_none() && !self.mod_screen_blocked(),
+                };
+                if opens {
+                    ScreenDecision::Vanilla(target)
+                } else {
+                    log::warn!(
+                        "Sunrise: mod {mod_id} answered screen_opening with {target:?}, which can't open here; the screen asked for opens"
+                    );
+                    ScreenDecision::Open
+                }
+            }
             _ => ScreenDecision::Open,
+        };
+        self.screen_state
+            .answered
+            .set(!matches!(decision, ScreenDecision::Open));
+        decision
+    }
+    /// Opens vanilla screen `target` as it opens on its own, in place of the
+    /// one asked for (`ScreenOpening::Vanilla`, which `screen_decision` let
+    /// through): the change fires no screen hook again.
+    fn open_screen_target(&mut self, target: ScreenTarget) {
+        self.screen_state.replacing = true;
+        match target {
+            ScreenTarget::Pause => {
+                self.pause_focus = None;
+                self.set_screen(Screen::Paused);
+                self.pause_menu = true;
+            }
+            ScreenTarget::Options => self.open_options(false),
+            ScreenTarget::Inventory => {
+                // A menu the server opened for the screen asked for (a crafting
+                // table) closes: the inventory shows the player's own. With
+                // only the player's own open, there is nothing to close.
+                if self.remote_menu_type().is_some() {
+                    self.close_container();
+                }
+                self.open_player_inventory();
+            }
+            ScreenTarget::Advancements => self.open_advancements(false),
+            ScreenTarget::Stats => self.open_stats(),
+            ScreenTarget::Chat => self.begin_chat_screen("", false),
+            _ => {
+                // A title screen: one of the game's own screens over the title goes.
+                self.set_screen(Screen::Playing);
+                if let (Some(title), Some(id)) = (self.title.as_mut(), title_target_id(target)) {
+                    title.open_by_id(id);
+                }
+                self.build_screen();
+            }
         }
+        // Every target takes the pointer, even one opened in place of a
+        // request that grabbed none (a mod's screen asked for while playing).
+        self.capture(false);
+        self.screen_state.replacing = false;
     }
     /// What `set_screen` does once the hooks have answered: `screen` opens,
     /// and the mod `owner`'s own screen when one answered `ModScreen`.
@@ -234,33 +332,23 @@ impl Game<'_> {
             ),
             None => [0.0; 4],
         };
-        let none = screen == Screen::Playing;
-        ScreenView::from(mod_api::__private::built::ScreenView {
-            id: screen.id(),
-            menu: self.remote_menu_type().filter(|m| !none && !m.is_empty()),
-            title: self
-                .remote
-                .as_ref()
-                .and_then(|r| r.menu_title_snapshot())
-                .filter(|_| !none),
-            rect,
-            slots: if none { 0 } else { self.slot_count() },
-            mouse: self.cursor(),
-            partial_tick: self.clock.fraction() as f32,
-        })
+        let mut view = self.screen_view_at(screen, rect);
+        if screen == Screen::Playing {
+            view.slots = 0;
+        }
+        view
     }
     #[cfg(test)]
     pub(super) fn test_observed_title(&self) -> Option<std::sync::Arc<mod_api::Text>> {
         self.observe_view(self.screen_change_view(self.screen))
             .title
     }
-    /// A mod's own screen cannot open now: over the title screen, a book, a
-    /// sign editor, a dialog or a prompt, with no player or a
+    /// A mod's own screen cannot open now: over a book, a sign editor, a
+    /// dialog or a prompt, with neither the title nor a player, with a
     /// world loading, or on a guest's behalf.
     fn mod_screen_blocked(&self) -> bool {
-        self.title.is_some()
-            || self.lan_acting.is_some()
-            || self.player.is_none()
+        self.lan_acting.is_some()
+            || (self.player.is_none() && self.title.is_none())
             || self.screen_over_playing()
             || self.remote_loading()
     }
@@ -271,7 +359,8 @@ impl Game<'_> {
     /// a screen: `screen_opening` fires first with `id` as the new screen,
     /// then `screen_closing` for an overlay it replaces. A mod's `Cancel`
     /// keeps what is open and `open` never runs; `ModScreen` opens the
-    /// mod's own screen instead, unless one can't open now. Otherwise `open`
+    /// mod's own screen instead, unless one can't open now, and `Vanilla` its
+    /// vanilla screen. Otherwise `open`
     /// sets the overlay and `screen_init_post` follows. Returns whether
     /// `open` ran. With no mod loaded, on a server's `Game` and on a guest's
     /// behalf, `open` just runs.
@@ -305,6 +394,12 @@ impl Game<'_> {
             ScreenDecision::ModScreen(mod_id) => {
                 self.apply_screen(Screen::Mod, Some(mod_id));
                 self.screen_state.observed = self.observed_now();
+                return false;
+            }
+            ScreenDecision::Vanilla(target) => {
+                self.open_screen_target(target);
+                self.screen_state.observed = self.observed_now();
+                self.shown_init_post();
                 return false;
             }
             ScreenDecision::Open => {}
@@ -345,8 +440,8 @@ impl Game<'_> {
     /// `Minecraft.setScreen` opens the title's screens: `screen_opening` fires
     /// from the title screen shown to the new one, then `screen_closing` for
     /// the one it leaves, and the change applies unless a mod answered
-    /// `Cancel`. A mod's own screen can't open over the title, so `ModScreen`
-    /// opens the screen asked for. Then `screen_init_post` follows and the
+    /// `Cancel`; `ModScreen` opens the mod's own screen over the title instead,
+    /// and `Vanilla` another title screen. Then `screen_init_post` follows and the
     /// frame's observer is told, so it does not announce it again. Each call
     /// also sets the title's gate: when no mod listens to the screen hooks
     /// (`screen_hooks_heard`), `set_mode` applies at once. Run after each window
@@ -370,16 +465,29 @@ impl Game<'_> {
             let to = screen_view_with_id(&none, id);
             self.decide_screen(&from, &to, true)
         };
-        if let ScreenDecision::Keep = decision {
-            return;
+        match decision {
+            ScreenDecision::Keep => return,
+            ScreenDecision::ModScreen(mod_id) => self.apply_screen(Screen::Mod, Some(mod_id)),
+            ScreenDecision::Vanilla(target) => self.open_screen_target(target),
+            ScreenDecision::Open => {
+                if let Some(title) = self.title.as_mut() {
+                    title.mode = mode;
+                }
+                self.build_screen();
+            }
         }
-        if let Some(title) = self.title.as_mut() {
-            title.mode = mode;
-        }
-        self.build_screen();
         self.screen_state.observed = self.observed_now();
-        let none = self.screen_change_view(Screen::Playing);
-        self.native_screen_init_post(&screen_view_with_id(&none, id));
+        self.shown_init_post();
+    }
+    /// `screen_init_post` for what shows now, once a change was told to the
+    /// frame's observer: a title screen, a mod's, or the game's own.
+    fn shown_init_post(&self) {
+        let view = self.screen_change_view(self.screen);
+        let id = match &self.title {
+            Some(title) if self.screen == Screen::Playing => title.mode.id(),
+            _ => view.id,
+        };
+        self.native_screen_init_post(&screen_view_with_id(&view, id));
     }
 
     /// Shows `title`, as `Minecraft.setScreen(new TitleScreen())` (or the
@@ -387,8 +495,8 @@ impl Game<'_> {
     /// does at startup and when a world closes. `screen_opening` fires to its
     /// screen, then `screen_closing` for an overlay it replaces, before it
     /// shows; `screen_init_post` follows. With no world open nothing else can
-    /// show, so a mod's `Cancel` or its own screen doesn't keep it shut (a
-    /// mod's screen can't open over the title).
+    /// show, so a mod's `Cancel` doesn't keep it shut; `ModScreen` opens the
+    /// mod's own screen over it, and `Vanilla` another title screen.
     pub(super) fn show_title(&mut self, mut title: sunrise_client::title::Title) {
         title.set_rule_registry(Arc::new(crate::game::api_values::game_rule_registry()));
         self.show_title_with_registry(title);
@@ -410,8 +518,9 @@ impl Game<'_> {
         self.screen_state.observed = self.observed_now();
     }
     /// The hooks of the title appearing (`to` is its screen) or going
-    /// (`None`), from what shows now. What changed before is told first.
-    fn title_change(&mut self, to: Option<&'static str>) {
+    /// (`None`), from what shows now, and a mod's answer. What changed before
+    /// is told first.
+    fn title_change(&mut self, to: Option<&'static str>) -> Option<Answered<ScreenOpening>> {
         let now = self.observed_now();
         self.observe_change(now);
         let none = self.screen_change_view(Screen::Playing);
@@ -433,7 +542,7 @@ impl Game<'_> {
             to.as_ref().unwrap_or(&none),
             true,
             from.is_some(),
-        );
+        )
     }
 
     pub(super) fn observe_screen(&mut self) {
@@ -1002,10 +1111,19 @@ impl Game<'_> {
     /// container build tells a mod the panel it is about to draw, not the one
     /// the previous frame drew.
     pub(super) fn screen_view_at(&self, screen: Screen, rect: [f32; 4]) -> ScreenView<'_> {
+        // Only the inventory screen shows a server's menu: a menu staged for
+        // a screen a mod replaced is not the pause or chat screen's.
+        let menu_shown = screen == Screen::Inventory;
         ScreenView::from(mod_api::__private::built::ScreenView {
             id: screen.id(),
-            menu: self.remote_menu_type().filter(|m| !m.is_empty()),
-            title: self.remote.as_ref().and_then(|r| r.menu_title_snapshot()),
+            menu: self
+                .remote_menu_type()
+                .filter(|m| menu_shown && !m.is_empty()),
+            title: self
+                .remote
+                .as_ref()
+                .and_then(|r| r.menu_title_snapshot())
+                .filter(|_| menu_shown),
             rect,
             slots: self.slot_count(),
             mouse: self.cursor(),

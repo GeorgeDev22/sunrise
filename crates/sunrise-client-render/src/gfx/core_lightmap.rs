@@ -5,6 +5,7 @@
 //! entry point for the frame's light texture, either way.
 
 use crate::core_shader::{CoreProgram, Glue};
+use crate::polytone_post::ExpressionUniform;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -21,13 +22,18 @@ pub(crate) const GLUE: Glue = Glue {
 /// The block `Lightmap.render` fills, beside the vanilla ones.
 pub(crate) const INFO_BLOCK: &str = "LightmapInfo";
 
+/// The pipeline's shaders, whose packs' expression uniforms (`shader_modifiers`) it is given.
+pub const SHADERS: [&str; 2] = ["minecraft:core/screenquad", "minecraft:core/lightmap"];
+
 /// Each vanilla uniform block's offset in the one buffer (`core_shader::BLOCKS` order), then
 /// `LightmapInfo`'s.
 const BLOCK_OFFSETS: [u64; 4] = [0, 256, 512, 768];
 const BLOCK_SIZES: [u64; 4] = [48, 64, 160, 48];
 const INFO_OFFSET: u64 = 1024;
 const INFO_SIZE: u64 = 96;
-/// The uniform buffer's bytes a frame writes: the vanilla blocks, then `LightmapInfo`.
+/// An expression uniform's block: one float, as std140 rounds it.
+const EXPRESSION_SIZE: u64 = 16;
+/// The bytes of vanilla's blocks and `LightmapInfo` in the uniform buffer.
 const UNIFORM_BYTES: usize = (INFO_OFFSET + INFO_SIZE) as usize;
 
 /// `LightmapRenderState` as `Lightmap.render` writes it (std140: six floats, four vec3s).
@@ -168,14 +174,30 @@ pub(super) struct CoreLightmap {
     pipeline: wgpu::RenderPipeline,
     group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
+    /// The packs' expression uniforms its stages read (`shader_modifiers`), resolved when it
+    /// loaded, each with this frame's value and its block's offset after `LightmapInfo`.
+    expressions: Vec<(ExpressionUniform, f32)>,
+    /// The bytes of vanilla's blocks and `LightmapInfo` a frame writes, kept between frames.
+    bytes: [u8; UNIFORM_BYTES],
     readback: Option<Readback>,
 }
 
+/// The offset of the `i`th expression uniform's block, after `LightmapInfo`'s.
+fn expression_offset(i: usize) -> u64 {
+    INFO_OFFSET + 256 * (i as u64 + 1)
+}
+
 impl CoreLightmap {
-    /// The pipeline for `program`, drawing into an `Rgba8Unorm` texture; `None` when the pack's
-    /// shader does not compile for the backend or reads a block it is not given (the layout
-    /// has no binding for it, which the error scope catches).
-    pub(super) fn new(device: &wgpu::Device, program: &CoreProgram) -> Option<Self> {
+    /// The pipeline for `program`, drawing into an `Rgba8Unorm` texture, with `expressions`
+    /// (resolved when it loaded: the expression blocks its stages read); `None` when the pack's
+    /// shader does not compile for the backend or a stage reads more blocks than the device
+    /// binds to one (each caught by the error scope, whose message names the limit). Each
+    /// block is bound only to the stages that read it: one only declared takes no binding.
+    pub(super) fn new(
+        device: &wgpu::Device,
+        program: &CoreProgram,
+        expressions: &[ExpressionUniform],
+    ) -> Option<Self> {
         let info_binding = program
             .other
             .iter()
@@ -192,42 +214,57 @@ impl CoreLightmap {
         };
         let vertex = module("Resource pack lightmap (vertex)", &program.vertex);
         let fragment = module("Resource pack lightmap (fragment)", &program.fragment);
-        let block = |binding: u32, size: u64| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(size),
-            },
-            count: None,
-        };
-        let mut entries: Vec<wgpu::BindGroupLayoutEntry> = (0..4)
-            .map(|binding| block(binding, BLOCK_SIZES[binding as usize]))
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Resource pack lightmap"),
+            size: expression_offset(expressions.len()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Every block a stage reads, at its offset and size, visible to the stages reading it:
+        // vanilla's four, `LightmapInfo`, then the expression uniforms.
+        let vanilla = (0..4u32).map(|b| (b, BLOCK_OFFSETS[b as usize], BLOCK_SIZES[b as usize]));
+        let info = info_binding.map(|b| (b, INFO_OFFSET, INFO_SIZE));
+        let blocks: Vec<(u32, u64, u64, wgpu::ShaderStages)> = vanilla
+            .chain(info)
+            .map(|(b, offset, size)| (b, offset, size, program.stages_reading(b)))
+            .chain(
+                expressions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| (e.binding, expression_offset(i), EXPRESSION_SIZE, e.stages)),
+            )
+            .filter(|(.., stages)| !stages.is_empty())
             .collect();
-        entries.extend(info_binding.map(|b| block(b, INFO_SIZE)));
+        let entries: Vec<wgpu::BindGroupLayoutEntry> = blocks
+            .iter()
+            .map(
+                |&(binding, _, size, visibility)| wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(size),
+                    },
+                    count: None,
+                },
+            )
+            .collect();
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Resource pack lightmap"),
             entries: &entries,
         });
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Resource pack lightmap"),
-            size: INFO_OFFSET + 256,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let range = |binding: u32, offset: u64, size: u64| wgpu::BindGroupEntry {
-            binding,
-            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                buffer: &uniform,
-                offset,
-                size: wgpu::BufferSize::new(size),
-            }),
-        };
-        let mut resources: Vec<wgpu::BindGroupEntry> = (0..4)
-            .map(|i| range(i as u32, BLOCK_OFFSETS[i], BLOCK_SIZES[i]))
+        let resources: Vec<wgpu::BindGroupEntry> = blocks
+            .iter()
+            .map(|&(binding, offset, size, _)| wgpu::BindGroupEntry {
+                binding,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &uniform,
+                    offset,
+                    size: wgpu::BufferSize::new(size),
+                }),
+            })
             .collect();
-        resources.extend(info_binding.map(|b| range(b, INFO_OFFSET, INFO_SIZE)));
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Resource pack lightmap"),
             layout: &layout,
@@ -272,6 +309,8 @@ impl CoreLightmap {
             pipeline,
             group,
             uniform,
+            bytes: [0; UNIFORM_BYTES],
+            expressions: expressions.iter().map(|e| (e.clone(), 0.0)).collect(),
             readback: None,
         })
     }
@@ -284,12 +323,32 @@ impl CoreLightmap {
         }
     }
 
-    /// The frame's blocks in the uniform buffer's layout: `globals` at 0, `info` at its own.
-    fn uniforms(globals: [u8; 48], info: &LightmapInfo) -> [u8; UNIFORM_BYTES] {
-        let mut data = [0u8; UNIFORM_BYTES];
+    /// The frame's blocks in the uniform buffer's layout, in the bytes the pipeline keeps for
+    /// them (no allocation a frame): `globals` at 0 and `info` at its own. With the buffer they
+    /// go to.
+    fn uniforms(&mut self, globals: [u8; 48], info: &LightmapInfo) -> (&wgpu::Buffer, &[u8]) {
+        let data = &mut self.bytes;
         data[..48].copy_from_slice(&globals);
         data[INFO_OFFSET as usize..].copy_from_slice(&info.std140());
-        data
+        (&self.uniform, data)
+    }
+
+    /// Uploads the frame's blocks: [`Self::uniforms`], then each expression uniform's value in
+    /// its own block, its 16 bytes only.
+    fn upload(
+        &mut self,
+        uploads: &mut super::upload::Uploads,
+        encoder: &mut wgpu::CommandEncoder,
+        globals: [u8; 48],
+        info: &LightmapInfo,
+    ) {
+        let (buffer, data) = self.uniforms(globals, info);
+        uploads.buffer(encoder, buffer, 0, data);
+        for (i, (_, value)) in self.expressions.iter().enumerate() {
+            let mut block = [0u8; EXPRESSION_SIZE as usize];
+            block[..4].copy_from_slice(&value.to_le_bytes());
+            uploads.buffer(encoder, &self.uniform, expression_offset(i), &block);
+        }
     }
 
     /// `Lightmap.render`'s pass: the screen quad over the whole of `texture` (through `view`,
@@ -476,9 +535,34 @@ impl super::Renderer {
     /// on a frame of linear light (docs/hdr-passes.md): it draws the 8-bit light texture, never
     /// the frame, and the world's shaders read that texture the same way under either encoding
     /// (they decode their result at the end, `linear_blend`), as they do the native one.
-    pub fn set_lightmap_shader(&mut self, program: Option<&CoreProgram>) {
-        self.core_lightmap = program.and_then(|p| CoreLightmap::new(&self.device, p));
+    pub fn set_lightmap_shader(
+        &mut self,
+        program: Option<&CoreProgram>,
+        expressions: &[ExpressionUniform],
+    ) {
+        self.core_lightmap = program.and_then(|p| CoreLightmap::new(&self.device, p, expressions));
         self.lightmap_uploaded = false;
+    }
+
+    /// Whether this frame has expression uniforms to evaluate: the pack's lightmap shader reads
+    /// some and draws (not under fullbright, which keeps the texture white).
+    pub fn reads_pack_expressions(&self) -> bool {
+        self.core_lightmap
+            .as_ref()
+            .is_some_and(|core| !self.fullbright && !core.expressions.is_empty())
+    }
+
+    /// Evaluates the expression uniforms the drawn pack lightmap shader reads, from `frame` (the
+    /// packs' expression context): their programs, resolved when it loaded, and nothing else.
+    pub fn evaluate_pack_expressions(&mut self, frame: &crate::environment::Frame) {
+        if !self.reads_pack_expressions() {
+            return;
+        }
+        if let Some(core) = self.core_lightmap.as_mut() {
+            for (expression, value) in &mut core.expressions {
+                *value = expression.evaluate(frame);
+            }
+        }
     }
 
     /// Whether F3's lightmap chart is shown (the game's `debug_shows_lightmap`): only then is a
@@ -528,8 +612,7 @@ impl super::Renderer {
         if let Some(globals) = globals
             && let Some(core) = self.core_lightmap.as_mut()
         {
-            let data = CoreLightmap::uniforms(globals, &info);
-            self.uploads.buffer(encoder, &core.uniform, 0, &data);
+            core.upload(&mut self.uploads, encoder, globals, &info);
             if core.collect(&mut self.lightmap_chart.pixels) {
                 self.lightmap_chart.pack_copied();
             }
