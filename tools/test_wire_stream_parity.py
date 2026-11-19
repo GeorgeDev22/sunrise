@@ -2436,9 +2436,11 @@ def forget_player(directory, level, others):
     treat it differently from the first client (end_portal: a Respawn with the first client's death location, and
     the portal taken at another tick)."""
     for root in [directory, *others]:
-        for kind in ('playerdata', 'stats', 'advancements'):
+        # 26.3 keeps them under players/ (LevelResource.PLAYER_DATA_DIR...); 1.21.11 (behind ViaVersion) at the top.
+        for kind in ('players/data', 'players/stats', 'players/advancements', 'playerdata', 'stats', 'advancements'):
             for saved in (root / level / kind).glob('*'):
-                saved.unlink(missing_ok=True)
+                if saved.is_file():
+                    saved.unlink()
 
 def play_all(client, server, scenarios, scripts, sunrise, capture):
     counts = ClientCounts(capture)
