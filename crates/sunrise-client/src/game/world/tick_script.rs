@@ -100,22 +100,35 @@ impl Game<'_> {
 }
 
 impl Game<'_> {
-    /// `click-slot SLOT [right] [shift]` without a renderer: sunrise-ctl's version clicks where the
-    /// slot is drawn, and `--headless` draws nothing. The vanilla driver clicks the menu itself
+    /// `click-slot SLOT [right] [shift] [INPUT] [bBUTTON]` without a renderer, as the vanilla
+    /// driver takes it: SLOT is the open menu's own slot (-999 outside the screen), INPUT a
+    /// `ContainerInput` name and BUTTON its button. sunrise-ctl's version clicks where the slot is
+    /// drawn, and `--headless` draws nothing. The vanilla driver clicks the menu itself
     /// (`MultiPlayerGameMode.handleContainerInput`), and so does this.
     fn tick_script_click(&mut self, line: &str) -> bool {
+        use sunrise_client::menu::Input;
         let words: Vec<&str> = line.split_whitespace().collect();
         let (Some(&"click-slot"), Some(Ok(slot))) =
-            (words.first(), words.get(1).map(|w| w.parse()))
+            (words.first(), words.get(1).map(|w| w.parse::<i32>()))
         else {
             return false;
         };
-        let input = if words.contains(&"shift") {
-            sunrise_client::menu::Input::QuickMove
+        let rest = &words[2..];
+        let mut input = if rest.contains(&"shift") {
+            Input::QuickMove
         } else {
-            sunrise_client::menu::Input::Pickup
+            Input::Pickup
         };
-        self.remote_menu_ops(&[(Some(slot), i32::from(words.contains(&"right")), input)]);
+        let mut button = i32::from(rest.contains(&"right"));
+        for word in rest {
+            if let Some(named) = Input::parse(word) {
+                input = named;
+            }
+            if let Some(Ok(b)) = word.strip_prefix('b').map(str::parse) {
+                button = b;
+            }
+        }
+        self.remote_menu_slot_click(slot, button, input);
         true
     }
 }
