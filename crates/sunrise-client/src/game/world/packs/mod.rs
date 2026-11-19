@@ -15,7 +15,9 @@ use sunrise_client::{
     datapack::DataPack,
     gfx::PreparedTextures,
     hud::HudAtlas,
-    lang, pack_browser,
+    lang,
+    level_loading::OverlayFade,
+    pack_browser,
     pack_screen::{self, Compat, PackInfo, Source as PackSource},
     packs::{self, Pack, Position},
     streaming::WorkerContext,
@@ -437,7 +439,27 @@ impl Game<'_> {
         #[cfg(test)]
         let stage = mod_api::testing::inherit_mods(stage);
         self.pack_reload = Some(PackReload::spawn(kind, stage)?);
+        self.reload_overlay = Some(ReloadOverlay::default());
         Ok(())
+    }
+    /// One frame of the pack reload's `LoadingOverlay`: its bar eased toward
+    /// the reload's progress (all of it once applied) and how far it has
+    /// faded. `None`, and the overlay dropped, once it has faded out.
+    pub(super) fn reload_overlay_frame(&mut self) -> Option<(f32, OverlayFade)> {
+        let overlay = self.reload_overlay.as_mut()?;
+        let now = Instant::now();
+        let since = |at: Instant| now.duration_since(at).as_millis() as u64;
+        let fade_in = since(*overlay.fade_in.get_or_insert(now));
+        let Some(fade) = OverlayFade::at(fade_in, overlay.fade_out.map(since)) else {
+            self.reload_overlay = None;
+            return None;
+        };
+        let actual = self
+            .pack_reload
+            .as_ref()
+            .map_or(1.0, |reload| reload.progress.fraction());
+        overlay.bar = sunrise_client::level_loading::ease_overlay(overlay.bar, actual);
+        Some((overlay.bar, fade))
     }
     /// `LoadingOverlay.tick` once the reload is done: the staged pack is
     /// applied on the render thread, and its outcome goes to whoever asked
@@ -449,6 +471,9 @@ impl Game<'_> {
         self.pack_reload = None;
         let result =
             staged.and_then(|staged| self.apply_staged_pack(staged).map_err(|e| e.to_string()));
+        if let Some(overlay) = &mut self.reload_overlay {
+            overlay.fade_out = Some(Instant::now());
+        }
         match kind {
             ReloadKind::Selection => {
                 self.mods_reloaded(result.is_ok());
@@ -801,7 +826,8 @@ pub(super) struct StagedPack {
     pub language: lang::Language,
 }
 
-/// `LoadingOverlay`'s stage lines for a pack reload, indexed by `progress`.
+/// A pack reload's stages, indexed by `progress`: the overlay draws how far
+/// through them it is (`ReloadInstance.getActualProgress`), not their names.
 const RELOAD_LINES: [&str; 4] = [
     "Preparing resources",
     "Loading assets",
@@ -827,8 +853,6 @@ type StageResult = std::result::Result<StagedPack, String>;
 /// loading overlay; `Game::drive_pack_reload` applies it on the render thread.
 pub(super) struct PackReload {
     pub(super) progress: super::Progress,
-    /// The bar as drawn, easing toward `progress` (`LoadingOverlay.currentProgress`).
-    pub(super) bar: f32,
     kind: ReloadKind,
     handle: Option<std::thread::JoinHandle<StageResult>>,
     /// When the overlay went up. `LoadingOverlay.fadeInStart`, set on the
@@ -836,6 +860,17 @@ pub(super) struct PackReload {
     started: Instant,
     /// How long the overlay stays up before the reload may be applied.
     hold: Duration,
+}
+/// `LoadingOverlay` over a pack reload, from its first frame until it has
+/// faded out (`Minecraft.setOverlay(null)`), two seconds after the reload.
+#[derive(Default)]
+pub(super) struct ReloadOverlay {
+    /// `fadeInStart`: the overlay's first frame.
+    fade_in: Option<Instant>,
+    /// `fadeOutStart`: when the reload was applied.
+    fade_out: Option<Instant>,
+    /// `currentProgress`: the bar as drawn.
+    bar: f32,
 }
 /// `LoadingOverlay.isReadyToFadeOut`: a reload started from inside the game
 /// (`fadeIn`) is not ready while `Util.getMillis() - fadeInStart < 1000L`, so
@@ -863,7 +898,6 @@ impl PackReload {
             .spawn(move || stage(&worker))?;
         Ok(Self {
             progress,
-            bar: 0.0,
             kind,
             handle: Some(handle),
             started: Instant::now(),

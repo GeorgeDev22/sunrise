@@ -1364,8 +1364,8 @@ impl Loading {
             sunrise_client::level_loading::draw_loading_overlay(
                 batch,
                 &gui.atlas,
-                self.progress.line(),
                 self.bar,
+                sunrise_client::level_loading::OverlayFade::OPAQUE,
                 self.settings.file.bool("darkMojangStudiosBackground"),
             );
             let (bars, lines) = super::startup_progress::shown();

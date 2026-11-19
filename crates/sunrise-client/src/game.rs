@@ -955,9 +955,11 @@ struct Game<'a> {
         std::time::Instant,
         Vec<(String, u64, Option<std::time::SystemTime>)>,
     )>,
-    /// A pack reload staged on a worker (`LoadingOverlay`): the frame draws
-    /// its progress until `drive_pack_reload` applies it.
+    /// A pack reload staged on a worker until `drive_pack_reload` applies it.
     pack_reload: Option<packs::PackReload>,
+    /// Its `LoadingOverlay`, up from the reload's start until it has faded
+    /// out after it: no input reaches the game meanwhile.
+    reload_overlay: Option<packs::ReloadOverlay>,
     /// A server's resource packs (game/world/server_packs.rs).
     server_packs: server_packs::ServerPackState,
     /// The link a chat click asks to open (`ConfirmLinkScreen`).
@@ -8212,23 +8214,20 @@ impl Game<'_> {
             }
             return Ok(false);
         }
-        // A pack reload covers the frame with its progress
-        // (`LoadingOverlay`) until `drive_pack_reload` applies it.
-        if let Some(reload) = &mut self.pack_reload {
+        // A pack reload's `LoadingOverlay`: once opaque it covers the frame
+        // alone; while it fades in or out it is drawn over the frame's GUI.
+        let reload_overlay = self.reload_overlay_frame();
+        if let Some((bar, fade)) = reload_overlay.filter(|(_, fade)| fade.opaque()) {
             if let Some(renderer) = &mut self.renderer {
                 let mut hud = HudBatch::new(
                     [renderer.config.width, renderer.config.height],
                     self.settings.gui_scale_inputs(),
                 );
-                reload.bar = sunrise_client::level_loading::ease_overlay(
-                    reload.bar,
-                    reload.progress.fraction(),
-                );
                 sunrise_client::level_loading::draw_loading_overlay(
                     &mut hud,
                     &self.gui.atlas,
-                    reload.progress.line(),
-                    reload.bar,
+                    bar,
+                    fade,
                     self.settings.file.bool("darkMojangStudiosBackground"),
                 );
                 pr.lap("pr_loading");
@@ -8616,6 +8615,15 @@ impl Game<'_> {
         let mut hud = sunrise_client::spans::time("hud", || self.hud(size));
         self.flush_ime(&mut hud);
         self.native_gui_render_post(&mut hud, self.ui.hide_gui, self.focused);
+        if let Some((bar, fade)) = reload_overlay {
+            sunrise_client::level_loading::draw_loading_overlay(
+                &mut hud,
+                &self.gui.atlas,
+                bar,
+                fade,
+                self.settings.file.bool("darkMojangStudiosBackground"),
+            );
+        }
         self.resolve_inline_profiles(&hud.inline_profiles);
         pr.lap("pr_hud");
         self.locator_camera =
@@ -9231,9 +9239,9 @@ impl Game<'_> {
         {
             return;
         }
-        // The pack reload's progress overlay takes no input
+        // The pack reload's overlay takes no input until it has faded out
         // (`LoadingOverlay`): `spawn_pack_reload` released what was held.
-        if self.pack_reload.is_some()
+        if self.reload_overlay.is_some()
             && !matches!(
                 &event,
                 WindowEvent::CloseRequested
@@ -10665,6 +10673,7 @@ impl<'a> Game<'a> {
             frame_attempted: render_settings::FrameAttempt::default(),
             pack_folder: None,
             pack_reload: None,
+            reload_overlay: None,
             server_packs: Default::default(),
             link_prompt: None,
             command_prompt: None,

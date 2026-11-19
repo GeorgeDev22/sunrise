@@ -462,22 +462,74 @@ fn fill_corners(batch: &mut HudBatch, atlas: &HudAtlas, [x0, y0, x1, y1]: [i32; 
     batch.fill(atlas, left as f32, top as f32, w, h, color);
 }
 
+/// How far `LoadingOverlay` has faded: the background's alpha, the logo's
+/// opacity, and the bar's, which is gone once the fade-out's first second ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayFade {
+    pub background: u8,
+    pub logo: f32,
+    pub bar: Option<f32>,
+}
+impl OverlayFade {
+    /// The startup overlay, which does not fade in.
+    pub const OPAQUE: Self = Self {
+        background: 255,
+        logo: 1.0,
+        bar: Some(1.0),
+    };
+    /// `LoadingOverlay.extractRenderState` for an overlay that fades in
+    /// (`fadeIn`): `fade_in_ms` since its first frame (`fadeInStart`),
+    /// `fade_out_ms` since the reload finished (`fadeOutStart`). It fades in
+    /// over half a second, then on finishing fades its bar out for a second
+    /// and itself for another; `None` once gone (`setOverlay(null)`).
+    pub fn at(fade_in_ms: u64, fade_out_ms: Option<u64>) -> Option<Self> {
+        let fade_out = fade_out_ms.map_or(-1.0, |ms| ms as f32 / 1000.0);
+        if fade_out >= 2.0 {
+            return None;
+        }
+        let fade_in = fade_in_ms as f32 / 500.0;
+        let (background, logo) = if fade_out >= 1.0 {
+            let logo = 1.0 - (fade_out - 1.0).clamp(0.0, 1.0);
+            ((logo * 255.0).ceil() as u8, logo)
+        } else {
+            let background = (f64::from(fade_in).clamp(0.15, 1.0) * 255.0).ceil() as u8;
+            (background, fade_in.clamp(0.0, 1.0))
+        };
+        let bar = (fade_out < 1.0).then(|| 1.0 - fade_out.clamp(0.0, 1.0));
+        Some(Self {
+            background,
+            logo,
+            bar,
+        })
+    }
+    /// Whether the background hides the frame under it.
+    pub fn opaque(&self) -> bool {
+        self.background == 255
+    }
+}
+
+/// White with `alpha` in the batch's RGBA.
+fn white(alpha: u8) -> u32 {
+    0x00FF_FFFF | u32::from(alpha) << 24
+}
+
 /// `LoadingOverlay.extractRenderState`: fills the frame with `BRAND_BACKGROUND`
 /// (Mojang red, or black when `darkMojangStudiosBackground` is set), draws the
 /// Mojang Studios logo as its two halves side by side, and the progress bar
-/// at 83.25% of the height (`extractProgressBar`, unfaded), with the stage's
-/// line above it. The logo's `MOJANG_LOGO` pipeline adds it (`SRC_ALPHA, ONE`):
+/// at 83.25% of the height (`extractProgressBar`), each as faded as `fade`
+/// says. The logo's `MOJANG_LOGO` pipeline adds it (`SRC_ALPHA, ONE`):
 /// its texels are white, which alpha blending matches but for the red channel
 /// of the logo's soft edges, a 16/255 difference at most.
 pub fn draw_loading_overlay(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
-    line: &str,
     progress: f32,
+    fade: OverlayFade,
     dark: bool,
 ) {
     let (w, h) = (batch.width, batch.height);
-    batch.fill(atlas, 0.0, 0.0, w, h, brand_background(dark));
+    let background = brand_background(dark) & 0x00FF_FFFF | u32::from(fade.background) << 24;
+    batch.fill(atlas, 0.0, 0.0, w, h, background);
     let (x, y, half_width, logo_height) = logo_layout(w, h);
     if let Some(r) = atlas.sprites.get(MOJANG_STUDIOS_LOGO).copied() {
         // blit(.., u, v, width, height, 120, 60, 120, 120): the left half
@@ -487,6 +539,8 @@ pub fn draw_loading_overlay(
             let (u, v) = ((u / 120.0).clamp(0.0, 1.0), v / 120.0);
             (r.u0 + (r.u1 - r.u0) * u, r.v0 + (r.v1 - r.v0) * v)
         };
+        // `ARGB.white(logoAlpha)`.
+        let color = white((fade.logo * 255.0).floor() as u8);
         for (i, (u, v)) in [(-0.0625, 0.0), (0.0625, 60.0)].into_iter().enumerate() {
             let (u0, v0) = at(u, v);
             let (u1, v1) = at(u + 120.0, v + 60.0);
@@ -499,9 +553,12 @@ pub fn draw_loading_overlay(
             };
             let left = x + i as i32 * half_width;
             let (lw, lh) = (half_width as f32, logo_height as f32);
-            batch.rect_uv(left as f32, y as f32, lw, lh, half, u32::MAX);
+            batch.rect_uv(left as f32, y as f32, lw, lh, half, color);
         }
     }
+    let Some(bar) = fade.bar else {
+        return;
+    };
     let bar_y = (f64::from(h) * 0.8325) as i32;
     let x_center = (w as i32) / 2;
     let [x0, y0, x1, y1] = [
@@ -511,23 +568,12 @@ pub fn draw_loading_overlay(
         bar_y + 5,
     ];
     let filled = (((x1 - x0) - 2) as f32 * progress.clamp(0.0, 1.0)).ceil() as i32;
-    let white = u32::MAX;
-    fill_corners(batch, atlas, [x0 + 2, y0 + 2, x0 + filled, y1 - 2], white);
-    fill_corners(batch, atlas, [x0 + 1, y0, x1 - 1, y0 + 1], white);
-    fill_corners(batch, atlas, [x0 + 1, y1, x1 - 1, y1 - 1], white);
-    fill_corners(batch, atlas, [x0, y0, x0 + 1, y1], white);
-    fill_corners(batch, atlas, [x1, y0, x1 - 1, y1], white);
-    let text = Text::literal(line);
-    let tw = atlas.font.width_text(&text) as i32;
-    let text_top = (y0 - 9 - 3) as f32;
-    batch.text_styled(
-        atlas,
-        &text,
-        (x_center - tw / 2) as f32,
-        text_top,
-        white,
-        true,
-    );
+    let color = white((bar * 255.0).round() as u8);
+    fill_corners(batch, atlas, [x0 + 2, y0 + 2, x0 + filled, y1 - 2], color);
+    fill_corners(batch, atlas, [x0 + 1, y0, x1 - 1, y0 + 1], color);
+    fill_corners(batch, atlas, [x0 + 1, y1, x1 - 1, y1 - 1], color);
+    fill_corners(batch, atlas, [x0, y0, x0 + 1, y1], color);
+    fill_corners(batch, atlas, [x1, y0, x1 - 1, y1], color);
 }
 
 /// Mods' startup bars under the stage bar, newest first, each with its label above it, as many
@@ -801,6 +847,28 @@ mod tests {
         }
         assert!((bar - 0.953_930).abs() < 1e-4, "{bar}");
         assert_eq!(ease_overlay(1.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn the_reload_overlay_fades_in_then_its_bar_then_itself() {
+        let fade = |background, logo, bar| {
+            Some(OverlayFade {
+                background,
+                logo,
+                bar,
+            })
+        };
+        // From 15% over the frame to opaque in half a second, the logo from nothing.
+        assert_eq!(OverlayFade::at(0, None), fade(39, 0.0, Some(1.0)));
+        assert_eq!(OverlayFade::at(250, None), fade(128, 0.5, Some(1.0)));
+        assert_eq!(OverlayFade::at(600, None), fade(255, 1.0, Some(1.0)));
+        // Finished: the bar fades out over a second on the full background...
+        assert_eq!(OverlayFade::at(3000, Some(500)), fade(255, 1.0, Some(0.5)));
+        // ...then the background and logo over the next, without the bar.
+        assert_eq!(OverlayFade::at(3000, Some(1500)), fade(128, 0.5, None));
+        assert_eq!(OverlayFade::at(3000, Some(2000)), None);
+        assert!(!OverlayFade::at(250, None).unwrap().opaque());
+        assert!(OverlayFade::at(600, None).unwrap().opaque());
     }
 
     #[test]
