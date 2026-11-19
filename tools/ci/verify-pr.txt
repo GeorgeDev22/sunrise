@@ -1,0 +1,6 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client --lib --tests -- -D warnings
+env SUNRISE_TEST_RESOURCES=$PWD/.local/sunrise-client/26.3 cargo test --locked -p sunrise-client --lib -- --ignored --exact game::remote::attack_target::tests::a_sprint_hit_on_a_boat_minecart_crystal_or_bullet_slows_the_attacker_and_stops_its_sprint game::native_hotbar_slot::hotbar_slot_tests::a_selection_goes_out_before_an_attack_in_the_same_tick
+cargo test --locked -p sunrise-client --lib -- game::remote::
+python3 tools/ci/check_ignored_test_rows.py
+env SUNRISE_TEST_RESOURCES=$PWD/.local/sunrise-client/26.3 cargo test --locked -p sunrise-client --lib -- --ignored game::special_attacks:: game::boats:: game::minecarts::
