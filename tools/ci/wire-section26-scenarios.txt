@@ -1,0 +1,12 @@
+jump_reset_kb
+s_tap_combo
+rod_then_hit
+pearl_sprint_throw
+boat_clutch
+cobweb_ladder_clutch
+gapple_while_hit
+double_click_one_tick
+axe_crit_sprint_reset
+bow_spam_strafe
+water_fight
+totem_offhand_void_fall

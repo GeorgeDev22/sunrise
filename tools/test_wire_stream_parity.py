@@ -1876,6 +1876,61 @@ SCENARIOS = {
                f'item replace entity {PLAYER} hotbar.0 with minecraft:oak_boat', f'item replace entity {PLAYER} hotbar.1 with minecraft:minecart'],
         ticks=50, steps={0: ['look 0 45'], 5: ['mouse right click'], 15: ['key 2 tap', 'look -60 45'], 20: ['mouse right click'],
                          30: ['mouse left click'], 34: ['mouse left click']}),
+    # Section 26 (2026-11-19): PvP techniques anticheats watch, beside a mob's hits (KNOCKBACK from FAR_HUSK).
+    'jump_reset_kb': dict(
+        setup=[FAR_HUSK, SWORD],
+        ticks=80, steps=merge({0: ['key w down']}, {t: [KNOCKBACK, 'key space tap'] for t in (15, 35, 55)}, {70: ['key w up']})),
+    's_tap_combo': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=3.0), SWORD],
+        ticks=80, steps=merge({0: ['look 0 15', 'key w down', 'key ctrl down']},
+                              {t: ['mouse left click', 'key w up', 'key s down'] for t in (12, 32, 52)},
+                              {t: ['key s up', 'key w down'] for t in (15, 35, 55)}, {70: ['key w up', 'key ctrl up']})),
+    'rod_then_hit': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=3.5), SWORD,
+               f'item replace entity {PLAYER} hotbar.1 with minecraft:fishing_rod'],
+        ticks=80, steps={0: ['look 0 10', 'key 2 tap'], 3: ['mouse right click'], 12: ['key 1 tap'], 14: ['mouse left click'],
+                         30: ['key 2 tap'], 32: ['mouse right click'], 34: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse left click']}),
+    'pearl_sprint_throw': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:ender_pearl 4'],
+        ticks=90, steps={0: ['look 0 -15', 'key w down', 'key ctrl down'], 10: ['key space tap'], 12: ['mouse right click'],
+                         60: ['key w up', 'key ctrl up']}),
+    'boat_clutch': dict(
+        setup=[f'item replace entity {PLAYER} weapon.mainhand with minecraft:oak_boat', f'tp {PLAYER} 0.5 {FLOOR + 16} 0.5 0 90'],
+        ticks=80, steps={0: ['look 0 90'], 28: ['mouse right click'], 30: ['mouse right click'], 50: ['key shift tap']}),
+    'cobweb_ladder_clutch': dict(
+        setup=[f'item replace entity {PLAYER} hotbar.0 with minecraft:cobweb 4', f'item replace entity {PLAYER} hotbar.1 with minecraft:ladder 4',
+               f'fill 0 {FLOOR + 1} 1 0 {FLOOR + 14} 1 minecraft:stone', f'tp {PLAYER} 0.5 {FLOOR + 13} 0.5 0 90'],
+        ticks=90, steps={0: ['look 0 90'], 22: ['mouse right click'], 50: ['command tp @s 0.5 ~12 0.5', 'key 2 tap', 'look 0 60'],
+                         66: ['mouse right click', 'key w down'], 80: ['key w up']}),
+    'gapple_while_hit': dict(
+        setup=[FAR_HUSK, f'item replace entity {PLAYER} weapon.mainhand with minecraft:golden_apple 4',
+               f'effect give {PLAYER} minecraft:hunger 2 50 true'],
+        ticks=100, steps=merge({20: ['mouse right down'], 60: ['mouse right up']}, every(25, 60, 9, KNOCKBACK))),
+    'double_click_one_tick': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=2.5), SWORD],
+        ticks=70, steps={0: ['look 0 20'], 13: ['mouse left click', 'mouse left click'], 26: ['mouse left click'],
+                         27: ['mouse left click'], 40: ['key w down', 'key ctrl down'], 52: ['mouse left click', 'mouse left click'],
+                         60: ['key w up', 'key ctrl up']}),
+    'axe_crit_sprint_reset': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=4.0),
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:netherite_axe'],
+        ticks=90, steps=merge({0: ['look 0 15', 'key w down', 'key ctrl down']},
+                              {t: ['key space tap'] for t in (10, 40)}, {t: ['mouse left click'] for t in (18, 48)},
+                              {t: ['key ctrl up'] for t in (20, 50)}, {t: ['key ctrl down'] for t in (24, 54)}, {75: ['key w up', 'key ctrl up']})),
+    'bow_spam_strafe': dict(
+        setup=[TARGET.format(x=0.5, y=FLOOR + 1, z=10.0), f'item replace entity {PLAYER} hotbar.0 with minecraft:arrow 64',
+               f'item replace entity {PLAYER} weapon.mainhand with minecraft:bow'],
+        ticks=100, steps=merge({0: ['look 0 0', 'key a down']}, {t: ['mouse right down'] for t in (5, 25, 45, 65)},
+                               {t: ['mouse right up'] for t in (12, 32, 52, 85)}, {40: ['key a up', 'key d down'], 90: ['key d up']})),
+    'water_fight': dict(
+        setup=[f'fill -3 {FLOOR - 2} -1 3 {FLOOR + 1} 8 minecraft:water', TARGET.format(x=0.5, y=FLOOR - 1, z=3.0), SWORD,
+               f'effect give {PLAYER} minecraft:water_breathing 30 0 true'],
+        ticks=80, steps=merge({0: ['look 0 25', 'key w down']}, every(10, 70, 12, 'mouse left click'), {72: ['key w up']})),
+    'totem_offhand_void_fall': dict(
+        setup=[f'item replace entity {PLAYER} weapon.offhand with minecraft:totem_of_undying', FAR_HUSK,
+               f'effect give {PLAYER} minecraft:resistance 30 255 true'],
+        ticks=60, steps={5: ['command damage @s 100 minecraft:mob_attack by @e[tag=far,limit=1]'],
+                         20: ['command effect clear @s minecraft:resistance'], 25: ['command damage @s 100 minecraft:generic']}),
 }
 
 
