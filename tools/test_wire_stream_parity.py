@@ -1972,7 +1972,7 @@ SCENARIOS = {
     'answer_lectern': dict(
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:lectern', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.1 with minecraft:writable_book'],
         ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
-                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'], 46: ['close']}),
     'answer_note_block': dict(
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:note_block', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.2 with minecraft:player_head'],
         ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
@@ -1980,15 +1980,15 @@ SCENARIOS = {
     'answer_sign_dye': dict(
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_sign', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:black_dye', f'item replace entity {PLAYER} hotbar.1 with minecraft:glow_ink_sac', f'item replace entity {PLAYER} hotbar.2 with minecraft:honeycomb'],
         ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
-                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'], 46: ['close']}),
     'answer_sign_waxed': dict(
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_sign', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:honeycomb', f'item replace entity {PLAYER} hotbar.1 with minecraft:black_dye'],
         ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
-                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'], 46: ['close']}),
     'answer_hanging_sign': dict(
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_hanging_sign', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:red_dye', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
         ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
-                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'], 46: ['close']}),
     'answer_candle': dict(
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:candle[candles=1,lit=false]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:candle', f'item replace entity {PLAYER} hotbar.1 with minecraft:flint_and_steel'],
         ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
@@ -2023,6 +2023,68 @@ SCENARIOS = {
                          26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
     'answer_vault_inactive': dict(
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:vault[vault_state=inactive]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:trial_key', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    # Section 29 (2026-11-19): items whose useOn answers a click on a block, with the block they take, another
+    # item and an empty hand, a torch in the off hand: a wrong client answer shows as a UseItem or a placed torch.
+    'use_on_honeycomb_copper': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:copper_block', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:honeycomb', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_axe_waxed_copper': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:waxed_copper_block', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:iron_axe', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_axe_exposed_copper': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:exposed_copper', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:iron_axe', f'item replace entity {PLAYER} hotbar.2 with minecraft:honeycomb'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_shovel_grass': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:grass_block', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:iron_shovel', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_hoe_coarse_dirt': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:coarse_dirt', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:iron_hoe', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_hoe_rooted_dirt': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:rooted_dirt', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:iron_hoe', f'item replace entity {PLAYER} hotbar.2 with minecraft:iron_shovel'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_ender_eye_frame': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:end_portal_frame[facing=north,eye=false]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:ender_eye', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick', f'item replace entity {PLAYER} hotbar.2 with minecraft:ender_eye'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_spawn_egg_spawner': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:spawner', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:zombie_spawn_egg', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_minecart_rail': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:rail', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:minecart', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_rocket_block': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:stone', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:firework_rocket', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_lead_fence': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:oak_fence', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:lead', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_bone_meal_stone': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:stone', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:bone_meal', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick', f'item replace entity {PLAYER} hotbar.2 with minecraft:bone_meal'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_bone_meal_grass': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:grass_block', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:bone_meal', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_bucket_water_cauldron': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:water_cauldron[level=3]', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:bucket', f'item replace entity {PLAYER} hotbar.1 with minecraft:glass_bottle'],
+        ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    'use_on_name_tag_block': dict(
+        setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:stone', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:name_tag', f'item replace entity {PLAYER} hotbar.1 with minecraft:written_book'],
         ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
                          26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
     # Section 26 (2026-11-19): PvP techniques anticheats watch, beside a mob's hits (KNOCKBACK from FAR_HUSK).
