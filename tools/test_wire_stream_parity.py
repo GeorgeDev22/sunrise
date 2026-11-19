@@ -2430,6 +2430,16 @@ def settle(counts, accepted, timeout=120):
         time.sleep(0.2)
 
 
+def forget_player(directory, level, others):
+    """The next client joins as a new player: Steve's saved data from this one (last death, portal cooldown,
+    spawn point, stats, advancements) would otherwise reach it in its first Login and Respawn, and the server would
+    treat it differently from the first client (end_portal: a Respawn with the first client's death location, and
+    the portal taken at another tick)."""
+    for root in [directory, *others]:
+        for kind in ('playerdata', 'stats', 'advancements'):
+            for saved in (root / level / kind).glob('*'):
+                saved.unlink(missing_ok=True)
+
 def play_all(client, server, scenarios, scripts, sunrise, capture):
     counts = ClientCounts(capture)
     for name in scenarios:
@@ -2650,6 +2660,7 @@ def run(args, out):
                     client.close()
                 time.sleep(2)
                 stop.set()
+                forget_player(directory, props.get('level-name', 'world'), [work / 'server2'] if proxy else [])
             captures[who] = capture
     finally:
         for extra in (proxy, second):
