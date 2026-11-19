@@ -1,0 +1,105 @@
+name: harness run
+# Fork only: the daily's failing harnesses on this tree, on GitHub-hosted runners. Mojang's files come from Mojang
+# inside the job (tools/ci/wire_grim_fetch.py). Harness logs hold vanilla data, so the public log shows only each
+# harness's name and result; the reports are uploaded encrypted to tools/ci/fork-report-key.pem, whose private
+# half never leaves the fork owner's machine.
+on:
+  push:
+    branches: ['harness-run']
+permissions:
+  contents: read
+concurrency:
+  group: harness-run
+  cancel-in-progress: true
+jobs:
+  harnesses:
+    name: shard-${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every harness (parity.py --all --list), every 30th per shard.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: The pinned Rust (tools/ci/rust-version)
+        id: rust
+        run: echo "version=$(cat tools/ci/rust-version)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+          targets: wasm32-unknown-unknown
+          components: rust-src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Room for the builds
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - name: Libraries, X server, software OpenGL and Vulkan
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev xvfb xauth x11-xkb-utils xkb-data \
+            libgl1-mesa-dri libegl1 libglx-mesa0 mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 libxcursor1 libxi6 \
+            libxrandr2 libasound2t64
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: harness-sweep
+          workspaces: '. -> .local/parity-target'
+      - name: Game files from Mojang and the prepared resources
+        run: |
+          python3 tools/ci/wire_grim_fetch.py --mc "$RUNNER_TEMP/mc" --servers "$RUNNER_TEMP/servers" > "$RUNNER_TEMP/fetch.log" 2>&1 || { tail -5 "$RUNNER_TEMP/fetch.log"; exit 1; }
+          python3 tools/lab.py prepare --minecraft-dir "$RUNNER_TEMP/mc" --server-jar "$RUNNER_TEMP/servers/server.jar" > "$RUNNER_TEMP/prepare.log" 2>&1 || { echo "lab prepare failed"; exit 1; }
+          cargo build --locked --profile fast -p sunrise-prepare > "$RUNNER_TEMP/prepare-build.log" 2>&1 || { echo "sunrise-prepare build failed"; exit 1; }
+          target/fast/sunrise-prepare --minecraft-dir "$RUNNER_TEMP/mc" --server-jar "$RUNNER_TEMP/servers/server.jar" --root "$PWD" > "$RUNNER_TEMP/sunrise-prepare.log" 2>&1 || { echo "sunrise-prepare failed"; exit 1; }
+          ls .local
+      - name: Prebuild what the harnesses build, with parity.py's profile so they reuse it
+        env:
+          CARGO_PROFILE_RELEASE_LTO: 'false'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_PROFILE_RELEASE_INCREMENTAL: 'true'
+          CARGO_PROFILE_DEV_OPT_LEVEL: '3'
+        run: |
+          export CARGO_TARGET_DIR="$PWD/.local/parity-target"
+          L="$RUNNER_TEMP/prebuild.log"
+          cargo build --profile fast -p sunrise-game --bin sunrise-client > "$L" 2>&1 || { tail -20 "$L"; exit 1; }
+          cargo build -p sunrise-game --bin sunrise-client >> "$L" 2>&1 || { tail -20 "$L"; exit 1; }
+          cargo build --locked -p sunrise-client-lib --example client_probe >> "$L" 2>&1 || { tail -20 "$L"; exit 1; }
+          cargo test --locked --no-run -p sunrise-client --lib >> "$L" 2>&1 || { tail -20 "$L"; exit 1; }
+          cargo test --locked --no-run -p sunrise-client-lib --lib >> "$L" 2>&1 || { tail -20 "$L"; exit 1; }
+      - name: Harnesses (names and results only)
+        env:
+          SUNRISE_NO_AUDIO: '1'
+          SUNRISE_TELEMETRY_URL: 'off'
+        run: |
+          mkdir -p reports
+          names=$(python3 tools/parity.py --all --list | awk -v s=${{ matrix.shard }} '(NR-1) % 30 == s' | tr '\n' ' ')
+          echo "$names" > reports/names.txt
+          python3 tools/ci/with_xvfb.py python3 tools/parity.py --fresh -j 2 --timeout 3600 $names > reports/parity.log 2>&1 || true
+          python3 tools/parity.py --status > reports/status.txt 2>&1 || true
+          grep -E "^(PASS|FAIL) " reports/parity.log | cut -d' ' -f1-3 || true
+          cp "$RUNNER_TEMP"/*.log reports/ 2>/dev/null || true
+      - name: Encrypt the reports
+        if: always()
+        run: |
+          mkdir -p reports
+          for d in .local/*-parity .local/parity-logs .local/parity .local/parity-runner/logs; do [ -d "$d" ] && cp -r "$d" reports/ 2>/dev/null; done
+          find reports -type f \( -name '*.jar' -o -name '*.class' -o -name '*.ogg' -o -name '*.png' -o -name '*.mca' \) -delete
+          tar -cJf reports.tar.xz reports
+          openssl rand -out key.bin 32
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in reports.tar.xz -out reports.tar.xz.enc -pass file:key.bin
+          openssl pkeyutl -encrypt -pubin -inkey tools/ci/fork-report-key.pem -pkeyopt rsa_padding_mode:oaep -in key.bin -out key.bin.enc
+          mkdir upload && mv reports.tar.xz.enc key.bin.enc upload/ && rm -f key.bin reports.tar.xz && rm -rf reports
+          ls -la upload
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: harness-shard-${{ matrix.shard }}
+          path: upload
+          retention-days: 7
