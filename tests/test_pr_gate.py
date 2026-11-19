@@ -179,14 +179,55 @@ class WorkflowTests(unittest.TestCase):
         jobs = workflow["jobs"]
         for name in ("runtime-leases",):
             self.assertEqual(jobs[name]["if"], "inputs.commit != '' || github.event_name == 'workflow_dispatch'")
+        # The wasm std member's Linux/Windows comparison is a platform leg too: the daily run and dispatches only.
+        names = yaml.safe_load((ROOT / ".github/workflows/wasm-std-names.yml").read_text())
+        self.assertEqual(set(names[True]), {"workflow_call", "workflow_dispatch"})
 
     def test_other_pull_request_workflows_skip_what_compiles_for_forks(self):
-        for workflow, jobs in (("cargo-sunrise-mod.yml", ("build",)), ("modding-book.yml", ("book",))):
+        for workflow, jobs in (("cargo-sunrise-mod-build.yml", ("build",)), ("modding-book.yml", ("book",))):
             text = (ROOT / ".github/workflows" / workflow).read_text()
             for name in jobs:
                 with self.subTest(workflow=workflow, job=name):
                     body = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z0-9_-]+:\n|\Z)", text, re.M | re.S)[1]
                     self.assertIn(f"if: {SAME_REPO}\n", body)
+
+    def test_a_pull_request_builds_the_mod_tool_for_linux_only(self):
+        import yaml
+
+        workflow = yaml.safe_load((ROOT / ".github/workflows/cargo-sunrise-mod-build.yml").read_text())
+        # Every other archive is the daily run's (and a tag's): a pull request push holds no macOS or Windows runner.
+        self.assertEqual(set(workflow[True]), {"workflow_call"})
+        step = next(step for step in workflow["jobs"]["plan"]["steps"] if step.get("id") == "platforms")
+        def targets(event):
+            import tempfile
+            with tempfile.NamedTemporaryFile("r") as output:
+                subprocess.run(["bash", "-e", "-c", step["run"]], cwd=ROOT, check=True,
+                               env={**os.environ, "EVENT_NAME": event, "GITHUB_OUTPUT": output.name})
+                return [platform["target"] for platform in json.loads(output.read().split("=", 1)[1])]
+        self.assertEqual(targets("pull_request"), ["x86_64-unknown-linux-gnu"])
+        from tools import sunrise_mod_binstall
+        self.assertEqual(targets("workflow_dispatch"), [platform["target"] for platform in sunrise_mod_binstall.PLATFORMS])
+
+
+    def test_only_a_version_tag_push_publishes_the_mod_tool_archives(self):
+        import yaml
+
+        build = yaml.safe_load((ROOT / ".github/workflows/cargo-sunrise-mod-build.yml").read_text())
+        entry = yaml.safe_load((ROOT / ".github/workflows/cargo-sunrise-mod.yml").read_text())
+        daily = yaml.safe_load((ROOT / ".github/workflows/daily.yml").read_text())
+        # The daily calls the build alone, read-only: nothing it runs can publish.
+        self.assertEqual(daily["jobs"]["cargo-sunrise-mod"]["uses"], "./.github/workflows/cargo-sunrise-mod-build.yml")
+        self.assertEqual(daily["jobs"]["cargo-sunrise-mod"]["permissions"], {"contents": "read"})
+        self.assertEqual(build["permissions"], {"contents": "read"})
+        self.assertTrue(all("permissions" not in job for job in build["jobs"].values()))
+        # The entry point publishes the archives it built itself, and only for the push of a version tag: a dispatch
+        # may name a tag too.
+        self.assertEqual(entry["jobs"]["build"]["uses"], "./.github/workflows/cargo-sunrise-mod-build.yml")
+        self.assertNotIn("with", entry["jobs"]["build"])
+        self.assertEqual(entry["jobs"]["publish"]["needs"], "build")
+        self.assertEqual(entry["jobs"]["publish"]["if"],
+                         "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cargo-sunrise-mod-v')")
+        self.assertEqual(set(entry["jobs"]), {"build", "publish"})
 
 
 if __name__ == "__main__":

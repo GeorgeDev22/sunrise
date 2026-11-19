@@ -15,6 +15,7 @@ use glam::{DVec3, Quat, Vec3 as FVec3};
 use sunrise_assets::resource_source::ResourceSource;
 use sunrise_core::{
     geometry::{Aabb, Vec3, trig},
+    jmath,
     random::{LegacyRandom, RandomSource},
 };
 use sunrise_world::block_collision::BlockCollisionRegistry;
@@ -1850,7 +1851,7 @@ impl ParticleEngine {
                 // A GPU particle is only a record: it never becomes an engine particle.
                 let shader = || registry.gpu_shader(&name);
                 self.polytone_gpu
-                    .spawn(&def, shader, &particle, custom, seed as u64);
+                    .spawn(&name, &def, shader, &particle, custom, seed as u64);
                 return None;
             }
             return Some(particle);
@@ -2904,8 +2905,8 @@ impl ParticleEngine {
                 q.velocity[1] = -f64::from(start);
                 let pr = r.next_float();
                 let flow_scale = [
-                    f64::from(pr * 60.0).to_radians().cos() * f64::from(side),
-                    f64::from(pr * 60.0).to_radians().sin() * f64::from(side),
+                    jmath::cos(f64::from(pr * 60.0).to_radians()) * f64::from(side),
+                    jmath::sin(f64::from(pr * 60.0).to_radians()) * f64::from(side),
                 ];
                 let swirl_period = f64::from(1000.0 + pr * 3000.0).to_radians();
                 if ty == T::TintedLeaves {
@@ -4173,8 +4174,8 @@ impl ParticleEngine {
                     }
                     if swirl {
                         let rel = f64::from(relative);
-                        xa += rel * (rel * swirl_period).cos() * f64::from(wind);
-                        za += rel * (rel * swirl_period).sin() * f64::from(wind);
+                        xa += rel * jmath::cos(rel * swirl_period) * f64::from(wind);
+                        za += rel * jmath::sin(rel * swirl_period) * f64::from(wind);
                     }
                     p.velocity[0] += xa * f64::from(0.0025f32);
                     p.velocity[2] += za * f64::from(0.0025f32);

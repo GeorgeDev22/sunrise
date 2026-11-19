@@ -184,6 +184,7 @@ pub mod telemetry;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 pub mod text_display;
+pub mod text_grammar;
 pub mod tick_chunk_membership;
 pub mod ticket_levels;
 pub mod title;

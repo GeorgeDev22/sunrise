@@ -608,7 +608,7 @@ pub(super) fn load_resources_for_mods(
         if headless {
             UiResources::server(source)
         } else {
-            UiResources::load(source).map(|ui| {
+            UiResources::load(source, vanilla_root).map(|ui| {
                 ui.with_splashes(
                     source,
                     vanilla_root,

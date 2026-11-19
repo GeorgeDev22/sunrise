@@ -21,6 +21,24 @@ pub struct Pattern {
     pub translation_key: String,
 }
 
+impl Pattern {
+    /// `BannerPattern.DIRECT_CODEC`.
+    pub fn decode(id: &str, value: &Value) -> Result<Self, String> {
+        let asset = value["asset_id"].as_str().ok_or("asset_id is required")?;
+        let asset = sunrise_core::identifier::Identifier::parse(asset)
+            .map_err(|error| format!("asset_id: {error}"))?
+            .to_string();
+        let translation_key = value["translation_key"]
+            .as_str()
+            .ok_or("translation_key is required")?;
+        Ok(Self {
+            id: id.into(),
+            asset: asset.trim_start_matches("minecraft:").to_owned(),
+            translation_key: translation_key.to_owned(),
+        })
+    }
+}
+
 /// The pattern registry, its tags and the item components the loom reads.
 #[derive(Default)]
 pub struct Banners {
@@ -83,16 +101,9 @@ impl Banners {
             else {
                 continue;
             };
-            let asset = v["asset_id"]
-                .as_str()
-                .unwrap_or(stem)
-                .trim_start_matches("minecraft:")
-                .to_owned();
-            banners.patterns.push(Pattern {
-                id: Arc::from(format!("minecraft:{stem}").as_str()),
-                asset,
-                translation_key: v["translation_key"].as_str().unwrap_or_default().to_owned(),
-            });
+            if let Ok(pattern) = Pattern::decode(&format!("minecraft:{stem}"), &v) {
+                banners.patterns.push(pattern);
+            }
         }
         banners.no_item_required = read_tag(root, "no_item_required", 0);
         // Every tag, `pattern_item/globe` included, for a component naming one.

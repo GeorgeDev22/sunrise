@@ -138,10 +138,16 @@ pub struct Cost {
     pub per_level: i32,
 }
 impl Cost {
+    fn decoded_fields(v: &Value) -> (Option<i32>, Option<i32>) {
+        let int = |name| v[name].as_i64().and_then(|n| i32::try_from(n).ok());
+        (int("base"), int("per_level_above_first"))
+    }
+
     fn parse(v: &Value) -> Self {
+        let (base, per_level) = Self::decoded_fields(v);
         Self {
-            base: v["base"].as_i64().unwrap_or(1) as i32,
-            per_level: v["per_level_above_first"].as_i64().unwrap_or(0) as i32,
+            base: base.unwrap_or(1),
+            per_level: per_level.unwrap_or(0),
         }
     }
     pub fn calculate(self, level: u32) -> i32 {
@@ -274,6 +280,112 @@ pub fn level_name(level: u32) -> String {
         .map_or_else(|| level.to_string(), |s| (*s).to_owned())
 }
 
+/// `Enchantment.getFullname`: append the level unless both it and the holder's maximum are one.
+pub fn format_full_name(
+    mut description: String,
+    level: u32,
+    max_level: u32,
+    suffix: impl FnOnce(u32) -> String,
+) -> String {
+    if level != 1 || max_level != 1 {
+        description.push(' ');
+        description.push_str(&suffix(level));
+    }
+    description
+}
+
+/// Decode a winning pack definition's top-level fields for registry sync.
+/// Holder sets and effect payloads are bound after the registry phase.
+pub fn decode_pack_definition(mut value: Value) -> Result<Value, String> {
+    let fields = value
+        .as_object_mut()
+        .ok_or("expected an enchantment object")?;
+    for (name, range) in [
+        ("max_level", 1..=255),
+        ("weight", 1..=1024),
+        ("anvil_cost", 0..=i64::from(i32::MAX)),
+    ] {
+        let n = fields
+            .get(name)
+            .and_then(Value::as_i64)
+            .filter(|n| range.contains(n))
+            .ok_or_else(|| format!("{name} must be an integer in {range:?}"))?;
+        fields.insert(name.into(), Value::from(n));
+    }
+    for name in ["min_cost", "max_cost"] {
+        let cost = fields
+            .get(name)
+            .ok_or_else(|| format!("{name} is required"))?;
+        let (base, per_level) = Cost::decoded_fields(cost);
+        let cost = Cost {
+            base: base.ok_or_else(|| format!("{name}.base must be an integer"))?,
+            per_level: per_level
+                .ok_or_else(|| format!("{name}.per_level_above_first must be an integer"))?,
+        };
+        fields.insert(
+            name.into(),
+            serde_json::json!({"base": cost.base,"per_level_above_first": cost.per_level}),
+        );
+    }
+    for name in ["supported_items", "primary_items", "exclusive_set"] {
+        match fields.get(name) {
+            Some(Value::String(_) | Value::Array(_) | Value::Object(_)) => {}
+            None | Some(Value::Null) if name != "supported_items" => {
+                fields.remove(name);
+            }
+            _ => return Err(format!("{name} must be a holder set")),
+        }
+    }
+    let slots = fields
+        .get("slots")
+        .and_then(Value::as_array)
+        .ok_or("slots must be a list of equipment slot groups")?;
+    for slot in slots {
+        if !matches!(
+            slot.as_str(),
+            Some(
+                "any"
+                    | "mainhand"
+                    | "offhand"
+                    | "hand"
+                    | "feet"
+                    | "legs"
+                    | "chest"
+                    | "head"
+                    | "armor"
+                    | "body"
+                    | "saddle"
+            )
+        ) {
+            return Err("slots must contain equipment slot groups".into());
+        }
+    }
+    match fields.get("effects") {
+        Some(Value::Null) => {
+            fields.remove("effects");
+        }
+        Some(Value::Object(_)) | None => {}
+        _ => return Err("effects must be a component map".into()),
+    }
+    fields.retain(|name, _| {
+        matches!(
+            name.as_str(),
+            "description"
+                | "max_level"
+                | "weight"
+                | "anvil_cost"
+                | "min_cost"
+                | "max_cost"
+                | "supported_items"
+                | "primary_items"
+                | "exclusive_set"
+                | "slots"
+                | "effects"
+        )
+    });
+    Ok(value)
+}
+
 /// One registry entry from its definition (`Enchantment.DIRECT_CODEC`).
 fn parse_entry(
     id: &str,
@@ -374,6 +486,33 @@ impl Enchantments {
         overlay: &sunrise_world::loot::PackOverlay,
         defaults: &sunrise_world::item_defaults::ItemDefaults,
     ) -> crate::Result<Self> {
+        // The registry lists entries sorted by id, like the data-pack loader.
+        let mut files: BTreeMap<String, Value> =
+            crate::items::data_files(root, "enchantment", overlay)
+                .into_iter()
+                .collect();
+        if files.values().any(HolderSetBinding::needed) {
+            let binding =
+                HolderSetBinding::load(root, overlay, defaults, files.keys().cloned().collect())?;
+            for (id, value) in &mut files {
+                binding.bind(id, value)?;
+            }
+        }
+        Self::load_selected(
+            root,
+            overlay,
+            defaults,
+            files.iter().map(|(id, value)| (id.as_str(), value)),
+        )
+    }
+
+    /// Assemble gameplay behavior from the selected, holder-bound definitions in id order.
+    pub fn load_selected<'a>(
+        root: &Path,
+        overlay: &sunrise_world::loot::PackOverlay,
+        defaults: &sunrise_world::item_defaults::ItemDefaults,
+        files: impl IntoIterator<Item = (&'a str, &'a Value)>,
+    ) -> crate::Result<Self> {
         let data = root.join("data/minecraft");
         let mut raw_tags = read_tag_dir(&data.join("tags/enchantment"));
         let namespaces = other_namespaces(root);
@@ -427,18 +566,6 @@ impl Enchantments {
             // Small tools/fixtures may not carry the prepared catalog.
             Err(_) => unordered(read_tag_dir(&data.join("tags/damage_type"))),
         };
-        // The registry lists entries sorted by id, like the data-pack loader.
-        let mut files: BTreeMap<String, Value> =
-            crate::items::data_files(root, "enchantment", overlay)
-                .into_iter()
-                .collect();
-        if files.values().any(HolderSetBinding::needed) {
-            let binding =
-                HolderSetBinding::load(root, overlay, defaults, files.keys().cloned().collect())?;
-            for (id, value) in &mut files {
-                binding.bind(id, value)?;
-            }
-        }
         let lang: HashMap<String, String> =
             sunrise_core::prepared_files::read(&root.join("assets/minecraft/lang/en_us.json"))
                 .ok()
@@ -486,14 +613,14 @@ impl Enchantments {
         }
         let mut custom_damage = HashMap::new();
         let list = files
-            .iter()
+            .into_iter()
             .filter_map(|(id, v)| {
                 match resolve_damage_effects(
                     &v["effects"],
                     DAMAGE_EFFECT_IDS.get().map_or(&[], Vec::as_slice),
                 ) {
                     Ok(Some(nodes)) => {
-                        custom_damage.insert(Arc::from(id.as_str()), nodes);
+                        custom_damage.insert(Arc::from(id), nodes);
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -725,14 +852,13 @@ impl Enchantments {
         let Some(e) = self.get(id) else {
             return (format!("{id} {}", level_name(level)), false);
         };
-        let mut name = tr(&e.description_key).unwrap_or_else(|| e.description.clone());
-        if (level != 1 || e.max_level != 1) && numeric {
-            name.push(' ');
-            name.push_str(&level.to_string());
-        } else if level != 1 || e.max_level != 1 {
-            name.push(' ');
+        let description = tr(&e.description_key).unwrap_or_else(|| e.description.clone());
+        let name = format_full_name(description, level, e.max_level, |level| {
+            if numeric {
+                return level.to_string();
+            }
             let key = format!("enchantment.level.{level}");
-            let suffix = tr(&key)
+            tr(&key)
                 .or_else(|| self.lang.get(&key).cloned())
                 .unwrap_or_else(|| {
                     if (1..=10).contains(&level) {
@@ -740,9 +866,8 @@ impl Enchantments {
                     } else {
                         key
                     }
-                });
-            name.push_str(&suffix);
-        }
+                })
+        });
         (name, self.is_curse(id))
     }
     /// Tooltip lines for a level list, in `#tooltip_order` then remaining order.

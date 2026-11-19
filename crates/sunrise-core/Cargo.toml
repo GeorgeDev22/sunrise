@@ -11,6 +11,7 @@ description = "Sunrise simulation foundations for the pinned vanilla Java Editio
 rng-trace = []
 
 [dependencies]
+md-5 = { version = "0.10.6", default-features = false }
 libm = "=0.2.16"
 rustc-hash = "2"
 serde_json = { version = "1.0.151", features = ["raw_value"] }

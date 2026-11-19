@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use sunrise_client::{
     advancements::Tree,
     crafting::ResolvedSources,
-    lan::data::{FrozenDamage, SyncData},
+    lan::data::{FrozenDamage, PackRegistryDefinitions, SyncData},
 };
 use sunrise_world::item_defaults::ItemData;
 
@@ -182,6 +182,7 @@ pub(super) struct Synced {
 pub(in crate::game) struct SyncCache {
     pub(super) data: Option<Synced>,
     pub(super) damage: Option<FrozenDamage>,
+    pub(super) packed_registries: Option<Arc<PackRegistryDefinitions>>,
     pub(super) advancements: Option<Arc<Tree>>,
     pub(super) world_packs: bool,
 }
@@ -189,6 +190,7 @@ pub(in crate::game) struct SyncCache {
 static SYNC: Mutex<SyncCache> = Mutex::new(SyncCache {
     data: None,
     damage: None,
+    packed_registries: None,
     advancements: None,
     world_packs: false,
 });
@@ -218,7 +220,7 @@ pub(super) fn cached_sync_data(
     {
         sync.data = None;
     }
-    let load = |advancements| {
+    let load = |packed, advancements| {
         let sources =
             server_sources(root, item_data, overlay).map_err(|error| error.to_string())?;
         match &sync.damage {
@@ -226,6 +228,7 @@ pub(super) fn cached_sync_data(
                 root,
                 overlay,
                 damage,
+                packed,
                 item_data.defaults(),
                 &sources,
                 advancements,
@@ -236,7 +239,7 @@ pub(super) fn cached_sync_data(
     };
     // A late vanilla preload must not replace a packed world's lazy snapshot.
     if sync.data.is_none() && sync.world_packs && !packs {
-        return load(None);
+        return load(None, None);
     }
     let advancements = sync.advancements.as_ref();
     sync.data
@@ -244,7 +247,7 @@ pub(super) fn cached_sync_data(
             root: root.to_owned(),
             with_packs: packs,
             generation,
-            result: load(advancements),
+            result: load(sync.packed_registries.as_ref(), advancements),
         })
         .result
         .clone()
@@ -257,10 +260,12 @@ pub(in crate::game) fn prepare_world_sync_data(
     item_data: &ItemData,
     overlay: &sunrise_world::loot::PackOverlay,
     damage: &sunrise_world::damage_source::Catalog,
+    packed_registries: Option<Arc<PackRegistryDefinitions>>,
     advancements: Arc<Tree>,
 ) -> std::result::Result<SyncCache, String> {
     let mut staged = SyncCache {
         data: SYNC.lock().unwrap_or_else(|e| e.into_inner()).data.clone(),
+        packed_registries,
         advancements: Some(advancements),
         ..Default::default()
     };

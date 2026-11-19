@@ -3624,7 +3624,43 @@ impl Game<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventTimings, OFFHAND_SLOT, equipment_slot_name, living_flags, mob_freeze_meta};
+    use super::{
+        EventTimings, Hub, LanHost, LanSettings, OFFHAND_SLOT, equipment_slot_name, living_flags,
+        mob_freeze_meta,
+    };
+
+    impl LanHost {
+        /// Install an already configured fixture hub without touching the process-wide sync cache.
+        pub(in crate::game) fn for_test(hub: Hub) -> Self {
+            Self {
+                settings: LanSettings {
+                    port: hub.lan.port,
+                    guest_commands: false,
+                    force_game_mode: false,
+                },
+                hub,
+                players_told_left: false,
+                play: Default::default(),
+                menus: Default::default(),
+                broken: Default::default(),
+                mob_state: Default::default(),
+                poses: Default::default(),
+                mob_players: Default::default(),
+                owner: None,
+                waypoints: Default::default(),
+                waypoint_dead: Default::default(),
+                border_sent: None,
+                commands: Default::default(),
+                quiet: Default::default(),
+                far: None,
+                native_commands_sent: None,
+                sleep_ignored: Default::default(),
+                states: Default::default(),
+                states_next_entity: None,
+                idle_states: Default::default(),
+            }
+        }
+    }
 
     #[test]
     fn a_burst_of_short_events_still_has_a_slow_tick_note() {
@@ -3765,33 +3801,7 @@ mod tests {
         guest.placed = true;
         guest.dimension = "minecraft:overworld".into();
         hub.guests.push(guest);
-        game.lan = Some(super::LanHost {
-            hub,
-            players_told_left: false,
-            settings: super::LanSettings {
-                port: 0,
-                guest_commands: false,
-                force_game_mode: false,
-            },
-            play: Default::default(),
-            menus: Default::default(),
-            broken: Default::default(),
-            mob_state: Default::default(),
-            poses: Default::default(),
-            mob_players: Default::default(),
-            owner: None,
-            waypoints: Default::default(),
-            waypoint_dead: Default::default(),
-            border_sent: None,
-            commands: Default::default(),
-            quiet: Default::default(),
-            far: None,
-            native_commands_sent: None,
-            sleep_ignored: Default::default(),
-            states: Default::default(),
-            states_next_entity: None,
-            idle_states: Default::default(),
-        });
+        game.lan = Some(LanHost::for_test(hub));
         for (block, expected) in [
             ("minecraft:ladder", false),
             ("minecraft:scaffolding", false),
@@ -4050,17 +4060,23 @@ mod tests {
         let damage = Catalog::load(&root, &PackOverlay::NONE).unwrap();
         let initial = vec![(
             "dialog/demo:before".into(),
-            vec![br#"{"type":"minecraft:notice"}"#.to_vec()],
+            vec![br#"{"type":"minecraft:notice","title":"Before"}"#.to_vec()],
         )];
-        let mut cache = SyncCache::default();
-        initialize_world_sync_data(
-            &mut cache,
+        let initial = PackOverlay::new(&initial);
+        let packed = sunrise_client::lan::data::SyncData::stage_registry_definitions(
             &root,
-            &PackOverlay::new(&initial),
-            &damage,
-            &item_data,
+            item_data.defaults(),
+            &initial,
+            &Default::default(),
+            &Default::default(),
+            |_| true,
         )
         .unwrap();
+        let mut cache = SyncCache {
+            packed_registries: Some(std::sync::Arc::new(packed)),
+            ..SyncCache::default()
+        };
+        initialize_world_sync_data(&mut cache, &root, &initial, &damage, &item_data).unwrap();
         assert!(cache.data.is_none());
         // A late vanilla helper cannot install its overlay over this world.
         cached_sync_data(&mut cache, &root, &PackOverlay::NONE, &item_data).unwrap();
@@ -4076,7 +4092,7 @@ mod tests {
             ),
             (
                 "dialog/demo:after".into(),
-                vec![br#"{"type":"minecraft:notice"}"#.to_vec()],
+                vec![br#"{"type":"minecraft:notice","title":"After"}"#.to_vec()],
             ),
             (
                 "tags/demo:damage_type/reloaded".into(),
@@ -4092,11 +4108,8 @@ mod tests {
         let wire = cached_sync_data(&mut cache, &root, &overlay, &item_data).unwrap();
         assert!(wire.id("minecraft:damage_type", "demo:too_late").is_none());
         assert!(health.id("demo:too_late").is_none());
-        assert!(wire.id("minecraft:dialog", "demo:before").is_none());
-        assert!(
-            wire.id("minecraft:dialog", "demo:after").is_some(),
-            "unrelated registries stay lazy"
-        );
+        assert!(wire.id("minecraft:dialog", "demo:before").is_some());
+        assert!(wire.id("minecraft:dialog", "demo:after").is_none());
         let fall = wire.id("minecraft:damage_type", "minecraft:fall").unwrap();
         let packets = wire.registry_packets(false, &sunrise_client::chunk::LevelShapes::VANILLA);
         let packet = packets
@@ -4665,10 +4678,7 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn a_guest_who_left_has_no_menu_owners() {
-        use super::super::transactions::decision::{
-            Admission,
-            engine::{Owner, Target},
-        };
+        use super::super::transactions::decision::{Admission, engine::Target};
         use sunrise_client::lan::hub::HostEvent;
         use sunrise_client::menu::{Kind, Menu};
         super::super::native_guest_turn_tests::with_guests(|game| {
@@ -4689,10 +4699,10 @@ mod tests {
             assert!(!host.play.contains_key(&12));
             assert!(host.menus.contains_key(&13));
             assert!(matches!(
-                Target::admit(game, 12, Owner::Inventory),
+                Target::admit(game, 12),
                 Err(Admission::MissingHolder)
             ));
-            assert!(Target::admit(game, 13, Owner::Inventory).is_ok());
+            assert!(Target::admit(game, 13).is_ok());
         });
     }
 

@@ -49,8 +49,47 @@ fn java_digit(c: char, radix: u32) -> Option<u32> {
     java_character::digit(u16::try_from(u32::from(c)).ok()?, radix)
 }
 
+/// Decode eight ASCII hex bytes in parallel. Each packed byte starts below 128,
+/// so adding the splatted range offsets cannot carry into the next byte.
+#[inline]
+fn uuid_hex_word(bytes: [u8; 8]) -> Option<u32> {
+    const BYTE: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = BYTE * 128;
+    let n = u64::from_be_bytes(bytes);
+    if n & HIGH != 0 {
+        return None;
+    }
+    let lower = n | (BYTE * u64::from(b' '));
+    let decimal = ((n + BYTE * (128 - b'0' as u64)) ^ (n + BYTE * (127 - b'9' as u64))) & HIGH;
+    let alpha =
+        ((lower + BYTE * (128 - b'a' as u64)) ^ (lower + BYTE * (127 - b'f' as u64))) & HIGH;
+    if decimal | alpha != HIGH {
+        return None;
+    }
+    let nibbles = (n & (BYTE * 15)) + ((alpha >> 7) * 9);
+    let pairs = (nibbles | (nibbles >> 4)) & 0x00ff_00ff_00ff_00ff;
+    let quads = (pairs | (pairs >> 8)) & 0x0000_ffff_0000_ffff;
+    Some((quads | (quads >> 16)) as u32)
+}
+
 /// `UUID.fromString`: signed-long hex groups, masked to UUID field widths.
 pub fn parse_java_uuid(name: &str) -> Option<u128> {
+    if let Ok(&b) = <&[u8; 36]>::try_from(name.as_bytes())
+        && b[8] == b'-'
+        && b[13] == b'-'
+        && b[18] == b'-'
+        && b[23] == b'-'
+        && let (Some(a), Some(c), Some(d), Some(e)) = (
+            uuid_hex_word(b[..8].try_into().unwrap()),
+            uuid_hex_word([b[9], b[10], b[11], b[12], b[14], b[15], b[16], b[17]]),
+            uuid_hex_word([b[19], b[20], b[21], b[22], b[24], b[25], b[26], b[27]]),
+            uuid_hex_word(b[28..].try_into().unwrap()),
+        )
+    {
+        return Some(
+            u128::from(a) << 96 | u128::from(c) << 64 | u128::from(d) << 32 | u128::from(e),
+        );
+    }
     if name.encode_utf16().count() > 36 {
         return None;
     }
@@ -83,6 +122,18 @@ pub fn parse_java_uuid(name: &str) -> Option<u128> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_uuid_accepts_mixed_case_hex_but_not_colon() {
+        assert_eq!(
+            parse_java_uuid("01234567-89Ab-cDeF-fEDc-bA9876543210"),
+            Some(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210)
+        );
+        assert_eq!(
+            parse_java_uuid("01234567-89:b-cDeF-fEDc-bA9876543210"),
+            None
+        );
+    }
 
     #[test]
     fn decimal_integer_and_long_boundaries_follow_java() {

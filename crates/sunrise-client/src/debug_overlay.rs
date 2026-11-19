@@ -35,8 +35,10 @@ pub struct PaintCache {
 }
 
 /// What the painted vertices depend on besides the lines: the framebuffer size, the GUI scale's
-/// bits and `Font::epoch` (glyphs move in the atlas when it changes).
-pub type PaintLayout = ([u32; 2], u32, u64);
+/// bits, `Font::epoch` (glyphs move in the atlas when it changes), and whether the lightmap
+/// chart had a current sample to paint (`Renderer::lightmap_sample`), so a sample that stops
+/// being current is not painted again from the cache.
+pub type PaintLayout = ([u32; 2], u32, u64, bool);
 
 impl PaintCache {
     /// The vertices, while they are recent and painted for this `layout`.
@@ -625,7 +627,7 @@ mod tests {
             glint_uv: [0.0; 2],
             text: 1,
         };
-        let layout = ([1920, 1080], 2.0f32.to_bits(), 5);
+        let layout = ([1920, 1080], 2.0f32.to_bits(), 5, true);
         let start = Instant::now();
         let mut cache = PaintCache::default();
         assert!(cache.fresh(start, layout).is_none());
@@ -634,11 +636,13 @@ mod tests {
         assert_eq!(cache.fresh(just_before, layout).map(<[_]>::len), Some(1));
         // Stale after a twentieth of a second, so the stats keep moving.
         assert!(cache.fresh(start + REPAINT, layout).is_none());
-        // Another window size, GUI scale or glyph layout repaints at once.
+        // Another window size, GUI scale or glyph layout, or the lightmap chart's sample no
+        // longer current, repaints at once.
         for other in [
-            ([1280, 720], layout.1, layout.2),
-            (layout.0, 3.0f32.to_bits(), layout.2),
-            (layout.0, layout.1, 6),
+            ([1280, 720], layout.1, layout.2, layout.3),
+            (layout.0, 3.0f32.to_bits(), layout.2, layout.3),
+            (layout.0, layout.1, 6, layout.3),
+            (layout.0, layout.1, layout.2, false),
         ] {
             assert!(cache.fresh(just_before, other).is_none());
         }

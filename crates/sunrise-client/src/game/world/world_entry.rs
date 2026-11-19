@@ -236,7 +236,7 @@ impl Game<'_> {
         let mut contributed = Vec::new();
         self.native_data_pack_files(&mut contributed);
         let modifier_files = global_loot_modifiers::contributed(&contributed);
-        let files = functions::overlay_files(
+        let (files, read_errors) = functions::overlay_files(
             stack,
             contributed
                 .into_iter()
@@ -267,9 +267,6 @@ impl Game<'_> {
             self.res.item_defaults(),
         )?;
         class_tags::install(&mut items, self.res.facts());
-        // Item damage predicates use the same frozen registry as player hurt.
-        Arc::make_mut(&mut items.enchantments).bind_damage_catalog(&health.damage);
-        items.bind_component_damage_catalog(&health.damage);
         // Tag files are read before their tags are bound, so the tag readers below keep the
         // context without tags: there `neoforge:tag_empty` is unsupported, never answered from a
         // part of this load's tags.
@@ -283,10 +280,28 @@ impl Game<'_> {
             conditions: &conditions,
             files: &files,
         };
-        if !reload {
-            // These synchronized registries are normally decoded only when a peer joins.
-            sunrise_client::lan::data::SyncData::stage_registry_conditions(root, &overlay);
-        }
+        let packed_registry_definitions =
+            if let Some(tables) = self.world_tables.as_ref().filter(|_| reload) {
+                Ok(tables.packed_registries.clone())
+            } else {
+                // Admit the frozen pack definitions with this candidate's bound
+                // tags, even if no peer joins and triggers the full wire load.
+                sunrise_client::lan::data::SyncData::stage_registry_definitions(
+                    root,
+                    self.res.item_defaults(),
+                    &overlay,
+                    &read_errors,
+                    &self.ui.registries,
+                    |id| {
+                        self.ui
+                            .registries
+                            .ids("minecraft:sound_event")
+                            .binary_search_by(|sound| sound.as_str().cmp(id))
+                            .is_ok()
+                    },
+                )
+                .map(Arc::new)
+            };
         // Visit independently readable registries before consuming any result.
         // One rejected winner must not hide the other entries' diagnostics.
         let loot =
@@ -309,18 +324,34 @@ impl Game<'_> {
                 &overlay,
             )
         };
-        if let Err(mut errors) = conditions.check_errors() {
-            // Report a broken loot reference alongside the conditions that may
-            // have removed its target. Recipe discovery reports its own errors.
-            for error in [loot.as_ref().err(), sources.as_ref().err()]
-                .into_iter()
-                .flatten()
-            {
-                use std::fmt::Write;
-                let _ = write!(errors, "; {error}");
-            }
-            return Err(errors.into());
-        }
+        let packed_registry_definitions =
+            match (packed_registry_definitions, conditions.check_errors()) {
+                (Ok(packed), Ok(())) => packed,
+                (packed, conditions) => {
+                    // A rejected registry must not hide independent load errors.
+                    let errors = [
+                        packed.err(),
+                        conditions.err(),
+                        loot.as_ref().err().map(ToString::to_string),
+                        datapack_candidate.as_ref().err().map(ToString::to_string),
+                        sources.as_ref().err().map(ToString::to_string),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                    return Err(errors.into());
+                }
+            };
+        packed_registry_definitions.install_items(
+            &mut items,
+            root,
+            &overlay,
+            self.res.item_defaults(),
+        )?;
+        // Item damage predicates use the same frozen registry as player hurt.
+        Arc::make_mut(&mut items.enchantments).bind_damage_catalog(&health.damage);
+        items.bind_component_damage_catalog(&health.damage);
         let sources = sources?;
         let mut loot = loot?;
         items.component_defaults = loot.component_defaults().clone();
@@ -479,6 +510,7 @@ impl Game<'_> {
                 suffocation,
                 files,
                 items: Arc::new(items),
+                packed_registries: packed_registry_definitions,
                 loot,
                 loot_modifier_manager,
                 recipes,
@@ -795,6 +827,7 @@ impl Game<'_> {
             advancements,
             health,
             datapack_registries,
+            ..
         } = self.stage_world_tables(stack, true, root)?;
         let items = tables
             .as_ref()

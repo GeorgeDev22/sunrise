@@ -61,7 +61,7 @@ pub const SCHEMA: i64 = 7;
 /// the preparer and fails when the output is not the one output-versions.txt gives this number
 /// (`python3 tools/prepare_output.py check`). The launcher reads this line from the version
 /// folder's sources: keep it on one line, as it is.
-pub const OUTPUT_VERSION: u32 = 4;
+pub const OUTPUT_VERSION: u32 = 5;
 
 /// Digest of this crate's sources (build.rs): the launcher prepares a version in-process when
 /// that version ships these same sources, and runs the version's own binary otherwise.
@@ -1221,9 +1221,8 @@ fn steps(
             }
         }
 
-        // The creative inventory (creative-inventory.json): every tab built by vanilla's
-        // CreativeModeTabs over the vanilla data pack's registries, with the search
-        // tab's tooltip lines and tags.
+        // The creative inventory recipes (creative-inventory.json): ordered generator
+        // rows and live-holder placeholders, plus search tooltip and tag metadata.
         run.stage();
         let creative = single(
             "the creative inventory",

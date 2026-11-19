@@ -28,8 +28,11 @@ combined result even if the run is cancelled. Its public-tree check reads every 
 
 ## Merging
 
-Pull requests go through the merge queue, which squashes each one into a single commit titled with the pull
-request's title and number (`kind(area): what changes (#123)`); never `gh pr merge --auto`. Branch protection on main
+Pull requests merge with a merge commit (`Merge pull request #123 from ...`), most of them through a rollup: a
+`sunrise-review-rollup-<n>` branch that carries reviewed pull requests at their heads, with integration fixes as carry
+commits on top, and is checked by `dyna-checks` like any rollup. A pull request's own commits stay as they are, and it
+shows as merged when its rollup merges. No workflow has a `merge_group` trigger: there is no merge queue. Never
+`gh pr merge --auto`. Branch protection on main
 requires `verify` for everyone, and a council member's review (team `council`) for the files `.github/CODEOWNERS` lists (what builds, signs
 and ships releases). Branches don't have to be up to date with main: main's own `dyna-checks` run catches the rare
 semantic conflict.
@@ -66,9 +69,13 @@ Unsure? Add `needs-proof`: it costs a few hours, a broken release costs more.
 
 The [daily run](#daily-run) is the only CI entry point for vanilla parity. It calls `.github/workflows/parity.yml`
 on every real (writing) run, which takes only commits of main, so no run can move `daily-green` or start the
-Nightly without it. Dry runs, rollups and pull requests do not run parity. The Dyna runner uses its prepared vanilla data and runs all automatic harnesses from scratch.
-`named_only` in `tools/parity_hosts.json` lists the exceptions, including `frame_identity` and capture-preserving
-harnesses that require explicit arguments; run them locally by name with the required setup.
+Nightly without it. Dry runs, rollups and pull requests do not run parity. The Dyna runners use their prepared
+vanilla data and run all automatic harnesses in shares of one plan (`tools/ci/parity_shards.py`,
+`tools/parity.py --harness-file`). They replay an earlier vanilla oracle run from the CI host's keep only when its
+command, JDK and inputs match ([parity workflow](parity-workflow.md)); the daily summary reads the shares' merged verdict.
+`named_only` in `tools/parity_hosts.json` lists the exceptions, such as `frame_identity`, each with its reason; run them
+locally by name. Proofs that need arguments (a saved capture to replay) declare `PARITY_MANUAL` in their script instead,
+which no automatic run selects.
 
 The daily summary files one `bug` issue per failing harness with the merges since the previous green daily as
 suspects. A failed or incomplete required parity leg holds `daily-green` and the automatic Nightly, but not the
@@ -127,8 +134,11 @@ dispatches it (`-f commit=<sha>`, `-f dry_run=false` to write). One run runs and
 dispatch replaces an older waiting one. The schedule stops when main's head already has a completed real daily run;
 a hand dispatch never does, so it retries a run whose tag move, issues or nightly failed. Its legs are the workflows that left main pushes:
 the ignored-tests data shards (`ignored-tests.yml`), the wasm fixture and guest stacks (`wasm-mods.yml`),
-`fn-replace-check.yml`, the game's Windows runtime-lease tests (`windows-runtime-leases.yml`), the machine sample
-built against the commit's mod API (`machine-sample.yml`) and the prebuilt SDK of the commit
+`fn-replace-check.yml`, the game's Windows runtime-lease tests (`windows-runtime-leases.yml`), every
+`cargo-sunrise-mod` binstall archive built from the commit and published nowhere (`cargo-sunrise-mod-build.yml`; a pull
+request's check builds only the Linux x86_64 archive, and only a `cargo-sunrise-mod-v*` tag's push publishes, from
+`cargo-sunrise-mod.yml`), the wasm std member's names built on Linux and on Windows (`wasm-std-names.yml`), the machine sample built against the commit's mod API (`machine-sample.yml`) and the
+prebuilt SDK of the commit
 (`prebuilt-game-build.yml`; each leg packs its slices after the checks, including the [native linkage probe](native-dylib-probe.md)
 on the Linux and Windows client builds. `sdk-publish` signs and publishes the slices as the mod SDK's
 release `sdk-<sha>` (`sdk-publish.yml`) only when its own legs are green on a real run on main, before the Nightly that
@@ -155,7 +165,7 @@ A [snapshot](#snapshot) (`release.yml -f kind=snapshot`) needs only dyna-checks'
 ```mermaid
 flowchart LR
     pr(["pull request"]) --> checks{"verify"}
-    checks -- green --> merge["merge queue<br/>(squash)"]
+    checks -- green --> merge["merge commit<br/>(most through a rollup)"]
     merge --> main(["main"])
     main --> daily["daily run, including parity on main’s head"]
     daily -- every applicable leg green --> decide{"decide<br/>tools/release_train.py"}
@@ -353,7 +363,8 @@ with the release key for the tag `mod-tool` (message `horizon release mod-tool\n
 signed too; `sunrise-release-sign verify --tag mod-tool` checks it, and `signed_digest` refuses the tag as a game release.
 Why it exists: the tool shipped only inside each `sdk-<commit>`, so a tool fix reached modders with the next Nightly.
 
-- When: on a push to main and by dispatch, never on a pull request. `decide` builds only when a file of the tool changed
+- When: after dyna-checks finishes a main push (so the gate's result exists when it is read) and by dispatch, never on
+  a pull request. `decide` builds only when a file of the tool changed
   since the commit `mod-tool` holds (`tools/ci/mod_tool.py crates` lists the folders: the workspace crates
   `cargo-sunrise-mod` depends on, from `cargo metadata`, plus the lock, the compiler pin and the files that build and sign
   it) and dyna-checks' gate is green on the commit, as for a snapshot. It refuses a commit not on main and one that does

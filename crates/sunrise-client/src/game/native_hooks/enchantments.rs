@@ -2,7 +2,6 @@ use super::*;
 
 /// Helpers for native mods, kept as stable as the hook points.
 // Native mods use these; nothing in Sunrise does.
-#[allow(dead_code)]
 impl Game<'_> {
     /// Registered enchantments, in registry order.
     pub(in crate::game) fn enchantments(&self) -> Vec<EnchantmentInfo> {
@@ -29,10 +28,6 @@ impl Game<'_> {
     /// `ItemStack.getHoverName()` as plain text, in the client's language.
     pub(in crate::game) fn hover_name(&self, stack: &ItemStack) -> String {
         sunrise_client::stations::hover_name(&self.pack.names, stack)
-    }
-    /// The creative search tab's stacks in order (`getSearchTabDisplayItems`).
-    pub(in crate::game) fn creative_search_items(&self) -> Vec<ItemStack> {
-        self.creative_screen.search_items().to_vec()
     }
     /// Whether enchantment `id` can go on `item` (`Enchantment.isSupportedItem`).
     pub(in crate::game) fn enchantment_supports(&self, id: &str, item: mod_api::ItemKey) -> bool {

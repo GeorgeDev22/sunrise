@@ -2547,7 +2547,10 @@ fn mob_from_nbt_at(
     ) {
         // AbstractCubeMob.readAdditionalSaveData: the size's attributes, then
         // the saved health, the max health when there is none.
-        crate::mobs::cube::set_size(&mut m, number(tag.get("Size")).unwrap_or(0) as i32 + 1);
+        crate::mobs::cube::set_size(
+            &mut m,
+            (number(tag.get("Size")).unwrap_or(0) as i32).wrapping_add(1),
+        );
         if let Some(h) = float(tag.get("Health")) {
             m.health = h as f32;
         }
@@ -3608,14 +3611,14 @@ pub fn falling_block_flags(tag: &Tag) -> (bool, bool) {
 
 /// `Cushion.addAdditionalSaveData`: the block it sits on and its colour.
 pub fn cushion_to_nbt(c: &Cushion, uuid: [i32; 4], raw: Option<&Tag>) -> Tag {
-    // A block-attached cushion does not update these: they stay as loaded.
+    // A block-attached cushion never moves or turns: Motion and pitch stay as loaded.
     let (on_ground, fall_distance) = raw.map_or((false, 0.0), ground_from_nbt);
     let base = Base {
         id: "minecraft:cushion",
         uuid,
         position: c.position,
-        motion: Vec3::ZERO,
-        rotation: [c.yaw, 0.0],
+        motion: raw.map_or(Vec3::ZERO, loaded_motion),
+        rotation: [c.yaw, raw.map_or(0.0, |raw| rotation(raw)[1])],
         on_ground,
         fall_distance,
     };

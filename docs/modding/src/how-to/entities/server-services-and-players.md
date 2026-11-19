@@ -126,6 +126,9 @@ absent. `text` must be a string, `extra` a non-empty list (null counts as
 absent), `selector` a selector and `nbt` an NBT path that parse, and a style
 field that is present and wrong (`color`, `shadow_color`, the format flags,
 `click_event`, `hover_event`, `insertion`, `font`) refuses the whole component.
+Command, URL and page click actions use `command`, `url` and `page`, respectively;
+a legacy `value`-only click for those actions is refused.
+`show_item` refuses `minecraft:air`; a component removal (`!id`) requires an object value.
 A translation's `fallback` and an `nbt` component's `interpret`, `plain` and
 `separator` of the wrong kind are dropped instead. An object whose only content
 key is `index` is refused, as in vanilla; Sunrise follows vanilla there. JSON

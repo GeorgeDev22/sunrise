@@ -595,7 +595,7 @@ impl Game<'_> {
             )
             .map(|source| source as &dyn ResourceSource);
         let language = Language::load_server(&self.ui.vanilla_root, layers, |value| {
-            super::native_text_grammar::build(value, &self.ui.registries, false)
+            sunrise_client::text_grammar::build(value, &self.ui.registries, false)
         });
         lang::set(language);
         self.native_server_starting(true);

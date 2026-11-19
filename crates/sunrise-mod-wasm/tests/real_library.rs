@@ -1,7 +1,7 @@
 //! Independently built library, observer and dependent packages load through the production loader.
 //! Its own test binary: the game's points registry is process-global and sealed once.
 // Generated fixtures exercise every shape; TODO(#2273): make the generator emit clippy-clean code.
-#![allow(clippy::all, unused_comparisons, unreachable_patterns, dead_code)]
+#![allow(clippy::all, unused_comparisons, unreachable_patterns)]
 #[path = "support/no_hooks.rs"]
 mod no_hooks;
 use sunrise_mod_package::manifest::Package;

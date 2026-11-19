@@ -97,6 +97,33 @@
       "refusals": {}
     },
     {
+      "name": "a required dependency upgrade also satisfies another request's optional range",
+      "requests": [{"id": "add_on"}, {"id": "requires_extra", "version": "2.0.0"}],
+      "installed": [{"id": "extra", "version": "1.0.0", "sha256": "0000000000000000000000000000000000000000000000000000000000000002"}],
+      "side": "client",
+      "native_fits": {},
+      "expected": {"requested": {"add_on": {"status": "installable", "version": "1.0.0"}, "requires_extra": {"status": "installable", "version": "2.0.0"}}, "install": [{"id": "add_on", "version": "1.0.0"}, {"id": "requires_extra", "version": "2.0.0"}], "update": [{"id": "extra", "from": "1.0.0", "to": "2.0.0"}], "optional": [{"from": {"id": "add_on", "version": "1.0.0"}, "dependency": {"id": "extra", "version": "^2", "optional": true}}], "required_by": {"extra": ["requires_extra"]}},
+      "refusals": {}
+    },
+    {
+      "name": "an impossible unrelated pin does not break the joint dependency upgrade",
+      "requests": [{"id": "add_on"}, {"id": "requires_extra", "version": "2.0.0"}, {"id": "b", "version": "9.0.0"}],
+      "installed": [{"id": "extra", "version": "1.0.0", "sha256": "0000000000000000000000000000000000000000000000000000000000000002"}],
+      "side": "client",
+      "native_fits": {},
+      "expected": {"requested": {"add_on": {"status": "installable", "version": "1.0.0"}, "requires_extra": {"status": "installable", "version": "2.0.0"}}, "install": [{"id": "add_on", "version": "1.0.0"}, {"id": "requires_extra", "version": "2.0.0"}], "update": [{"id": "extra", "from": "1.0.0", "to": "2.0.0"}], "optional": [{"from": {"id": "add_on", "version": "1.0.0"}, "dependency": {"id": "extra", "version": "^2", "optional": true}}], "required_by": {"extra": ["requires_extra"]}},
+      "refusals": {"b": ["b", "9.0.0"]}
+    },
+    {
+      "name": "a guarded dependency downgrade cannot block keeping the installed dependency",
+      "requests": [{"id": "requires_extra", "version": "1.0.0"}, {"id": "extra", "version": "2.0.0"}],
+      "installed": [{"id": "add_on", "version": "1.0.0", "sha256": "0000000000000000000000000000000000000000000000000000000000000001"}, {"id": "extra", "version": "2.0.0", "sha256": "0000000000000000000000000000000000000000000000000000000000000003"}],
+      "side": "client",
+      "native_fits": {},
+      "expected": {"requested": {"extra": {"status": "already_installed", "version": "2.0.0"}}, "kept": [{"id": "extra", "version": "2.0.0"}]},
+      "refusals": {"requires_extra": ["add_on", "extra", "^2"]}
+    },
+    {
       "name": "an impossible b pin does not follow an out of range library candidate into a",
       "requests": [{"id": "a"}, {"id": "b", "version": "9.0.0"}],
       "installed": [],

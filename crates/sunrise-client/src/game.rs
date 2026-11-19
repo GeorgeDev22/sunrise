@@ -743,6 +743,8 @@ struct WorldTables {
     /// them), for the advancement tree reload and the loot data.
     files: Vec<(String, Vec<Vec<u8>>)>,
     items: Arc<Items>,
+    /// Registry definitions stay frozen at world open, even when tags reload.
+    packed_registries: Arc<sunrise_client::lan::data::PackRegistryDefinitions>,
     loot: Arc<sunrise_world::loot::LootData>,
     loot_modifier_manager: Arc<mod_api::GlobalLootModifierManager>,
     recipes: Recipes,
@@ -1670,6 +1672,7 @@ struct Game<'a> {
     /// The `[[native.loop]]` slots' state, per published loop (`published_loops.rs`).
     loop_states: published_loops::LoopStates,
     creative_screen: Creative,
+    creative_contents: native_hooks::CreativeCache,
     /// `CreativeModeInventoryScreen.ignoreTextInput`: the chat key opened the
     /// search tab, so the letter it carries is not typed into the box.
     creative_ignore_text: bool,
@@ -2941,120 +2944,171 @@ impl Game<'_> {
         f: impl FnOnce(&Behaviours, &mut GameLevel<'_>, &mut Ticks) -> R,
     ) -> R {
         self.ensure_stateful_entity_table();
+        let result = self.with_level_access(false, f);
+        self.flush_spill();
+        if self.lan.is_some() {
+            self.flush_lan_particles();
+            self.flush_native_sounds();
+        }
+        result
+    }
+
+    /// Placement queries need neither trigger snapshots nor live factory setup or effect drains.
+    fn with_placement_preview_level<R>(
+        &mut self,
+        f: impl FnOnce(&Behaviours, &GameLevel<'_>, &Ticks) -> R,
+    ) -> R {
+        self.with_level_access(true, |behaviours, level, ticks| f(behaviours, level, ticks))
+    }
+
+    fn with_level_access<R>(
+        &mut self,
+        placement_preview: bool,
+        f: impl FnOnce(&Behaviours, &mut GameLevel<'_>, &mut Ticks) -> R,
+    ) -> R {
         let darken = self.sky_darken();
         let (rain, thunder) = self.weather_levels(1.0);
-        // Spectators ignore block triggers (Entity.isIgnoringBlockTriggers).
-        let spectator = self.spectator();
-        let player_box = self.player.as_ref().filter(|_| !spectator).map(|p| {
-            let w = f64::from(p.dimensions.width) / 2.0;
-            (
-                [p.position.x - w, p.position.y, p.position.z - w],
-                [
-                    p.position.x + w,
-                    p.position.y + f64::from(p.dimensions.height),
-                    p.position.z + w,
-                ],
-            )
-        });
-        let player_collision = self.player.as_ref().filter(|_| !spectator).map(|p| {
-            let main_hand = self.inventory.get(self.selected).and_then(Option::as_ref);
-            PlayerCollision {
-                y: p.position.y,
-                descending: p.velocity.y < 0.0,
-                fall_distance: p.fall_distance,
-                main_hand_item: main_hand.map_or_else(
-                    || Arc::from("minecraft:air"),
-                    |stack| Arc::clone(&stack.item),
-                ),
-                main_hand_count: main_hand.map_or(0, |stack| stack.count as i32),
-                leather_boots: worn_boots::leather_boots(&self.armor),
-            }
-        });
-        let cart_boxes = self
-            .carts
-            .iter()
-            .map(|c| {
-                let p = c.position;
+        let (
+            player_box,
+            player_collision,
+            cart_boxes,
+            arrow_boxes,
+            guest_boxes,
+            building_player_boxes,
+            fire_players,
+            trigger_hooks,
+            trigger_extras,
+            open_containers,
+            golem_chests,
+        ) = if placement_preview {
+            Default::default()
+        } else {
+            // Spectators ignore block triggers (Entity.isIgnoringBlockTriggers).
+            let spectator = self.spectator();
+            let player_box = self.player.as_ref().filter(|_| !spectator).map(|p| {
+                let w = f64::from(p.dimensions.width) / 2.0;
                 (
-                    [p.x - 0.49, p.y, p.z - 0.49],
-                    [p.x + 0.49, p.y + 0.7, p.z + 0.49],
+                    [p.position.x - w, p.position.y, p.position.z - w],
+                    [
+                        p.position.x + w,
+                        p.position.y + f64::from(p.dimensions.height),
+                        p.position.z + w,
+                    ],
                 )
-            })
-            .collect();
-        let arrow_boxes = self
-            .creatures
-            .projectiles
-            .iter()
-            .filter(|p| p.arrow.is_some())
-            .map(|p| p.position)
-            .chain(self.tridents.iter().map(|t| t.position))
-            .map(|at| {
-                let b = sunrise_client::arrows::arrow_bounds(at);
-                (b.min_position().components(), b.max_position().components())
-            })
-            .collect();
-        let guest_boxes = self.lan_block_trigger_boxes();
-        let building_player_boxes = self
-            .lan_acting
-            .is_some()
-            .then(|| self.lan_building_boxes.boxes(self.dim));
-        let dimension = self.dim.level();
-        let rules = self.level_rules();
-        let fire_players: Vec<[f64; 3]> = self
-            .player
-            .iter()
-            .filter(|_| !spectator)
-            .map(|p| [p.position.x, p.position.y, p.position.z])
-            .chain(self.lan.iter().flat_map(|h| {
-                h.hub
-                    .guests
-                    .simulation_iter()
-                    .filter(|g| h.hub.here(g) && !g.spectator())
-                    .map(|g| g.position)
-            }))
-            .collect();
-        let mut trigger_hooks: Vec<(Aabb, bool)> = self
-            .hook
-            .iter()
-            .map(|h| (h.bounds(), h.applies_block_effects()))
-            .collect();
-        self.lan_hook_triggers(&mut trigger_hooks);
-        // EntityType.LIGHTNING_BOLT: 0 x 0.
-        let trigger_extras: Vec<Aabb> = self
-            .bolts
-            .iter()
-            .map(|b| {
-                let at = Vec3::new(b.at[0], b.at[1], b.at[2]);
-                Aabb::new(at, at)
-            })
-            .collect();
-        // `ContainerOpenersCounter.getEntitiesWithContainerOpen`: the players
-        // whose menu still holds a container of the block at a position. A
-        // double chest answers for both halves (`ChestBlockEntity$1` takes a
-        // `CompoundContainer`), and a spectator's menu counts for nothing.
-        let mut open_containers: Vec<(i32, i32, i32)> = Vec::new();
-        for key in self.container.into_iter().filter(|_| !spectator).chain(
-            self.lan
+            });
+            let player_collision = self.player.as_ref().filter(|_| !spectator).map(|p| {
+                let main_hand = self.inventory.get(self.selected).and_then(Option::as_ref);
+                PlayerCollision {
+                    y: p.position.y,
+                    descending: p.velocity.y < 0.0,
+                    fall_distance: p.fall_distance,
+                    main_hand_item: main_hand.map_or_else(
+                        || Arc::from("minecraft:air"),
+                        |stack| Arc::clone(&stack.item),
+                    ),
+                    main_hand_count: main_hand.map_or(0, |stack| stack.count as i32),
+                    leather_boots: worn_boots::leather_boots(&self.armor),
+                }
+            });
+            let cart_boxes = self
+                .carts
                 .iter()
-                .flat_map(|h| {
+                .map(|c| {
+                    let p = c.position;
+                    (
+                        [p.x - 0.49, p.y, p.z - 0.49],
+                        [p.x + 0.49, p.y + 0.7, p.z + 0.49],
+                    )
+                })
+                .collect();
+            let arrow_boxes = self
+                .creatures
+                .projectiles
+                .iter()
+                .filter(|p| p.arrow.is_some())
+                .map(|p| p.position)
+                .chain(self.tridents.iter().map(|t| t.position))
+                .map(|at| {
+                    let b = sunrise_client::arrows::arrow_bounds(at);
+                    (b.min_position().components(), b.max_position().components())
+                })
+                .collect();
+            let guest_boxes = self.lan_block_trigger_boxes();
+            let building_player_boxes = self
+                .lan_acting
+                .is_some()
+                .then(|| self.lan_building_boxes.boxes(self.dim));
+            let fire_players: Vec<[f64; 3]> = self
+                .player
+                .iter()
+                .filter(|_| !spectator)
+                .map(|p| [p.position.x, p.position.y, p.position.z])
+                .chain(self.lan.iter().flat_map(|h| {
                     h.hub
                         .guests
                         .simulation_iter()
                         .filter(|g| h.hub.here(g) && !g.spectator())
+                        .map(|g| g.position)
+                }))
+                .collect();
+            let mut trigger_hooks: Vec<(Aabb, bool)> = self
+                .hook
+                .iter()
+                .map(|h| (h.bounds(), h.applies_block_effects()))
+                .collect();
+            self.lan_hook_triggers(&mut trigger_hooks);
+            // EntityType.LIGHTNING_BOLT: 0 x 0.
+            let trigger_extras: Vec<Aabb> = self
+                .bolts
+                .iter()
+                .map(|b| {
+                    let at = Vec3::new(b.at[0], b.at[1], b.at[2]);
+                    Aabb::new(at, at)
                 })
-                .filter_map(|g| g.menu.as_ref().and_then(|m| m.pos)),
-        ) {
-            open_containers.push(key);
-            if let Some(other) = self.chest_other_half(key) {
-                open_containers.push(other);
+                .collect();
+            // `ContainerOpenersCounter.getEntitiesWithContainerOpen`: the players
+            // whose menu still holds a container of the block at a position. A
+            // double chest answers for both halves (`ChestBlockEntity$1` takes a
+            // `CompoundContainer`), and a spectator's menu counts for nothing.
+            let mut open_containers: Vec<(i32, i32, i32)> = Vec::new();
+            for key in self.container.into_iter().filter(|_| !spectator).chain(
+                self.lan
+                    .iter()
+                    .flat_map(|h| {
+                        h.hub
+                            .guests
+                            .simulation_iter()
+                            .filter(|g| h.hub.here(g) && !g.spectator())
+                    })
+                    .filter_map(|g| g.menu.as_ref().and_then(|m| m.pos)),
+            ) {
+                open_containers.push(key);
+                if let Some(other) = self.chest_other_half(key) {
+                    open_containers.push(other);
+                }
             }
-        }
-        // CopperGolem.hasContainerOpen: the chest a golem opened, and its other half.
-        let mut golem_chests: Vec<(i32, i32, i32)> = Vec::new();
-        for &key in self.world.chest_openers.keys() {
-            golem_chests.push(key);
-            golem_chests.extend(self.chest_other_half(key));
-        }
+            // CopperGolem.hasContainerOpen: the chest a golem opened, and its other half.
+            let mut golem_chests: Vec<(i32, i32, i32)> = Vec::new();
+            for &key in self.world.chest_openers.keys() {
+                golem_chests.push(key);
+                golem_chests.extend(self.chest_other_half(key));
+            }
+            (
+                player_box,
+                player_collision,
+                cart_boxes,
+                arrow_boxes,
+                guest_boxes,
+                building_player_boxes,
+                fire_players,
+                trigger_hooks,
+                trigger_extras,
+                open_containers,
+                golem_chests,
+            )
+        };
+        let dimension = self.dim.level();
+        let rules = self.level_rules();
         let native_authoritative = self.native_authoritative();
         let liquid_transaction_open = self.transaction_current().is_some();
         let environment = self.res.environment_of(&self.dimension_type().id);
@@ -3146,13 +3200,7 @@ impl Game<'_> {
             drop_breaker_at: None,
             drop_into: None,
         };
-        let result = f(self.res.behaviours(), &mut level, &mut self.block_ticks);
-        self.flush_spill();
-        if self.lan.is_some() {
-            self.flush_lan_particles();
-            self.flush_native_sounds();
-        }
-        result
+        f(self.res.behaviours(), &mut level, &mut self.block_ticks)
     }
     pub(super) fn native_block_ignite_allowed(
         &mut self,
@@ -4740,10 +4788,11 @@ impl Game<'_> {
         }
         self.tick_first_level()
     }
-    /// The title remains the no-level sentinel while debug options covers it.
-    /// Only UI dispatch ignores it; world loading and simulation still see it.
+    /// The title remains the no-level sentinel while debug options or a mod's
+    /// screen covers it. Only UI dispatch ignores it; world loading and
+    /// simulation still see it.
     fn title_input_active(&self) -> bool {
-        self.title.is_some() && self.screen != Screen::DebugOptions
+        self.title.is_some() && !matches!(self.screen, Screen::DebugOptions | Screen::Mod)
     }
     fn hud(&mut self, size: [u32; 2]) -> HudBatch {
         // Gui.extractRenderState passes integer coordinates to the HUD and screen. Keep
@@ -4857,11 +4906,14 @@ impl Game<'_> {
                 self.say_system_queued(&found);
             }
         }
-        if self.screen == Screen::DebugOptions && self.title.is_some() {
-            // DebugOptionsScreen replaces the title; no level HUD is behind it.
+        if matches!(self.screen, Screen::DebugOptions | Screen::Mod) && self.title.is_some() {
+            // DebugOptionsScreen or a mod's screen replaces the title; no level
+            // HUD is behind it.
             let drawn = self.draw_screen_with_pre_hook(&mut batch);
-            if drawn {
+            if drawn && self.screen == Screen::DebugOptions {
                 self.draw_debug_options(&mut batch);
+            } else if drawn {
+                self.draw_mod_screen(&mut batch);
             }
             self.draw_screen_with_post_hook(&mut batch);
             self.draw_toasts(&mut batch, false);
@@ -5211,16 +5263,7 @@ impl Game<'_> {
             Screen::Dead => self.draw_death_screen(&mut batch),
             Screen::Stats => self.draw_stats(&mut batch),
             Screen::Advancements => self.draw_advancements(&mut batch),
-            Screen::Mod => {
-                self.draw_screen_phase(
-                    &mut batch,
-                    sunrise_client::screen_draw::RenderPhase::Background,
-                );
-                self.draw_screen_phase(
-                    &mut batch,
-                    sunrise_client::screen_draw::RenderPhase::Foreground,
-                );
-            }
+            Screen::Mod => self.draw_mod_screen(&mut batch),
             Screen::WorldOptions => self.draw_world_options(&mut batch),
             Screen::Friends => self.draw_friends_screen(&mut batch),
             Screen::Social => self.draw_social_screen(&mut batch),
@@ -6417,6 +6460,7 @@ impl Game<'_> {
         self.share_spawn_conditions();
         self.score = Default::default();
         reset_world_progress(&mut self.adv, &mut self.stats);
+        self.reset_creative_contents();
         let stack = self.open_world_datapacks(&level.enabled_features)?;
         let root = self.options.resources.clone();
         self.damage_tag_generation = self.damage_tag_generation.wrapping_add(1);
@@ -6581,6 +6625,7 @@ impl Game<'_> {
         }
         // The save screen has finished every write before releasing storage.
         self.ui.dispatcher = Default::default();
+        self.reset_creative_contents();
         self.server_loot.set(None);
         self.server_items = None;
         self.session_lock = None;
@@ -8249,6 +8294,8 @@ impl Game<'_> {
             .get(&(block[0] >> 4, block[2] >> 4))
             .map(|c| c.biome(block[0], block[1], block[2]))
             .unwrap_or(0);
+        // Asked before the environment's borrow: the renderer's pack shaders answer.
+        let pack_expressions = self.reads_pack_expressions();
         let environment = self.view_environment();
         // EnvironmentAttributeProbe: the spatially interpolated biome colours,
         // Gaussian-weighted over the noise biomes around the camera (plains
@@ -8296,6 +8343,7 @@ impl Game<'_> {
         if self.pack.environments.is_some()
             || self.pack.polytone_particles.is_some()
             || self.pack.polytone_post.is_some()
+            || pack_expressions
         {
             let light = self.world.light(block[0], block[1], block[2]);
             let frame = sunrise_client::environment::Frame {
@@ -8372,6 +8420,7 @@ impl Game<'_> {
             // Native mods' overlays first, then the packs' OptiFine emissive blocks.
             sunrise_client::native_emissive::table(
                 &self.pack.render.sprite_layers,
+                &self.pack.render.file_layers,
                 requests,
                 &self.pack.render.emissive,
             )
@@ -8530,6 +8579,7 @@ impl Game<'_> {
         let game_ticks = self.world.game_time as f64 + alpha;
         let delta_ticks = (game_ticks - self.polytone_post_ticks).clamp(0.0, 20.0) as f32;
         self.polytone_post_ticks = game_ticks;
+        self.evaluate_pack_expressions(polytone_frame.as_ref());
         let polytone_extras = match (&self.pack.polytone_post, &polytone_frame) {
             (Some(post), Some(frame)) => {
                 let view = bob * spin * sunrise_client::camera::view_matrix(yaw, pitch);
@@ -8880,6 +8930,7 @@ impl Game<'_> {
         // Renderer encoding and GPU waiting belong to render, not prepare.
         drop(prepare);
         let debug_passes = self.debug_lists_gpu_passes();
+        let lightmap_chart = self.debug_shows_lightmap();
         let mut prepared_draws = std::mem::take(&mut *self.prepared_model_draws.borrow_mut());
         let result = match self.renderer.as_mut() {
             Some(renderer) => {
@@ -8887,6 +8938,7 @@ impl Game<'_> {
                 let capture_gpu = self.profile.gpu();
                 let recording = capture_gpu != GpuSwitch::Off;
                 renderer.set_pass_timing(debug_passes || self.gpu_passes || recording);
+                renderer.set_lightmap_readback(lightmap_chart);
                 renderer.set_keep_timed_frames(recording);
                 renderer.set_pass_detail(self.gpu_pass_detail || capture_gpu == GpuSwitch::Detail);
                 // `gpu_passes` and a capture's `--gpu` are measurements: they take every sample they can.
@@ -11058,6 +11110,7 @@ impl<'a> Game<'a> {
             trial_spawner_tick_positions: Vec::new(),
             loop_states: Default::default(),
             creative_screen: prepared.creative_screen,
+            creative_contents: Default::default(),
             creative_ignore_text: false,
             control: None,
             agent_control_on: false,

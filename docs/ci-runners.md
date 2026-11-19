@@ -142,6 +142,10 @@ only the workflow token (`actions: read`, `issues: write`). What the Team and th
 GitHub reruns a failed job only after its whole run has ended: while another job of the run (often `lint`) is still
 going, "Re-run failed jobs" is refused ("already running"). Wait for the run to finish, then rerun the failed job.
 
+For daily parity, rerun the entire workflow ("Re-run all jobs"), or dispatch a fresh daily for the same commit.
+The merged verdict reads only the plan and share artifacts from the current attempt; an earlier attempt's
+artifacts cannot fill a gap.
+
 ## Rust version
 
 CI, the launcher's native-mod toolchain and the wasm mods' toolchain use one Rust release, written once in

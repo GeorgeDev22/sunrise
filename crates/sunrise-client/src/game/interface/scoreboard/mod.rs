@@ -501,7 +501,11 @@ impl Game<'_> {
         host.hub.teams.clone_from(&self.score.board.teams);
         let view = sunrise_client::lan::scoreboard::View::of(&self.score.board);
         host.hub.guests.update_all(|g| {
-            if g.placed && g.scoreboard != view {
+            if g.placed && !g.scoreboard_synced {
+                g.send_all(&view.initial());
+                g.scoreboard = view.clone();
+                g.scoreboard_synced = true;
+            } else if g.placed && g.scoreboard != view {
                 g.send_all(&g.scoreboard.changes(&view));
                 g.scoreboard = view.clone();
             }

@@ -123,21 +123,8 @@ pub(super) fn pack_stack(
     }
 }
 
-/// The world's enabled packs' content files (`recipe/`, `loot_table/`,
-/// `advancement/`, `tags/…`) for the tables to merge over the resource
-/// root's own. Empty when the world has no packs.
-pub(super) fn content_overlay(stack: &PackStack) -> Vec<(String, Vec<Vec<u8>>)> {
-    let packs: Vec<&DataPack> = std::iter::once(&stack.content)
-        .chain(stack.enabled_packs())
-        .collect();
-    if packs.is_empty() {
-        return Vec::new();
-    }
-    DataStore::load(&packs).files.into_iter().collect()
-}
-
-/// The files the content tables load from: the world's enabled packs'
-/// (`content_overlay`) with what native mods contribute for this load
+/// The files the content tables load from: the world's enabled packs
+/// with what native mods contribute for this load
 /// (`native_data_pack_files`) below them. `PackOverlay::top` is a path's last
 /// file, so a pack's file still overrides a mod's for the same path, and a
 /// later contribution overrides an earlier one, as packs do. `Game` builds
@@ -146,25 +133,31 @@ pub(super) fn content_overlay(stack: &PackStack) -> Vec<(String, Vec<Vec<u8>>)> 
 pub(super) fn overlay_files(
     stack: &PackStack,
     contributed: Vec<(String, Vec<u8>)>,
-) -> Vec<(String, Vec<Vec<u8>>)> {
-    if contributed.is_empty() {
-        return content_overlay(stack);
-    }
+) -> (
+    Vec<(String, Vec<Vec<u8>>)>,
+    std::collections::BTreeMap<String, String>,
+) {
     // Passive content replaces prepared data, native contributions sit over
     // it, and the world's selected packs retain the highest priority.
-    let mut files = DataStore::load(&[&stack.content]).files;
+    let mut store = DataStore::load(&[&stack.content]);
     for (path, bytes) in contributed {
-        if let Err(e) = serde_json::from_slice::<Box<serde_json::value::RawValue>>(&bytes) {
+        if !sunrise_client::lan::data::is_pack_registry_file(&path)
+            && let Err(e) = serde_json::from_slice::<Box<serde_json::value::RawValue>>(&bytes)
+        {
             log::warn!("Sunrise: a native mod's data pack file {path} is not JSON, skipped: {e}");
             continue;
         }
-        files.entry(path).or_default().push(bytes);
+        store.file_errors.remove(&path);
+        store.files.entry(path).or_default().push(bytes);
     }
     let packs = stack.enabled_packs().collect::<Vec<_>>();
-    for (path, versions) in DataStore::load(&packs).files {
-        files.entry(path).or_default().extend(versions);
+    let world = DataStore::load(&packs);
+    for (path, versions) in world.files {
+        store.file_errors.remove(&path);
+        store.files.entry(path).or_default().extend(versions);
     }
-    files.into_iter().collect()
+    store.file_errors.extend(world.file_errors);
+    (store.files.into_iter().collect(), store.file_errors)
 }
 
 impl FnState {
@@ -290,6 +283,10 @@ impl Game<'_> {
                 &self.res.core.item_data,
                 &super::pack_files(&tables.tables),
                 &tables.health.damage,
+                tables
+                    .tables
+                    .as_ref()
+                    .map(|tables| tables.packed_registries.clone()),
                 tables.advancements.clone(),
             )
             .map_err(|error| ReloadStageError::DataSource(format!("world registries: {error}")))?;
@@ -2975,7 +2972,8 @@ mod tests {
                 &[],
                 &[],
             );
-            let files = content_overlay(&stack);
+            let (files, errors) = overlay_files(&stack, Vec::new());
+            assert!(errors.is_empty());
             let (_, versions) = files.iter().find(|(id, _)| id == "recipe/x:r").unwrap();
             let last = versions.last().unwrap();
             assert_eq!(
@@ -3038,7 +3036,7 @@ mod tests {
             &[],
             &[],
         );
-        let files = overlay_files(
+        let (files, _) = overlay_files(
             &stack,
             vec![
                 ("tags/pkg:item/both".to_owned(), tag("pkg:from_mod")),
@@ -3077,7 +3075,7 @@ mod tests {
             ["pkg:only_mod"]
         );
         // The next load asks again: the new contribution, not the first's.
-        let files = overlay_files(
+        let (files, _) = overlay_files(
             &stack,
             vec![("tags/pkg:item/mod_only".to_owned(), tag("pkg:second_load"))],
         );
@@ -3088,7 +3086,7 @@ mod tests {
             ["pkg:second_load"]
         );
         // A file that isn't JSON is skipped alone, not the whole load.
-        let files = overlay_files(
+        let (files, _) = overlay_files(
             &stack,
             vec![
                 ("tags/pkg:item/mod_only".to_owned(), b"{not json".to_vec()),
@@ -3099,8 +3097,6 @@ mod tests {
         let tags = sunrise_items::items::load_tags(&dir, "item", &overlay).unwrap();
         assert!(!tags.contains_key("pkg:mod_only"));
         assert!(tags["pkg:good"].contains("pkg:good"));
-        // With nothing contributed the overlay is the packs' own.
-        assert_eq!(overlay_files(&stack, Vec::new()), content_overlay(&stack));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

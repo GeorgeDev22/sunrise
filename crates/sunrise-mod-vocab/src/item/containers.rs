@@ -195,8 +195,10 @@ impl std::ops::DerefMut for ModBlockEntity {
         &mut self.fields
     }
 }
-/// What a slot of a mod container admits, besides what its face rules and the item allow.
-/// Hoppers, droppers, funnels, menu shift-clicks and `ResourceHandler::insert` all apply it.
+/// The declared admission rule for a slot, beside its face rules and stack limits.
+/// In world insertion, [`crate::BlockEntityPart::can_place_item`] replaces this rule when
+/// it returns `Some`; `None` keeps it. Menu slots keep the declared rule and
+/// `menu_slot_rules`, independently of the block entity's answer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 // exhaustive: the three admission rules are the whole set a declaration can name
 #[derive(sunrise_mod_api_macros::Wire)]

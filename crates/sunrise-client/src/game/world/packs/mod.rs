@@ -680,8 +680,6 @@ impl Game<'_> {
             &mut self.native_shaders.picked,
         ));
         self.ui.chat.rescale(&self.gui.atlas);
-        // The screen survives reload, but names and mod-collected contents may change.
-        self.creative_screen.invalidate_build();
         super::client_reload::apply_client_reload(&self.mod_phase, client_applies);
         self.install_loop_context(loop_context);
         // A reload from the title can apply before the start's world-rest worker is done.
@@ -737,7 +735,10 @@ pub(super) fn stage_pack(
     // the frame that applies the reload (about 20 ms of it).
     let (render, atlas, panorama, (sounds, ui_metadata, language)) = std::thread::scope(|s| {
         let atlas = super::resource_load::named_scope(s, "pack-assets", || {
-            HudAtlas::build_over_with_dynamic_textures(&source, &source, pool)
+            let game = sunrise_assets::resource_source::ResourceSource::directory(
+                vanilla_root.to_path_buf(),
+            );
+            HudAtlas::build_over_with_dynamic_textures(&source, &source, &game, pool)
                 .map_err(|e| e.to_string())
         });
         let panorama = super::resource_load::named_scope(s, "pack-assets", || {

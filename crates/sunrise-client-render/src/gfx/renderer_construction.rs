@@ -866,7 +866,11 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            // A pack's `core/lightmap` draws into it, and its pixels are read back for F3.
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let lightmap_view = lightmap.create_view(&Default::default());
@@ -2201,7 +2205,7 @@ impl Renderer {
             },
             gpu_timer,
             gpu_times: Vec::new(),
-            lightmap_pixels: [0; 16 * 16 * 4],
+            lightmap_chart: core_lightmap::LightmapChart::new(),
             last_wait: std::time::Duration::ZERO,
             last_encode: std::time::Duration::ZERO,
             window,
@@ -2242,6 +2246,7 @@ impl Renderer {
             core_text: None,
             core_sky: None,
             core_particles,
+            core_lightmap: None,
             debug_lines_opaque,
             debug_lines,
             debug_lines_on_top,

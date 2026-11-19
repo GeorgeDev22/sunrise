@@ -25,8 +25,8 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "run",
         everyday: true,
-        usage: "run [--game <sunrise-client>] [--resources <folder>] [-- <game args>]",
-        summary: "Builds the mod, then starts the game with it.",
+        usage: "run [--game <sunrise-client>] [--resources <folder>] [--jars <dir>] [-- <game args>]",
+        summary: "Builds the mod, then starts the game with it; --jars selects a folder of original Java jars named by SHA-512.",
     },
     Command {
         name: "check",
@@ -92,7 +92,7 @@ const COMMANDS: &[Command] = &[
         name: "use-jar",
         everyday: false,
         usage: "use-jar <path>",
-        summary: "Lists an exact original Java jar as a passive asset and data source.",
+        summary: "Lists an exact original Java jar as a passive asset and data source and caches it for runs.",
     },
     Command {
         name: "native-build",

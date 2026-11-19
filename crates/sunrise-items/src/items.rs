@@ -685,10 +685,13 @@ impl Song {
 #[derive(Clone, Debug)]
 pub struct Instrument {
     pub sound: String,
+    /// `None` names a registry holder; `Some` keeps an inline sound's optional fixed range.
+    pub inline_sound_range: Option<Option<f32>>,
     /// Seconds the horn stays up, and its cooldown.
     pub use_duration: f32,
     /// How far it carries, in blocks (`range / 16` is its volume).
     pub range: f32,
+    pub durability_damage: i32,
 }
 impl Instrument {
     /// `InstrumentItem.getUseDuration`: `Mth.floor(useDuration * 20)`.
@@ -724,17 +727,50 @@ pub fn inline_instrument(stack: &ItemStack) -> Option<&sunrise_core::nbt::Tag> {
         _ => None,
     }
 }
-/// `Instrument.DIRECT_CODEC`: a `sound_event` that is an id or `{sound_id}`,
-/// `use_duration` and `range`.
-fn parse_instrument(v: &Value) -> Instrument {
-    let sound = match &v["sound_event"] {
-        Value::String(s) => s.clone(),
-        other => other["sound_id"].as_str().unwrap_or("").to_owned(),
-    };
-    Instrument {
-        sound,
-        use_duration: v["use_duration"].as_f64().unwrap_or(0.0) as f32,
-        range: v["range"].as_f64().unwrap_or(0.0) as f32,
+impl Instrument {
+    /// `Instrument.DIRECT_CODEC`: a sound holder or inline sound, duration,
+    /// audible range, and optional durability cost used by instrument gameplay.
+    pub fn decode(v: &Value) -> std::result::Result<Self, String> {
+        let event = &v["sound_event"];
+        let (sound, inline_sound_range) = if let Some(id) = event.as_str() {
+            (id, None)
+        } else {
+            let id = event["sound_id"]
+                .as_str()
+                .ok_or("sound_event must be a sound id or definition")?;
+            let fixed = match &event["range"] {
+                Value::Null => None,
+                range => Some(range.as_f64().ok_or("sound_event.range must be a number")? as f32),
+            };
+            (id, Some(fixed))
+        };
+        let sound = sunrise_core::identifier::Identifier::parse(sound)
+            .map_err(|error| format!("sound_event: {error}"))?
+            .to_string();
+        let use_duration = v["use_duration"]
+            .as_f64()
+            .map(|n| n as f32)
+            .filter(|n| (0.0..=f32::MAX).contains(n))
+            .ok_or("use_duration must be non-negative and finite")?;
+        let range = v["range"]
+            .as_f64()
+            .map(|n| n as f32)
+            .filter(|n| *n > 0.0 && *n <= f32::MAX)
+            .ok_or("range must be positive and finite")?;
+        let durability_damage = match &v["durability_damage"] {
+            Value::Null => 0,
+            n => n
+                .as_u64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or("durability_damage must be a non-negative integer")?,
+        };
+        Ok(Self {
+            sound,
+            inline_sound_range,
+            use_duration,
+            range,
+            durability_damage,
+        })
     }
 }
 #[path = "condition_files.rs"]
@@ -743,7 +779,11 @@ pub(crate) use condition_files::data_files;
 fn load_instruments(root: &Path, overlay: &PackOverlay) -> HashMap<String, Instrument> {
     data_files(root, "instrument", overlay)
         .into_iter()
-        .map(|(id, v)| (id, parse_instrument(&v)))
+        .filter_map(|(id, v)| {
+            Instrument::decode(&v)
+                .ok()
+                .map(|definition| (id, definition))
+        })
         .collect()
 }
 fn load_songs(root: &Path, overlay: &PackOverlay) -> HashMap<String, Song> {
@@ -910,12 +950,13 @@ impl Items {
         defaults: &ItemDefaults,
     ) -> Result<Self> {
         let mut items = Self::load_registry(root, registry, facts, overlay, defaults)?;
+        items.load_resource_registries(root, overlay, defaults)?;
         items.load_table_loot(root, overlay, defaults)?;
         Ok(items)
     }
 
-    /// Load the item registry and tags before resolving the world's loot
-    /// references. The owning load must bind its separately prepared loot data.
+    /// Load the item registry and tags before admitting dependent registries.
+    /// The owning load must then install instruments, enchantments and loot.
     pub fn load_registry(
         root: &Path,
         registry: &BlockRegistry,
@@ -1000,7 +1041,9 @@ impl Items {
     /// Every item's defaults, tags and block-to-item identities, without
     /// placement state ids (for headless tools that never place blocks).
     pub fn catalog(root: &Path, overlay: &PackOverlay, defaults: &ItemDefaults) -> Result<Self> {
-        let mut items = Self::catalog_items(root, overlay, defaults)?;
+        let mut items = Self::catalog_items(root, overlay, defaults, |items| {
+            items.load_resource_registries(root, overlay, defaults)
+        })?;
         ingredient_defaults::load_component_damage_registry(root, overlay, &mut items)?;
         Ok(items)
     }
@@ -1011,15 +1054,22 @@ impl Items {
         overlay: &PackOverlay,
         defaults: &ItemDefaults,
         damage: sunrise_client_core::registries::RegistryIds,
+        load_registries: impl FnOnce(&mut Self) -> Result<()>,
     ) -> Result<Self> {
-        let mut items = Self::catalog_items(root, overlay, defaults)?;
+        let mut items = Self::catalog_items(root, overlay, defaults, load_registries)?;
         Arc::make_mut(&mut items.component_registry)
             .by_registry
             .insert("minecraft:damage_type".into(), damage);
         Ok(items)
     }
-    fn catalog_items(root: &Path, overlay: &PackOverlay, defaults: &ItemDefaults) -> Result<Self> {
+    fn catalog_items(
+        root: &Path,
+        overlay: &PackOverlay,
+        defaults: &ItemDefaults,
+        load_registries: impl FnOnce(&mut Self) -> Result<()>,
+    ) -> Result<Self> {
         let mut items = Self::load_with(root, &HashMap::new(), overlay, defaults)?;
+        load_registries(&mut items)?;
         items.block_items = Arc::new(ingredient_defaults::block_items(root)?);
         items.load_table_loot(root, overlay, defaults)?;
         Ok(items)
@@ -1266,17 +1316,10 @@ impl Items {
             order.push(id);
         }
         let registry_order = registry_order(root, &order);
-        let enchantments = Arc::new(crate::enchant::Enchantments::load_with(
-            root, overlay, defaults,
-        )?);
         Ok(Self {
             items,
             block_items: Default::default(),
-            component_registry: ingredient_defaults::component_registry(
-                root,
-                &enchantments,
-                &entity_tags,
-            )?,
+            component_registry: ingredient_defaults::component_registry(root, &entity_tags)?,
             mob_visibility,
             order,
             registry_order,
@@ -1288,10 +1331,37 @@ impl Items {
             block_tag_order: load_tag_lists(root, "block", overlay)?,
             fluid_tag_order: load_tag_lists(root, "fluid", overlay)?,
             songs: load_songs(root, overlay),
-            instruments: load_instruments(root, overlay),
-            enchantments,
             ..Self::default()
         })
+    }
+
+    /// Load from resource files when there is no staged world registry snapshot.
+    pub fn load_resource_registries(
+        &mut self,
+        root: &Path,
+        overlay: &PackOverlay,
+        defaults: &ItemDefaults,
+    ) -> Result<()> {
+        self.install_registries(
+            crate::enchant::Enchantments::load_with(root, overlay, defaults)?,
+            load_instruments(root, overlay),
+        );
+        Ok(())
+    }
+
+    /// Install the dependent registries and the component decoder's matching ids.
+    pub fn install_registries(
+        &mut self,
+        enchantments: crate::enchant::Enchantments,
+        instruments: HashMap<String, Instrument>,
+    ) {
+        Arc::make_mut(&mut self.component_registry).enchantments = enchantments
+            .list
+            .iter()
+            .map(|entry| entry.id.to_string())
+            .collect();
+        self.enchantments = Arc::new(enchantments);
+        self.instruments = instruments;
     }
 
     fn load_table_loot(
@@ -1339,21 +1409,11 @@ impl Items {
             None
         }
     }
-    /// Record one prototype's `equippable` and `mob_visibility` the way `load`
-    /// reads them from the default-component report.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn insert_mob_visibility_component(&mut self, id: &str, components: &Value) {
-        if let Some(parsed) = worn_mob_visibility(components, &HashMap::new()) {
-            self.mob_visibility.insert(Arc::from(id), parsed);
-        }
-    }
     /// The instrument a goat horn plays: its `instrument` component's
     /// registry entry or inline instrument.
     pub fn instrument(&self, stack: &ItemStack) -> Option<Instrument> {
         if let Some(tag) = inline_instrument(stack) {
-            return Some(parse_instrument(
-                &sunrise_client_core::scoreboard::tag_to_json(tag),
-            ));
+            return Instrument::decode(&sunrise_client_core::scoreboard::tag_to_json(tag)).ok();
         }
         self.instruments.get(&instrument_id(stack)?).cloned()
     }
@@ -3653,7 +3713,7 @@ mod tests {
             fs::write(dir.join("entry.json"), "{}").unwrap();
             files.push((format!("{kind}/demo:entry"), vec![
                 b"{}".to_vec(),
-                json!({"neoforge:conditions":[{"type":"neoforge:mod_loaded","modid":"provider"}],"description":"winning","max_level":7}).to_string().into_bytes(),
+                json!({"neoforge:conditions":[{"type":"neoforge:mod_loaded","modid":"provider"}],"description":"winning","max_level":7,"sound_event":"demo:note","use_duration":4.0,"range":16.0}).to_string().into_bytes(),
             ]));
             files.push((
                 format!("{kind}/demo:unknown"),

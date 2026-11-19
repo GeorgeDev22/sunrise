@@ -172,6 +172,8 @@ pub mod capture;
 mod celestial;
 mod census;
 pub mod compositor;
+pub(crate) mod core_lightmap;
+pub use core_lightmap::SHADERS as LIGHTMAP_SHADERS;
 pub(crate) mod core_lines;
 mod core_particles;
 pub use core_particles::HEIGHTMAP_SIZE as POLYTONE_HEIGHTMAP_SIZE;
@@ -182,6 +184,7 @@ pub(crate) mod display_watch;
 mod dx12_compiler;
 mod end_sky;
 pub mod entity_skin;
+pub mod expression_blocks;
 pub mod external;
 mod flat;
 mod frame_gen;
@@ -341,9 +344,8 @@ pub struct Renderer {
     gpu_timer: Option<timing::GpuTimer>,
     /// GPU frame times (ms) read back since the caller last drained them.
     pub gpu_times: Vec<f32>,
-    /// The last lightmap written, RGBA rows of sky level by block level
-    /// (F3+4 shows it).
-    pub lightmap_pixels: [u8; 16 * 16 * 4],
+    /// The light texture's pixels F3+4 shows, with what drew them (`lightmap_sample`).
+    lightmap_chart: core_lightmap::LightmapChart,
     /// Time the last `render` spent blocked on the GPU or the display
     /// (acquiring, presenting, offscreen pacing, the submit thread holding the queue),
     /// excluded from CPU time.
@@ -427,6 +429,9 @@ pub struct Renderer {
     core_text: Option<core_text::CoreText>,
     /// The packs' `core/sky` and `core/stars`, drawn in place of the native sky and stars.
     core_sky: Option<core_sky::CoreSky>,
+    /// A resource pack's `core/lightmap`, which draws the light texture in place of the native
+    /// one.
+    core_lightmap: Option<core_lightmap::CoreLightmap>,
     /// Polytone GPU particle types with their own shader, and this frame's batches of them.
     core_particles: core_particles::CoreParticles,
     /// Gizmo lines: opaque ones (`RenderTypes.lines`, which writes depth),
@@ -585,7 +590,7 @@ pub struct Renderer {
     section_copy_bytes: u64,
     /// When a large translucent page may start to shrink (`shrink_translucent`).
     shrink_gate: ShrinkGate,
-    /// Whether `lightmap` holds `lightmap_pixels` yet.
+    /// Whether `lightmap` holds `lightmap_chart`'s native pixels yet.
     lightmap_uploaded: bool,
     sprite_minimum_size: u32,
     /// Each sprite layer's own side, before the arrays scaled it up (`mipmap::Settings::native_size`).
@@ -1135,27 +1140,6 @@ impl Renderer {
     pub fn custom_sky_draws(&mut self) -> &mut Vec<crate::custom_sky::Draw> {
         &mut self.custom_sky_draws
     }
-    /// The resource packs' `core/rendertype_lines` (`HudAtlas::lines_shader`) for the block
-    /// outline, or the built-in one.
-    pub fn set_lines_shader(&mut self, program: Option<&crate::core_shader::CoreProgram>) {
-        let format = self.output.frame.format;
-        // A pack's GLSL writes vanilla's gamma: a frame of linear light keeps the built-in one.
-        let program = program.filter(|_| !self.output.frame.linear_light);
-        self.core_lines =
-            program.and_then(|program| core_lines::CoreLines::new(&self.device, format, program));
-    }
-    /// The resource packs' `core/sky` and `core/stars` (`HudAtlas::sky_shader`,
-    /// `stars_shader`), or the built-in sky and stars.
-    pub fn set_sky_shaders(
-        &mut self,
-        disc: Option<&crate::core_shader::CoreProgram>,
-        stars: Option<&crate::core_shader::CoreProgram>,
-    ) {
-        // As `set_lines_shader`: not on a frame of linear light.
-        let keep = !self.output.frame.linear_light;
-        let (disc, stars) = (disc.filter(|_| keep), stars.filter(|_| keep));
-        self.core_sky = core_sky::CoreSky::new(&self.device, self.output.frame.format, disc, stars);
-    }
     fn quad_indices(device: &wgpu::Device, quads: u32) -> wgpu::Buffer {
         surface_setup::ray_query::quad_indices(device, quads)
     }
@@ -1363,71 +1347,6 @@ impl Renderer {
     fn screen_view(&self, fov_degrees: f32, yaw: f32, pitch: f32, far: f32) -> View {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         View::screen(yaw, pitch, fov_degrees, aspect, far)
-    }
-    fn update_lightmap(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        sky: &Sky,
-        darkness: f32,
-        gamma: f32,
-        night_vision: f32,
-        flicker: f32,
-        boss_darken: f32,
-    ) {
-        // lightmap.fsh: per (block, sky) level.
-        let brightness = |level: f32| level / (4.0 - 3.0 * level);
-        let mut pixels = [0u8; 16 * 16 * 4];
-        for s in 0..16 {
-            for b in 0..16 {
-                let block_level = b as f32 / 15.0;
-                let sky_level = s as f32 / 15.0;
-                let block_brightness = brightness(block_level) * (1.4 + flicker);
-                let sky_brightness = brightness(sky_level) * sky.sky_light_factor;
-                // NightVisionColor defaults to 0x999999.
-                let mut color =
-                    Vec3::from(sky.ambient_light_color).max(Vec3::splat(0.6 * night_vision));
-                color += Vec3::from(sky.sky_light_color) * sky_brightness;
-                let parabolic = (2.0 * block_level - 1.0).powi(2);
-                let block_color = Vec3::from(sky.block_light_tint).lerp(Vec3::ONE, 0.9 * parabolic);
-                color += block_color * block_brightness;
-                // lightmap.fsh: a boss bar mixes the light toward 70/60/60%.
-                color = color.lerp(color * Vec3::new(0.7, 0.6, 0.6), boss_darken);
-                color -= Vec3::splat(darkness);
-                color = color.clamp(Vec3::ZERO, Vec3::ONE);
-                let max = color.max_element().max(1e-6);
-                let inverted = 1.0 - max;
-                let scaled = 1.0 - inverted.powi(4);
-                let not_gamma = color * (scaled / max);
-                color = color.lerp(not_gamma, gamma);
-                let i = (s * 16 + b) * 4;
-                pixels[i] = (color.x * 255.0) as u8;
-                pixels[i + 1] = (color.y * 255.0) as u8;
-                pixels[i + 2] = (color.z * 255.0) as u8;
-                pixels[i + 3] = 255;
-            }
-        }
-        if self.fullbright {
-            pixels.fill(255);
-        }
-        // The lightmap changes with the time of day, flicker and effects,
-        // not every frame: upload only what differs from the texture.
-        if pixels == self.lightmap_pixels && self.lightmap_uploaded {
-            return;
-        }
-        self.uploads.texture(
-            encoder,
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.lightmap,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            16,
-            16,
-            &pixels,
-        );
-        self.lightmap_pixels = pixels;
-        self.lightmap_uploaded = true;
     }
     fn animate(&mut self, encoder: &mut wgpu::CommandEncoder, tick: u64, cull_inactive: bool) {
         let active = cull_inactive.then_some(&self.active_animated_layers[..]);

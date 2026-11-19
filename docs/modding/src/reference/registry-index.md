@@ -2,7 +2,7 @@
 
 Use the registry to distribute content and native mods (`.smod`), modpacks (`.spack`),
 resource packs, data packs, shaders-folder packs and Sunrise shader packs (`.sshader`).
-Submit your project page and version file through the registry submission form.
+Use the [registry submission form](https://playsunrise.net/mods/submit) or stage a mod locally with `cargo sunrise-mod publish`.
 Versions are pinned by SHA-256. The launcher and website read schema 1 of `index.json`.
 The format is defined by `sunrise_mod_package::index` and `sunrise_mod_package::modpack`.
 
@@ -124,11 +124,15 @@ review and history; it is not a candidate for installation.
    supplies eligibility for each version: `native-1/<sunrise>/<mixins>` says what it was made for, not whether
    the used SDK surface is unchanged on this build. Try another eligible version if a later range rules out a
    choice. Do not change a dependency to a version that breaks an installed mod's known range.
-4. Try each request on its own. If an installed version blocks it and the batch also requests a change to that mod,
-   try those requests together before refusing. Plan feasible requests together when their selections share a mod or
-   activate a dependency constraint across requests. If a group can't be resolved, report the refusal for that group;
-   an independent group can still install. A plan gives each request's outcome and version or refusal reason,
-   lists what to install, keep or update, and identifies which requests need each dependency. Lists are ordered by id.
+4. Try the entire batch against the final versions. A replacement can come from a request or from another mod's
+   required dependencies. If the whole batch cannot install, group requests whose selections share a mod or activate
+   a dependency constraint across requests, and check each group together. An installed version can block a request
+   on its own but not as part of a group that replaces that version; a different candidate version may need a
+   different replacement. If a group still fails, retry by omitting requests blocked by installed versions, trying
+   larger subgroups first. If the retry search hits its limit, the unresolved requests report that limit and the
+   previously validated groups can still be planned separately. A plan gives each request's outcome and version or
+   refusal reason, lists what to install, keep or update, and identifies which requests need each dependency. Lists
+   are ordered by id.
    An update with `downgrade: true` moves to a lower SemVer; the installer names that downgrade in its status line
    (for example, “Downgraded Sunrise Creatures from 0.2.0 to 0.1.3”).
 5. Before removing a mod, use its id and the installed artifacts to find the known installed mods that require
@@ -210,8 +214,9 @@ sits in a linked folder, refuses the import before anything is written.
 ## Submitting a project
 
 A project is a file `mods/<id>.toml` in [sunrise-org/sunrise-mods](https://github.com/sunrise-org/sunrise-mods),
-added by a pull request that a person reviews ([Publishing your mod](../how-to/publish.md) is the task page, and
-`cargo sunrise-mod publish` writes the entry). Its page needs:
+added by a pull request that a person reviews. The [registry submission form](https://playsunrise.net/mods/submit)
+opens the pull request for you. For a mod, you can instead stage it with `cargo sunrise-mod publish` and open the
+pull request yourself. See [Publishing your mod](../how-to/publish.md) for the steps. Its page needs:
 
 - A description of 50–10,000 characters after trimming.
 - 1–3 categories from your project kind’s list and up to 10 lowercase tags.

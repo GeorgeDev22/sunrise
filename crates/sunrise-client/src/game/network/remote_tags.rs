@@ -23,7 +23,27 @@ impl Game<'_> {
             self.server_items = self.server_items(&r.registries);
         }
         self.refresh_infiniburn();
+        self.refresh_creative_search_tags();
         self.install_remote_tags();
+    }
+
+    pub(super) fn refresh_creative_search_tags(&mut self) {
+        let tags = self.remote.as_ref().and_then(|r| {
+            let ids = r.builtin.get("minecraft:item")?;
+            let tags = r.registries.tags.get("minecraft:item")?;
+            Some(
+                tags.iter()
+                    .map(|(tag, members)| {
+                        let items = members
+                            .iter()
+                            .filter_map(|&id| ids.name(id).map(str::to_owned))
+                            .collect();
+                        (tag.clone(), items)
+                    })
+                    .collect(),
+            )
+        });
+        self.creative_screen.set_item_tags(tags.as_ref());
     }
 
     /// Make the server's tags what native mods read, then tell them. Snapshot client

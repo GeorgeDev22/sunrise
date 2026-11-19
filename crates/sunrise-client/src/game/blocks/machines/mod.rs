@@ -7,6 +7,8 @@ use super::{Game, composter::is_composter, spill, storage::is_shulker_box};
 use mod_api::__private::game::*;
 use sunrise_core::nbt::Tag;
 
+#[cfg(test)]
+mod can_place_item_tests;
 pub(in crate::game) mod cauldron_contents;
 #[cfg(test)]
 mod contents_changed_tests;
@@ -267,6 +269,122 @@ pub(super) struct Containers<'a> {
     /// The level's mobs, for the cat half of `ChestBlock.isChestBlockedAt`.
     mobs: &'a [Mob],
 }
+/// The API snapshots for one offered stack. The offered count may shrink, and an
+/// accepted write (or its notification) may change what the next slot sees.
+#[derive(Default)]
+struct PlacementAttempt {
+    stack: Option<Option<mod_api::ItemStack>>,
+    entity: Option<PlacementEntity>,
+}
+
+enum PlacementQuery<'a> {
+    Offer(&'a mut PlacementAttempt),
+    Planning,
+}
+
+struct PlacementEntity {
+    pos: Pos,
+    revision: sunrise_client::chunk::block_entity::ModRevision,
+    snapshot: PlacementSnapshot,
+}
+
+enum PlacementSnapshot {
+    Unsubscribed,
+    Unrepresentable,
+    Ready(mod_api::ModBlockEntity),
+}
+
+#[derive(Clone, Copy)]
+enum Insertion {
+    Automation(Option<Pos>),
+    /// The pull transaction keeps just the receiving hopper's slot.
+    Pull,
+    /// A capability write may need to keep the whole entity.
+    Capability,
+}
+
+#[derive(PartialEq, Eq)]
+enum MoveIn {
+    /// The offer was refused or had no room; a pull can try the next slot.
+    Skipped,
+    /// A fitting slot failed to take the stack; a pull must abort.
+    Blocked,
+    Moved,
+}
+
+impl PlacementAttempt {
+    fn ask(
+        &mut self,
+        pos: Pos,
+        entity: &sunrise_client::containers::ModBlockEntity,
+        slot: usize,
+        stack: &ItemStack,
+    ) -> Option<bool> {
+        use super::api_values::TryIntoApi;
+
+        if stack.count == 0 || !mod_api::__private::has_part_hook(mod_api::HookId::CanPlaceItem) {
+            return None;
+        }
+        let revision = entity.revision();
+        if self
+            .entity
+            .as_ref()
+            .is_none_or(|seen| seen.pos != pos || seen.revision != revision)
+        {
+            let snapshot = if mod_api::__private::block_entity_type_listens(
+                mod_api::HookId::CanPlaceItem,
+                entity.id(),
+            ) {
+                match entity.try_into_api() {
+                    Ok(snapshot) => PlacementSnapshot::Ready(snapshot),
+                    Err(error) => {
+                        log::debug!(
+                            "Sunrise: can_place_item could not read {} at {pos:?}: {error:?}",
+                            entity.id()
+                        );
+                        PlacementSnapshot::Unrepresentable
+                    }
+                }
+            } else {
+                PlacementSnapshot::Unsubscribed
+            };
+            self.entity = Some(PlacementEntity {
+                pos,
+                revision,
+                snapshot,
+            });
+        }
+        let snapshot = match &self.entity.as_ref()?.snapshot {
+            PlacementSnapshot::Unsubscribed => return None,
+            PlacementSnapshot::Unrepresentable => return Some(false),
+            PlacementSnapshot::Ready(snapshot) => snapshot,
+        };
+        let Some(offered) = self.stack.get_or_insert_with(|| {
+            stack
+                .try_into_api()
+                .inspect_err(|error| {
+                    log::debug!(
+                        "Sunrise: can_place_item could not read the offered {}: {error:?}",
+                        stack.item
+                    );
+                })
+                .ok()
+        }) else {
+            return Some(false);
+        };
+        if offered.count() != stack.count && offered.set_count(stack.count).is_err() {
+            return Some(false);
+        }
+        let mut allowed = None;
+        Game::native_can_place_item(snapshot, slot, offered, &mut allowed);
+        allowed
+    }
+
+    fn wrote_entity(&mut self) {
+        self.entity = None;
+    }
+}
+
 impl Containers<'_> {
     fn prop(&self, state: BlockStateId, key: &str) -> Option<&str> {
         self.registry
@@ -521,24 +639,47 @@ impl Containers<'_> {
     /// `Container.canPlaceItem` (+ `canPlaceItemThroughFace` for furnaces): `accepts`, and what
     /// the slot holds now. The slots of one item (a jukebox's, a chiseled bookshelf's, a brewing
     /// stand's bottles) take one only when empty, a furnace's fuel slot no bucket onto a
-    /// bucket, and a crafter fills its smallest stack first.
-    fn can_place(&self, view: &View, slot: usize, stack: &ItemStack) -> bool {
+    /// bucket, and a crafter fills its smallest stack first. Planning has no offered amount,
+    /// so it must not veto a slot that a subscribed part could admit.
+    fn can_place(
+        &self,
+        view: &View,
+        slot: usize,
+        stack: &ItemStack,
+        query: PlacementQuery<'_>,
+    ) -> bool {
         if !self.accepts(view, slot, stack) {
             return false;
         }
+        if let Some(container) = &view.container {
+            let Some((pos, index)) = view.locate(slot) else {
+                return false;
+            };
+            let Some(BlockEntity::Mod(entity)) = self.world.block_entities.get(&pos) else {
+                return false;
+            };
+            let answer = match query {
+                PlacementQuery::Offer(attempt) => attempt.ask(pos, entity, index, stack),
+                PlacementQuery::Planning => mod_api::__private::block_entity_type_listens(
+                    mod_api::HookId::CanPlaceItem,
+                    entity.id(),
+                )
+                .then_some(true),
+            };
+            return answer.unwrap_or_else(|| {
+                sunrise_client::containers::mod_container_insert_allowed(
+                    container
+                        .insert_rules
+                        .get(slot)
+                        .copied()
+                        .unwrap_or_default(),
+                    self.get(view, slot),
+                    stack,
+                )
+            });
+        }
         let held = self.get(view, slot);
         let is_bucket = |s: &ItemStack| &*s.item == "minecraft:bucket";
-        if let Some(container) = &view.container {
-            return sunrise_client::containers::mod_container_insert_allowed(
-                container
-                    .insert_rules
-                    .get(slot)
-                    .copied()
-                    .unwrap_or_default(),
-                held,
-                stack,
-            );
-        }
         match view.kind {
             Kind::Jukebox | Kind::Bookshelf => held.is_none(),
             Kind::Brewing => slot >= 3 || held.is_none(),
@@ -561,19 +702,24 @@ impl Containers<'_> {
         if !self.accepts(view, slot, stack) {
             return 0;
         }
+        self.slot_stack_limit(view, slot, stack)
+    }
+    fn slot_stack_limit(&self, view: &View, slot: usize, stack: &ItemStack) -> u32 {
         let capacity = view.slot_limit().min(self.max_stack(stack));
         view.locate(slot)
             .and_then(|(pos, _)| self.world.container_stack_limit(pos))
             .map_or(capacity, |limit| capacity.min(limit))
     }
-    /// How many of `stack` slot `slot` takes now: none where `can_place` refuses it, else
-    /// `capacity` less what it holds.
-    fn fits(&self, view: &View, slot: usize, stack: &ItemStack) -> u32 {
-        if !self.can_place(view, slot, stack) {
+    /// For planning, physical room subject to rules a part cannot override.
+    fn planning_room(&self, view: &View, slot: usize, stack: &ItemStack) -> u32 {
+        if !self.can_place(view, slot, stack, PlacementQuery::Planning) {
             return 0;
         }
+        self.insertion_room(view, slot, stack)
+    }
+    fn insertion_room(&self, view: &View, slot: usize, stack: &ItemStack) -> u32 {
         room(
-            self.capacity(view, slot, stack),
+            self.slot_stack_limit(view, slot, stack),
             self.get(view, slot),
             stack,
         )
@@ -651,13 +797,13 @@ impl Containers<'_> {
     }
 }
 
-/// How many of `stack` go into a slot holding `current`, up to `limit`: into an empty slot, or
-/// onto the same item and components (`HopperBlockEntity.canMergeItems`).
+/// Physical room for this item and components, in an empty or matching stack
+/// (`HopperBlockEntity.canMergeItems`).
 fn room(limit: u32, current: Option<&ItemStack>, stack: &ItemStack) -> u32 {
     match current {
-        None => stack.count.min(limit),
+        None => limit,
         Some(current) if current.same_item_same_components(stack) => {
-            stack.count.min(limit.saturating_sub(current.count))
+            limit.saturating_sub(current.count)
         }
         Some(_) => 0,
     }
@@ -864,7 +1010,13 @@ impl Game<'_> {
         let Some(view) = containers.view((pos[0], pos[1], pos[2]), false) else {
             return false;
         };
-        view.kind == Kind::Shulker || containers.can_place(&view, slot, stack)
+        view.kind == Kind::Shulker
+            || containers.can_place(
+                &view,
+                slot,
+                stack,
+                PlacementQuery::Offer(&mut PlacementAttempt::default()),
+            )
     }
     fn slot_mut_at(&mut self, view: &View, slot: usize) -> Option<&mut Option<ItemStack>> {
         let (pos, i) = view.locate(slot)?;
@@ -933,13 +1085,14 @@ impl Game<'_> {
     /// `HopperBlockEntity.tryMoveInItem`.
     fn try_move_in_item(
         &mut self,
-        from_hopper: Option<Pos>,
+        insertion: Insertion,
         view: &View,
         stack: ItemStack,
         slot: usize,
-    ) -> Option<ItemStack> {
-        let (rest, moved) = self.move_in_item(from_hopper, view, stack, slot);
-        if moved {
+        attempt: &mut PlacementAttempt,
+    ) -> (Option<ItemStack>, MoveIn) {
+        let (rest, result) = self.move_in_item(insertion, view, stack, slot, attempt);
+        if result == MoveIn::Moved {
             self.view_changed(view);
             // JukeboxBlockEntity.setTheItem through a hopper's or a dropper's
             // transfer: the disc it lands on starts playing.
@@ -948,21 +1101,40 @@ impl Game<'_> {
                 self.jukebox_inserted([x, y, z]);
             }
         }
-        rest
+        (rest, result)
     }
-    /// `tryMoveInItem` before its `setChanged`: the remainder, and whether
-    /// anything moved.
+    /// `tryMoveInItem` before `setChanged`: ask about the full offer, then keep and
+    /// write the admitted slot. A skipped slot is never journaled.
     fn move_in_item(
         &mut self,
-        from_hopper: Option<Pos>,
+        insertion: Insertion,
         view: &View,
         mut stack: ItemStack,
         slot: usize,
-    ) -> (Option<ItemStack>, bool) {
+        attempt: &mut PlacementAttempt,
+    ) -> (Option<ItemStack>, MoveIn) {
         let c = self.containers();
-        if !c.can_place(view, slot, &stack) {
-            return (Some(stack), false);
+        if !c.can_place(view, slot, &stack, PlacementQuery::Offer(attempt)) {
+            return (Some(stack), MoveIn::Skipped);
         }
+        let (from_hopper, count) = match insertion {
+            Insertion::Automation(from_hopper) => (from_hopper, stack.count),
+            Insertion::Pull | Insertion::Capability => {
+                let count = c.insertion_room(view, slot, &stack).min(stack.count);
+                if count == 0 {
+                    return (Some(stack), MoveIn::Skipped);
+                }
+                if matches!(insertion, Insertion::Pull) {
+                    let Some((pos, index)) = view.locate(slot) else {
+                        return (Some(stack), MoveIn::Blocked);
+                    };
+                    self.journal_block_entity_slot(pos, index);
+                } else {
+                    self.journal_view_slot(view, slot);
+                }
+                (None, count)
+            }
+        };
         self.unpack_inventory_slot(view, slot);
         let was_empty = self.inventory_is_empty(view);
         let c = self.containers();
@@ -973,7 +1145,7 @@ impl Game<'_> {
         let restricted = override_limit.is_some_and(|limit| limit < vanilla_max);
         let max = override_limit.map_or(vanilla_max, |limit| vanilla_max.min(limit));
         if restricted && max == 0 {
-            return (Some(stack), false);
+            return (Some(stack), MoveIn::Blocked);
         }
 
         let mut success = false;
@@ -983,7 +1155,7 @@ impl Game<'_> {
             let Some(tag) = spill::saved_entity(&self.world, [pos.0, pos.1, pos.2])
                 .or_else(|| self.pot_data([pos.0, pos.1, pos.2]))
             else {
-                return (Some(stack), false);
+                return (Some(stack), MoveIn::Blocked);
             };
             let item = tag.get("item").and_then(save::item_from_nbt);
             Some((tag, item))
@@ -994,10 +1166,12 @@ impl Game<'_> {
             item
         } else {
             let Some(target) = self.slot_mut_at(view, slot) else {
-                return (Some(stack), false);
+                return (Some(stack), MoveIn::Blocked);
             };
             target
         };
+        let beyond_slot = stack.count - count;
+        stack.count = count;
         // An empty stack a mod left in its slot: the slot is free (`isEmpty`).
         if target.as_ref().is_some_and(|s| s.count == 0) {
             *target = None;
@@ -1058,7 +1232,14 @@ impl Game<'_> {
                 state.cooldown = 8 - skip;
             }
         }
-        ((stack.count > 0).then_some(stack), success)
+        let result = if success {
+            attempt.wrote_entity();
+            MoveIn::Moved
+        } else {
+            MoveIn::Blocked
+        };
+        stack.count += beyond_slot;
+        ((stack.count > 0).then_some(stack), result)
     }
     /// `HopperBlockEntity.addItem(from, container, stack, direction)`; the remainder.
     fn add_item(
@@ -1072,10 +1253,19 @@ impl Game<'_> {
             let (x, y, z) = view.parts[0].0;
             return self.composter_container_insert([x, y, z], stack, face == Some(Direction::Up));
         }
+        let mut attempt = PlacementAttempt::default();
         let mut rest = Some(stack);
         for slot in view.slots_to_add_iter(face) {
             let Some(stack) = rest.take() else { break };
-            rest = self.try_move_in_item(from_hopper, view, stack, slot);
+            rest = self
+                .try_move_in_item(
+                    Insertion::Automation(from_hopper),
+                    view,
+                    stack,
+                    slot,
+                    &mut attempt,
+                )
+                .0;
         }
         rest
     }
@@ -1453,13 +1643,17 @@ impl Game<'_> {
                 if part.checked(came, 1, &at) != Some(1) {
                     return Err(());
                 }
-                let target = (0..hopper.len())
-                    .find(|&slot| game.containers().fits(hopper, slot, &one) > 0)
-                    .ok_or(())?;
-                let (pos, slot) = hopper.locate(target).ok_or(())?;
-                game.journal_block_entity_slot(pos, slot);
-                game.try_move_in_item(None, hopper, one, target)
-                    .map_or(Ok(()), |_| Err(()))
+                let mut attempt = PlacementAttempt::default();
+                let mut rest = one;
+                for target in 0..hopper.len() {
+                    match game.try_move_in_item(Insertion::Pull, hopper, rest, target, &mut attempt)
+                    {
+                        (Some(remainder), MoveIn::Skipped) => rest = remainder,
+                        (None, MoveIn::Moved) => return Ok(()),
+                        _ => return Err(()),
+                    }
+                }
+                Err(())
             });
             if moved.is_ok() {
                 return true;
@@ -2344,7 +2538,15 @@ mod brewing_fuel_transfer_tests {
                 let hopper = containers.view(hopper_pos, false).unwrap();
                 let stand = containers.view(stand_pos, false).unwrap();
                 let fuel = containers.get(&hopper, 0).unwrap();
-                assert_eq!(containers.can_place(&stand, 4, fuel), accepted);
+                assert_eq!(
+                    containers.can_place(
+                        &stand,
+                        4,
+                        fuel,
+                        super::PlacementQuery::Offer(&mut super::PlacementAttempt::default()),
+                    ),
+                    accepted
+                );
                 assert_eq!(
                     game.eject_into(hopper_pos, &hopper, &stand, Direction::West),
                     accepted
@@ -2684,7 +2886,7 @@ mod capacity_tests {
             };
             let offered = ItemStack::new(offered, 1);
             assert_eq!(c.capacity(&view, 0, &offered), 1, "{block}");
-            assert_eq!(c.fits(&view, 0, &offered), 0, "{block}");
+            assert_eq!(c.planning_room(&view, 0, &offered), 0, "{block}");
             assert_eq!(
                 c.capacity(&view, 0, &ItemStack::new("minecraft:stick", 1)),
                 0,

@@ -228,16 +228,16 @@ earlier recipe at the same id. A jar may use any namespace. Only its passive
 `assets/` and `data/` participate: Java classes and the jar's own pack metadata are
 not loaded.
 
-Original jars stay in `<game home>/jars/<sha512>.jar`; no bytes are copied into a
-mod. The launcher checks and supplies exact files, and the existing ZIP readers
-write only the decoded resource cache. The complete ordered reference list,
+The game reads exact originals from `<game home>/jars/<sha512>.jar`; no bytes are copied into a mod.
+For development, [`cargo sunrise-mod run`](../how-to/content-mods.md#java-jars-as-external-assets) checks and
+stages these files in its own game home. The ZIP readers write only the decoded resource cache.
+The complete ordered reference list,
 including version, contributes to the composed root's stamp, so changing it
 rebuilds on the next resource load. Server `/reload` uses the accepted inputs of
 that composed root, not another package scan.
 
-**Unavailable originals.** Launcher preparation refuses before a native build or
-game launch and names all requiring mods, the original jar and its expected
-cache path. Direct game resource or world loading with a missing native
+**Unavailable originals.** `cargo sunrise-mod run` refuses before starting the game and names the mod,
+the original jar and its expected cache path. Direct game resource or world loading with a missing native
 requirement fails as a whole; it never publishes code without the matching data.
 A missing input during `/reload` reports the typed failure to the command source
 and keeps the previous data and composed root. Content-only mods have no code to

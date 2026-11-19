@@ -39,7 +39,9 @@ To compile it against the prebuilt game, run `cargo sunrise-mod build`: it fetch
 into a per-user cache and installs the Rust the SDK names with rustup, so it needs the network the first time. To
 play it, run `cargo sunrise-mod run --resources <folder> -- <game args>`; the user has to make those prepared
 resources from their own Minecraft ([Prepared resources](start/first-mod.md#prepared-resources)), so ask for the
-folder and never download Mojang's files. Run `cargo test` for the logic the hooks use. A build server uses the plan contract in
+folder and never download Mojang's files. For [`[[jar]]` originals](how-to/content-mods.md#java-jars-as-external-assets),
+add the developer's local jar with `cargo sunrise-mod use-jar <path>` before running. Run `cargo test` for the logic
+the hooks use. A build server uses the plan contract in
 [Your first native mod](start/first-mod.md#without-the-tools-commands).
 
 ## Rules that matter

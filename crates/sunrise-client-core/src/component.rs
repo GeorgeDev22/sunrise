@@ -41,21 +41,22 @@ pub fn untrusted_http_url(url: &str) -> bool {
     })
 }
 
-/// `ClickEvent.CODEC` plus the legacy `value` field TextComponentHoverAndClickEventFix
-/// renames (`url` / `command` / `page`).
+/// A current `ClickEvent.CODEC` value, with no legacy field fallbacks.
 pub fn parse_click_event(
     e: &serde_json::Map<String, Value>,
 ) -> Result<Option<crate::text::ClickEvent>, sunrise_core::json_nbt::JsonNbtError> {
-    parse_click_event_origin(e, Origin::Remote)
+    parse_click_event_origin(e, Origin::Remote, false)
 }
 fn parse_click_event_origin(
     e: &serde_json::Map<String, Value>,
     origin: Origin,
+    legacy_fields: bool,
 ) -> Result<Option<crate::text::ClickEvent>, sunrise_core::json_nbt::JsonNbtError> {
     use crate::text::ClickEvent;
     use sunrise_core::json_nbt::json_to_tag;
     let text = |k: &str| e.get(k).and_then(Value::as_str).map(str::to_owned);
-    let legacy = || text("value");
+    // Rendering also reads pre-DataFixer chat and SNBT. The current codec does not.
+    let legacy = || legacy_fields.then(|| text("value")).flatten();
     let event = match e.get("action").and_then(Value::as_str) {
         Some("open_file") if origin == Origin::Local => text("path").map(ClickEvent::OpenFile),
         Some("open_url") => text("url")
@@ -65,11 +66,12 @@ fn parse_click_event_origin(
         Some("change_page") => e
             .get("page")
             .and_then(Value::as_i64)
-            .or_else(|| e.get("value").and_then(Value::as_i64))
             .or_else(|| {
-                e.get("value")
-                    .and_then(Value::as_str)
-                    .and_then(|s| s.parse().ok())
+                if !legacy_fields {
+                    return None;
+                }
+                let value = e.get("value")?;
+                value.as_i64().or_else(|| value.as_str()?.parse().ok())
             })
             .and_then(|p| i32::try_from(p).ok())
             .filter(|p| origin == Origin::Local || *p >= 1)
@@ -165,7 +167,7 @@ fn object_style<'a>(
 ) -> Style {
     let mut style = Style::default();
     if let Some(c) = o.get("color").and_then(Value::as_str) {
-        style.color = named_color(c).or_else(|| hex_color(c));
+        style.color = parse_color(c);
     }
     style.shadow_color = o.get("shadow_color").and_then(shadow_color);
     style.bold = style_flag(o.get("bold"));
@@ -177,7 +179,7 @@ fn object_style<'a>(
     // ClickEvent.CODEC: the actions a chat line acts on here. A component
     // from a server never opens a file.
     if let Some(e) = style_event_object(o, "click_event", "clickEvent") {
-        style.click = parse_click_event_origin(e, origin).ok().flatten();
+        style.click = parse_click_event_origin(e, origin, true).ok().flatten();
     }
     // HoverEvent.ShowText, ShowItem and ShowEntity.
     if let Some(e) = style_event_object(o, "hover_event", "hoverEvent") {
@@ -216,8 +218,8 @@ pub(crate) fn hex_color(c: &str) -> Option<u32> {
 }
 
 /// Whether `c` is a style `color` (`TextColor.parseColor`): a named colour or `#` and hex.
-pub fn is_color(c: &str) -> bool {
-    named_color(c).is_some() || hex_color(c).is_some()
+pub fn parse_color(c: &str) -> Option<u32> {
+    named_color(c).or_else(|| hex_color(c))
 }
 
 /// `Style.shadow_color`: a packed ARGB int or normalized RGBA array.

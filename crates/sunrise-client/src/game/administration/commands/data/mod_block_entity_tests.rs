@@ -233,4 +233,18 @@ fn actual_data_commands_preserve_same_mod_entity_runtime_state() {
     assert_ne!(entity(&game).revision(), before);
     assert!(entity(&game).data.is_empty());
     assert_eq!(game.data_of(&DataRef::Block(POS)).unwrap(), saved);
+
+    game.native_lifecycle
+        .begin_open(mod_api::Authority::IntegratedServer);
+    game.options.dedicated = Some(Vec::new());
+    let level = game.level("minecraft:overworld").unwrap();
+    let handle = game.block_entity(level, POS).unwrap();
+    assert_eq!(
+        handle.merge_data(&mut game, [("count".into(), Tag::Int(3))].into()),
+        Ok(true)
+    );
+    assert_eq!(
+        handle.data(&game).unwrap().get(&"count".into()),
+        Some(&mod_api::Tag::Int(3))
+    );
 }

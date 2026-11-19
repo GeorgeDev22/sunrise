@@ -2,6 +2,7 @@
 
 use super::client::RealmServer;
 use std::sync::Mutex;
+use sunrise_core::md5::name_uuid;
 
 /// The world's resource pack the player agreed to download before joining
 /// (`GetServerDetailsTask.scheduleResourcePackDownload`): the next connection to `address`
@@ -22,15 +23,7 @@ pub fn take_pending_pack(address: &str) -> Option<RealmsPack> {
     (pack.address == address).then_some(pack)
 }
 
-/// `UUID.nameUUIDFromBytes`.
-pub(super) fn name_uuid(bytes: &[u8]) -> u128 {
-    let mut h = sunrise_protocol::crypto::md5(bytes);
-    h[6] = (h[6] & 0x0f) | 0x30;
-    h[8] = (h[8] & 0x3f) | 0x80;
-    u128::from_be_bytes(h)
-}
-
-/// `GetServerDetailsTask.generatePackId`.
+/// `GetServerDetailsTask.generatePackId` uses `UUID.nameUUIDFromBytes`.
 pub fn pack_id(server: &RealmServer) -> u128 {
     match &server.minigame_name {
         Some(minigame) => name_uuid(format!("minigame:{minigame}").as_bytes()),

@@ -104,15 +104,7 @@ impl Renderer {
                 &self.animations,
             );
         }
-        self.update_lightmap(
-            &mut encoder,
-            &frame.sky,
-            frame.darkness.1,
-            (self.gamma - frame.darkness.0).max(0.0),
-            frame.night_vision,
-            frame.block_flicker,
-            frame.boss_darken,
-        );
+        self.update_lightmap(&mut encoder, frame);
         let views = self.views(frame);
         let pose = frame.bob * frame.spin;
         let view_proj = views.primary().view_proj(pose);
@@ -1275,7 +1267,7 @@ impl Renderer {
                     fog_color,
                     pack.fog,
                 );
-                self.uploads.buffer(&mut encoder, core.uniform(), 0, &data);
+                core.upload(&mut self.uploads, &mut encoder, &data);
             }
         }
         // A pack's core/sky and core/stars: the disc with the sky colour, the stars with their
@@ -1474,7 +1466,8 @@ impl Renderer {
         let outlined = skin.map_or(0, |s| s.outline_vertices);
         let entity_vertices = u64::from(outline_base) + u64::from(outlined);
         if entity_vertices > self.entity_capacity {
-            self.entity_capacity = entity_vertices.next_power_of_two();
+            self.entity_capacity =
+                entity_buffer_vertices(entity_vertices, self.device.limits().max_buffer_size);
             self.entity_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Entity vertices"),
                 size: self.entity_capacity * std::mem::size_of::<Vertex>() as u64,
@@ -3449,4 +3442,11 @@ fn mark_layers(active: &mut [u64], layers: &[u16]) {
         let layer = usize::from(layer);
         active[layer / u64::BITS as usize] |= 1 << (layer % u64::BITS as usize);
     }
+}
+
+/// The vertices the entity buffer grows to for a frame of `vertices`: the next power of two,
+/// but no more than a buffer of `max_buffer_size` bytes holds unless the frame itself needs it.
+pub(super) fn entity_buffer_vertices(vertices: u64, max_buffer_size: u64) -> u64 {
+    let most = max_buffer_size / std::mem::size_of::<Vertex>() as u64;
+    vertices.next_power_of_two().min(most).max(vertices)
 }

@@ -2659,14 +2659,22 @@ impl<'a> Plan<'a> {
             row.set("page", J::Num((1 + i / 10).into()));
             row.set("title", J::Str(tab.title.clone()));
             row.set("icon", stack(&tab.icon));
-            row.set("visible", J::Bool(true));
-            let items = tab
-                .items
-                .iter()
-                .filter(|id| known(id))
-                .map(|id| stack(id))
-                .collect();
-            row.set("items", J::Arr(items));
+            row.set(
+                "build",
+                J::Arr(
+                    tab.items
+                        .iter()
+                        .filter(|id| known(id))
+                        .map(|id| {
+                            J::Obj(vec![
+                                ("kind".into(), J::Str("stack".into())),
+                                ("visibility".into(), J::Str("PARENT_AND_SEARCH_TABS".into())),
+                                ("snbt".into(), stack(id)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            );
             tabs.push(row);
         }
         if let Some(search) = search {
@@ -2678,21 +2686,14 @@ impl<'a> Plan<'a> {
                     .cloned()
                     .unwrap_or_else(|| path.to_owned())
             };
-            let tab = &mut tabs[search];
-            for (key, add) in [
-                ("items", new.iter().map(|id| stack(id)).collect::<Vec<_>>()),
-                (
-                    "lines",
-                    new.iter()
-                        .map(|id| J::Arr(vec![J::Str(name(id))]))
-                        .collect(),
-                ),
-                // shortcut: a mod item's tags aren't searched by (#tag) yet.
-                ("tags", new.iter().map(|_| J::Arr(Vec::new())).collect()),
-            ] {
-                if let Some(J::Arr(list)) = tab.get_mut(key) {
-                    list.extend(add);
-                }
+            if let Some(J::Arr(metadata)) = tabs[search].get_mut("search_metadata") {
+                metadata.extend(new.into_iter().map(|id| {
+                    J::Obj(vec![
+                        ("stack".into(), stack(id)),
+                        ("lines".into(), J::Arr(vec![J::Str(name(id))])),
+                        ("ungrouped".into(), J::Bool(true)),
+                    ])
+                }));
             }
         }
         Ok(())

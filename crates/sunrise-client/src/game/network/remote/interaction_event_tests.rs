@@ -37,6 +37,12 @@ use sunrise_core::geometry::Vec3;
 use sunrise_core::nbt::Tag;
 use sunrise_protocol::{connection::Pipe, packets::configuration::ClientInformation};
 
+impl Game<'_> {
+    pub(in crate::game) fn set_sent_sneak_for_test(&mut self) {
+        self.remote.as_mut().unwrap().last_input |= super::SHIFT_INPUT;
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
     Phase(UsePhase, LogicalSide),

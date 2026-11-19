@@ -61,9 +61,21 @@ fn registry_resolution_fixtures() {
             removal,
         } in cases
         {
-            let mut plan = resolve::install(&index, &requests, &installed, &game, side, |p, v| {
-                native_fits[&p.id][&v.version]
-            });
+            let install = |requests: &[Request]| {
+                resolve::install(&index, requests, &installed, &game, side, |p, v| {
+                    native_fits[&p.id][&v.version]
+                })
+            };
+            let mut plan = install(&requests);
+            // Reversing and rotating covers every order for the three-request recovery cases.
+            let mut reordered = requests;
+            for _ in 0..2 {
+                reordered.reverse();
+                for _ in 0..reordered.len() {
+                    assert_eq!(install(&reordered), plan, "{name}: request order");
+                    reordered.rotate_left(1);
+                }
+            }
             for (id, words) in refusals {
                 let Some(RequestResult::Refused { reason }) = plan.requested.remove(&id) else {
                     panic!("{name}: expected a refusal for {id}: {plan:?}");

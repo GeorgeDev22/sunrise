@@ -332,7 +332,20 @@ impl Game<'_> {
             return;
         }
         let now = Instant::now();
-        let layout = (size, batch.scale.to_bits(), self.gui.atlas.font.epoch());
+        // The lightmap chart's pixels: none until the texture drawn now has been read
+        // (`Renderer::lightmap_sample`). Whether there are any is part of the cache's key, so
+        // a sample that stops being current is not painted again from it.
+        let lightmap = self
+            .renderer
+            .as_ref()
+            .filter(|_| self.debug_shows_lightmap())
+            .and_then(|r| r.lightmap_sample());
+        let layout = (
+            size,
+            batch.scale.to_bits(),
+            self.gui.atlas.font.epoch(),
+            lightmap.is_some(),
+        );
         if let Some(vertices) = self.debug_paint.borrow().fresh(now, layout) {
             batch.vertices.extend_from_slice(vertices);
             return;
@@ -370,14 +383,8 @@ impl Game<'_> {
                 scale, scale,
             )]));
             draws.extend(charts);
-            if self.debug_charts.lightmap
-                && let Some(r) = &self.renderer
-            {
-                draws.extend(sunrise_client::debug_chart::lightmap(
-                    &r.lightmap_pixels,
-                    width,
-                    height,
-                ));
+            if let Some(pixels) = lightmap {
+                draws.extend(sunrise_client::debug_chart::lightmap(pixels, width, height));
             }
             draws.push(hud_layout::GuiDraw::Pop);
         }
@@ -385,6 +392,12 @@ impl Game<'_> {
         self.debug_paint
             .borrow_mut()
             .store(now, layout, &batch.vertices[first_vertex..]);
+    }
+    /// Whether F3's lightmap chart (F3+4) is on screen: the overlay drawn, open and charting
+    /// the lightmap. Only then does the renderer read a pack-drawn light texture back for it
+    /// (`Renderer::set_lightmap_readback`).
+    pub(in crate::game) fn debug_shows_lightmap(&self) -> bool {
+        self.debug_overlay_visible() && self.debug && self.debug_charts.lightmap
     }
     /// Whether the overlay is listing GPU pass times (its `system_specs` lines), the only reason
     /// it has to time passes.
@@ -1467,3 +1480,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tests/lightmap_chart_tests.rs"]
+mod lightmap_chart_tests;

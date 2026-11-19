@@ -120,9 +120,6 @@ impl MultiLineEdit {
     pub fn cursor(&self) -> usize {
         self.cursor
     }
-    pub fn line_count(&self) -> usize {
-        self.lines.len()
-    }
     pub fn lines(&self) -> &[(usize, usize)] {
         &self.lines
     }

@@ -15,17 +15,7 @@ use sunrise_core::{
     random::RandomSource,
 };
 
-/// A `painting_variant` and whether `#placeable` lists it (in tag order).
-#[derive(Clone, Debug)]
-pub(super) struct Variant {
-    pub id: Arc<str>,
-    pub asset: String,
-    pub width: i32,
-    pub height: i32,
-    /// `PaintingVariant.title` and `author`: text components.
-    pub title: Option<serde_json::Value>,
-    pub author: Option<serde_json::Value>,
-}
+pub(super) use sunrise_client::entities::PaintingVariant as Variant;
 /// Variants by id plus the `#minecraft:placeable` list.
 #[derive(Default)]
 pub(super) struct PaintingVariants {
@@ -44,18 +34,9 @@ impl PaintingVariants {
                 else {
                     continue;
                 };
-                all.push(Variant {
-                    id: Arc::from(format!("minecraft:{name}")),
-                    asset: v["asset_id"]
-                        .as_str()
-                        .unwrap_or(name)
-                        .trim_start_matches("minecraft:")
-                        .to_owned(),
-                    width: v["width"].as_i64().unwrap_or(1) as i32,
-                    height: v["height"].as_i64().unwrap_or(1) as i32,
-                    title: v.get("title").cloned(),
-                    author: v.get("author").cloned(),
-                });
+                if let Ok(variant) = Variant::decode(&format!("minecraft:{name}"), &v) {
+                    all.push(variant);
+                }
             }
         }
         let placeable =

@@ -70,11 +70,19 @@ pub(super) fn network_recipes(
     defaults: &sunrise_world::item_defaults::ItemDefaults,
     sources: &sunrise_client::crafting::ResolvedSources,
     damage: sunrise_client_core::registries::RegistryIds,
+    packed: Option<&super::data::PackRegistryDefinitions>,
 ) -> crate::Result<(BTreeMap<String, Box<str>>, HashMap<String, i32>)> {
     // The resolved copy: the load's `ingredient` answers are in place, and
     // none of them leaves it (`forget_answers` below).
     let items = sunrise_client::items::Items::catalog_with_damage_registry(
-        resources, overlay, defaults, damage,
+        resources,
+        overlay,
+        defaults,
+        damage,
+        |items| match packed {
+            Some(packed) => packed.install_items(items, resources, overlay, defaults),
+            None => items.load_resource_registries(resources, overlay, defaults),
+        },
     )?;
     let accepted =
         sunrise_client::crafting::Recipes::from_resolved(resources, &items, overlay, sources)?;
