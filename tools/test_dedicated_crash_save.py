@@ -15,7 +15,8 @@ checks, from the files the server leaves:
   (the fixture takes it out first, as a panic in the network tick leaves it). Same checks.
 - Bystander: a second player, given diamonds and riding a boat, is in when the panic interrupts the
   first one's turn. A crash saves the players it did not interrupt as a stop does, each leaving with
-  the vehicle they alone ride: the bystander's file holds the diamonds and the boat. The interrupted
+  the vehicle they alone ride: the bystander's file holds the diamonds and the boat, and the world
+  saved after them no longer has the boat (it would be there twice). The interrupted
   player keeps the files the previous clean stop wrote, and a lost hub saves only the world.
 """
 import hashlib
@@ -243,6 +244,8 @@ def crash_saves_bystander(build):
         server.console(f'give {bystander} minecraft:diamond 4')
         server.console(f'execute at {bystander} run summon minecraft:oak_boat ~ ~ ~ {{Tags:["bystander_boat"]}}')
         server.console(f'ride {bystander} mount @e[tag=bystander_boat,limit=1]')
+        # Stays in the world: once the restart shows it, the chunk's entities have loaded.
+        server.console(f'execute at {bystander} run summon minecraft:armor_stand ~ ~ ~ {{Tags:["bystander_anchor"],NoGravity:1b}}')
         server.console('say GIVEN-TO-BYSTANDER')
         server.wait_for(r'\[Server\] GIVEN-TO-BYSTANDER')
         assert not file.exists(), 'the bystander was saved before the crash'
@@ -267,6 +270,25 @@ def crash_saves_bystander(build):
     # the world save keeps a ridden vehicle in its chunk.
     vehicle = player.get('RootVehicle', {}).get('Entity', {}).get('id')
     assert vehicle == 'minecraft:oak_boat', f'the bystander left without their boat in the file ({vehicle!r})'
+    # ...and the boat left the world before it was saved: the restart, with the bystander away, has the
+    # anchor beside it but no boat (a world saved first keeps a second one in the chunk).
+    server = start(directory)
+    try:
+        server.console('forceload add -32 -32 32 32')
+        for _ in range(60):
+            server.console('execute if entity @e[tag=bystander_anchor] run say ANCHOR-LOADED')
+            time.sleep(1)
+            if any('ANCHOR-LOADED' in l for l in server.lines):
+                break
+        else:
+            raise AssertionError('the anchor beside the boat never loaded after the restart')
+        server.console('execute if entity @e[tag=bystander_boat] run say BOAT-STILL-IN-WORLD')
+        server.console('say BOAT-CHECKED')
+        server.wait_for(r'\[Server\] BOAT-CHECKED', timeout=60)
+        assert not any('BOAT-STILL-IN-WORLD' in l for l in server.lines), \
+            'the boat the bystander left with is also still in the world: it was saved twice'
+    finally:
+        server.stop()
     print('crash saves the bystander, keeps the interrupted player: ok', flush=True)
 
 def main():
