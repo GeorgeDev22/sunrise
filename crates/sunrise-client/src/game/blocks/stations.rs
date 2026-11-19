@@ -1037,6 +1037,32 @@ impl Game<'_> {
         }
     }
     /// `EnchantmentMenu.clickMenuButton`.
+    /// A station screen's button as its screen presses it: `clickMenuButton` on this client's
+    /// menu, then, when the menu took it, `handleInventoryButtonClick`. The enchanting table's
+    /// screen checks the cost and lapis itself (`click_enchant`).
+    pub(super) fn station_menu_button(&mut self, button: i32) {
+        if self
+            .station
+            .as_ref()
+            .is_some_and(|s| s.kind == Kind::Enchanting)
+        {
+            if let Ok(button) = usize::try_from(button)
+                && button < 3
+            {
+                self.click_enchant(button);
+            }
+            return;
+        }
+        let mut taken = false;
+        let flag = &mut taken;
+        self.menu_session(|menu, env, _| {
+            *flag = menu.button(env, button);
+            Some(*flag)
+        });
+        if taken {
+            self.remote_station_button(button);
+        }
+    }
     fn click_enchant(&mut self, button: usize) {
         let Some(s) = self.station.as_ref() else {
             return;

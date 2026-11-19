@@ -88,7 +88,7 @@ impl Game<'_> {
         let lines = running.steps.remove(&tick).unwrap_or_default();
         let finished = (running.tick > running.ticks).then(|| running.name.clone());
         for line in lines {
-            if !self.tick_script_click(&line) {
+            if !self.tick_script_menu_line(&line) {
                 self.replay_line(&line, event_loop);
             }
         }
@@ -100,14 +100,33 @@ impl Game<'_> {
 }
 
 impl Game<'_> {
-    /// `click-slot SLOT [right] [shift] [INPUT] [bBUTTON]` without a renderer, as the vanilla
-    /// driver takes it: SLOT is the open menu's own slot (-999 outside the screen), INPUT a
-    /// `ContainerInput` name and BUTTON its button. sunrise-ctl's version clicks where the slot is
-    /// drawn, and `--headless` draws nothing. The vanilla driver clicks the menu itself
-    /// (`MultiPlayerGameMode.handleContainerInput`), and so does this.
-    fn tick_script_click(&mut self, line: &str) -> bool {
+    /// The menu lines, without a renderer, as the vanilla driver takes them:
+    /// - `click-slot SLOT [right] [shift] [INPUT] [bBUTTON]`: SLOT is the open menu's own slot
+    ///   (-999 outside the screen), INPUT a `ContainerInput` name and BUTTON its button;
+    /// - `menu-button N`: a station screen's button (a stonecutter's recipe, a loom's pattern, an
+    ///   enchantment), `clickMenuButton` and then `handleInventoryButtonClick`;
+    /// - `select-trade N`: a merchant screen's offer (`MerchantScreen.postButtonClick`).
+    ///
+    /// sunrise-ctl's versions press where the screen draws them, and `--headless` draws nothing.
+    /// The vanilla driver works the menu itself (`MultiPlayerGameMode.handleContainerInput`), and
+    /// so does this.
+    fn tick_script_menu_line(&mut self, line: &str) -> bool {
         use sunrise_client::menu::Input;
         let words: Vec<&str> = line.split_whitespace().collect();
+        let number = words.get(1).and_then(|w| w.parse::<i32>().ok());
+        match (words.first(), number) {
+            (Some(&"menu-button"), Some(button)) => {
+                self.station_menu_button(button);
+                return true;
+            }
+            (Some(&"select-trade"), Some(offer)) => {
+                if let Ok(offer) = usize::try_from(offer) {
+                    self.try_move_items(offer);
+                }
+                return true;
+            }
+            _ => {}
+        }
         let (Some(&"click-slot"), Some(Ok(slot))) =
             (words.first(), words.get(1).map(|w| w.parse::<i32>()))
         else {
