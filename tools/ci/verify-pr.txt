@@ -1,0 +1,3 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client -p sunrise-items --all-targets -- -D warnings
+env SUNRISE_TEST_RESOURCES=/home/runner/work/sunrise/sunrise/.local/sunrise-client/26.3 cargo test --locked -p sunrise-client --lib -- click_ending_tests remote_mob_use dispenser --include-ignored
