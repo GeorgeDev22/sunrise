@@ -1,0 +1,2 @@
+cargo fmt --all -- --check
+python3 tools/parity.py dedicated_crash_save dedicated_server
