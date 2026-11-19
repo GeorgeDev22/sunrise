@@ -742,8 +742,9 @@ SCENARIOS = {
     # motion (DELTA_* and ROTATE_DELTA), and handleRespawn's KEEP_ENTITY_DATA keeps it on the new player: whether
     # each client's first moves on the platform carry it.
     'end_portal_momentum': dict(
-        setup=[f'setblock 0 {FLOOR + 1} 4 minecraft:end_portal'],
-        ticks=120, steps={0: ['key w down', 'key ctrl down'], 5: ['key space tap'], 8: ['key w up', 'key ctrl up'],
+        setup=[f'setblock 0 {FLOOR + 1} 3 minecraft:end_portal'],
+        ticks=120, steps={0: ['key w down', 'key ctrl down'], 3: ['key space down'], 5: ['key space up'],
+                          9: ['key w up', 'key ctrl up'],
                           100: ['command execute in minecraft:overworld run tp @s 0.5 -60 0.5']}),
     # The portal goes once the player has gone through: left at the spawn point, it sent the next client to join
     # (after the last scenario, before any reset) straight into the End.
