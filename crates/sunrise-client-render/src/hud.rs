@@ -111,9 +111,14 @@ pub struct HudAtlas {
     /// A resource pack's own `core/rendertype_lines` shader for the block outline, translated;
     /// none draws the outline natively.
     pub lines_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    /// Its Polytone expression uniforms (`shader_modifiers`), resolved when it loaded.
+    pub lines_expressions: Vec<crate::polytone_post::ExpressionUniform>,
     /// The packs' `core/sky` and `core/stars`, when a pack replaces them.
     pub sky_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
     pub stars_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    /// Their Polytone expression uniforms, resolved when they loaded.
+    pub sky_expressions: Vec<crate::polytone_post::ExpressionUniform>,
+    pub stars_expressions: Vec<crate::polytone_post::ExpressionUniform>,
     /// The packs' `core/lightmap` (with `core/screenquad`), when a pack replaces either stage.
     pub lightmap_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
     /// Its Polytone expression uniforms (`shader_modifiers`), resolved when it loaded: the
@@ -1028,8 +1033,11 @@ impl HudAtlas {
             glint_armor: (Vec::new(), 1, 1),
             text_shaders: Default::default(),
             lines_shader: None,
+            lines_expressions: Vec::new(),
             sky_shader: None,
             stars_shader: None,
+            sky_expressions: Vec::new(),
+            stars_expressions: Vec::new(),
             lightmap_shader: None,
             lightmap_expressions: Vec::new(),
             sprite_modifiers: Default::default(),
@@ -1100,8 +1108,11 @@ impl HudAtlas {
             white,
             text_shaders: Default::default(),
             lines_shader: None,
+            lines_expressions: Vec::new(),
             sky_shader: None,
             stars_shader: None,
+            sky_expressions: Vec::new(),
+            stars_expressions: Vec::new(),
             lightmap_shader: None,
             lightmap_expressions: Vec::new(),
             sprite_modifiers: Default::default(),
@@ -1611,8 +1622,11 @@ impl HudAtlas {
             glint_armor,
             text_shaders: Default::default(),
             lines_shader: None,
+            lines_expressions: Vec::new(),
             sky_shader: None,
             stars_shader: None,
+            sky_expressions: Vec::new(),
+            stars_expressions: Vec::new(),
             lightmap_shader: None,
             lightmap_expressions: Vec::new(),
             sprite_modifiers: Default::default(),

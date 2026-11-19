@@ -5,7 +5,7 @@
 use crate::sdk_fetch::{PinnedSdk, ensure_sdk, fetch_build};
 use crate::uses_table::{self, Scanned, surface_of};
 use mod_surface::child::ChildEntry;
-use mod_surface::uses::{Change, Fit, USES_FILE, UsesTable, fits as fit};
+use mod_surface::uses::{Change, Fit, USES_FILE, USES_SCHEMA, UsesTable, fits as fit};
 use mod_surface::{Surface, leaf};
 use std::path::Path;
 use std::process::{Command, ExitCode};
@@ -334,10 +334,15 @@ fn fits_lines(entry: ChildEntry, args: &[String]) -> Result<Answer, String> {
         Some(path) => package_subject(path)?,
         None => folder_subject(entry, project)?,
     };
-    let (name, table) = match subject {
+    let (name, mut table) = match subject {
         Subject::Table { name, table } => (name, table),
         Subject::NotApplicable(text) => return Ok(Answer::NotApplicable(text)),
     };
+    // A list an older tool wrote names no hook versions: the build it was made for has them.
+    if table.schema != USES_SCHEMA {
+        let made_for = fetch_build(project, &table.made_for)?;
+        table.pin_hook_versions(&surface_of(&made_for)?);
+    }
     println!("{name}:");
     let mut all = true;
     for build in builds {

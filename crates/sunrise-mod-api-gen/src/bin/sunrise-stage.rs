@@ -116,7 +116,6 @@ fn uses_command(entry: mod_surface::child::ChildEntry, args: &[PathBuf]) {
     // No manifest form names a hook version today (the schema refuses `hook_version`).
     let manifest = ManifestFacts {
         names: input.manifest_names,
-        hook_versions: Default::default(),
     };
     let uses = uses_contained(
         entry,
@@ -163,7 +162,14 @@ fn fits_command(args: &[PathBuf]) -> ! {
         .unwrap_or_else(|e| fail(format!("{}: {e}", table.display())));
     let table =
         UsesTable::read(&bytes).unwrap_or_else(|e| fail(format!("{}: {e}", table.display())));
-    match fits(&table.entries, &read_surface(target)) {
+    let target = read_surface(target);
+    if table.lacks_a_hook_version(&target) {
+        fail(
+            "the list is of an older schema and holds no version of a hook the target has past version 1; scan the mod again"
+                .to_owned(),
+        );
+    }
+    match fits(&table.entries, &target) {
         Fit::Fits => {
             println!(
                 "fits ({} items, made for {})",

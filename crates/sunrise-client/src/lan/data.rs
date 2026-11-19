@@ -816,24 +816,6 @@ impl SyncData {
         Ok(sync)
     }
 
-    /// MinecraftServer.reloadResources: `/reload` keeps the synchronized
-    /// registries the server started with (`kept`'s, its
-    /// LayeredRegistryAccess) and reads the tags against them
-    /// (TagLoader.loadTagsForExistingRegistries), the world's packs' as well
-    /// (`overlay`); the rest stays reloaded.
-    pub fn keep_registries(
-        &mut self,
-        resources: &Path,
-        kept: &SyncData,
-        overlay: &sunrise_world::loot::PackOverlay,
-    ) {
-        self.dynamic = kept.dynamic.clone();
-        self.registries = kept.registries.clone();
-        let root = resources.join("data/minecraft");
-        self.tags = Self::load_tags(&root, &self.builtin, &self.dynamic, overlay.conditions);
-        Self::merge_pack_tags(&mut self.tags, &root, overlay, &self.builtin, &self.dynamic);
-    }
-
     /// The creative builder's server view: the same ordered entries and current tags a
     /// joining client receives. The network's name-only index omits the decoded payloads.
     pub fn creative_holders(&self) -> sunrise_items::creative_catalog::Holders {

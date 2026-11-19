@@ -82,6 +82,38 @@ fn a_mod_fits_a_build_where_what_it_uses_is_unchanged() {
 }
 
 #[test]
+fn a_list_with_no_hook_versions_is_no_list_once_a_hook_it_uses_is_past_its_first_version() {
+    let dir = project_dir("fit-old-list", Some(&[("hook:joined", "h1")]), None);
+    let uses_file = dir.join(uses::USES_FILE);
+    let old = std::fs::read_to_string(&uses_file)
+        .unwrap()
+        .replace(&format!("\"schema\":{}", uses::USES_SCHEMA), "\"schema\":1");
+    std::fs::write(&uses_file, old).unwrap();
+    let target = |version: u64| -> mod_surface::Surface {
+        serde_json::from_value(serde_json::json!({
+            "schema": mod_surface::SCHEMA, "hash": "s",
+            "hooks": [{
+                "id": "hook:joined", "hash": "h1", "engine": {"target": "t"}, "call": "c",
+                "version": version, "side": "server", "contract": "listen", "cancellable": false, "arguments": [],
+            }],
+        }))
+        .unwrap()
+    };
+    let made_for = pin(&dir);
+    assert_eq!(
+        judged(&dir, OTHER_BUILD, &target(1)),
+        Verdict::Fits {
+            made_for: made_for.clone()
+        }
+    );
+    assert_eq!(
+        judged(&dir, OTHER_BUILD, &target(2)),
+        Verdict::NoList { made_for }
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn the_copy_a_build_makes_is_judged_by_the_same_table() {
     let dir = project_dir("fit-copied", Some(&[("fn:give", "h1")]), None);
     let bundle = crate::bundle_in(&dir).unwrap().unwrap();

@@ -663,6 +663,15 @@ impl Game<'_> {
         Some((TrackingTarget::Entity(id), mob_tracking_body(mob)))
     }
 
+    /// `Hud.updateVignetteBrightness`, from the local player's eye: `Gui.tick` runs it on every tick
+    /// the game isn't paused, frozen level or not.
+    pub(in crate::game) fn tick_vignette(&mut self) {
+        if let Some(e) = self.eye_position() {
+            let brightness = self.eye_brightness(e);
+            self.screen_fx.tick_vignette(brightness);
+        }
+    }
+
     pub(super) fn tick_particles(&mut self) {
         // A client mod's `clear_particles`, before this tick adds any.
         self.apply_mod_particle_clear();
@@ -670,9 +679,13 @@ impl Game<'_> {
         let mut laps = sunrise_client::spans::laps();
         let eye = self.eye_position();
         if let Some(e) = eye {
-            let brightness = self.eye_brightness(e);
+            // A client of a server eases the vignette in `tick_hud`, frozen level or not.
+            if self.remote.is_none() {
+                let brightness = self.eye_brightness(e);
+                self.screen_fx.tick_vignette(brightness);
+            }
             let inside_portal = self.client_portal_effect();
-            self.screen_fx.tick(brightness, inside_portal);
+            self.screen_fx.tick_portal(inside_portal);
             // LocalPlayer.aiStep: processPortalCooldown after the transition
             // effect (a local world's player counts down in handlePortal).
             if self.remote.is_some() && self.portals.player.cooldown > 0 {
@@ -987,19 +1000,19 @@ impl Game<'_> {
     }
 }
 
-/// The packs' expression uniforms on the lightmap shader (`shader_modifiers`, wiki "Shaders").
+/// The packs' expression uniforms on core shaders (`shader_modifiers`, wiki "Shaders").
 impl Game<'_> {
-    /// Whether this frame has expression uniforms to evaluate: the drawn pack lightmap shader
-    /// reads one. Only then is the frame's expression context made for them.
-    pub(in crate::game) fn lightmap_reads_expressions(&self) -> bool {
+    /// Whether an installed pack core shader reads expression uniforms this frame. Fullbright
+    /// excludes the lightmap only. The frame's expression context is made only when needed.
+    pub(in crate::game) fn reads_pack_expressions(&mut self) -> bool {
         self.renderer
-            .as_ref()
+            .as_mut()
             .is_some_and(|r| r.reads_pack_expressions())
     }
 
-    /// The values of the expression uniforms the drawn lightmap shader reads, from `frame` (the
-    /// packs' expression context): their programs, resolved when the shader loaded.
-    pub(in crate::game) fn evaluate_lightmap_expressions(
+    /// Evaluate the installed pack pipelines' expression uniforms from `frame`, skipping the
+    /// lightmap under fullbright. Values are uploaded when each pipeline prepares its draw.
+    pub(in crate::game) fn evaluate_pack_expressions(
         &mut self,
         frame: Option<&sunrise_client::environment::Frame>,
     ) {

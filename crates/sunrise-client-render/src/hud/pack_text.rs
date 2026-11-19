@@ -61,7 +61,7 @@ pub(super) fn load_pair(
     let name = names.1;
     match translate_pair(root, defaults, names, defines, glue, provided)? {
         Ok(program) => {
-            log::info!("the resource pack's {name} shader is used");
+            log::info!("the resource pack's {name} shader translated");
             Some(Arc::new(program))
         }
         Err(e) => {
@@ -240,6 +240,63 @@ fn load_lightmap(
     }
 }
 
+/// A loaded pack shader and its expression uniforms, as the atlas keeps them: none of either
+/// when no pack's shader is used.
+trait UnzipOrDefault {
+    fn unzip_or_default(
+        self,
+    ) -> (
+        Option<Arc<CoreProgram>>,
+        Vec<crate::polytone_post::ExpressionUniform>,
+    );
+}
+
+impl UnzipOrDefault
+    for Option<(
+        Arc<CoreProgram>,
+        Vec<crate::polytone_post::ExpressionUniform>,
+    )>
+{
+    fn unzip_or_default(
+        self,
+    ) -> (
+        Option<Arc<CoreProgram>>,
+        Vec<crate::polytone_post::ExpressionUniform>,
+    ) {
+        match self {
+            Some((program, expressions)) => (Some(program), expressions),
+            None => (None, Vec::new()),
+        }
+    }
+}
+
+/// The packs' core shader `id` (`minecraft:core/<name>`, one shader for both stages: the sky,
+/// the stars and the block outline) with the blocks its file of `modifiers` names, and its
+/// expression uniforms resolved for the blocks its stages read; none when no pack replaces it,
+/// it doesn't translate, or a block refuses it (named in the log).
+fn load_with_expressions(
+    root: &ResourceSource,
+    defaults: &ResourceSource,
+    modifiers: &crate::polytone_post::ShaderModifiers,
+    id: &str,
+    glue: &Glue,
+) -> Option<(
+    Arc<CoreProgram>,
+    Vec<crate::polytone_post::ExpressionUniform>,
+)> {
+    let name = id.strip_prefix("minecraft:core/")?;
+    let names = modifiers.names(&[id]);
+    let provided = |block: &str| names.iter().any(|n| n == block);
+    let program = load_pair(root, defaults, (name, name), &[], glue, &provided)?;
+    match modifiers.resolve((id, id), &program, &[]) {
+        Ok(expressions) => Some((program, expressions)),
+        Err(e) => {
+            log::warn!("the resource pack's {name} shader is not used: {e}");
+            None
+        }
+    }
+}
+
 /// The packs' core shaders the atlas carries (text, block outline, sky, stars, lightmap).
 pub(super) fn load_shaders(
     atlas: &mut super::HudAtlas,
@@ -247,19 +304,24 @@ pub(super) fn load_shaders(
     defaults: &ResourceSource,
 ) {
     atlas.text_shaders.gui = load(root, defaults);
-    atlas.lines_shader = load_core(
-        root,
-        defaults,
-        "rendertype_lines",
-        &[],
-        &crate::gfx::core_lines::GLUE,
-    );
-    let sky = |name| load_core(root, defaults, name, &[], &crate::gfx::core_sky::GLUE);
-    atlas.sky_shader = sky("sky");
-    atlas.stars_shader = sky("stars");
     // The packs' expression uniforms (`shader_modifiers`), read once, with their config entries.
     let configs = crate::packs::polytone_configs(&crate::packs::Source::Opened(root.clone()));
     let modifiers = crate::polytone_post::ShaderModifiers::read(root, configs);
+    let blocks = crate::gfx::expression_blocks::LINES;
+    let lines = load_with_expressions(
+        root,
+        defaults,
+        &modifiers,
+        blocks[0],
+        &crate::gfx::core_lines::GLUE,
+    );
+    (atlas.lines_shader, atlas.lines_expressions) = lines.unzip_or_default();
+    let sky =
+        |id| load_with_expressions(root, defaults, &modifiers, id, &crate::gfx::core_sky::GLUE);
+    (atlas.sky_shader, atlas.sky_expressions) =
+        sky(crate::gfx::expression_blocks::SKY[0]).unzip_or_default();
+    (atlas.stars_shader, atlas.stars_expressions) =
+        sky(crate::gfx::expression_blocks::STARS[0]).unzip_or_default();
     let lightmap = load_lightmap(root, defaults, &modifiers);
     atlas.lightmap_shader = lightmap.as_ref().map(|(program, _)| program.clone());
     atlas.lightmap_expressions = lightmap.map(|(_, e)| e).unwrap_or_default();
