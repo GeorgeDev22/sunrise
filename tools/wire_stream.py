@@ -99,6 +99,10 @@ def decode(name, data):
         return {'slot': r.short()}
     if name == 'attack':
         return {'entity': r.varint()}
+    if name == 'spectator_action':
+        # ByteBufCodecs.OPTIONAL_VAR_INT: the entity id + 1, or 0 for none.
+        v = r.varint()
+        return {'entity': v - 1} if v else {'entity': None}
     if name == 'interact':
         # The point (Vec3.LP_STREAM_CODEC, packed) and the sneak flag stay raw.
         return {'entity': r.varint(), 'hand': r.varint(), 'raw': r.rest()}

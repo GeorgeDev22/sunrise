@@ -1636,9 +1636,10 @@ SCENARIOS = {
                          25: ['key 2 tap'], 30: ['look 0 60', 'mouse right click', 'key f tap'],
                          40: ['key q tap', 'key f tap'], 48: ['look 0 60'], 50: ['mouse left down'], 55: ['key q tap'],
                          60: ['mouse left up']}),
-    # A donkey with a chest: E sends OPEN_INVENTORY (isServerControlledInventory), before the tick's click.
+    # A donkey with a chest (no AI: its wandering and head turns differed between the runs): E sends OPEN_INVENTORY
+    # (isServerControlledInventory), before the tick's click.
     'mount_keys_with_clicks': dict(
-        setup=[f'summon minecraft:donkey 0.5 {FLOOR + 1} 1.5 {{Tame:1b,ChestedHorse:1b,PersistenceRequired:1b,Rotation:[0f,0f],'
+        setup=[f'summon minecraft:donkey 0.5 {FLOOR + 1} 1.5 {{NoAI:1b,Tame:1b,ChestedHorse:1b,PersistenceRequired:1b,Rotation:[0f,0f],'
                'equipment:{saddle:{id:"minecraft:saddle",count:1}}}', TARGET.format(x=0.5, y=FLOOR + 1, z=4.5), SWORD],
         ticks=50, steps={0: ['command ride @s mount @e[type=minecraft:donkey,limit=1]'], 5: ['look 0 20'],
                          10: ['mouse left click', 'key e tap'], 20: ['key esc tap'], 25: ['look 0 20'],
@@ -1695,11 +1696,12 @@ SCENARIOS = {
                          16: ['key tab tap'], 20: ['key esc tap'], 25: ['key t tap'], 28: ['type /function '],
                          32: ['key tab tap'], 36: ['type ' + 'a' * 70], 40: ['key esc tap'], 45: ['key t tap'],
                          48: ['type /say ' + 'x' * 300], 52: ['key enter tap']}),
-    # ChatC: chat typed while walking (the screen stops the walk; W pressed again after it), and a line sent while W
-    # is held.
+    # ChatC: chat typed while still sliding from a walk, and a line sent while W is held. W is let go before the
+    # chat opens: a screen's close re-reads the physical keys (KeyMapping.setAll), which the vanilla driver's
+    # KeyMapping.set never pressed, so a W held through the chat walks on only in Sunrise (as inventory_walk).
     'chat_walking': dict(
-        ticks=60, steps={0: ['key w down'], 5: ['key t tap'], 7: ['type hello there'], 9: ['key enter tap'],
-                         12: ['key w down'], 25: ['chat walking and talking'], 35: ['key w up']}),
+        ticks=60, steps={0: ['key w down'], 4: ['key w up'], 5: ['key t tap'], 7: ['type hello there'],
+                         9: ['key enter tap'], 12: ['key w down'], 25: ['chat walking and talking'], 35: ['key w up']}),
     # CrashD: a book on a lectern, its pages turned with Page Down and Page Up (LecternScreen's buttons send
     # ServerboundContainerButtonClick), then closed.
     'lectern_book': dict(
