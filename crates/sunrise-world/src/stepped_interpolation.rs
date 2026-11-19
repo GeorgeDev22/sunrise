@@ -8,6 +8,36 @@
 
 use std::collections::VecDeque;
 
+/// The start of `LivingEntity.aiStep` on a client for an entity it doesn't
+/// simulate (`canSimulateMovement` false), after this tick's `commonTick`
+/// step: while it isn't interpolating, its motion (the server's last
+/// `set_entity_motion`) keeps 0.98 of itself; then a player's horizontal
+/// motion under 0.003 (squared 9.0E-6), any other entity's x or z under
+/// 0.003, and anyone's y under 0.003 drop to zero.
+pub fn client_motion(motion: [f64; 3], interpolating: bool, player: bool) -> [f64; 3] {
+    let [mut x, mut y, mut z] = if interpolating {
+        motion
+    } else {
+        motion.map(|v| v * 0.98)
+    };
+    if player {
+        if x * x + z * z < 9.0e-6 {
+            (x, z) = (0.0, 0.0);
+        }
+    } else {
+        if x.abs() < 0.003 {
+            x = 0.0;
+        }
+        if z.abs() < 0.003 {
+            z = 0.0;
+        }
+    }
+    if y.abs() < 0.003 {
+        y = 0.0;
+    }
+    [x, y, z]
+}
+
 /// A position and rotation (`PositionAndRotation`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PosRot {

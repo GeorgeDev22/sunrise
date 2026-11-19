@@ -21,10 +21,14 @@ import net.minecraft.world.phys.Vec3;
  * {@code AbstractInterpolationHandler.interpolateTo} / {@code interpolate} and
  * {@code SteppedInterpolationHandler.startInterpolating} / {@code doInterpolate} drive it, with the
  * entity's own {@code setPos} / {@code setRot}. The handler's entity hooks are out of scope: the
- * entity moves only by its interpolation (no deltas to adjust) at the normal tick rate.
+ * entity moves only by its interpolation (no deltas to adjust) at the normal tick rate. After each
+ * tick's step, the start of {@code LivingEntity.aiStep} for an entity the client doesn't simulate:
+ * its motion keeps 0.98 of itself while not {@code isInterpolating} (the handler's
+ * {@code hasActiveInterpolation}), then drops its tiny components.
  *
  * <p>Input (args[0]), one event a line: {@code case STEPS X Y Z YAW PITCH} (a fresh entity there
- * with a handler of that many interpolation steps), {@code move L X Y Z} or {@code move S N
+ * with a handler of that many interpolation steps; a trailing {@code P} makes it a player),
+ * {@code motion X Y Z} ({@code handleSetEntityMotion}), {@code move L X Y Z} or {@code move S N
  * (X Y Z TICKS)xN} or {@code move N} (no position), then {@code R YAW PITCH} or {@code -} (no
  * rotation), and {@code tick}. Output (args[1]): the entity after every event.
  */
@@ -37,6 +41,34 @@ public final class VanillaSteppedInterpolationOracle {
 
     private static String hex(double v) {
         return Long.toHexString(Double.doubleToRawLongBits(v));
+    }
+
+    /** LivingEntity.aiStep, from its start to its setDeltaMovement, on a client. */
+    private static Vec3 aiStep(Vec3 movementIn, boolean interpolating, boolean player) {
+        Vec3 movement = movementIn;
+        if (!interpolating) {
+            movement = movement.scale(0.98);
+        }
+        double dx = movement.x;
+        double dy = movement.y;
+        double dz = movement.z;
+        if (player) {
+            if (movement.horizontalDistanceSqr() < 9.0E-6) {
+                dx = 0.0;
+                dz = 0.0;
+            }
+        } else {
+            if (Math.abs(movement.x) < 0.003) {
+                dx = 0.0;
+            }
+            if (Math.abs(movement.z) < 0.003) {
+                dz = 0.0;
+            }
+        }
+        if (Math.abs(movement.y) < 0.003) {
+            dy = 0.0;
+        }
+        return new Vec3(dx, dy, dz);
     }
 
     private static String hex(float v) {
@@ -61,6 +93,8 @@ public final class VanillaSteppedInterpolationOracle {
         Vec3 pos = Vec3.ZERO;
         float yRot = 0;
         float xRot = 0;
+        Vec3 delta = Vec3.ZERO;
+        boolean player = false;
         try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(Path.of(args[1])))) {
             for (String line : Files.readAllLines(Path.of(args[0]))) {
                 String[] f = line.trim().split(" ");
@@ -73,6 +107,8 @@ public final class VanillaSteppedInterpolationOracle {
                         pos = new Vec3(Double.parseDouble(f[2]), Double.parseDouble(f[3]), Double.parseDouble(f[4]));
                         yRot = Float.parseFloat(f[5]);
                         xRot = Float.parseFloat(f[6]);
+                        delta = Vec3.ZERO;
+                        player = f.length > 7 && f[7].equals("P");
                         what = "c";
                     }
                     case "move" -> {
@@ -125,6 +161,10 @@ public final class VanillaSteppedInterpolationOracle {
                             what = "i";
                         }
                     }
+                    case "motion" -> {
+                        delta = new Vec3(Double.parseDouble(f[1]), Double.parseDouble(f[2]), Double.parseDouble(f[3]));
+                        what = "m";
+                    }
                     case "tick" -> {
                         // AbstractInterpolationHandler.interpolate.
                         if (((List<?>) remaining.get(data)).isEmpty()) {
@@ -138,10 +178,12 @@ public final class VanillaSteppedInterpolationOracle {
                             advance.invoke(data, 1.0F, steps);
                             what = "t";
                         }
+                        delta = aiStep(delta, !((List<?>) remaining.get(data)).isEmpty(), player);
                     }
                     default -> throw new IllegalArgumentException(line);
                 }
-                out.println(what + " " + hex(pos.x) + " " + hex(pos.y) + " " + hex(pos.z) + " " + hex(yRot) + " " + hex(xRot));
+                out.println(what + " " + hex(pos.x) + " " + hex(pos.y) + " " + hex(pos.z) + " " + hex(yRot) + " " + hex(xRot)
+                    + " " + hex(delta.x) + " " + hex(delta.y) + " " + hex(delta.z));
             }
         }
     }

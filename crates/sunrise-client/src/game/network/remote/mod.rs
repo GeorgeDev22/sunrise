@@ -80,7 +80,7 @@ use {
     sunrise_world::{
         level::InteractionResult,
         registry::BlockStateId,
-        stepped_interpolation::{Path, PosRot, Start, SteppedInterpolation},
+        stepped_interpolation::{Path, PosRot, Start, SteppedInterpolation, client_motion},
     },
 };
 
@@ -7320,6 +7320,15 @@ impl Game<'_> {
             {
                 place_interpolated(m, at);
             }
+            // LivingEntity.aiStep for a mob this client does not simulate (the
+            // driven mount was skipped above).
+            let interpolating = stepped.get(&(m.id as i32)).is_some_and(|h| h.active());
+            let v = client_motion(
+                [m.velocity.x, m.velocity.y, m.velocity.z],
+                interpolating,
+                player,
+            );
+            m.velocity = Vec3::new(v[0], v[1], v[2]);
             // `ClientLevel.tickNonPassenger`'s `commonTick` interpolated the
             // entity before `Player.tick`, which `Pre` precedes.
             if let Some(player) = player_ref {
