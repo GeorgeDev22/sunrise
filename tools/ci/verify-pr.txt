@@ -1,0 +1,3 @@
+env SUNRISE_TEST_RESOURCES=/home/runner/work/sunrise/sunrise/.local/sunrise-client/26.3 cargo test --locked -p sunrise-client --lib -- game::mob_discard_tests game::native_entity_selectors --include-ignored < /dev/null
+python3 tools/parity.py --fresh --timeout 5400 selector_bounds selector_criterion selector_empty_tag selector_global_order < /dev/null
+python3 tools/test_command_exec_parity.py --only 'dying selector candidates' --work-dir .local/dying-selector-parity < /dev/null
