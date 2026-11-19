@@ -163,12 +163,6 @@ fn fits_command(args: &[PathBuf]) -> ! {
     let table =
         UsesTable::read(&bytes).unwrap_or_else(|e| fail(format!("{}: {e}", table.display())));
     let target = read_surface(target);
-    if table.lacks_a_hook_version(&target) {
-        fail(
-            "the list is of an older schema and holds no version of a hook the target has past version 1; scan the mod again"
-                .to_owned(),
-        );
-    }
     match fits(&table.entries, &target) {
         Fit::Fits => {
             println!(
@@ -178,6 +172,10 @@ fn fits_command(args: &[PathBuf]) -> ! {
             );
             std::process::exit(0)
         }
+        Fit::Unversioned(hooks) => fail(format!(
+            "not known: nothing the list can judge changed, but it holds no version of {}; scan the mod again",
+            hooks.join(", ")
+        )),
         Fit::DoesNotFit(misfits) => {
             println!(
                 "does not fit: {} of the {} items it uses changed",

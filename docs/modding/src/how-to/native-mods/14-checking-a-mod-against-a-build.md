@@ -66,8 +66,11 @@ What the scan cannot place is left to the compile, and records nothing:
 The real compile on the player's machine is always the final check. A mod judged to fit whose compile fails is
 left out by name, with a note that it needs an update from its author, and the other mods still build.
 
-Two changes always refuse, because no compile can see them or repair them: an item the mod uses that is removed,
-renamed or changed, and a hook the mod uses whose version changed (the same signature with a new meaning).
+Two changes always refuse, because no compile can see them or repair them: an item in the list that is removed,
+renamed or changed, and a hook in the list whose version changed (the same signature with a new meaning). The
+promise covers the hooks the list names: a subscription that a macro from outside the mod and the API writes is
+not in it. A list that holds no version of a hook, as one an older tool wrote, gets "not known" for that hook
+([Lists an older tool wrote](../../reference/sdk/04-fit.md#lists-an-older-tool-wrote)).
 
 Some sources cannot be judged at all:
 - a file that does not parse as Rust (the message gives its line);

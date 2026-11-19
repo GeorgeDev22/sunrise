@@ -36,6 +36,9 @@ mod runtime_environment_tests;
 #[path = "shared/screen_position_tests.rs"]
 mod screen_position_tests;
 #[cfg(test)]
+#[path = "shared/screen_slot_tests.rs"]
+mod screen_slot_tests;
+#[cfg(test)]
 #[path = "shared/slot_icon_tests.rs"]
 mod slot_icon_tests;
 #[cfg(test)]
@@ -3367,62 +3370,6 @@ fn packet_view(
 mod tests {
     #[test]
     #[ignore = "daily"]
-    fn enchantment_registry_returns_records_and_unknown_cost() {
-        super::super::native_entity_refs::tests::with_game(|game| {
-            let all = game.enchantments();
-            let sharpness = all.iter().find(|e| e.id == "minecraft:sharpness").unwrap();
-            assert_eq!((sharpness.max_level, sharpness.curse), (5, false));
-            let binding = all
-                .iter()
-                .find(|e| e.id == "minecraft:binding_curse")
-                .unwrap();
-            assert!(binding.curse);
-            assert!(
-                game.enchantment_min_cost("minecraft:sharpness", 1)
-                    .is_some()
-            );
-            assert_eq!(game.enchantment_min_cost("missing:unknown", 1), None);
-        });
-    }
-    #[test]
-    #[ignore = "daily"]
-    fn translate_gives_the_text_of_a_defined_key_and_none_otherwise() {
-        use sunrise_client::lang::{Language, ResourceSource, scoped};
-        struct Empty;
-        impl ResourceSource for Empty {
-            fn read(&self, _: &str) -> Option<Vec<u8>> {
-                None
-            }
-        }
-        super::super::native_entity_refs::tests::with_game(|game| {
-            let (got, _) = scoped(Language::load(&[&Empty], "en_us"), || {
-                (
-                    game.translate("sunrise.options.controller"),
-                    game.translate("missing.key"),
-                )
-            });
-            assert_eq!(got, (Some("Controller".to_owned()), None));
-        });
-    }
-    #[test]
-    #[ignore = "daily"]
-    fn a_trait_mod_measures_text_through_its_draw_context() {
-        use super::super::host::draw::GameDrawContext;
-        use super::super::native_entity_refs::tests::with_game;
-        use mod_api::DrawContext;
-
-        with_game(|game| {
-            let mut batch = sunrise_client::hud::HudBatch::scratch([320, 240]);
-            let draw = GameDrawContext::new(game, &mut batch);
-            // A server's HUD atlas is metrics-only (upstream 2e5a2629a): no sprite sheets,
-            // while an upper-case A still advances 6 GUI pixels.
-            assert_eq!(draw.text_width("AA"), 12.0);
-            assert_eq!(draw.text_width(""), 0.0);
-        });
-    }
-
-    #[test]
-    #[ignore = "daily"]
     fn declared_types_create_tick_and_reload_through_game() {
         use super::super::native_entity_refs::tests::{record_key, run_fresh_cases, with_game_at};
         use mod_api::{self, *};
@@ -3714,51 +3661,6 @@ mod tests {
                 });
             },
         );
-    }
-
-    #[test]
-    #[ignore = "daily"]
-    fn replacing_mod_block_entity_payload_keeps_its_type_and_saved_identity() {
-        use super::super::native_entity_refs::tests::with_game;
-        use std::sync::Arc;
-        use sunrise_client::chunk::Chunk;
-        use sunrise_client::containers::{BlockEntity, ModBlockEntity, ModBlockEntityFields};
-        use sunrise_client::save::{block_entity_encode, decode_block_entity};
-
-        with_game(|game| {
-            game.world
-                .chunks
-                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
-            let pos = (1, 64, 1);
-            let machine = ModBlockEntity::new("test:machine".into(), Default::default());
-            let made = machine.revision();
-            game.world
-                .block_entities
-                .insert(pos, BlockEntity::Mod(Box::new(machine)));
-            assert_eq!(
-                game.native_with_mod_block_entity([1, 64, 1], |entity| {
-                    **entity = ModBlockEntityFields {
-                        data: vec![7],
-                        ..Default::default()
-                    };
-                    assert_eq!(entity.id(), "test:machine");
-                }),
-                Some(())
-            );
-            let entity = game.world.block_entities.get(&pos).unwrap();
-            let BlockEntity::Mod(machine) = entity else {
-                panic!("not a mod block entity");
-            };
-            assert_eq!(machine.id(), "test:machine");
-            assert_eq!(machine.data, [7]);
-            assert_ne!(machine.revision(), made);
-            assert!(game.world.modified.contains(&(0, 0)));
-            let saved =
-                block_entity_encode::encode(pos, entity, "minecraft:stone", &Default::default());
-            let (saved_pos, loaded) = decode_block_entity(&saved).unwrap();
-            assert_eq!(saved_pos, pos);
-            assert_eq!(loaded.id(), "test:machine");
-        });
     }
 
     #[test]
@@ -4076,144 +3978,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(game.screen_hovered_item(), None);
-    }
-
-    /// The characters a `ScreenEvent.CharacterTyped.Pre` sees are the
-    /// printable ones of a text: a cancelled one leaves that text and a
-    /// control character (a key, not text) is never offered a hook.
-    #[test]
-    fn typed_text_keeps_control_characters_and_drops_cancelled_ones() {
-        let mut offered = Vec::new();
-        let left = super::screen_text_hooked("a\u{7f}b\u{1b}c", |c| {
-            offered.push(c);
-            c == 'b'
-        });
-        assert_eq!(offered, ['a', 'b', 'c']);
-        assert_eq!(left.as_deref(), Some("a\u{7f}\u{1b}c"));
-        // Every printable character cancelled: no text is left to type.
-        assert_eq!(super::screen_text_hooked("ab", |_| true), None);
-        // Nothing to offer: an empty text stays empty and keys alone stay whole.
-        assert_eq!(super::screen_text_hooked("", |_| true).as_deref(), Some(""));
-        assert_eq!(
-            super::screen_text_hooked("\u{7f}\t", |_| true).as_deref(),
-            Some("\u{7f}\t")
-        );
-        // What no hook cancels is handed back as it came in.
-        assert_eq!(
-            super::screen_text_hooked("hello", |_| false).as_deref(),
-            Some("hello")
-        );
-    }
-
-    /// The window's key path: only a key's printable characters go on to the
-    /// hook and the text box.
-    #[test]
-    fn a_key_offers_only_its_printable_characters() {
-        // Backspace, Escape and the like are keys, not text.
-        assert_eq!(super::chars_to_type("a\u{7f}\u{1b}b", true), "ab");
-        // Nothing typed: nothing to hand over.
-        assert_eq!(super::chars_to_type("", true), "");
-        // Ctrl+A is a shortcut: its `a` reaches no hook and no box.
-        assert_eq!(super::chars_to_type("a", false), "");
-    }
-
-    /// A mod's camera replaces vanilla's value by value; one that isn't finite keeps vanilla's.
-    #[test]
-    fn a_mod_camera_replaces_each_finite_value() {
-        use super::posed_camera;
-        let vanilla = (glam::DVec3::new(1.0, 2.0, 3.0), 10.0, 20.0);
-        assert_eq!(
-            posed_camera(vanilla, [-40.5, 90.0, 1e7], 270.0, -35.0),
-            (glam::DVec3::new(-40.5, 90.0, 1e7), 270.0, -35.0)
-        );
-        assert_eq!(
-            posed_camera(
-                vanilla,
-                [f64::NAN, 5.0, f64::INFINITY],
-                f32::NAN,
-                f32::NEG_INFINITY
-            ),
-            (glam::DVec3::new(1.0, 5.0, 3.0), 10.0, 20.0)
-        );
-    }
-
-    /// A data packet for an old window leaves the open mod screen alone.
-    #[test]
-    fn mod_screen_data_is_its_windows_only() {
-        let mut s = super::OpenNativeScreen {
-            slot_moves: Default::default(),
-            layout_revision: 0,
-            key: (0, 0, 0),
-            window: 4,
-            menu: "gtmod:menu".into(),
-            block: Some("gtmod:machine".into()),
-            screen: mod_api::Screen::default(),
-            data: Vec::new(),
-            extra: None,
-        };
-        assert!(s.set_data(4, 1, 7));
-        assert!(!s.set_data(3, 1, 99));
-        assert_eq!(s.data, [0, 7]);
-    }
-
-    /// A slot move changes only a shown slot, to a finite position, takes
-    /// effect at the commit, and counts only what changed a position (a
-    /// repeat of the effective position, declared or moved, keeps the layout).
-    #[test]
-    fn slot_moves_refuse_what_the_screen_does_not_show() {
-        let declared = [
-            Some(mod_api::ScreenSlot {
-                position: [8.0, 18.0],
-                ..Default::default()
-            }),
-            None,
-            Some(mod_api::ScreenSlot {
-                position: [26.0, 18.0],
-                ..Default::default()
-            }),
-        ];
-        use mod_api::ScreenSlotRefusal::*;
-        let moves = super::SlotMoves::default();
-        // The current place again changes nothing, not even the count.
-        assert_eq!(moves.set(&declared, 0, Some([8.0, 18.0])), Ok(()));
-        assert_eq!(moves.count.get(), 0);
-        assert_eq!(moves.set(&declared, 2, Some([100.5, -4.0])), Ok(()));
-        assert_eq!(moves.count.get(), 1);
-        // Pending until the build commits it; the read-back sees it at once.
-        assert_eq!(moves.position(2, [26.0, 18.0]), Some([26.0, 18.0]));
-        assert_eq!(moves.latest(&declared, 2), Some([100.5, -4.0]));
-        moves.commit();
-        assert_eq!(moves.position(2, [26.0, 18.0]), Some([100.5, -4.0]));
-        assert_eq!(moves.position(0, [8.0, 18.0]), Some([8.0, 18.0]));
-        // Refusals change nothing.
-        for (slot, pos, refusal) in [
-            (1, Some([0.0, 0.0]), HiddenAtOpen),
-            (3, Some([0.0, 0.0]), NoSuchSlot),
-            (usize::MAX, None, NoSuchSlot),
-            (0, Some([f32::NAN, 0.0]), BadPosition),
-            (0, Some([0.0, f32::INFINITY]), BadPosition),
-        ] {
-            assert_eq!(
-                moves.set(&declared, slot, pos),
-                Err(refusal),
-                "{slot} {pos:?}"
-            );
-        }
-        assert_eq!(moves.count.get(), 1);
-        assert_eq!(moves.position(0, [8.0, 18.0]), Some([8.0, 18.0]));
-        // Hiding a slot hidden at open is already so.
-        assert_eq!(moves.set(&declared, 1, None), Ok(()));
-        assert_eq!(moves.count.get(), 1);
-        // Hidden, then shown again where the mod puts it.
-        assert_eq!(moves.set(&declared, 2, None), Ok(()));
-        assert_eq!(moves.count.get(), 2);
-        assert_eq!(moves.set(&declared, 2, None), Ok(()));
-        assert_eq!(moves.count.get(), 2);
-        moves.commit();
-        assert_eq!(moves.position(2, [26.0, 18.0]), None);
-        assert_eq!(moves.set(&declared, 2, Some([26.0, 18.0])), Ok(()));
-        moves.commit();
-        assert_eq!(moves.position(2, [26.0, 18.0]), Some([26.0, 18.0]));
-        assert_eq!(moves.count.get(), 3);
     }
 }

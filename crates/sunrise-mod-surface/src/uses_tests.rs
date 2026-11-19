@@ -405,6 +405,7 @@ fn words(fit: Fit) -> Vec<String> {
     match fit {
         Fit::Fits => vec![],
         Fit::DoesNotFit(misfits) => misfits.iter().map(ToString::to_string).collect(),
+        Fit::Unversioned(hooks) => panic!("no version of {hooks:?}"),
     }
 }
 
@@ -603,10 +604,11 @@ fn a_used_hook_whose_version_changed_is_named() {
     )
     .unwrap();
     assert_eq!(entry(&made, "hook:player_logged_in").version, Some(1));
-    assert_eq!(
-        words(fits(made.entries(), &version_two)),
-        ["the hook `player_logged_in` is now version 2; this mod was made for version 1"]
-    );
+    let bumped = Fit::DoesNotFit(vec![Misfit {
+        id: "hook:player_logged_in".into(),
+        change: Change::Version { named: 1, now: 2 },
+    }]);
+    assert_eq!(fits(made.entries(), &version_two), bumped);
     // A hook the mod does not use may change its version.
     let other = uses(
         [("src/lib.rs", "fn f() {}")],
@@ -616,7 +618,8 @@ fn a_used_hook_whose_version_changed_is_named() {
     .unwrap();
     assert_eq!(fits(other.entries(), &version_two), Fit::Fits);
     // A list of the schema before this one holds no versions: the build it was made for gives
-    // them, and without it a hook past its first version cannot be shown unchanged.
+    // them, and without it no target can show the hook unchanged, since the mod may have been
+    // made for any version of it.
     let old = |pinned: bool| {
         let mut table = UsesTable {
             schema: 1,
@@ -631,13 +634,11 @@ fn a_used_hook_whose_version_changed_is_named() {
         }
         table
     };
-    assert_eq!(
-        words(fits(&old(true).entries, &version_two)),
-        ["the hook `player_logged_in` is now version 2; this mod was made for version 1"]
-    );
-    assert!(old(false).lacks_a_hook_version(&version_two));
-    assert!(!old(false).lacks_a_hook_version(&base().build()));
-    assert!(!old(true).lacks_a_hook_version(&version_two));
+    assert_eq!(fits(&old(true).entries, &version_two), bumped);
+    assert_eq!(fits(&old(true).entries, &base().build()), Fit::Fits);
+    let unversioned = Fit::Unversioned(vec!["hook:player_logged_in".into()]);
+    assert_eq!(fits(&old(false).entries, &version_two), unversioned);
+    assert_eq!(fits(&old(false).entries, &base().build()), unversioned);
 }
 
 #[test]
@@ -1051,7 +1052,7 @@ fn a_table_refuses_unknown_fields_and_sorts_its_entries() {
 }
 
 #[test]
-fn a_list_of_the_schema_that_recorded_doubt_as_a_build_fits_a_new_field() {
+fn an_older_list_cannot_tell_a_literal_from_a_doubt_so_a_new_field_is_left_to_the_compile() {
     let mut target = wider();
     target.replace_type(settings(
         &[("height", "i32"), ("depth", "i32")],
@@ -1787,7 +1788,7 @@ fn a_table_naming_many_routes_the_target_lacks_is_judged_without_a_walk_each() {
                     .all(|m| matches!(m.change, Change::Route { .. }))
             );
         }
-        Fit::Fits => panic!("fits, though no named route exists"),
+        other => panic!("{other:?}, though no named route exists"),
     }
 }
 
@@ -1831,7 +1832,7 @@ fn refused_for_the_new_field(fit: Fit) {
                 && matches!(&m.change, Change::Fields { gained, .. } if gained == &["ultrawarm"])),
             "{misfits:?}"
         ),
-        Fit::Fits => panic!("fits, though the mod builds the API's struct field by field"),
+        other => panic!("{other:?}, though the mod builds the API's struct field by field"),
     }
 }
 
