@@ -739,20 +739,52 @@ pub fn cape(textures: &Textures) -> Option<String> {
 /// which has the same layout) in its top half. Vanilla draws a cape of any
 /// size; a larger one is scaled down to 64x32 here.
 pub fn process_cape(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    let canvas = if width <= 64 && height <= 32 {
+        (64, 32)
+    } else {
+        (width, height)
+    };
+    lay_cape(width, height, rgba, canvas)
+}
+
+/// An OptiFine cape in a 64x64 skin slot: the picture on its cape texture
+/// (`sunrise_optifine::capes::canvas`), that texture scaled to the slot's top
+/// half. A 92x44 HD cape keeps the 128x64 layout's coordinates, where
+/// [`process_cape`] would stretch it over the whole 64x32.
+pub fn process_optifine_cape(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    let canvas = sunrise_optifine::capes::canvas(width, height);
+    lay_cape(width, height, rgba, canvas)
+}
+
+/// The `width`x`height` picture in the top left corner of a `canvas`, and
+/// that canvas scaled (nearest texel) to the top half of a 64x64 slot.
+fn lay_cape(width: u32, height: u32, rgba: &[u8], canvas: (u32, u32)) -> Option<Vec<u8>> {
     let (w, h) = (width as usize, height as usize);
+    let (cw, ch) = (canvas.0 as usize, canvas.1 as usize);
     if w == 0 || h == 0 || rgba.len() < w * h * 4 {
         return None;
     }
     let mut img = vec![0u8; 64 * 64 * 4];
-    let (fit_w, fit_h) = if w <= 64 && h <= 32 { (w, h) } else { (64, 32) };
-    for y in 0..fit_h {
-        for x in 0..fit_w {
-            let (sx, sy) = (x * w / fit_w, y * h / fit_h);
-            let (s, d) = ((sy * w + sx) * 4, (y * 64 + x) * 4);
-            img[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+    for y in 0..32 {
+        for x in 0..64 {
+            let (sx, sy) = (x * cw / 64, y * ch / 32);
+            if sx < w && sy < h {
+                let (s, d) = ((sy * w + sx) * 4, (y * 64 + x) * 4);
+                img[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+            }
         }
     }
     Some(img)
+}
+
+/// The cape a player wears, and whether it dresses their elytra too: their
+/// OptiFine cape where they have one, over their profile's cape, which
+/// always does (`WingsLayer` draws `PlayerSkin.cape`).
+pub fn worn_cape<'a>(
+    optifine: Option<(&'a str, bool)>,
+    profile: Option<&'a str>,
+) -> Option<(&'a str, bool)> {
+    optifine.or(profile.map(|cape| (cape, true)))
 }
 
 /// The cape the launcher gives an offline name (`SUNRISE_OFFLINE_CAPE`, a
@@ -952,7 +984,14 @@ pub struct Downloader {
     state_order: std::collections::VecDeque<(Kind, String)>,
     /// The `resources` keys, oldest first ([`Bounds::resources`]).
     resource_order: std::collections::VecDeque<String>,
-    /// Downloads started whose answer `state` has not taken yet: one thread each.
+    /// Players' OptiFine capes by name ([`Downloader::optifine_cape`]): each
+    /// name is asked once for the session, a cape and a miss alike.
+    optifine: std::collections::HashMap<String, Optifine>,
+    /// The `optifine` names, oldest first, so the oldest settled one can go ([`Bounds::states`]).
+    optifine_order: std::collections::VecDeque<String>,
+    optifine_done: std::sync::mpsc::Receiver<(String, Option<(Vec<u8>, bool)>)>,
+    optifine_send: std::sync::mpsc::Sender<(String, Option<(Vec<u8>, bool)>)>,
+    /// Downloads started whose answer has not been taken yet: one thread each.
     in_flight: usize,
     /// Fetches a texture's body; the HTTP GET, but for a test.
     fetch: fn(&str) -> Option<Vec<u8>>,
@@ -962,22 +1001,39 @@ pub struct Downloader {
 /// breaks the decoder, say), dropping this answers "failed" instead: the download's place in
 /// `in_flight` is given back and the texture is retried after the wait, where an answer that never
 /// came kept the key `Pending` for good and, with the bound, the place taken for the session.
-struct Answer {
-    send: std::sync::mpsc::Sender<((Kind, String), Option<Vec<u8>>)>,
-    key: Option<(Kind, String)>,
+struct Answer<K, P> {
+    send: std::sync::mpsc::Sender<(K, Option<P>)>,
+    key: Option<K>,
 }
-impl Answer {
-    fn give(&mut self, image: Option<Vec<u8>>) {
+impl<K, P> Answer<K, P> {
+    fn give(&mut self, image: Option<P>) {
         if let Some(key) = self.key.take() {
             let _ = self.send.send((key, image));
         }
     }
 }
-impl Drop for Answer {
+impl<K, P> Drop for Answer<K, P> {
     fn drop(&mut self) {
         self.give(None);
     }
 }
+
+/// Where a player's OptiFine cape stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Optifine {
+    Asking,
+    /// The server has none for the name, or answered something that isn't one.
+    NoCape,
+    /// Its atlas location, and whether it dresses an elytra too
+    /// (`sunrise_optifine::capes::dresses_elytra`).
+    Cape {
+        location: String,
+        elytra: bool,
+    },
+}
+
+/// Where OptiFine capes sit in the atlas: this and the player's name.
+const OPTIFINE_CAPE_LOCATIONS: &str = "optifine_capes/";
 
 /// What the downloader keeps and runs at most. Every texture URL a server (or a tab list of
 /// hundreds of players) names used to add a `states` entry and a thread of its own, and every
@@ -1012,6 +1068,7 @@ impl Downloader {
     }
     pub fn new(root: std::path::PathBuf) -> Self {
         let (send, done) = std::sync::mpsc::channel();
+        let (optifine_send, optifine_done) = std::sync::mpsc::channel();
         Self {
             root,
             states: Default::default(),
@@ -1030,6 +1087,10 @@ impl Downloader {
             retry_after: std::time::Duration::from_secs(60),
             state_order: Default::default(),
             resource_order: Default::default(),
+            optifine: Default::default(),
+            optifine_order: Default::default(),
+            optifine_done,
+            optifine_send,
             in_flight: 0,
             fetch: http_get,
             bounds: BOUNDS,
@@ -1115,25 +1176,7 @@ impl Downloader {
     /// How the download of `url` stands, starting it the first time. A
     /// failure is permanent for `retry_after`, then tried again.
     pub fn state(&mut self, kind: Kind, url: &str) -> Download {
-        while let Ok((key, image)) = self.done.try_recv() {
-            self.in_flight = self.in_flight.saturating_sub(1);
-            let state = match image {
-                Some(rgba) => {
-                    match key.0 {
-                        Kind::Skin => self.queue(skin_location(&key.1), rgba),
-                        Kind::Cape => self.queue(cape_location(&key.1), rgba),
-                        Kind::Elytra => {}
-                    }
-                    self.failed.remove(&key);
-                    Download::Ready
-                }
-                None => {
-                    self.failed.insert(key.clone(), std::time::Instant::now());
-                    Download::Failed
-                }
-            };
-            self.set_state(key, state);
-        }
+        self.settle();
         let Some(hash) = texture_hash(url) else {
             return Download::Failed;
         };
@@ -1156,20 +1199,114 @@ impl Downloader {
             // Not recorded: the next call asks again, and starts it once one has finished.
             return Download::Pending;
         }
-        self.in_flight += 1;
         self.set_state(key.clone(), Download::Pending);
         let digest: String = skin_location(&key.1)["skins/".len()..].to_owned();
         let (url, send, root) = (url.to_owned(), self.send.clone(), self.root.clone());
         let fetch = self.fetch;
+        self.spawn(send, key, move || {
+            Self::load_texture(&root, kind, &digest, &url, fetch)
+        });
+        Download::Pending
+    }
+    /// The OptiFine cape of the player `name`, from the cape server whose
+    /// addresses are `<server><name>.png`, once its download is ready: its
+    /// atlas location and whether it dresses an elytra too. Each name is asked
+    /// once for the session; any answer but a PNG that
+    /// `sunrise_optifine::capes::accepts` and that decodes counts as no cape. A
+    /// name `sunrise_optifine::capes::valid_name` refuses is never asked.
+    pub fn optifine_cape(&mut self, server: &str, name: &str) -> Option<(&str, bool)> {
+        self.settle();
+        if !self.optifine.contains_key(name) {
+            if !sunrise_optifine::capes::valid_name(name) || self.in_flight >= self.bounds.downloads
+            {
+                // A free download is asked for again next frame, as `state` does.
+                return None;
+            }
+            self.remember_optifine(name.to_owned(), Optifine::Asking);
+            let url = format!("{server}{name}.png");
+            let (send, fetch) = (self.optifine_send.clone(), self.fetch);
+            self.spawn(send, name.to_owned(), move || {
+                Self::load_optifine_cape(&url, fetch)
+            });
+            return None;
+        }
+        match self.optifine.get(name) {
+            Some(Optifine::Cape { location, elytra }) => Some((location.as_str(), *elytra)),
+            _ => None,
+        }
+    }
+    /// Records how `name`'s OptiFine cape stands. A new name may push the
+    /// oldest settled one out, which is asked again if it comes back; names
+    /// being asked are never dropped, so their answer has a place to land.
+    fn remember_optifine(&mut self, name: String, state: Optifine) {
+        if self.optifine.insert(name.clone(), state).is_some() {
+            return;
+        }
+        self.optifine_order.push_back(name);
+        while self.optifine.len() > self.bounds.states {
+            let Some(at) = self
+                .optifine_order
+                .iter()
+                .position(|n| self.optifine.get(n) != Some(&Optifine::Asking))
+            else {
+                break;
+            };
+            if let Some(old) = self.optifine_order.remove(at) {
+                self.optifine.remove(&old);
+            }
+        }
+    }
+    /// Runs `load` on a download thread of its own; its answer comes back on
+    /// `send` as `key`'s, for `settle`.
+    fn spawn<K: Send + 'static, P: Send + 'static>(
+        &mut self,
+        send: std::sync::mpsc::Sender<(K, Option<P>)>,
+        key: K,
+        load: impl FnOnce() -> Option<P> + Send + 'static,
+    ) {
+        self.in_flight += 1;
         std::thread::spawn(move || {
             let mut answer = Answer {
                 send,
                 key: Some(key),
             };
-            let image = Self::load_texture(&root, kind, &digest, &url, fetch);
+            let image = load();
             answer.give(image);
         });
-        Download::Pending
+    }
+    /// Takes the answers of the downloads that finished.
+    fn settle(&mut self) {
+        while let Ok((name, cape)) = self.optifine_done.try_recv() {
+            self.in_flight = self.in_flight.saturating_sub(1);
+            let state = match cape {
+                Some((rgba, elytra)) => {
+                    let location = format!("{OPTIFINE_CAPE_LOCATIONS}{name}");
+                    self.queue(location.clone(), rgba);
+                    Optifine::Cape { location, elytra }
+                }
+                None => Optifine::NoCape,
+            };
+            self.remember_optifine(name, state);
+        }
+        while let Ok((key, image)) = self.done.try_recv() {
+            self.in_flight = self.in_flight.saturating_sub(1);
+            let state = match image {
+                Some(rgba) => {
+                    match key.0 {
+                        Kind::Skin => self.queue(skin_location(&key.1), rgba),
+                        Kind::Cape => self.queue(cape_location(&key.1), rgba),
+                        Kind::Elytra => {}
+                    }
+                    self.failed.remove(&key);
+                    Download::Ready
+                }
+                None => {
+                    self.failed.insert(key.clone(), std::time::Instant::now());
+                    Download::Failed
+                }
+            };
+            self.set_state(key, state);
+        }
     }
     /// One texture's pixels: the disk cache's body if it decodes, else a fetch
     /// (`SkinTextureDownloader.downloadSkin`). Only a body that decodes is
@@ -1202,6 +1339,21 @@ impl Downloader {
         let _ = std::fs::write(&file, &body);
         Some(image)
     }
+    /// A cape server's answer as a skin slot's picture, and whether it dresses
+    /// an elytra too. Never written to the disk cache: a player's cape can
+    /// change, and the names of the players seen stay unwritten.
+    fn load_optifine_cape(
+        url: &str,
+        fetch: impl FnOnce(&str) -> Option<Vec<u8>>,
+    ) -> Option<(Vec<u8>, bool)> {
+        let body = fetch(url)?;
+        if !sunrise_optifine::capes::accepts(&body) {
+            return None;
+        }
+        let (w, h, rgba) = crate::hud::decode_bytes(&body).ok()?;
+        let elytra = sunrise_optifine::capes::dresses_elytra(w, h);
+        Some((process_optifine_cape(w, h, &rgba)?, elytra))
+    }
     /// Keeps a decoded skin for `again`, dropping the oldest past the bound.
     fn remember(&mut self, location: String, rgba: Vec<u8>) {
         if !self.images.contains_key(&location) {
@@ -1231,6 +1383,17 @@ impl Downloader {
             let Some(image) = self.images.get(location).cloned() else {
                 // Dropped from memory: read from the packs again.
                 self.forget_resource(location);
+                return false;
+            };
+            self.queue(location.to_owned(), image);
+            return true;
+        }
+        if let Some(name) = location.strip_prefix(OPTIFINE_CAPE_LOCATIONS) {
+            let Some(image) = self.images.get(location).cloned() else {
+                // Dropped from memory, and on no disk: the cape server is asked again.
+                if self.optifine.remove(name).is_some() {
+                    self.optifine_order.retain(|n| n != name);
+                }
                 return false;
             };
             self.queue(location.to_owned(), image);
@@ -2376,5 +2539,246 @@ mod download_bound_tests {
             std::env::temp_dir(),
         ));
         assert!(d.resources.is_empty() && d.resource_order.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod optifine_cape_tests {
+    use super::{Downloader, Optifine, process_cape, process_optifine_cape, worn_cape};
+
+    /// A `width`x`height` picture whose texel at (x, y) is `[x, y, 7, 255]`.
+    fn picture(width: usize, height: usize) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(width * height * 4);
+        for y in 0..height {
+            for x in 0..width {
+                rgba.extend([x as u8, y as u8, 7, 255]);
+            }
+        }
+        rgba
+    }
+
+    fn texel(slot: &[u8], x: usize, y: usize) -> [u8; 4] {
+        let at = (y * 64 + x) * 4;
+        slot[at..at + 4].try_into().unwrap()
+    }
+
+    /// A picture keeps the cape layout's coordinates: on the 64x32 texture
+    /// texel for texel, on the 128x64 one every other texel. What the picture
+    /// doesn't cover stays clear, and the slot's bottom half is empty.
+    #[test]
+    fn optifine_capes_keep_the_layout_of_their_texture() {
+        for (w, h, scale) in [
+            (64, 32, 1),
+            (46, 22, 1),
+            (22, 17, 1),
+            (92, 44, 2),
+            (128, 64, 2),
+        ] {
+            let slot = process_optifine_cape(w as u32, h as u32, &picture(w, h)).unwrap();
+            assert_eq!(slot.len(), 64 * 64 * 4);
+            for y in 0..64 {
+                for x in 0..64 {
+                    let (sx, sy) = (x * scale, y * scale);
+                    let want = if y < 32 && sx < w && sy < h {
+                        [sx as u8, sy as u8, 7, 255]
+                    } else {
+                        [0; 4]
+                    };
+                    assert_eq!(texel(&slot, x, y), want, "{w}x{h} at ({x}, {y})");
+                }
+            }
+        }
+        // The profile's own capes keep vanilla's stretch over the whole 64x32.
+        let stretched = process_cape(92, 44, &picture(92, 44)).unwrap();
+        assert_eq!(texel(&stretched, 45, 21), [64, 28, 7, 255]);
+        assert!(process_optifine_cape(46, 22, &[0; 4]).is_none());
+    }
+
+    #[test]
+    fn an_optifine_cape_is_worn_over_the_profiles_cape() {
+        let profile = Some("capes/mojang");
+        assert_eq!(
+            worn_cape(Some(("optifine_capes/Steve", true)), profile),
+            Some(("optifine_capes/Steve", true))
+        );
+        assert_eq!(
+            worn_cape(Some(("optifine_capes/Steve", false)), profile),
+            Some(("optifine_capes/Steve", false))
+        );
+        assert_eq!(worn_cape(None, profile), Some(("capes/mojang", true)));
+        assert_eq!(
+            worn_cape(Some(("optifine_capes/Steve", true)), None),
+            Some(("optifine_capes/Steve", true))
+        );
+        assert_eq!(worn_cape(None, None), None);
+    }
+
+    const SERVER: &str = "http://capes.test/capes/";
+    /// The addresses [`cape_server`] was asked for.
+    static ASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    /// A `width`x`height` PNG of [`picture`].
+    fn png(width: usize, height: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&picture(width, height)).unwrap();
+        writer.finish().unwrap();
+        out
+    }
+
+    /// A cape server with two capes, one answer that isn't a picture, and a
+    /// 404 (`None`, as `http_get` gives) for every other name.
+    fn cape_server(url: &str) -> Option<Vec<u8>> {
+        ASKED.lock().unwrap().push(url.to_owned());
+        match url.strip_prefix(SERVER)? {
+            "Hd_Cape.png" => Some(png(92, 44)),
+            "old.png" => Some(png(22, 17)),
+            "Broken.png" => Some(b"<html>Not a cape</html>".to_vec()),
+            _ => None,
+        }
+    }
+
+    /// Asks for `name`'s cape until its answer has come.
+    fn wait(d: &mut Downloader, name: &str) -> Option<(String, bool)> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let cape = d
+                .optifine_cape(SERVER, name)
+                .map(|(c, e)| (c.to_owned(), e));
+            if cape.is_some()
+                || d.optifine.get(name) != Some(&Optifine::Asking)
+                || std::time::Instant::now() > deadline
+            {
+                return cape;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// Each valid name is asked once, its cape and its miss alike kept for
+    /// the session; nothing else is ever put in an address.
+    #[test]
+    fn each_name_is_asked_for_its_cape_once() {
+        let root = std::env::temp_dir().join(format!(
+            "sunrise-test-optifine-capes-{}",
+            std::process::id()
+        ));
+        let mut d = Downloader::new(root.clone());
+        d.fetch = cape_server;
+        for name in [
+            "",
+            "two words",
+            "../../x",
+            "a/b",
+            "Jörg",
+            "ABCDEFGHIJKLMNOPQ",
+        ] {
+            assert_eq!(d.optifine_cape(SERVER, name), None, "{name:?}");
+        }
+        assert_eq!(
+            wait(&mut d, "Hd_Cape"),
+            Some(("optifine_capes/Hd_Cape".to_owned(), true))
+        );
+        assert_eq!(
+            wait(&mut d, "old"),
+            Some(("optifine_capes/old".to_owned(), false))
+        );
+        assert_eq!(wait(&mut d, "Broken"), None);
+        assert_eq!(wait(&mut d, "Nobody"), None);
+        for name in ["Hd_Cape", "old", "Broken", "Nobody"] {
+            for _ in 0..3 {
+                d.optifine_cape(SERVER, name);
+            }
+        }
+        assert_eq!(
+            *ASKED.lock().unwrap(),
+            [
+                "http://capes.test/capes/Hd_Cape.png",
+                "http://capes.test/capes/old.png",
+                "http://capes.test/capes/Broken.png",
+                "http://capes.test/capes/Nobody.png",
+            ]
+        );
+        let ready = d.take_ready();
+        let (location, slot) = ready
+            .iter()
+            .find(|(l, _)| l == "optifine_capes/Hd_Cape")
+            .unwrap();
+        assert_eq!(texel(slot, 45, 21), [90, 42, 7, 255], "{location}");
+        assert!(!root.exists(), "capes are never written to the disk cache");
+    }
+
+    /// Over HTTP, as from OptiFine's server (a local one here, as
+    /// `SUNRISE_OPTIFINE_CAPES` names a test's own): a cape is found, a 404
+    /// is no cape, and neither is asked again.
+    #[test]
+    #[ignore = "daily"]
+    fn a_cape_server_is_asked_over_http() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}/capes/", listener.local_addr().unwrap());
+        let body = png(46, 22);
+        let (lines, asked) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut line = String::new();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                reader.read_line(&mut line).unwrap();
+                while reader.read_line(&mut String::new()).unwrap() > 2 {}
+                // Told before the answer, so the test has it once its answer came.
+                let _ = lines.send(line.trim_end().to_owned());
+                if line.starts_with("GET /capes/Caped.png ") {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(head.as_bytes()).unwrap();
+                    stream.write_all(&body).unwrap();
+                } else {
+                    stream
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .unwrap();
+                }
+            }
+        });
+        let mut d = Downloader::new(
+            std::env::temp_dir().join(format!("sunrise-test-optifine-http-{}", std::process::id())),
+        );
+        let wait = |d: &mut Downloader, name: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let cape = d
+                    .optifine_cape(&server, name)
+                    .map(|(c, e)| (c.to_owned(), e));
+                if cape.is_some()
+                    || d.optifine.get(name) != Some(&Optifine::Asking)
+                    || std::time::Instant::now() > deadline
+                {
+                    return cape;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        assert_eq!(
+            wait(&mut d, "Caped"),
+            Some(("optifine_capes/Caped".to_owned(), true))
+        );
+        assert_eq!(wait(&mut d, "Plain"), None);
+        assert_eq!(d.optifine.get("Plain"), Some(&Optifine::NoCape));
+        for name in ["Caped", "Plain"] {
+            d.optifine_cape(&server, name);
+        }
+        let asked: Vec<String> = asked.try_iter().collect();
+        assert_eq!(
+            asked,
+            [
+                "GET /capes/Caped.png HTTP/1.1",
+                "GET /capes/Plain.png HTTP/1.1"
+            ]
+        );
     }
 }

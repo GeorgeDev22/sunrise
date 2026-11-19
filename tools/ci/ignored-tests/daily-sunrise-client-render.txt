@@ -36,6 +36,7 @@ sunrise-client-render perf_capture::tests::three_units_of_a_and_one_of_b_split_t
 sunrise-client-render perf_capture::tests::time_blocks_and_ticks_per_block_follow_when_they_were_added lib daily slow
 sunrise-client-render perf_capture::tests::wall_samples_carry_their_state_and_a_second_kind lib daily slow
 sunrise-client-render radial_overlay::tests::every_action_has_an_icon_and_every_string_a_sunrise_key lib daily slow
+sunrise-client-render skins::optifine_cape_tests::a_cape_server_is_asked_over_http lib daily network
 sunrise-client-render skins::tests::a_failed_download_is_retried_after_the_wait lib daily network
 sunrise-client-render skins::tests::http_get_reads_2xx_bodies lib daily network
 sunrise-client-render skins::tests::profiles_resolve_through_the_services lib daily network
