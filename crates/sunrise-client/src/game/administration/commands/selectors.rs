@@ -57,6 +57,14 @@ impl Game<'_> {
                     candidates.extend(self.level_candidates());
                 }
             }
+            // EntitySelectorParser: `@e` and `@n` keep only `Entity::isAlive`
+            // (the players were sorted in `player_candidates`).
+            if matches!(s.kind, 'e' | 'n') {
+                let dying = self.dying_targets();
+                if !dying.is_empty() {
+                    candidates.retain(|t| !dying.contains(t));
+                }
+            }
             out.extend(self.native_selector_kept(s, candidates, origin));
             if let Some(back) = back {
                 self.enter_command_level(back);

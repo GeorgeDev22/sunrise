@@ -800,6 +800,18 @@ impl Game<'_> {
         candidates.retain(|t| !self.target_removed(t));
         candidates
     }
+    /// The level's entities that are not `Entity::isAlive` though still in
+    /// it: a killed mob through its death animation.
+    pub(super) fn dying_targets(&self) -> Vec<Target> {
+        use super::entity::{Entity as _, entity_lists_of, for_each_entity};
+        let mut dying = Vec::new();
+        for_each_entity!(entity_lists_of!(self), entity => {
+            if !entity.is_alive() {
+                dying.extend(entity.selector_target());
+            }
+        });
+        dying
+    }
     /// The loaded levels, in the order the server holds them: the
     /// overworld, the nether, the end (MinecraftServer.getAllLevels).
     pub(super) fn loaded_dims(&self) -> Vec<Dim> {
