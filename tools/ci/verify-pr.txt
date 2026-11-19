@@ -1,0 +1,3 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client --all-targets -- -D warnings
+cargo test --locked -p sunrise-client --lib -- tick_script play_input
