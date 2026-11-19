@@ -2086,6 +2086,83 @@ SCENARIOS = {
         setup=[f'setblock 0 {FLOOR + 1} 2 minecraft:stone', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:name_tag', f'item replace entity {PLAYER} hotbar.1 with minecraft:written_book'],
         ticks=50, steps={0: ['look 0 35'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
                          26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click']}),
+    # Section 30 (2026-11-19): mobs that answer a click, with the item each takes, another item and an empty hand,
+    # a torch in the off hand: a wrong client answer shows as an extra Interact or UseItem, or a placed torch.
+    'mob_answer_dye_sheep': dict(
+        setup=[f'summon minecraft:sheep 0.5 {FLOOR + 1} 2.5 {{Color:0b,NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:red_dye', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_sheared_sheep': dict(
+        setup=[f'summon minecraft:sheep 0.5 {FLOOR + 1} 2.5 {{Sheared:1b,NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:shears', f'item replace entity {PLAYER} hotbar.1 with minecraft:red_dye'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_axolotl_bucket': dict(
+        setup=[f'summon minecraft:axolotl 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:water_bucket', f'item replace entity {PLAYER} hotbar.1 with minecraft:bucket'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_mooshroom': dict(
+        setup=[f'summon minecraft:mooshroom 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:bowl', f'item replace entity {PLAYER} hotbar.1 with minecraft:shears', f'item replace entity {PLAYER} hotbar.2 with minecraft:bucket'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_saddle_pig': dict(
+        setup=[f'summon minecraft:pig 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:saddle', f'item replace entity {PLAYER} hotbar.1 with minecraft:carrot'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_wolf': dict(
+        setup=[f'summon minecraft:wolf 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:bone', f'item replace entity {PLAYER} hotbar.1 with minecraft:lead', f'item replace entity {PLAYER} hotbar.2 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_horse': dict(
+        setup=[f'summon minecraft:horse 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:golden_carrot', f'item replace entity {PLAYER} hotbar.1 with minecraft:saddle'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_villager': dict(
+        setup=[f'summon minecraft:villager 0.5 {FLOOR + 1} 2.5 {{VillagerData:{{profession:"minecraft:none"}},NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:name_tag', f'item replace entity {PLAYER} hotbar.1 with minecraft:emerald'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_chicken': dict(
+        setup=[f'summon minecraft:chicken 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:wheat_seeds', f'item replace entity {PLAYER} hotbar.1 with minecraft:wheat'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_goat': dict(
+        setup=[f'summon minecraft:goat 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:bucket', f'item replace entity {PLAYER} hotbar.1 with minecraft:wheat'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_parrot': dict(
+        setup=[f'summon minecraft:parrot 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:wheat_seeds', f'item replace entity {PLAYER} hotbar.1 with minecraft:cookie'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_iron_golem': dict(
+        setup=[f'summon minecraft:iron_golem 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:iron_ingot', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_snow_golem': dict(
+        setup=[f'summon minecraft:snow_golem 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:shears', f'item replace entity {PLAYER} hotbar.1 with minecraft:stick'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_creeper': dict(
+        setup=[f'summon minecraft:creeper 0.5 {FLOOR + 1} 2.5 {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:stick', f'item replace entity {PLAYER} hotbar.1 with minecraft:name_tag'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
+    'mob_answer_baby_cow': dict(
+        setup=[f'summon minecraft:cow 0.5 {FLOOR + 1} 2.5 {{Age:-24000,NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}}', f'item replace entity {PLAYER} weapon.offhand with minecraft:torch 8', f'item replace entity {PLAYER} hotbar.0 with minecraft:wheat', f'item replace entity {PLAYER} hotbar.1 with minecraft:bucket'],
+        ticks=50, steps={0: ['look 0 25'], 4: ['mouse right click'], 14: ['key 2 tap'], 16: ['mouse right click'],
+                         26: ['key 3 tap'], 28: ['mouse right click'], 38: ['key 1 tap'], 40: ['mouse right click'],
+                         46: ['close']}),
     # Section 26 (2026-11-19): PvP techniques anticheats watch, beside a mob's hits (KNOCKBACK from FAR_HUSK).
     'jump_reset_kb': dict(
         setup=[FAR_HUSK, SWORD],

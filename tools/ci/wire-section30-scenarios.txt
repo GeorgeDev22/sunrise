@@ -1,0 +1,15 @@
+mob_answer_dye_sheep
+mob_answer_sheared_sheep
+mob_answer_axolotl_bucket
+mob_answer_mooshroom
+mob_answer_saddle_pig
+mob_answer_wolf
+mob_answer_horse
+mob_answer_villager
+mob_answer_chicken
+mob_answer_goat
+mob_answer_parrot
+mob_answer_iron_golem
+mob_answer_snow_golem
+mob_answer_creeper
+mob_answer_baby_cow
