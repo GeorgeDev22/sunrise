@@ -1,0 +1,4 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client-render -p sunrise-client --all-targets -- -D warnings
+env SUNRISE_TEST_RESOURCES=/home/runner/work/sunrise/sunrise/.local/sunrise-client/26.3 cargo test --locked -p sunrise-client --lib -- remote_vehicles --include-ignored --skip steering_mount_control_matches_vanilla
+python3 tools/parity.py camera
