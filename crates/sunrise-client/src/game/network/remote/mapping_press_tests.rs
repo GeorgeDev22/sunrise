@@ -295,3 +295,38 @@ fn opening_a_screen_releases_mod_holds() {
         ));
     });
 }
+
+/// Q in creative mode: `MultiPlayerGameMode.dropItem` sends the drop and nothing else, so the
+/// end of the tick sends no creative slot edit for the stack it left (only the creative screen
+/// sends those).
+#[test]
+#[ignore = "daily"]
+fn a_creative_drop_sends_no_creative_slot() {
+    with_pressing_game(|game, packets, _| {
+        game.set_mode_id(1);
+        game.forced_hit = None;
+        game.inventory[game.selected] = Some(ItemStack::new("minecraft:stone", 16));
+        // The setup's stack is the server's as well.
+        game.remote_synced();
+        game.key_pressed(
+            winit::keyboard::KeyCode::KeyQ,
+            winit::keyboard::KeyCode::KeyQ,
+        )
+        .unwrap();
+        game.remote_handle_input();
+        game.remote_send_state(0);
+        let sent = sent(packets);
+        assert!(
+            sent.iter().any(|p| p == "minecraft:player_action"),
+            "{sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|p| p == "minecraft:set_creative_mode_slot"),
+            "{sent:?}"
+        );
+        assert_eq!(
+            game.inventory[game.selected].as_ref().map(|s| s.count),
+            Some(15)
+        );
+    });
+}

@@ -1,0 +1,1 @@
+sunrise-client game::remote::interaction_event_tests::mapping_press_tests::a_creative_drop_sends_no_creative_slot lib daily resources
