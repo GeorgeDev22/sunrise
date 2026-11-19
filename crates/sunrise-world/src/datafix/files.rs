@@ -459,11 +459,9 @@ pub(crate) fn fix_1493(base: &Path) -> io::Result<()> {
             let Some(Tag::Compound(features)) = data.get("Features") else {
                 continue;
             };
-            let values: Vec<(String, Tag)> = features
-                .iter()
-                .map(|(k, v)| (k.to_string_lossy(), v.clone()))
-                .collect();
-            for (_, mut value) in super::items::java_hash_order(values, |(k, _)| k.clone()) {
+            let values = features.iter().collect();
+            for (_, value) in super::items::java_hash_order(values, |(k, _)| (*k).clone()) {
+                let mut value = value.clone();
                 let chunk_x = as_int(value.get("ChunkX"), 0);
                 let chunk_z = as_int(value.get("ChunkZ"), 0);
                 let children = super::dynamic::stream(value.get("Children"));

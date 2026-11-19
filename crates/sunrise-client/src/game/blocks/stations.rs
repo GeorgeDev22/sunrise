@@ -43,7 +43,6 @@ use std::cell::Cell;
 use sunrise_client::{
     block_entity_item, brewing,
     containers::BlockEntity,
-    enchant::Enchantments,
     hud::{HudBatch, rgba},
     items::ItemStack,
     random_source,
@@ -1607,7 +1606,10 @@ impl Game<'_> {
         advanced: bool,
         mod_callbacks: bool,
     ) -> Vec<(sunrise_client::text::Text, u32)> {
-        let e: &Enchantments = self.active_enchantment_definitions();
+        use sunrise_client::item_tooltip::{
+            self, EnchantmentComponent, PaintingTooltip, TooltipHolders,
+        };
+        let holders = TooltipHolders::Definitions(self.active_enchantment_definitions());
         let color = self.rarity_color(stack);
         let advanced = !nested && advanced;
         let display = sunrise_client::item_tooltip::tooltip_display(stack);
@@ -1634,27 +1636,24 @@ impl Game<'_> {
         if let Some(text) = sunrise_client::item_tooltip::disc_fragment_line(stack, &translate) {
             push(&mut lines, text, gray);
         }
-        // HangingEntityItem.appendHoverText: a painting's variant, its title,
-        // author and size, or in a creative tab "Random variant".
-        if &*stack.item == "minecraft:painting" && display.shows("minecraft:painting/variant") {
-            use sunrise_client::text::Text;
-            if let Some(v) = self.painting_variants.of_stack(stack) {
-                for part in [&v.title, &v.author].into_iter().flatten() {
-                    let text = sunrise_client::component::to_text(part, &mut |_| Text::empty());
-                    lines.push((text, u32::MAX));
-                }
-                let size = [v.width, v.height].map(|n| Text::literal(n.to_string()));
-                lines.push((Text::translate("painting.dimensions", &size), u32::MAX));
-            } else if creative
-                && stack
-                    .data()
-                    .and_then(|d| d.other("minecraft:painting/variant"))
-                    .is_none()
-            {
-                let random = Text::translate("painting.random", &[]);
-                lines.push((random.with_color(sunrise_client::text::GRAY), u32::MAX));
-            }
-        }
+        lines.extend(
+            item_tooltip::painting_lines(
+                stack,
+                &display,
+                creative,
+                |id| {
+                    let v = self.painting_variants.get(id)?;
+                    Some(PaintingTooltip {
+                        title: v.title.as_ref(),
+                        author: v.author.as_ref(),
+                        size: [v.width, v.height],
+                    })
+                },
+                &sunrise_client::text::Text::translate,
+            )
+            .into_iter()
+            .map(|text| (text, u32::MAX)),
+        );
         let context = mod_api::TooltipAppendContext {
             player: self.own_uuid(),
             player_entity_id: self.own_entity_id(),
@@ -1688,9 +1687,14 @@ impl Game<'_> {
         }
         details.start("minecraft:instrument", lines.len());
         // InstrumentComponent.addToTooltip.
-        if let Some(text) =
-            sunrise_client::item_tooltip::instrument_line(stack, &display, &translate)
-        {
+        if let Some(text) = item_tooltip::instrument_line(
+            stack,
+            &display,
+            Some(|id: &str| {
+                let key = format!("instrument.{}", id.replacen(':', ".", 1));
+                Some(translate(&key).unwrap_or(key))
+            }),
+        ) {
             push(&mut lines, text, gray);
         }
         details.start("minecraft:map_id", lines.len());
@@ -1851,31 +1855,15 @@ impl Game<'_> {
             push(&mut lines, format!(" {p}"), rgba(170, 170, 170, 255));
             push(&mut lines, format!(" {m}"), rgba(170, 170, 170, 255));
         }
-        details.start("minecraft:stored_enchantments", lines.len());
-        if display.shows("minecraft:stored_enchantments") {
-            for (text, curse) in e.tooltip(stack.stored_enchantments()) {
+        for component in [EnchantmentComponent::Stored, EnchantmentComponent::Applied] {
+            details.start(component.id(), lines.len());
+            for (text, curse) in
+                item_tooltip::enchantment_lines(stack, &display, component, holders, &translate)
+            {
                 push(
                     &mut lines,
                     text,
-                    if curse {
-                        rgba(255, 85, 85, 255)
-                    } else {
-                        rgba(170, 170, 170, 255)
-                    },
-                );
-            }
-        }
-        details.start("minecraft:enchantments", lines.len());
-        if display.shows("minecraft:enchantments") {
-            for (text, curse) in e.tooltip(stack.enchantments()) {
-                push(
-                    &mut lines,
-                    text,
-                    if curse {
-                        rgba(255, 85, 85, 255)
-                    } else {
-                        rgba(170, 170, 170, 255)
-                    },
+                    if curse { rgba(255, 85, 85, 255) } else { gray },
                 );
             }
         }

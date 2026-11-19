@@ -11444,6 +11444,8 @@ fn client_fluid_step(
 }
 
 #[cfg(test)]
+mod frozen_screen_effects_tests;
+#[cfg(test)]
 mod placement_prediction_tests;
 #[cfg(test)]
 #[path = "player_tick_tests.rs"]

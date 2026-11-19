@@ -76,8 +76,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       # The pool's routing for a leg that starts late (fn-replace-check waits for the SDK's Linux legs), decided now:
-      # the run's lease snapshot is judged only within an hour of the run's creation (tools/ci/dyna_ci_route.sh), and
-      # a route of its own an hour or more later sent fn-replace-check to GitHub's runners (daily 44065326913, 44145360054).
+      # the lease snapshot is judged only within an hour of the attempt's creation or start (tools/ci/dyna_ci_route.sh),
+      # and a route of its own an hour or more later sent fn-replace-check to GitHub's runners (daily 44065326913,
+      # 44145360054).
       - id: route
         env:
           GH_TOKEN: ${{ github.token }}
@@ -125,7 +126,7 @@ jobs:
     if: needs.resolve.outputs.skip == 'false'
     permissions:
       contents: read
-      actions: read  # its routing reads this run's creation time (tools/ci/dyna_ci_route.sh)
+      actions: read  # its routing reads this attempt's creation or start time (tools/ci/dyna_ci_route.sh)
     uses: ./.github/workflows/ignored-tests.yml
     with:
       commit: ${{ needs.resolve.outputs.commit }}
@@ -144,7 +145,7 @@ jobs:
     if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.skip == 'false' }}
     permissions:
       contents: read
-      actions: read  # its routing reads this run's creation time (tools/ci/dyna_ci_route.sh)
+      actions: read  # its routing reads this attempt's creation or start time (tools/ci/dyna_ci_route.sh)
     uses: ./.github/workflows/fn-replace-check.yml
     with:
       commit: ${{ needs.resolve.outputs.commit }}
@@ -180,7 +181,7 @@ jobs:
     if: needs.resolve.outputs.skip == 'false'
     permissions:
       contents: read
-      actions: read  # its routing reads this run's creation time (tools/ci/dyna_ci_route.sh)
+      actions: read  # its routing reads this attempt's creation or start time (tools/ci/dyna_ci_route.sh)
     uses: ./.github/workflows/machine-sample.yml
     with:
       commit: ${{ needs.resolve.outputs.commit }}

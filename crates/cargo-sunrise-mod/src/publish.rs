@@ -6,11 +6,10 @@
 //! and SHA-256, and `PULL_REQUEST.md`. It is not a complete registry checkout.
 use crate::{
     bounded::{self, Symlinks},
-    internals::atomic_write,
+    internals::{atomic_write, check_output_dir},
 };
 use std::{
     fs,
-    io::ErrorKind,
     path::{Path, PathBuf},
 };
 use sunrise_mod_package::{
@@ -259,8 +258,7 @@ pub fn run(entry_point: mod_surface::child::ChildEntry, args: &[String]) -> Resu
     let release_version = manifest.version.to_string();
     if !registry::plain_version(&release_version) {
         return Err(format!(
-            "{MANIFEST}: version {:?} cannot name a registry release: set `version` to at most 64 ASCII letters, digits, '.', '-' or '_', starting with a letter or digit",
-            manifest.version
+            "{MANIFEST}: version {release_version:?} cannot name a registry release: use SemVer without `+build` metadata and at most 64 characters"
         ));
     }
     let kind = if manifest.native.is_some() {
@@ -274,6 +272,15 @@ pub fn run(entry_point: mod_surface::child::ChildEntry, args: &[String]) -> Resu
             checkout.display(),
             errors.join("; ")
         ))?;
+        if loaded
+            .collections
+            .iter()
+            .any(|collection| &collection.id == id)
+        {
+            return Err(format!(
+                "{id} is already a registry collection: choose a different `id` in {MANIFEST}"
+            ));
+        }
         // The registry loader has bound every entry's id to its file name; select this project's id.
         loaded.entries.into_iter().find(|e| &e.id == id)
     } else {
@@ -357,22 +364,7 @@ pub fn run(entry_point: mod_surface::child::ChildEntry, args: &[String]) -> Resu
         .flatten()
         .chain(built.into_iter().flatten()),
     ) {
-        match fs::symlink_metadata(dir) {
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => {
-                return Err(format!(
-                    "{} is not a real directory: publish writes only into real folders; replace it with one, or choose a --out folder without symlinks",
-                    dir.display()
-                ));
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(format!(
-                    "{}: {e}; choose a writable --out folder",
-                    dir.display()
-                ));
-            }
-        }
+        check_output_dir(dir)?;
     }
     if let Some(checkout) = &o.registry
         && let Ok(out_path) = dunce::canonicalize(&out)

@@ -42,6 +42,7 @@ struct Published {
     lists: Contents,
     api: Option<Arc<CreativeModeTabs>>,
     holders: Arc<Holders>,
+    items: Arc<Items>,
 }
 
 struct ActiveBuild {
@@ -185,6 +186,7 @@ impl Game<'_> {
             lists: lists.clone(),
             api: None,
             holders: Arc::new(holders),
+            items,
         });
         Ok(lists)
     }
@@ -207,8 +209,12 @@ impl Game<'_> {
         if let Some(published) = &self.creative_contents.published
             && Arc::ptr_eq(&lists, &published.lists)
         {
-            self.creative_screen
-                .publish(lists, published.holders.clone(), &self.pack.names);
+            self.creative_screen.publish(
+                lists,
+                published.holders.clone(),
+                published.items.clone(),
+                &self.pack.names,
+            );
         }
     }
 

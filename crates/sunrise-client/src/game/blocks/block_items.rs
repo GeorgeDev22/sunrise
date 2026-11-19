@@ -381,13 +381,15 @@ impl Game<'_> {
         }
         let block = self.world.block(pos[0], pos[1], pos[2]);
         let name = &self.res.facts().get(block).name;
-        let Some((_, mut entity)) = save::decode_block_entity_for_block(&placed, name) else {
+        let previous = self.world.block_entities.get(&key);
+        let Some((_, mut entity)) = save::decode_block_entity_replacing(&placed, name, previous)
+        else {
             return;
         };
         // The new crafter's state flag (CrafterBlock.newBlockEntity), which
         // its saved data has no part of.
         if let (BlockEntity::Crafter(new), Some(BlockEntity::Crafter(old))) =
-            (&mut entity, self.world.block_entities.get(&key))
+            (&mut entity, previous)
         {
             new.state_triggered = old.state_triggered;
         }

@@ -522,12 +522,10 @@ dependencies = [
  "sunrise-mod-point-emit",
  "sunrise-mod-source",
  "sunrise-mod-surface",
- "sunrise-mod-wasm",
  "sunrise-native-build",
  "sunrise-port-pack",
  "sunrise-release-sign",
  "sunrise-shader-api",
- "sunrise-wasmtime",
  "tempfile",
  "toml",
  "toml_edit",
@@ -1875,12 +1873,6 @@ dependencies = [
  "zerotrie",
  "zerovec",
 ]
-
-[[package]]
-name = "id-arena"
-version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
 name = "idna"
@@ -4488,7 +4480,6 @@ dependencies = [
  "glam",
  "libc",
  "log",
- "miniz_oxide 0.8.9",
  "naga",
  "png",
  "pollster",
@@ -4513,7 +4504,6 @@ dependencies = [
  "sunrise-game-discovery",
  "sunrise-gameplay",
  "sunrise-guest-stack",
- "sunrise-hdr",
  "sunrise-hooks",
  "sunrise-items",
  "sunrise-java-properties",
@@ -4539,7 +4529,6 @@ dependencies = [
  "sunrise-world",
  "tempfile",
  "toml",
- "unicode-bidi",
  "ureq",
  "wat",
  "wgpu",
@@ -4595,7 +4584,6 @@ dependencies = [
  "gilrs",
  "glam",
  "log",
- "miniz_oxide 0.8.9",
  "mio",
  "naga",
  "open",
@@ -4618,7 +4606,6 @@ dependencies = [
  "sunrise-engine-slots",
  "sunrise-game-discovery",
  "sunrise-guest-stack",
- "sunrise-hdr",
  "sunrise-hooks",
  "sunrise-items",
  "sunrise-java-properties",
@@ -4642,7 +4629,6 @@ dependencies = [
  "sunrise-threads",
  "sunrise-world",
  "tempfile",
- "unicode-bidi",
  "ureq",
  "wgpu",
  "winit",
@@ -4685,6 +4671,7 @@ dependencies = [
  "sunrise-hdr",
  "sunrise-hooks",
  "sunrise-items",
+ "sunrise-java-properties",
  "sunrise-mod-api",
  "sunrise-mod-api-macros",
  "sunrise-mod-package",
@@ -4858,7 +4845,6 @@ name = "sunrise-hot-paths-game"
 version = "0.1.0"
 dependencies = [
  "sunrise-client",
- "sunrise-guest-stack",
  "sunrise-mod-api",
  "sunrise-mod-host",
  "sunrise-mod-package",
@@ -4928,7 +4914,6 @@ dependencies = [
  "syn 2.0.119",
  "tempfile",
  "toml",
- "wit-parser",
 ]
 
 [[package]]
@@ -4937,7 +4922,6 @@ version = "0.1.0"
 dependencies = [
  "log",
  "serde_json",
- "sunrise-client-core",
  "sunrise-core",
  "sunrise-mod-api-gen",
  "sunrise-mod-api-macros",
@@ -4984,7 +4968,6 @@ dependencies = [
  "sunrise-client",
  "sunrise-mod-api",
  "sunrise-mod-host",
- "sunrise-mod-package",
  "sunrise-mod-wasm",
  "tempfile",
  "wat",
@@ -4996,6 +4979,7 @@ version = "0.1.0"
 dependencies = [
  "libloading",
  "log",
+ "object 0.39.1",
  "serde",
  "serde_json",
  "sha2",
@@ -5030,7 +5014,6 @@ dependencies = [
  "subtle",
  "sunrise-assets",
  "sunrise-core",
- "sunrise-mod-api",
  "sunrise-mod-api-macros",
  "sunrise-mod-call",
  "sunrise-mod-point-shape",
@@ -5070,14 +5053,11 @@ dependencies = [
 name = "sunrise-mod-points"
 version = "0.1.0"
 dependencies = [
- "quote",
- "serde_json",
  "sunrise-engine-slots",
  "sunrise-mod-api",
  "sunrise-mod-api-gen",
  "sunrise-mod-api-macros",
  "sunrise-mod-call",
- "sunrise-mod-point-shape",
  "syn 2.0.119",
 ]
 
@@ -5085,7 +5065,6 @@ dependencies = [
 name = "sunrise-mod-render"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
  "glam",
  "sunrise-client-render",
  "sunrise-engine-slots",
@@ -5137,7 +5116,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sunrise-core",
- "sunrise-items",
  "sunrise-mod-api",
  "sunrise-mod-api-gen",
  "sunrise-mod-api-macros",
@@ -5169,7 +5147,6 @@ dependencies = [
  "sunrise-mod-runtime",
  "sunrise-threads",
  "sunrise-wasmtime",
- "sunrise-world",
  "syn 2.0.119",
  "tempfile",
  "wasmparser 0.261.0",
@@ -5221,7 +5198,6 @@ dependencies = [
  "libc",
  "object 0.39.1",
  "proc-macro2",
- "quote",
  "semver",
  "serde",
  "serde_json",
@@ -5261,7 +5237,6 @@ dependencies = [
  "log",
  "regex",
  "sunrise-assets",
- "sunrise-core",
  "sunrise-system",
  "zip",
 ]
@@ -5303,7 +5278,6 @@ name = "sunrise-perf-share"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
- "log",
  "open",
  "serde",
  "serde_json",
@@ -5326,8 +5300,6 @@ dependencies = [
  "sunrise-mod-api-gen",
  "sunrise-mod-point-shape",
  "sunrise-perf-format",
- "sunrise-prepare",
- "sunrise-protocol",
  "sunrise-server-files",
  "sunrise-system",
  "sunrise-world",
@@ -5453,7 +5425,6 @@ dependencies = [
  "sunrise-core",
  "sunrise-java-properties",
  "sunrise-protocol",
- "sunrise-world",
  "ureq",
  "windows-sys 0.61.2",
 ]
@@ -5466,7 +5437,6 @@ dependencies = [
  "serde",
  "sunrise-core",
  "sunrise-platform",
- "sunrise-server-files",
  "toml",
  "toml_edit",
  "windows-sys 0.61.2",
@@ -7185,25 +7155,6 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
-
-[[package]]
-name = "wit-parser"
-version = "0.261.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "962e43c4db2da607b50839a531e5b63473268b40efdf8028d5c54b572ca4f6f6"
-dependencies = [
- "anyhow",
- "hashbrown 0.17.1",
- "id-arena",
- "indexmap",
- "log",
- "semver",
- "serde",
- "serde_derive",
- "serde_json",
- "unicode-ident",
- "wasmparser 0.261.0",
-]
 
 [[package]]
 name = "wl-clipboard-rs"

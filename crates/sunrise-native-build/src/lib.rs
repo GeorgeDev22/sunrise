@@ -240,21 +240,6 @@ pub fn bundle_in(dir: &Path) -> Result<Option<Bundle>, String> {
     package::read(dir)
 }
 
-pub fn is_revision(text: &str) -> bool {
-    text.len() == 40 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-/// Appends `text` to the build log, the way a compiler warning reads.
-pub fn log_warning(text: &str) {
-    if let Ok(mut log) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path())
-    {
-        let _ = writeln!(log, "warning: {text}");
-    }
-}
-
 /// Every file under `dir`, by its path relative to `dir` (with `/`), sorted. A symlink is refused:
 /// horizon-mixins refuses them too.
 fn files(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {

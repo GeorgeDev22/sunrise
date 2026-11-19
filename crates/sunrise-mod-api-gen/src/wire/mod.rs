@@ -6,6 +6,7 @@ mod borrowed;
 pub(crate) mod calls;
 mod descriptors;
 mod host;
+pub(crate) use host::refusal_value;
 mod prepared;
 #[cfg(test)]
 mod prepared_tests;
