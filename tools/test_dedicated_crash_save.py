@@ -231,6 +231,8 @@ def main():
         ('hub', 1, {'y': 1, 'console': True}, 'The panic interrupted the network tick'),
     ):
         log = crash(directory, fixture, port, out, trigger)
+        (lab.LOCAL / 'dedicated-crash-save-parity').mkdir(parents=True, exist_ok=True)
+        (lab.LOCAL / 'dedicated-crash-save-parity' / f'{fixture}-server.log').write_text(log)
         if f'The server thread panicked: crash fixture at {fixture}' not in log:
             problems.append(f'{fixture}: no panic in the log')
         if expect not in log:
