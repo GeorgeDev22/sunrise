@@ -13,10 +13,11 @@ The scenarios are the ones of that vanilla run, in its order. Sunrise runs --hea
 WIRE_STREAM_WINDOWED=1. DIR gets
 sunrise.jsonl (its capture) and a copy of vanilla.jsonl, compared as test_wire_stream_parity.py --compare-only
 does. A server packet that reached vanilla just before its next tick-end was taken a tick later (REPLAY_LATE), and
-the replay does the same; one a little earlier may have been taken on either tick (REPLAY_EDGE). A pass needs
-evidence that Sunrise took every packet on vanilla's tick: a scenario with such an edge packet, a packet sent after
-Sunrise had passed its tick, or (phased) one sent late, is inconclusive. DIR/timing.json keeps that record with the
-capture, so test_wire_stream_parity.py --compare-only reaches the same verdict.
+the replay does the same; one a little earlier may have been taken on either tick (REPLAY_EDGE). Those ticks are
+inferred from the proxy's timestamps: neither client reports the tick it handled a packet on, so a replay without
+differences is a `match`, a diagnostic, never an exact pass. A scenario with such an edge packet, a packet sent
+after Sunrise had passed its tick, or (phased) one sent late, is inconclusive. DIR/timing.json keeps that record
+with the capture, so test_wire_stream_parity.py --compare-only DIR reaches the same verdict.
 """
 import argparse
 import json
@@ -349,7 +350,7 @@ def main():
         sys.exit(f'FAIL: {e}')
     print(f'\nreplayed vanilla server stream, vanilla vs Sunrise; captures in {args.out}')
     for name, problems in results:
-        print(f'  {ws.verdict(problems)}  {name}')
+        print(f'  {ws.verdict(problems, "replay")}  {name}')
         for p in problems:
             print(p)
     sys.exit(1 if any(p for _, p in results) else 0)

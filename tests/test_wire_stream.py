@@ -155,6 +155,40 @@ class WireStreamTest(unittest.TestCase):
         self.assertFalse(wire_stream.mark_packet('chat_command', command(b'wire-markers')))
         self.assertFalse(wire_stream.mark_packet('chat', command(b'wire-mark') + bytes(17)))
 
+    def test_a_replay_s_tick_is_one_ordered_stream_with_the_network_thread_s_answers_in_it(self):
+        keep_alive = c2s('keep_alive', bytes(7) + b'\x09')
+        batch = lambda rate: c2s('chunk_batch_received', struct.pack('>f', rate))  # noqa: E731
+        swing, end = c2s('swing', varint(0)), c2s('client_tick_end')
+        [between] = wire_stream.scenarios([LOGIN, mark(), swing, keep_alive, swing, end], exact=True)
+        [after] = wire_stream.scenarios([LOGIN, mark(), swing, swing, keep_alive, end], exact=True)
+        self.assertEqual([n for n, _ in between[0]['wire']], ['swing', 'keep_alive', 'swing', 'client_tick_end'])
+        # The same answer elsewhere among the tick's packets differs, and only in where it sits.
+        self.assertEqual([d[0] for d in wire_stream.compare(between, after, 0, key='wire')], [0])
+        self.assertTrue(wire_stream.interleaving_only(between[0]['wire'], after[0]['wire']))
+        [other] = wire_stream.scenarios([LOGIN, mark(), swing, c2s('swing', varint(1)), keep_alive, end], exact=True)
+        self.assertFalse(wire_stream.interleaving_only(between[0]['wire'], other[0]['wire']))
+        # A chunk batch's measured rate is left out of the stream, and kept apart.
+        [a], [b] = (wire_stream.scenarios([LOGIN, mark(), batch(rate), end], exact=True) for rate in (3.5, 9.0))
+        self.assertEqual(wire_stream.compare(a, b, 0, key='wire'), [])
+        self.assertNotEqual(a[0]['frame_wire'], b[0]['frame_wire'])
+
+    def test_a_short_capture_never_matches(self):
+        tick = lambda: {'packets': [('client_tick_end', {})], 'frame': [], 'misplaced': []}  # noqa: E731
+        whole, short = [tick(), tick(), tick()], [tick()]
+        self.assertEqual([d[0] for d in wire_stream.compare(whole, short, 1)], [1])
+        self.assertEqual([d[0] for d in wire_stream.compare(short, short, 1)], [1])
+        self.assertTrue(wire_stream.complete(whole, 1))
+        self.assertFalse(wire_stream.complete(whole[:2], 1), 'tick 1 is not closed yet')
+
+    def test_a_timing_record_is_read_whole_for_its_scenarios(self):
+        names = ['walk', 'bow']
+        record = {'scenarios': names, 'uncertain': {'bow': ['explode reached vanilla 10.0-12 ms before tick 3']}}
+        self.assertEqual(wire_stream.timing_doubts(record, names), record['uncertain'])
+        for bad in ({'scenarios': ['walk'], 'uncertain': {}}, {'scenarios': names}, [],
+                    {'scenarios': names, 'uncertain': {'swim': []}}, {'scenarios': names, 'uncertain': {'bow': 'x'}}):
+            with self.subTest(record=bad), self.assertRaises(ValueError):
+                wire_stream.timing_doubts(bad, names)
+
     def test_compare_reports_the_first_field_that_differs(self):
         tick = lambda y: {'packets': [('move_player_pos', {'x': 0.5, 'y': y})], 'frame': [], 'misplaced': []}  # noqa
         diffs = wire_stream.compare([tick(-60.0)], [tick(-60.0000001)], 0)

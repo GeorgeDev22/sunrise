@@ -10,10 +10,13 @@ SUNRISE_TICK_SCRIPT, game/world/tick_script.rs; vanilla: VanillaTickScript.java,
 keys pressed through KeyMapping). Both send /wire-mark on the scenario's first tick. tools/wire_stream.py
 cuts each scenario's stream into client ticks (ClientTickEnd ends one) and decodes the packets; every tick
 must hold the same packets, in the same order, with the same bytes (doubles and floats by their bits). In the
-replay the answers to the server (pong, teleport acceptance, chat acknowledgement) keep their place among a tick's
-packets, and the network thread's (keep-alive, chunk batch) compare by tick and bytes; a scenario whose delivery
-ticks the replay can't vouch for is inconclusive. Live, the answers compare by name and order, and must never fall
-between two packets of one tick; a live match is not an exact pass.
+replay each tick is one ordered stream: the answers to the server (pong, teleport acceptance, chat acknowledgement)
+and the network thread's (keep-alive, chunk batch) keep their place among the tick's packets. Where the network
+thread's answers sit, and a chunk batch's measured rate, are not verified when that is all that differs; a scenario
+whose delivery ticks the replay can't vouch for is inconclusive, and one a client didn't finish fails. Live, the
+answers compare by name and order, and must never fall between two packets of one tick. Neither is an exact pass:
+no client reports the tick it handled the server's packets on, so a run without differences is a `match`, a
+diagnostic (`verdict`).
 
 Vanilla plays the live server; Sunrise then gets vanilla's server stream replayed on the same scenario ticks
 (tools/wire_replay.py), so both clients answered the same server and a difference is the client's own. --live plays
@@ -1953,10 +1956,13 @@ def compare(captures, scenarios, replayed=False, uncertain=None):
     """Each scenario's problems, the second client's stream against the first's (`captures` in that order).
 
     `replayed`: both clients got the same server stream (wire_replay.py), checked here, so nothing is renumbered or
-    realigned: every tick's packets, the frame's answers in their place among them, compare byte for byte, and the
-    network thread's answers by tick and bytes (wire_stream's `exact`). `uncertain` is the replay's timing record
-    ({scenario: [why its delivery ticks are not known to be vanilla's]}, REPLAY_TIMING): such a scenario is
-    inconclusive, its differences listed; None (no record) leaves every scenario inconclusive.
+    realigned: each tick is one ordered stream, every packet in its place (the frame's and the network thread's
+    answers included), compared byte for byte (wire_stream's `exact`). A tick that differs only in where the
+    network thread's answers sit, or in a measured body, is not verified (inconclusive). `uncertain` is the
+    replay's timing record ({scenario: [why its delivery ticks are not known to be vanilla's]}, REPLAY_TIMING): such
+    a scenario is inconclusive, its differences listed; None (no record) leaves every scenario inconclusive.
+
+    Both: a client that didn't finish the scenario's measured window (a short capture) fails it.
 
     Live (not `replayed`): ids and sequences are renumbered per client, a scenario's answer tick is realigned
     (`anchor`) and the frame's answers compare by name and order only; a live match is not an exact pass."""
@@ -1978,7 +1984,9 @@ def compare(captures, scenarios, replayed=False, uncertain=None):
     for name in scenarios:
         v, h = runs[ref][name], runs[new][name]
         ticks = SCENARIOS[name]['ticks'] + PRELUDE
-        problems = []
+        problems = [f'  {who} ended {max(len(run) - 1, 0)} ticks into the {ticks + 1}-tick measured window: the '
+                    'capture is short' for who, run in ((ref_name, v), (new_name, h))
+                    if not wire_stream.complete(run, ticks)]
         if replayed:
             if uncertain is None:
                 problems.append(f'{INCONCLUSIVE} no delivery-timing record with the replay capture '
@@ -1990,6 +1998,11 @@ def compare(captures, scenarios, replayed=False, uncertain=None):
             diffs = anchored_diffs(v, h, ticks, SCENARIOS[name].get('anchor'), problems, (ref_name, new_name))
         wire = lambda run, i: run[i]['wire'] if i < len(run) else None  # noqa: E731
         for i, vt, ht in diffs:
+            if replayed and wire_stream.interleaving_only(wire(v, i), wire(h, i)):
+                answers = [n for n, _ in wire(v, i) if n in wire_stream.NETWORK]
+                problems.append(f'{INCONCLUSIVE} tick {i}: the network thread\'s answers {answers} sit elsewhere '
+                                'among the tick\'s packets, which its own timing decides: this order is not verified')
+                continue
             problems.append(f'  tick {i}:\n  {ref_name}:\n{wire_stream.describe(vt)}\n  {new_name}:\n'
                             f'{wire_stream.describe(ht)}')
             problems += wire_stream.field_diff(vt, ht, (ref_name, new_name), (wire(v, i), wire(h, i)))
@@ -2011,21 +2024,14 @@ def compare(captures, scenarios, replayed=False, uncertain=None):
     return results
 
 
-# The network thread's answer whose body is the client's own measurement: ChunkBatchReceived's rate comes from how
-# long the client took over the batch's chunks (ChunkBatchSizeCalculator), so the replay can't make it the same.
-MEASURED = {'chunk_batch_received'}
-
-
 def network_answers(v, h, ticks, names):
-    """Replay: the network thread's answers (keep-alive, chunk batch), which may land anywhere within a tick: their
-    ticks, names and bytes in order. A measured body that differs is reported as not verified (inconclusive)."""
+    """Replay: the measured bodies the ordered stream leaves out (wire_stream.MEASURED), answer by answer. Their
+    ticks and order are the stream's; a body that differs is each client's own measurement, not verified
+    (inconclusive)."""
     ref_name, new_name = names
-    answers = lambda run: [(i, n, b) for i, t in enumerate(run[:ticks + 1]) for n, b in t['frame_wire']]  # noqa: E731
-    a, b = answers(v), answers(h)
-    if [(i, n, d if n not in MEASURED else None) for i, n, d in a] != \
-            [(i, n, d if n not in MEASURED else None) for i, n, d in b]:
-        return [f'  network-thread answers (tick, packet, bytes): {ref_name} {a}, {new_name} {b}']
-    measured = [(x, y) for x, y in zip(a, b) if x[2] != y[2]]
+    answers = lambda run: [(i, n, b) for i, t in enumerate(run[:ticks + 1]) for n, b in t['frame_wire']  # noqa: E731
+                           if n in wire_stream.MEASURED]
+    measured = [(x, y) for x, y in zip(answers(v), answers(h)) if x[2] != y[2]]
     return [f'{INCONCLUSIVE} {x[1]} at tick {x[0]} carries each client\'s own timing measurement, not verified: '
             f'{ref_name} {x[2]}, {new_name} {y[2]}' for x, y in measured]
 
@@ -2035,11 +2041,41 @@ REPLAY_TIMING = 'timing.json'
 INCONCLUSIVE = '  inconclusive:'
 
 
-def verdict(problems, exact=True):
-    """`exact`: a replay's comparison; a live one without differences is a `match`, not a pass."""
+def verdict(problems, how):
+    """A scenario's verdict, `how` it was compared ('live' or 'replay'). Neither is an exact pass: a live comparison
+    realigns the server's answers, and a replay infers the tick each client handled a server packet on from the
+    proxy's timestamps; no client reports the tick it handled it on (an accepted-tick observation). So no
+    difference is a `match`, a diagnostic; one is a FAIL, or INCONCLUSIVE when the comparison can't vouch for it."""
     if not problems:
-        return 'pass' if exact else 'match (live)'
+        return f'match ({how})'
     return 'INCONCLUSIVE' if any(p.startswith(INCONCLUSIVE) for p in problems) else 'FAIL'
+
+
+def timing_record(path, scenarios):
+    """The replay's delivery-timing record at `path`, checked whole: written for exactly these scenarios, in their
+    order, each doubt a reason under one of them. Its {scenario: [why]}."""
+    try:
+        return wire_stream.timing_doubts(json.loads(path.read_text()), scenarios)
+    except (OSError, ValueError) as e:
+        raise Failed(f'{path}: {e}')
+
+
+def replay_evidence(out, scenarios):
+    """A replay's Sunrise capture and delivery-timing record, wherever they are: OUT/replay/ (this harness's
+    replay) or OUT itself (wire_replay.py run alone writes vanilla.jsonl, sunrise.jsonl and REPLAY_TIMING into its
+    --out). Captures whose clients got the same server play packets are a replay with or without the record:
+    (Sunrise's capture, {scenario: [why]} or None when the record is missing, which leaves every scenario
+    inconclusive). None for a live run's captures."""
+    nested = out / 'replay'
+    folder = nested if (nested / 'sunrise.jsonl').exists() else out
+    capture, timing = folder / 'sunrise.jsonl', folder / REPLAY_TIMING
+    if not capture.exists():
+        return None
+    inputs = lambda path: wire_stream.shared_input(  # noqa: E731
+        [e for e in net_capture.load(path) if e.get('conn') == 1 and 'name' in e])
+    if folder == out and not timing.exists() and inputs(out / 'vanilla.jsonl') != inputs(capture):
+        return None
+    return capture, timing_record(timing, scenarios) if timing.exists() else None
 
 
 def main():
@@ -2080,15 +2116,13 @@ def main():
     replay_capture, uncertain = False, None
     if args.compare_only:
         captures = {who: out / f'{who}.jsonl' for who in args.clients}
-        if 'sunrise' in captures and not args.live and (out / 'replay' / 'sunrise.jsonl').exists():
-            captures['sunrise'] = out / 'replay' / 'sunrise.jsonl'
-            replay_capture = True
-            timing = out / 'replay' / REPLAY_TIMING
-            if timing.exists():
-                record = json.loads(timing.read_text())
-                if record.get('scenarios') != args.scenarios:
-                    sys.exit(f'FAIL: {timing} is for the scenarios {record.get("scenarios")}, not {args.scenarios}')
-                uncertain = record['uncertain']
+        if args.clients == ['vanilla', 'sunrise'] and not args.live:
+            try:
+                evidence = replay_evidence(out, args.scenarios)
+            except Failed as e:
+                sys.exit(f'FAIL: {e}')
+            if evidence is not None:
+                (captures['sunrise'], uncertain), replay_capture = evidence, True
     else:
         if out.exists() and (not out.is_dir() or any(out.iterdir())):
             sys.exit(f'FAIL: {out} is not an empty folder: give --out a new one, or remove it first (a run writes '
@@ -2125,13 +2159,13 @@ def main():
             for check, _ in violations:
                 counts[check] = counts.get(check, 0) + 1
             print(f'Grim violations, {CLIENTS[who]}: {len(violations)} {counts}')
-    exact = replayed or replay_capture
-    how = ('replayed vanilla server stream: exact' if exact
-           else 'live server: aligned to its answers, a match is not an exact pass')
-    print(f'\nserverbound play streams, {CLIENTS[args.clients[0]]} vs {CLIENTS[args.clients[1]]} ({how}); '
-          f'captures in {out}')
+    how = 'replay' if replayed or replay_capture else 'live'
+    detail = ('replayed vanilla server stream, compared byte for byte; delivery ticks inferred, not observed'
+              if how == 'replay' else 'live server: aligned to its answers')
+    print(f'\nserverbound play streams, {CLIENTS[args.clients[0]]} vs {CLIENTS[args.clients[1]]} ({detail}; a '
+          f'match is a diagnostic, not an exact pass); captures in {out}')
     for name, problems in results:
-        print(f'  {verdict(problems, exact and name != "transfer_back")}  {name}')
+        print(f'  {verdict(problems, "live" if name == "transfer_back" else how)}  {name}')
         for p in problems:
             print(p)
     if any(p for _, p in results):

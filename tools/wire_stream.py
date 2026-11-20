@@ -13,10 +13,13 @@ acknowledgements are the exception: the network thread sends them (ClientCommonP
 ClientPacketListener.handleChunkBatchFinished), so they may land anywhere.
 
 `exact` (a replay, tools/wire_replay.py: both clients got the same server packets): nothing is renumbered. Each
-tick's `wire` holds its packets' bytes, the frame's answers among them in the order they were sent, and compares
-byte for byte (floats by their bits); entity ids are named through the shared server stream (`self`, then e1, e2...
-in the order the server added them), the same on both sides, for reading only. The network thread's answers stay
-in `frame` with their bytes in `frame_wire`.
+tick's `wire` is one ordered stream: every serverbound packet of the tick in the order it was sent, the frame's
+answers and the network thread's among them, compared byte for byte (floats by their bits). Only the chunk batch
+acknowledgement's body is left out of it: its rate is the client's own measurement (`MEASURED`). Entity ids are
+named through the shared server stream (`self`, then e1, e2... in the order the server added them), the same on
+both sides, for reading only. The network thread's answers are also kept in `frame`, their bytes in `frame_wire`.
+A tick that differs only in where the network thread's answers sit among the others (`interleaving_only`) is not
+the client's tick to decide.
 """
 import struct
 
@@ -25,6 +28,12 @@ FRAME = {'keep_alive', 'pong', 'chunk_batch_received', 'accept_teleportation', '
 # Answers to the server that also come from the frame; `misplaced` checks them. The network thread's own
 # answers are left out: they may come between two packets of a tick.
 ASYNC = FRAME - {'keep_alive', 'chunk_batch_received'}
+# The network thread's own answers (ClientCommonPacketListenerImpl.handleKeepAlive,
+# ClientPacketListener.handleChunkBatchFinished).
+NETWORK = FRAME - ASYNC
+# The network thread's answer whose body is the client's own measurement: ChunkBatchReceived's rate comes from how
+# long the client took over the batch's chunks (ChunkBatchSizeCalculator), so a replay can't make it the same.
+MEASURED = {'chunk_batch_received'}
 
 
 class Reader:
@@ -240,14 +249,18 @@ def scenarios(entries, exact=False):
             fields['entity'] = shared.get(fields['entity'], fields['entity'])
         elif 'entity' in fields and fields['entity'] == me:
             fields['entity'] = 'self'
-        if name in FRAME and not (exact and name in ASYNC):
+        if name in FRAME and not exact:
             tick['frame'].append((name, fields))
             tick['frame_wire'].append((name, wire_key(name, data)))
             if name in ASYNC and tick['packets']:
                 tick['misplaced'].append(name)
             continue
+        if exact and name in NETWORK:
+            # In the stream in its place, and kept apart for its measured body.
+            tick['frame'].append((name, fields))
+            tick['frame_wire'].append((name, wire_key(name, data)))
         tick['packets'].append((name, fields))
-        tick['wire'].append((name, wire_key(name, data)))
+        tick['wire'].append((name, None if exact and name in MEASURED else wire_key(name, data)))
         if name == 'client_tick_end':
             current.append(new_tick())
     if not exact:
@@ -296,13 +309,42 @@ def name_entities(run):
 def compare(vanilla, sunrise, ticks, key='packets'):
     """The ticks 0..ticks where the two streams differ: [(tick, vanilla packets, Sunrise packets)]. Fields
     compare exactly, floats included: they are what vanilla's client sends. `key` 'wire': by the packets' bytes
-    (an exact scenarios()); the decoded packets are what is returned either way."""
+    (an exact scenarios()); the decoded packets are what is returned either way. A tick either stream doesn't
+    reach is a difference, even when both miss it: a short capture never matches."""
     out = []
     at = lambda run, i, k: run[i][k] if i < len(run) else None  # noqa: E731
     for i in range(ticks + 1):
-        if at(vanilla, i, key) != at(sunrise, i, key):
+        if i >= len(vanilla) or i >= len(sunrise) or at(vanilla, i, key) != at(sunrise, i, key):
             out.append((i, at(vanilla, i, 'packets'), at(sunrise, i, 'packets')))
     return out
+
+
+def complete(run, ticks):
+    """Whether `run` holds the whole measured window: ticks 0..ticks, each closed by its ClientTickEnd."""
+    return len(run) > ticks + 1
+
+
+def timing_doubts(record, scenarios):
+    """A replay's delivery-timing record (tools/wire_replay.py writes it), checked whole: made for exactly these
+    scenarios, in their order, each doubt a reason under one of them. Its {scenario: [why]}; ValueError otherwise."""
+    if not isinstance(record, dict) or record.get('scenarios') != scenarios:
+        found = record.get('scenarios') if isinstance(record, dict) else record
+        raise ValueError(f'the delivery-timing record is for the scenarios {found}, not {scenarios}')
+    doubts = record.get('uncertain')
+    if not isinstance(doubts, dict) or not set(doubts) <= set(scenarios) or not all(
+            isinstance(why, list) and all(isinstance(w, str) for w in why) for why in doubts.values()):
+        raise ValueError('the delivery-timing record has no whole {scenario: [reason]} list of its doubts')
+    return doubts
+
+
+def interleaving_only(a, b):
+    """Whether two ticks' exact `wire` streams differ only in where the network thread's answers sit among the
+    tick's other packets: the same packets in the same order without them, and the same answers in the same order.
+    That thread sends them whenever the server's packet arrives, so their place is no client's tick to decide."""
+    if a is None or b is None:
+        return False
+    split = lambda wire: ([p for p in wire if p[0] not in NETWORK], [p for p in wire if p[0] in NETWORK])  # noqa: E731
+    return split(a) == split(b)
 
 
 def compare_answered(vanilla, sunrise, ticks, av, ah):
