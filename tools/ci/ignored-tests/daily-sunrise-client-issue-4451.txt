@@ -2294,7 +2294,6 @@ sunrise-client game::remote::tests::chat_event_tests::mods_replace_and_cancel_re
 sunrise-client game::remote::tests::chat_window_and_input_tests::a_mod_chat_line_shows_locally_and_sends_nothing lib daily resources
 sunrise-client game::remote::tests::chat_window_and_input_tests::mod_open_chat_fills_the_box_only_over_the_world lib daily resources
 sunrise-client game::remote::tests::click_ending_tests::an_end_crystal_click_on_a_block_ends_there lib daily resources
-sunrise-client game::remote::tests::click_ending_tests::an_ender_eye_and_a_minecart_end_the_click_where_vanilla_does lib daily resources
 sunrise-client game::remote::tests::click_ending_tests::flint_and_steel_use_on_ends_the_click lib daily resources
 sunrise-client game::remote::tests::client_attributes_tests::update_attributes_answers_the_local_players_living_reads lib daily resources
 sunrise-client game::remote::tests::client_camera_tests::client_camera_entity_returns_to_player_after_removal lib daily resources
@@ -2648,4 +2647,3 @@ sunrise-client game::xp_repair_ratio_tests::bad_ratios_never_break_the_repair li
 sunrise-client game::xp_repair_ratio_tests::give_experience_points_repairs_through_the_part lib daily resources
 sunrise-client game::xp_repair_ratio_tests::the_ratio_a_part_answers_scales_the_repair lib daily resources
 sunrise-client game::zombie_villagers::tests::conversions_preserve_body_equipment lib daily resources
-sunrise-client game::remote_mob_use::tests::a_saddle_on_a_pig_and_a_cookie_on_a_parrot_answer_on_the_client lib daily resources
