@@ -715,6 +715,12 @@ pub fn skin_location(hash: &str) -> String {
 pub fn cape_location(hash: &str) -> String {
     location("capes/", hash)
 }
+/// Whether the atlas location holds a cape, a profile's (`capes/`) or an OptiFine one
+/// (`optifine_capes/`): a 64x32 texture in the top half of its 64x64 slot ([`process_cape`],
+/// [`process_optifine_cape`]), which the cape model reads alone.
+pub fn is_cape_location(location: &str) -> bool {
+    location.starts_with("capes/") || location.starts_with(OPTIFINE_CAPE_LOCATIONS)
+}
 fn location(prefix: &str, hash: &str) -> String {
     let units: Vec<u8> = hash.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let digest = sha1(&units);
@@ -2545,6 +2551,14 @@ mod download_bound_tests {
 #[cfg(test)]
 mod optifine_cape_tests {
     use super::{Downloader, Optifine, process_cape, process_optifine_cape, worn_cape};
+
+    #[test]
+    fn optifine_capes_are_capes_in_the_atlas_too() {
+        assert!(super::is_cape_location(&super::cape_location("abc")));
+        assert!(super::is_cape_location("optifine_capes/abdl"));
+        assert!(!super::is_cape_location(&super::skin_location("abc")));
+        assert!(!super::is_cape_location("patch/capes/x"));
+    }
 
     /// A `width`x`height` picture whose texel at (x, y) is `[x, y, 7, 255]`.
     fn picture(width: usize, height: usize) -> Vec<u8> {

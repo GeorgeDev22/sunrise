@@ -5882,8 +5882,10 @@ impl Game<'_> {
             height: 64,
             rgba,
         });
-        // A cape is a 64x32 texture in the top half of the slot (skins::process_cape).
-        if location.starts_with("capes/") {
+        // A cape is a 64x32 texture in the top half of the slot (skins::process_cape), an
+        // OptiFine one too: given the whole slot, the model read twice as far down and drew
+        // the cape's top half squashed over all of it.
+        if sunrise_client_render::skins::is_cape_location(&location) {
             rect.v1 = (rect.v0 + rect.v1) / 2.0;
         }
         self.gui.atlas.sprites.insert(location, rect);
