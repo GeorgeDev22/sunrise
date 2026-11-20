@@ -6,7 +6,7 @@ use super::{
     anim::{Poses, State},
     brain::{Ttl, living_near},
     goals::{
-        Cx, Float, Goal, HurtByTarget, LOOK, LookAtPlayer, MOVE, MeleeAttack, NearestTarget, Prey,
+        Cx, Goal, HurtByTarget, LOOK, LookAtPlayer, MOVE, MeleeAttack, NearestTarget, Prey,
         RandomLookAround, Stroll, TARGET, TargetState, goal_clone, target_continue,
     },
 };
@@ -1318,8 +1318,9 @@ impl Goal for BackUpIfTooClose {
 pub fn register_piglin(m: &mut Mob) {
     // `AbstractPiglin.<init>`: a piglin's navigation opens doors.
     m.ai.nav.can_open_doors = true;
+    // `PiglinAi.initCoreActivity` has no `Swim`: a piglin sinks in water
+    // and lava.
     let g = &mut m.ai.goals;
-    g.add(0, Float);
     // `PiglinAi.initCoreActivity`: `InteractWithDoor.create()`.
     g.add(0, super::doors::InteractWithDoor::default());
     g.add(1, Admire);
@@ -1453,8 +1454,8 @@ impl Goal for HuntHoglin {
     }
 }
 pub fn register_brute(m: &mut Mob) {
+    // `PiglinBruteAi.initCoreActivity` has no `Swim`: a brute sinks.
     let g = &mut m.ai.goals;
-    g.add(0, Float);
     g.add(2, MeleeAttack::new(1.0, true));
     // `PiglinBruteAi.createIdleMovementBehaviors`: `StrollToPoi(HOME, 0.6, 2,
     // 100)` ahead of the plain stroll, so a brute that drifts off walks back to
@@ -1530,8 +1531,9 @@ impl Goal for BruteStrollHome {
     }
 }
 pub fn register_hoglin(m: &mut Mob) {
+    // `HoglinAi.initCoreActivity` has no `Swim`: a hoglin sinks in water and
+    // lava, and a lava fall carries it down to the floor of a farm.
     let g = &mut m.ai.goals;
-    g.add(0, Float);
     // `HoglinAi.initRetreatActivity`: `SetWalkTargetAwayFrom.entity(AVOID_TARGET, 1.3, 15, false)`.
     g.add(1, WalkAway::retreat(1.3, 15.0, false));
     // HoglinAi: MeleeAttack.create(40) for adults, 15 for babies, in the
@@ -1558,8 +1560,8 @@ pub fn register_hoglin(m: &mut Mob) {
     );
 }
 pub fn register_zoglin(m: &mut Mob) {
+    // `Zoglin.initCoreActivity` has no `Swim`: a zoglin sinks.
     let g = &mut m.ai.goals;
-    g.add(0, Float);
     // Zoglin.initMemories: MeleeAttack.create(40) for adults, 15 for babies.
     g.add(2, MeleeAttack::new(1.0, true).intervals(40, 15));
     g.add(5, Stroll::avoiding_water(0.4));
