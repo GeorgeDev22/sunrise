@@ -3856,6 +3856,16 @@ impl Mob {
             mount: self.extra.mount,
         }
     }
+    /// The box at `position` that the block effects of this mob's tick
+    /// (`Entity.applyEffectsFromBlocks`: portals, among others) see: its
+    /// [`Self::bounds_at`], except a shulker's, which `Shulker.tick` grows
+    /// only after them.
+    pub fn block_effects_bounds_at(&self, position: Vec3) -> Aabb {
+        if self.kind.species == Species::Shulker {
+            return shulker::block_effects_bounds_at(self, position);
+        }
+        self.bounds_at(position)
+    }
     /// `Entity.makeBoundingBox(position)`.
     pub fn bounds_at(&self, position: Vec3) -> Aabb {
         // Shulker.makeBoundingBox: the lid's lift, not the dimensions.

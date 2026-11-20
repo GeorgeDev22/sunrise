@@ -127,7 +127,16 @@ fn progress_aabb(direction: u8, from: f64, to: f64, pos: Vec3, size: f32) -> Aab
 /// `1 + currentPeekAmount` height of [`peek_height_scale`] is only the
 /// entity's dimensions (its eye height), not this box.
 pub fn bounds_at(m: &Mob, position: Vec3) -> Aabb {
-    let lift = f64::from(physical_peek(m.anim.v[PEEK]));
+    peek_bounds_at(m, m.anim.v[PEEK], position)
+}
+/// The box `Entity.applyEffectsFromBlocks` sees in `Shulker.tick`: `super.tick()`
+/// runs before `updatePeekAmount`, so it is the box last tick's peek built
+/// (`anim.vo`, which `begin_tick` keeps before the lid eases).
+pub fn block_effects_bounds_at(m: &Mob, position: Vec3) -> Aabb {
+    peek_bounds_at(m, m.anim.vo[PEEK], position)
+}
+fn peek_bounds_at(m: &Mob, peek: f32, position: Vec3) -> Aabb {
+    let lift = f64::from(physical_peek(peek));
     progress_aabb(
         opposite(m.extra.variant3),
         -1.0,

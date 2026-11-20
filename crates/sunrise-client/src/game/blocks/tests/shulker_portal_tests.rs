@@ -31,6 +31,12 @@ fn a_shulker_on_a_wall_goes_through_the_portal_its_lid_opens_into() {
             .unwrap();
     }
     assert_eq!(game.mobs.len(), 2);
+    // The sweep sees the box last tick's peek built (`Shulker.tick` grows it
+    // after `super.tick()`); these shells have not ticked, so give each the
+    // lid it loaded with as last tick's too.
+    for m in game.mobs.iter_mut() {
+        m.anim.vo = m.anim.v;
+    }
     game.update_chunk_tickets();
     assert!(
         game.entity_ticking_area()(4, 4),

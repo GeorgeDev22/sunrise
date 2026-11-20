@@ -1799,11 +1799,12 @@ impl Entity for Mob {
     fn sweeps_portals(&self) -> bool {
         true
     }
-    /// A mob's own box (`Mob::bounds_at`): a shulker's grows toward its open
+    /// A mob's own box as its block effects see it
+    /// (`Mob::block_effects_bounds_at`): a shulker's grows toward its open
     /// lid (`Shulker.makeBoundingBox`), so a shell beside or under a portal
-    /// peeks into it.
+    /// peeks into it, the tick after the lid opened.
     fn portal_bounds(&self, at: Vec3) -> Option<Aabb> {
-        Some(self.bounds_at(at))
+        Some(self.block_effects_bounds_at(at))
     }
     fn can_use_portal(&self, game: &Game<'_>) -> bool {
         game.mob_portal_eligible(self)
