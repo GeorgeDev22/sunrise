@@ -16,7 +16,7 @@ pub trait Hooks {
     /// The current level's game rules remain readable through `host.level(dimension)`.
     /// Called only when this Part's own cadence requests it. All Parts see
     /// the same snapshots; their queued changes apply in Part order afterward.
-    /// Clearing `keep` skips later Parts. Server-side on both targets.
+    /// Clearing `keep` skips later Parts. Server-side.
     #[hook(
         side = "server",
         scope = "effect",

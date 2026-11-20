@@ -130,8 +130,9 @@ pub trait MenusClientBackend {
     fn menu_slot_boxes(&self, menu: MenuRef) -> Option<Vec<Option<[f32; 4]>>>;
     /// Side: client.
     /// Slot roles from the client layout and content menu declaration, in menu order.
-    /// The length equals `slot_count`. Unknown roles are `Other`; these describe
-    /// neither server backing nor rules for accepting items. Returns `None` outside
+    /// The length equals `slot_count`. Machine inputs (including fuel and brewing
+    /// bottle slots) are `Input`; unknown roles are `Other`. Roles describe neither
+    /// server backing nor rules for accepting items. Returns `None` outside
     /// a world, without an open menu, for stale/foreign menus or missing content types.
     /// Game types with no known slot count return `None`; workstations without
     /// classified layouts give all `Other` when their count is known. Creative returns the underlying inventory menu, not tab wrappers:
@@ -139,6 +140,21 @@ pub trait MenusClientBackend {
     /// Built per call with one Vec allocation and a table lookup; cache for the menu.
     #[access(WorldOnly)]
     fn menu_slot_kinds(&self, menu: MenuRef) -> Option<Vec<MenuSlotKind>>;
+    /// Side: client.
+    /// The local player's open merchant menu's synchronized offers, copied in display order
+    /// (`MerchantMenu.getOffers`). Includes both payments, the result with its components,
+    /// and the synchronized stock and price data. Use [`MerchantOffer::cost_a_count`] for
+    /// the adjusted first payment. Reading does not select or take a trade or send a packet.
+    ///
+    /// `Ok(None)` means the menu is stale, foreign, closed, or not a merchant menu.
+    /// An open merchant menu without offers returns `Ok(Some(Vec::new()))`.
+    /// Returns [`LevelReadError::Unavailable`] when the phase or backend cannot supply the
+    /// read, or an offer cannot be converted to an API value.
+    #[access(WorldOnly)]
+    fn menu_merchant_offers(
+        &self,
+        menu: MenuRef,
+    ) -> Result<Option<Vec<MerchantOffer>>, LevelReadError>;
 }
 /// The handles' client writes of the `menus` area, implemented by the game and reached through [`ClientBackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait

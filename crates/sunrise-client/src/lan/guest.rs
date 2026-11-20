@@ -156,6 +156,15 @@ impl InboxItem {
     }
 }
 
+/// The body state at a single accepted move, before later input or reports.
+#[derive(Clone, Copy, Debug)]
+pub struct GuestMove {
+    pub position: [f64; 3],
+    pub delta: [f64; 3],
+    pub on_ground: bool,
+    pub sneaking: bool,
+}
+
 pub struct Guest {
     /// Identity generation and journal binding travel with the actual player record.
     pub residency: crate::join_seq::residency::member::Member,
@@ -319,16 +328,10 @@ pub struct Guest {
     // Chunks.
     pub center: Option<(i32, i32)>,
     pub sent_chunks: crate::fast_hash::FxHashSet<(i32, i32)>,
-    /// Sent as far-ring columns and needing a near snapshot on promotion.
-    pub far_sent_chunks: crate::fast_hash::FxHashSet<(i32, i32)>,
     /// The near chunks the mods were told this player watches
     /// (`lan::chunk_watch`); empty while no mod listens.
     pub watched: crate::fast_hash::FxHashSet<(i32, i32)>,
     pub chunk_queue: Vec<(i32, i32)>,
-    /// The far ring's chunks still to send, past the view distance (`lan::far`), closest first.
-    pub far_queue: Vec<(i32, i32)>,
-    /// Where the bounded far-ring scan resumes; reset when the view changes.
-    pub far_cursor: usize,
     /// PlayerChunkSender: batches sent but not yet acknowledged, how many
     /// may be (1 until the client's first acknowledgement, then 10), the
     /// rate the client asks for and the chunks the next batch may hold.
@@ -452,9 +455,8 @@ pub struct Guest {
     pub inbox: VecDeque<InboxItem>,
     pub joined_tick: u64,
     pub ticks: u64,
-    /// The moves accepted since the game last looked (movement, on ground),
-    /// for ServerPlayer.doCheckFallDamage.
-    pub moves: Vec<([f64; 3], bool)>,
+    /// The moves accepted since the game last looked, for ServerPlayer.doCheckFallDamage.
+    pub moves: Vec<GuestMove>,
     /// Whether the guest was on the ground before the first of `moves`.
     pub moves_from_ground: bool,
     /// `ServerPlayer.lastKnownClientMovement`: the last move accepted from
@@ -540,6 +542,8 @@ pub struct Guest {
     /// changed since (`progressChanged`).
     pub advancements: crate::advancements::Progress,
     pub advancements_loaded: bool,
+    /// Whether the first advancement snapshot reached this connection.
+    pub advancements_sent: bool,
     pub advancements_visible: Vec<bool>,
     pub advancements_changed: std::collections::BTreeSet<usize>,
     /// The server's scoreboard as this player's client has it (lan/scoreboard.rs).
@@ -668,7 +672,7 @@ impl Guest {
     }
     /// `ChunkMap.isChunkTracked`: whether the guest watches chunk `(x, z)` of
     /// level `dimension`, inside its view (`ChunkTrackingView.contains`) and
-    /// sent rather than pending. A far-ring column past the view is not tracked.
+    /// sent rather than pending.
     pub fn tracks_chunk(&self, dimension: &str, (x, z): (i32, i32)) -> bool {
         self.watches_level(dimension)
             && self.sent_chunks.contains(&(x, z))
@@ -763,11 +767,8 @@ impl Guest {
             load_timeout: CLIENT_LOADED_TIMEOUT,
             center: None,
             sent_chunks: Default::default(),
-            far_sent_chunks: Default::default(),
             watched: Default::default(),
             chunk_queue: Vec::new(),
-            far_queue: Vec::new(),
-            far_cursor: 0,
             unacknowledged: 0,
             max_unacknowledged: 1,
             chunks_per_tick: 9.0,
@@ -858,6 +859,7 @@ impl Guest {
             selected_tab: None,
             advancements: Default::default(),
             advancements_loaded: false,
+            advancements_sent: false,
             advancements_visible: Vec::new(),
             advancements_changed: Default::default(),
             scoreboard: Default::default(),

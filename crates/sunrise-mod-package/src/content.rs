@@ -983,6 +983,10 @@ pub struct MenuType {
     /// slots a player takes from but never puts into, each below `slots`.
     #[serde(default)]
     pub results: Vec<u16>,
+    /// Zero-based machine input slots, disjoint from results and crafting slots.
+    /// This is a client layout role, not an item acceptance or transfer rule.
+    #[serde(default)]
+    pub inputs: Vec<u16>,
     /// a crafting grid over some of the slots, which crafts as vanilla's
     /// crafting table does (`CraftingMenu`).
     #[serde(default)]
@@ -1043,7 +1047,6 @@ pub const MAX_MENU_SLOTS: u16 = 256;
 #[derive(Debug, Clone)]
 enum Source {
     Dir(PathBuf),
-    #[cfg(not(target_arch = "wasm32"))]
     Zip(PathBuf),
     /// No files: content a native mod declares in code.
     Code,
@@ -1075,7 +1078,6 @@ pub struct Content {
 /// Reads a mod's content files ([`Content::reader`]).
 pub enum FileReader<'a> {
     Dir(&'a Path),
-    #[cfg(not(target_arch = "wasm32"))]
     Zip(Box<zip::ZipArchive<std::fs::File>>),
 }
 impl FileReader<'_> {
@@ -1086,7 +1088,6 @@ impl FileReader<'_> {
             Self::Dir(root) => {
                 Box::new(std::fs::File::open(root.join(name)).map_err(|e| format!("{name}: {e}"))?)
             }
-            #[cfg(not(target_arch = "wasm32"))]
             Self::Zip(zip) => Box::new(zip.by_name(name).map_err(|e| format!("{name}: {e}"))?),
         };
         let mut out = Vec::new();
@@ -1105,7 +1106,6 @@ impl FileReader<'_> {
         check_path(name)?;
         let root = match self {
             Self::Dir(root) => root,
-            #[cfg(not(target_arch = "wasm32"))]
             Self::Zip(_) => return Ok(None),
         };
         let path = root.join(name);
@@ -1146,22 +1146,16 @@ impl Content {
         let (source, sized) = if path.is_dir() {
             (Source::Dir(path.to_owned()), folder_files(path)?)
         } else {
-            #[cfg(target_arch = "wasm32")]
-            return Err("archive I/O is unavailable on wasm32".into());
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let mut zip = open_zip(path)?;
-                let mut out = Vec::new();
-                for i in 0..zip.len() {
-                    let entry = zip.by_index_raw(i).map_err(|e| e.to_string())?;
-                    let name = entry.name().map_err(|e| e.to_string())?.into_owned();
-                    if (name.starts_with("assets/") || name.starts_with("data/")) && !entry.is_dir()
-                    {
-                        out.push((name.to_owned(), entry.size()));
-                    }
+            let mut zip = open_zip(path)?;
+            let mut out = Vec::new();
+            for i in 0..zip.len() {
+                let entry = zip.by_index_raw(i).map_err(|e| e.to_string())?;
+                let name = entry.name().map_err(|e| e.to_string())?.into_owned();
+                if (name.starts_with("assets/") || name.starts_with("data/")) && !entry.is_dir() {
+                    out.push((name.to_owned(), entry.size()));
                 }
-                (Source::Zip(path.to_owned()), out)
             }
+            (Source::Zip(path.to_owned()), out)
         };
         let mut files = Vec::with_capacity(sized.len());
         let mut total = 0u64;
@@ -1297,7 +1291,6 @@ impl Content {
     pub fn source(&self) -> &Path {
         match &self.source {
             Source::Dir(path) => path,
-            #[cfg(not(target_arch = "wasm32"))]
             Source::Zip(path) => path,
             Source::Code => Path::new(""),
         }
@@ -1660,6 +1653,19 @@ impl Content {
                     return Err(format!("{name}: result {r} is listed twice"));
                 }
             }
+            for &input in &file.inputs {
+                if input >= file.slots {
+                    return Err(format!(
+                        "{name}: input {input} is past the last slot, {}",
+                        file.slots - 1
+                    ));
+                }
+                if !seen.insert(input) {
+                    return Err(format!(
+                        "{name}: input {input} is listed twice or is a result"
+                    ));
+                }
+            }
             if let Some(c) = file.crafting {
                 let end = u32::from(c.grid) + u32::from(c.size) * u32::from(c.size);
                 if !matches!(c.size, 2 | 3) {
@@ -1674,14 +1680,15 @@ impl Content {
                 if (u32::from(c.grid)..end).contains(&u32::from(c.result)) {
                     return Err(format!("{name}: the crafting result is in its grid"));
                 }
-                if file
-                    .results
-                    .iter()
-                    .any(|&r| r == c.result || (u32::from(c.grid)..end).contains(&u32::from(r)))
-                {
+                let is_crafting_slot =
+                    |&s: &u16| s == c.result || (u32::from(c.grid)..end).contains(&u32::from(s));
+                if file.results.iter().any(is_crafting_slot) {
                     return Err(format!(
                         "{name}: results lists a crafting slot (the result is take-only already)"
                     ));
+                }
+                if file.inputs.iter().any(is_crafting_slot) {
+                    return Err(format!("{name}: inputs lists a crafting slot"));
                 }
             }
             if let Some(l) = file.links {
@@ -1846,9 +1853,6 @@ fn check_block(file: &Block) -> Result<(), String> {
     }
     if p.explosion_resistance.is_some_and(|r| r < 0.0) {
         return Err("explosion_resistance is 0 or more".into());
-    }
-    if p.friction.is_some_and(|f| !(0.0..=2.0).contains(&f)) {
-        return Err("friction is 0 to 2".into());
     }
     if p.light.is_some_and(|l| l > 15) {
         return Err("light is 0 to 15".into());
@@ -2062,13 +2066,11 @@ fn check_sign_walls(blocks: &[&Block]) -> Result<(), String> {
 fn reader_of(source: &Source) -> Result<FileReader<'_>, String> {
     Ok(match source {
         Source::Dir(root) => FileReader::Dir(root),
-        #[cfg(not(target_arch = "wasm32"))]
         Source::Zip(path) => FileReader::Zip(Box::new(open_zip(path)?)),
         Source::Code => FileReader::Dir(Path::new("")),
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn open_zip(path: &Path) -> Result<zip::ZipArchive<std::fs::File>, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     zip::ZipArchive::new(file).map_err(|e| e.to_string())
@@ -2234,6 +2236,27 @@ capabilities = ["registries"]
         let content = package.and_then(|p| Content::read(&path, &p.manifest));
         std::fs::remove_dir_all(&dir).unwrap();
         content
+    }
+
+    #[test]
+    fn a_declared_friction_is_any_finite_number() {
+        let load = |value: &str| {
+            let file =
+                format!(r#"{{"template":"minecraft:stone","properties":{{"friction":{value}}}}}"#);
+            smod(
+                "friction-range",
+                MANIFEST_TEXT,
+                &[("data/ruby/sunrise/block/a.json", file.as_bytes())],
+            )
+        };
+        for (value, expected) in [("3.0", 3.0), ("-0.5", -0.5)] {
+            let content = load(value).unwrap();
+            assert_eq!(content.blocks[0].properties.friction, Some(expected));
+        }
+        // JSON has no NaN or infinity: a literal is a parse error, and a number past f32's range
+        // becomes infinity and is refused by the check.
+        assert!(load("NaN").is_err());
+        assert!(load("1e39").is_err());
     }
 
     #[test]
@@ -2639,30 +2662,38 @@ capabilities = ["registries"]
     }
 
     #[test]
-    fn menu_types_take_slots_data_slots_and_results() {
+    fn menu_types_take_slots_data_slots_and_roles() {
         let files: &[(&str, &[u8])] = &[
             (
                 "data/ruby/sunrise/menu/press.json",
-                br#"{"slots": 9, "data_slots": 2, "results": [7, 8]}"#,
+                br#"{"slots": 9, "data_slots": 2, "results": [7, 8], "inputs": [0, 6]}"#,
             ),
             ("data/ruby/sunrise/menu/bag.json", br#"{"slots": 4}"#),
             (
                 "data/ruby/sunrise/menu/station.json",
-                br#"{"slots": 16, "results": [11], "crafting": {"grid": 1, "result": 0}, "links": {"from": 12, "count": 4}}"#,
+                br#"{"slots": 16, "results": [11], "inputs": [15], "crafting": {"grid": 1, "result": 0}, "links": {"from": 12, "count": 4}}"#,
             ),
         ];
         let content = smod("menus", MANIFEST_TEXT, files).unwrap();
         let menus: Vec<_> = content
             .menu_types
             .iter()
-            .map(|m| (m.id.as_str(), m.slots, m.data_slots, m.results.clone()))
+            .map(|m| {
+                (
+                    m.id.as_str(),
+                    m.slots,
+                    m.data_slots,
+                    m.results.as_slice(),
+                    m.inputs.as_slice(),
+                )
+            })
             .collect();
         assert_eq!(
             menus,
             [
-                ("ruby:bag", 4, 0, vec![]),
-                ("ruby:press", 9, 2, vec![7, 8]),
-                ("ruby:station", 16, 0, vec![11])
+                ("ruby:bag", 4, 0, &[][..], &[][..]),
+                ("ruby:press", 9, 2, &[7, 8][..], &[0, 6][..]),
+                ("ruby:station", 16, 0, &[11][..], &[15][..])
             ]
         );
         let links: Vec<_> = content.menu_types.iter().map(|m| m.links).collect();
@@ -2762,6 +2793,29 @@ capabilities = ["registries"]
             let files: &[(&str, &[u8])] = &[("data/ruby/sunrise/menu/a.json", file.as_bytes())];
             let e = smod(case, MANIFEST_TEXT, files).unwrap_err();
             assert!(e.contains(why), "{case}: {e}");
+        }
+    }
+
+    #[test]
+    fn menu_types_reject_invalid_inputs() {
+        for (case, file) in [
+            ("input-past", r#"{"slots": 3, "inputs": [3]}"#),
+            ("input-twice", r#"{"slots": 3, "inputs": [1, 1]}"#),
+            (
+                "input-result",
+                r#"{"slots": 3, "inputs": [1], "results": [1]}"#,
+            ),
+            (
+                "input-grid",
+                r#"{"slots": 6, "inputs": [2], "crafting": {"grid": 1, "size": 2, "result": 0}}"#,
+            ),
+            (
+                "input-craft-result",
+                r#"{"slots": 6, "inputs": [0], "crafting": {"grid": 1, "size": 2, "result": 0}}"#,
+            ),
+        ] {
+            let files: &[(&str, &[u8])] = &[("data/ruby/sunrise/menu/a.json", file.as_bytes())];
+            assert!(smod(case, MANIFEST_TEXT, files).is_err(), "{case}");
         }
     }
 

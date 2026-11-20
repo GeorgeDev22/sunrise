@@ -12,6 +12,6 @@ enumerate every tag. Unknown tags return `Some(false)` or `Some(Vec::new())`;
 unavailable key mappings return `None`. A retained key keeps its identity across
 reloads, but its members are read from the current evaluation's tables.
 
-The same Tags resource crosses Wire for native and wasm callbacks. Neither
+Neither
 callback gains a mutable game host or an opportunity to change tags. No tag
 snapshot is copied when no codec with the evaluated type id is registered.

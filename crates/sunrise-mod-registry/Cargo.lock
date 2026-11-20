@@ -426,8 +426,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "foldhash",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -645,8 +643,6 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -1353,8 +1349,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "sunrise-game-discovery",
- "sunrise-mod-call",
- "sunrise-mod-point-shape",
  "sunrise-mod-source",
  "sunrise-mod-surface",
  "syn 2.0.119",
@@ -1367,15 +1361,7 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
- "sunrise-mod-point-shape",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "sunrise-mod-call"
-version = "0.1.0"
-dependencies = [
- "sha2",
 ]
 
 [[package]]
@@ -1392,25 +1378,12 @@ dependencies = [
  "sha2",
  "sunrise-core",
  "sunrise-mod-api-macros",
- "sunrise-mod-call",
- "sunrise-mod-point-shape",
  "sunrise-mod-surface",
  "sunrise-mod-vocab",
  "sunrise-shader-api",
  "toml",
- "wasmparser",
+ "windows-sys 0.61.2",
  "zip",
-]
-
-[[package]]
-name = "sunrise-mod-point-shape"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1461,7 +1434,7 @@ dependencies = [
  "proc-macro2",
  "serde",
  "serde_json",
- "sunrise-mod-call",
+ "sha2",
  "syn 2.0.119",
 ]
 
@@ -1819,19 +1792,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "wasmparser"
-version = "0.261.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f20f20e44f7e8aeb6744823ea9d869ede51e51be4fdaedede2852282e54d2d8"
-dependencies = [
- "bitflags",
- "hashbrown",
- "indexmap",
- "semver",
- "serde",
 ]
 
 [[package]]

@@ -1053,7 +1053,7 @@ pub fn paint(batch: &mut HudBatch, atlas: &HudAtlas, draws: &[Draw]) -> Option<u
             } => crate::ui::nine_slice(
                 batch,
                 atlas,
-                &format!("gui/sprites/{sprite}"),
+                sprite,
                 *x as f32,
                 *y as f32,
                 *w as f32,

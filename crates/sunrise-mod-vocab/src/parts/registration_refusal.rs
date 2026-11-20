@@ -1,24 +1,14 @@
 // exports: none (reached inside the crate only)
-//! Self-refusal transport and the registration admission savepoint.
-
-/// Engine admission plumbing; mods call `RegistrationContext::refuse` instead.
-// hidden: the generated registrar call table transports self-refusals.
-#[doc(hidden)]
-pub trait RegistrationRefusalRegistrar {
-    /// Deliver the current mod's refusal, without accepting an owner argument.
-    fn registration_refusal(&mut self, reason: String);
-    /// Deliver one of the current mod's loading warnings.
-    fn registration_warning(&mut self, warning: LoadingMessage);
-}
+//! Registration refusals and bounded loading messages.
 
 /// The most loading warnings one mod keeps; later ones are dropped.
-// hidden: the host re-applies the cap to what a guest sends.
+// hidden: registration contexts enforce the cap.
 #[doc(hidden)]
 pub const MAX_LOADING_WARNINGS: usize = 16;
 
 /// A loading message as a translation key and its arguments, resolved against the
 /// selected language when the game shows it (NeoForge's `ModLoadingIssue`).
-#[derive(sunrise_mod_api_macros::Wire, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LoadingMessage {
     pub(crate) key: String,
@@ -55,8 +45,8 @@ pub(crate) fn bounded_text(text: &str) -> &str {
     &text[..end]
 }
 
-/// Engine transport plumbing for the generated guest dispatch arm.
-// hidden: drains the guest-local context's warnings after the registration callback.
+/// Drains the context's warnings after the registration callback.
+// hidden: the loader collects warnings before installing Parts.
 #[doc(hidden)]
 pub fn take_registration_warnings(cx: &crate::RegistrationContext) -> Vec<LoadingMessage> {
     std::mem::take(&mut *cx.warnings.lock().unwrap_or_else(|p| p.into_inner()))
@@ -76,8 +66,8 @@ pub fn registration_warnings(id: &str) -> Vec<LoadingMessage> {
     })
 }
 
-/// Engine transport plumbing for the generated guest dispatch arm.
-// hidden: drains the guest-local context after the registration callback.
+/// Drains the context's refusal after the registration callback.
+// hidden: the loader decides whether to admit the registered mod.
 #[doc(hidden)]
 pub fn take_registration_refusal(cx: &crate::RegistrationContext) -> Option<String> {
     cx.self_refusal

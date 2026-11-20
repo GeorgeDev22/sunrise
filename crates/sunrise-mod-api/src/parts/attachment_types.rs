@@ -13,7 +13,7 @@ impl crate::AttachmentDeclarations for LoadedAttachmentDeclarations {
     }
 }
 
-/// The immutable registry reached by guest metadata checks, with no world borrow.
+/// The immutable attachment type registry, with no world borrow.
 pub fn attachment_declarations() -> &'static dyn crate::AttachmentDeclarations {
     static LOOKUP: LoadedAttachmentDeclarations = LoadedAttachmentDeclarations;
     &LOOKUP

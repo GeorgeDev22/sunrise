@@ -1005,15 +1005,7 @@ impl Game<'_> {
         sunrise_client::widgets::narratable(|| {
             sunrise_client::widgets::Narratable::button(done_label(), [bx, by, 200.0, 20.0], true)
         });
-        batch.sprite_scaled(
-            atlas,
-            "gui/sprites/widget/button",
-            bx,
-            by,
-            200.0,
-            20.0,
-            u32::MAX,
-        );
+        batch.sprite_scaled(atlas, "widget/button", bx, by, 200.0, 20.0, u32::MAX);
         let done = done_label();
         let tw = HudBatch::text_width(atlas, &done);
         batch.text(

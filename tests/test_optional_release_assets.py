@@ -15,7 +15,8 @@ REQUIRED = {
     "sunrise-linux-x86_64.tar.gz", "sunrise-windows-x64.zip", "sunrise-macos-arm64.zip",
     "sunrise-macos-x64.zip", "sunrise-server-linux-x86_64.tar.gz", "sunrise-source.tar.gz", "sunrise-release.json",
 }
-OPTIONAL = ("sunrise-windows-arm64.zip", "sunrise-linux-musl-x86_64.tar.gz")
+OPTIONAL = "sunrise-windows-arm64.zip"
+MUSL = "sunrise-linux-musl-x86_64.tar.gz"
 # The bash on PATH, as in test_pr_ready: Windows' CreateProcess looks in System32 before PATH, so a bare "bash"
 # there is WSL's, which gets none of the steps' env and none of the host's paths.
 BASH = shutil.which("bash")
@@ -36,16 +37,17 @@ def run_step(containing):
                      "release shell checks require a bash that is not WSL's, OpenSSL and sha256sum")
 class OptionalReleaseAssetsTests(unittest.TestCase):
     def test_sign_and_publish_with_each_optional_archive_combination(self):
-        for repository, mask in product(("sunrise-org/sunrise", "horizon-rust/horizon"), range(4)):
-            with self.subTest(repository=repository, mask=mask), tempfile.TemporaryDirectory() as folder:
+        for repository, arm64 in product(("sunrise-org/sunrise", "horizon-rust/horizon"), (False, True)):
+            with self.subTest(repository=repository, arm64=arm64), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 dist = root / "dist"
                 dist.mkdir()
-                present = REQUIRED | {name for i, name in enumerate(OPTIONAL) if mask & (1 << i)}
+                present = REQUIRED | ({OPTIONAL} if arm64 else set())
                 # The fork's Nightly carries its SDK's index in its signed sums; upstream's has no SDK.
                 if repository == "sunrise-org/sunrise":
                     present |= {"sdk.json"}
-                for name in present:
+                # A musl archive must never be signed or uploaded by the main release jobs, even if present.
+                for name in present | {MUSL}:
                     (dist / name).write_text(name)
                 script_dir = root / "tools/ci"
                 script_dir.mkdir(parents=True)
@@ -86,17 +88,17 @@ gh() {
                 files = {Path(name).name for name in (root / "published").read_text().splitlines()}
                 self.assertEqual(files, present | {"SHA256SUMS", "SHA256SUMS.sig", "SHA256SUMS.v2.sig", "smoke-test.json",
                                                    "nightly-notes.md"})
-                for name in set(OPTIONAL) - present:
-                    self.assertIn(f"::warning::{name} is missing", signed.stdout)
-                    self.assertIn(f"::warning::{name} is missing", published.stdout)
+                if not arm64:
+                    self.assertIn(f"::warning::{OPTIONAL} is missing", signed.stdout)
+                    self.assertIn(f"::warning::{OPTIONAL} is missing", published.stdout)
 
     def test_a_snapshot_is_signed_for_its_channel_and_published_under_its_own_tag(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             dist = root / "dist"
             dist.mkdir()
-            present = REQUIRED | {OPTIONAL[0]}
-            for name in present:
+            present = REQUIRED | {OPTIONAL}
+            for name in present | {MUSL}:
                 (dist / name).write_text(name)
             (root / "tools/ci").mkdir(parents=True)
             shutil.copy(ROOT / "tools/ci/sign_release.sh", root / "tools/ci")

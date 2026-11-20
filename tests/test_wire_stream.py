@@ -148,10 +148,12 @@ class WireStreamTest(unittest.TestCase):
                          ['    #0 move_player_rot bytes: vanilla 000000000000000001, Sunrise 800000000000000001'])
 
     def test_the_mark_is_the_command_not_its_bytes_in_another_packet(self):
-        text = b'wire-mark'
-        self.assertTrue(wire_stream.is_mark('chat_command', varint(len(text)) + text))
-        self.assertFalse(wire_stream.is_mark('chat_command', varint(len(text) + 2) + text + b' x'))
-        self.assertFalse(wire_stream.is_mark('chat', varint(len(text)) + text + bytes(17)))
+        command = lambda text: varint(len(text)) + text  # noqa: E731
+        self.assertTrue(wire_stream.mark_packet('chat_command', command(b'wire-mark')))
+        self.assertTrue(wire_stream.mark_packet('chat_command', command(b'wire-mark 07')))
+        self.assertFalse(wire_stream.mark_packet('chat_command', command(b'wire-mark x')))
+        self.assertFalse(wire_stream.mark_packet('chat_command', command(b'wire-markers')))
+        self.assertFalse(wire_stream.mark_packet('chat', command(b'wire-mark') + bytes(17)))
 
     def test_compare_reports_the_first_field_that_differs(self):
         tick = lambda y: {'packets': [('move_player_pos', {'x': 0.5, 'y': y})], 'frame': [], 'misplaced': []}  # noqa

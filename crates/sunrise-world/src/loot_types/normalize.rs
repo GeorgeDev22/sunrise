@@ -13,6 +13,12 @@ impl super::super::LootData {
         for id in ids {
             let mut table = self.tables[id].clone();
             super::super::native_loot_table_load(context, id, &mut table);
+            super::super::validate_loot_table(&table).map_err(|reason| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("native loot_table {id}: {reason}"),
+                )
+            })?;
             self.holder_sets
                 .walk(&format!("native loot_table {id}"), &mut table, &self.tags)?;
             table_fields(&mut table, &self.tags, &self.types);

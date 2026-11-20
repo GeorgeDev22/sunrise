@@ -167,6 +167,14 @@ impl IPayloadContext for Unreached {
     fn check_payload_token(&self, _: &PayloadToken) -> Result<(), PayloadSendError> {
         unreachable!()
     }
+    fn send_to(
+        &mut self,
+        _: &[PlayerRef],
+        _: &PayloadId,
+        _: PayloadBytes,
+    ) -> Result<u32, PayloadSendError> {
+        unreachable!()
+    }
     fn disconnect(&mut self, _: Text) {
         unreachable!()
     }

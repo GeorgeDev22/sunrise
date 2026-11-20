@@ -11,7 +11,7 @@ then upload the package and open the pull request yourself.
 Set `version` in `sunrise-mod.toml` to a SemVer without `+build` metadata, at most 64 characters after
 padding missing parts (for example, `1.2` becomes `1.2.0`). The registry uses that version in the release name.
 
-In your mod's folder (content, native or wasm; add `--wasm` for a wasm mod, as for `build`):
+In your mod's folder:
 
 ```sh
 cargo sunrise-mod publish --summary "One line about the mod." --owner your-github-login --categories utility
@@ -96,8 +96,7 @@ Authors may sign with an Ed25519 key in [minisign](https://jedisct1.github.io/mi
 holds the public key, every version of the project must be signed with it, and an update signed with another key is
 refused. `cargo sunrise-mod` verifies a signature but does not make keys or signatures: use `minisign`.
 
-Build and sign before calling `publish`, including on the first listing. For example, for a mod with ID `my_mod`
-(add `--wasm` to `build` for a wasm mod):
+Build and sign before calling `publish`, including on the first listing. For example, for a mod with ID `my_mod`:
 
 ```sh
 cargo sunrise-mod build

@@ -251,7 +251,6 @@ pub fn load(folder: &Path) -> Result<Vec<&'static mod_api::__private::native::Na
 /// Start the fixed executable, registering checked native libraries before the engine seal.
 pub fn main() {
     crate::prepare_main_stack();
-    crate::exit_if_compile_child();
     let startup = sunrise_client::entry::prepare();
     let result = std::env::current_exe()
         .map_err(|e| e.to_string())
@@ -261,7 +260,6 @@ pub fn main() {
         std::process::exit(1);
     });
     let mut entries = Vec::new();
-    let mut slots = Vec::new();
     let mut built = Vec::new();
     let mut installs = Vec::new();
     // Every patch copy is installed and checked before any mod's hook factory runs, as the
@@ -273,15 +271,9 @@ pub fn main() {
     sunrise_client::entry::installed(&installs);
     for library in libraries {
         entries.extend((library.entries)());
-        slots.extend((library.slots)());
         built.extend_from_slice(library.built);
     }
-    crate::main_with(
-        entries,
-        &slots,
-        Box::leak(built.into_boxed_slice()),
-        startup,
-    );
+    crate::main_with(entries, Box::leak(built.into_boxed_slice()), startup);
 }
 
 #[cfg(test)]

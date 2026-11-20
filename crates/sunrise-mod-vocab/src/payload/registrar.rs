@@ -1,7 +1,7 @@
 //! Registration views over the single load-owned registrar.
 use crate::{
-    HandlerThread, IPayloadHandler, PayloadDeclaration, PayloadDirection, PayloadId,
-    PayloadProtocol, Registrar,
+    HandlerThread, IPayloadHandler, PayloadDeclaration, PayloadDelivery, PayloadDirection,
+    PayloadId, PayloadProtocol, Registrar,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
@@ -15,6 +15,7 @@ pub struct PayloadRegistrar<'a> {
     pub(super) version: String,
     pub(super) optional: bool,
     pub(super) thread: HandlerThread,
+    pub(super) delivery: PayloadDelivery,
 }
 
 impl<'a> PayloadRegistrar<'a> {
@@ -24,6 +25,7 @@ impl<'a> PayloadRegistrar<'a> {
             version: version.into(),
             optional: false,
             thread: HandlerThread::Main,
+            delivery: PayloadDelivery::Reliable,
         }
     }
     /// Use another exact version without changing the original view.
@@ -47,6 +49,15 @@ impl<'a> PayloadRegistrar<'a> {
             ..self.clone()
         }
     }
+    /// Let queued sends of these payloads be dropped under congestion (see
+    /// [`PayloadDelivery::Droppable`]), without changing the original view. Play channels only:
+    /// a configuration or common declaration refuses load.
+    pub fn droppable(&self) -> Self {
+        Self {
+            delivery: PayloadDelivery::Droppable,
+            ..self.clone()
+        }
+    }
     fn register(
         &mut self,
         id: PayloadId,
@@ -63,6 +74,7 @@ impl<'a> PayloadRegistrar<'a> {
                 direction,
                 optional: self.optional,
                 thread: self.thread,
+                delivery: self.delivery,
             },
             server,
             client,
@@ -161,7 +173,7 @@ methods!(
 );
 
 // no wire: the load event borrows its registrar and has no invocation data representation.
-/// The load-time payload registration event, reached from the current Registrar.
+/// The load-time payload registration event, built by the game through the current [`Registrar`].
 #[non_exhaustive]
 pub struct RegisterPayloadHandlersEvent<'a> {
     registrar: &'a mut dyn Registrar,
@@ -175,6 +187,7 @@ impl RegisterPayloadHandlersEvent<'_> {
 
 // no wire: the load event borrows its registrar; handler callbacks cross separately.
 /// Assign client handlers to already declared clientbound payloads before freeze.
+/// The game builds this event through the current [`Registrar`].
 #[non_exhaustive]
 pub struct RegisterClientPayloadHandlersEvent<'a> {
     registrar: &'a mut dyn Registrar,

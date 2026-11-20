@@ -1052,6 +1052,7 @@ impl Game<'_> {
                 subject: None,
             };
             let mut tops: Vec<BlockPos> = Vec::new();
+            let side = game_side!(self);
             if let Some(step) = a.tick_move(
                 &mut scene,
                 facts,
@@ -1060,6 +1061,7 @@ impl Game<'_> {
                 Some(self.border.geometry()),
                 &nearby,
                 &self.loop_context,
+                &side,
             ) {
                 // LivingEntity.aiStep: `travel` first, then the blocks' push.
                 a.tick_settle(medium, step);
@@ -1585,11 +1587,11 @@ impl Game<'_> {
         camera: glam::DVec3,
         alpha: f64,
         out: &mut Vec<Vertex>,
+        run: std::ops::Range<usize>,
     ) {
         // The stands' models posed on the GPU path (`mobs::skin`), when it runs this frame.
         let skinning = self.skinning();
-        for a in self
-            .armor_stands
+        for a in self.armor_stands[run]
             .iter()
             .filter(|a| !self.hides_as_camera(a.id))
         {
@@ -1656,10 +1658,17 @@ impl Game<'_> {
                 let mut frame = self.skin_frame.borrow_mut();
                 let mark = frame.mark();
                 let mut skin = sunrise_client::mobs::skin::Skin::new(&mut models, &mut frame);
-                self.armor_stand_vertices(a, alpha as f32, base, packed, Some(&mut skin), out);
+                self.armor_stand_vertices(
+                    a,
+                    Some(alpha as f32),
+                    base,
+                    packed,
+                    Some(&mut skin),
+                    out,
+                );
                 Some((mark, skin.bounds))
             } else {
-                self.armor_stand_vertices(a, alpha as f32, base, packed, None, out);
+                self.armor_stand_vertices(a, Some(alpha as f32), base, packed, None, out);
                 None
             };
             if !self.tracked_entity_glowing(a.id) {
@@ -1712,12 +1721,12 @@ impl Game<'_> {
 
     /// `ArmorStandRenderer.submit` for stand `a` under `base` (its
     /// `setupRotations`): the body, the hand and head items, the armour and
-    /// the wings, at packed light `packed`. With `skin`, the stand's own models
-    /// (body and armour) are posed on the GPU; items and wings stay here.
+    /// the wings, at packed light `packed`. `world_partial` is absent in the GUI preview.
+    /// With `skin`, supported meshes are posed on the GPU.
     fn armor_stand_vertices(
         &self,
         a: &ArmorStand,
-        partial: f32,
+        world_partial: Option<f32>,
         base: glam::Mat4,
         packed: u32,
         mut skin: Option<&mut sunrise_client::mobs::skin::Skin>,
@@ -1745,6 +1754,7 @@ impl Game<'_> {
             return;
         };
         let mut poses = Poses::new(model);
+        let partial = world_partial.unwrap_or(0.0);
         self.setup_armor_stand_pose(a, partial, &mut poses);
         // Item layers pose from the hidden arms too (`visible` only skips drawing).
         let posed = poses.clone();
@@ -1794,7 +1804,16 @@ impl Game<'_> {
                 );
             }
         }
-        self.armor_stand_items(a, model, base, &posed, packed, skin.as_deref_mut(), out);
+        self.armor_stand_items(
+            a,
+            model,
+            base,
+            &posed,
+            world_partial,
+            packed,
+            skin.as_deref_mut(),
+            out,
+        );
         // HumanoidArmorLayer: head, chest, legs, feet. One pose map for every layer
         // (`reset` keeps its capacity).
         let mut layer_poses = Poses::default();
@@ -1883,7 +1902,7 @@ impl Game<'_> {
             * glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0))
             * glam::Mat4::from_translation(glam::Vec3::new(0.0, -1.501, 0.0));
         let mut verts = Vec::new();
-        self.armor_stand_vertices(&stand, 0.0, base, 240 | 240 << 8, None, &mut verts);
+        self.armor_stand_vertices(&stand, None, base, 240 | 240 << 8, None, &mut verts);
         // ARMOR_STAND_ANGLE: rotationXYZ(0.43633232, 0, PI).
         let gui =
             glam::Mat4::from_translation(glam::Vec3::new((x0 + x1) / 2.0, (y0 + y1) / 2.0, 0.0))
@@ -2101,6 +2120,7 @@ impl Game<'_> {
         model: &Part,
         base: glam::Mat4,
         poses: &Poses,
+        world_partial: Option<f32>,
         light: u32,
         mut skin: Option<&mut sunrise_client::mobs::skin::Skin>,
         out: &mut Vec<Vertex>,
@@ -2150,11 +2170,19 @@ impl Game<'_> {
                 ));
             let seed = a.id as i32 + if left { 1 } else { 2 };
             // OptiFine CIT `hand=off` rules: slot 1 is the off hand.
-            let state = if left {
+            let mut state = if left {
                 self.resolve_item_in_hand(stack, context, Some(&owner), seed, Hand::Off)
             } else {
                 self.resolve_item(stack, context, Some(&owner), seed)
             };
+            if let Some(partial_tick) = world_partial {
+                let hand = if left {
+                    mod_api::Hand::Off
+                } else {
+                    mod_api::Hand::Main
+                };
+                self.tint_held_item(&mut state, stack, a.id, hand, partial_tick);
+            }
             submit(&state, pose, out);
         }
         // `CustomHeadLayer`: a worn skull draws the skull model.
@@ -3075,7 +3103,7 @@ mod setup_anim_tests {
                 let mut verts = Vec::new();
                 game.armor_stand_vertices(
                     &stand,
-                    0.5,
+                    Some(0.5),
                     glam::Mat4::IDENTITY,
                     0xf0f0,
                     None,

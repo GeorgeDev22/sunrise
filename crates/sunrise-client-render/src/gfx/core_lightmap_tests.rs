@@ -91,9 +91,21 @@ fn draw(
     core: &mut CoreLightmap,
     info: &LightmapInfo,
 ) -> [u8; 16 * 16 * 4] {
+    draw_with(device, queue, core, info, None)
+}
+
+/// [`draw`] with `poly_globals` uploaded.
+fn draw_with(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    core: &mut CoreLightmap,
+    info: &LightmapInfo,
+    poly_globals: Option<&super::super::expression_blocks::PolyGlobalsBytes>,
+) -> [u8; 16 * 16 * 4] {
     let target = target(device);
     let mut uploads = super::super::upload::Uploads::new(device);
     let mut encoder = device.create_command_encoder(&Default::default());
+    core.extra.set_globals(poly_globals);
     core.upload(&mut uploads, &mut encoder, [0; 48], info);
     core.draw(
         &mut encoder,
@@ -418,6 +430,68 @@ fn a_lightmap_shader_reads_its_expression_uniforms_values() {
     }
 }
 
+/// Polytone's `PolyGlobals` from the built-in `polytone_globals.glsl` beside `LightmapInfo` and
+/// an expression uniform, each in its own block: the player's block height (64) in red,
+/// `SkyFactor` (0.6, 153) in green and `F0` (0.2, 51) in blue, exact bytes; zeros when no
+/// globals are given.
+#[test]
+#[ignore = "daily"]
+fn a_lightmap_shader_reads_poly_globals() {
+    let _gpu = crate::gfx::test_gpu::lock();
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let fsh = "#version 330\n#moj_import <polytone_globals.glsl>\n\
+        layout(std140) uniform LightmapInfo {\n    float SkyFactor;\n} info;\n\
+        layout(std140) uniform F0 {\n    float F0v;\n};\n\
+        layout(location = 0) in vec2 texCoord;\nlayout(location = 0) out vec4 fragColor;\n\
+        void main() {\n    fragColor = vec4(float(PolyPlayerBlockPos.y) / 255.0, info.SkyFactor, \
+        F0v, 1.0);\n}\n";
+    let include = |id: &str| {
+        sunrise_polytone::globals::is_include(id)
+            .then(|| sunrise_polytone::globals::GLSL.to_owned())
+    };
+    let program =
+        crate::core_shader::translate_core_with(SCREENQUAD_VSH, fsh, &[], &include, &GLUE, &|_| {
+            true
+        })
+        .expect("the shaders translate");
+    let pack = sunrise_assets::resource_source::ResourceSource::indexed(
+        [(
+            "assets/minecraft/polytone/shader_modifiers/core/lightmap.json".to_owned(),
+            sunrise_assets::resource_source::Resource::bytes(b"{\"F0\": \"0.2\"}".to_vec()),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let modifiers = crate::polytone_post::ShaderModifiers::read(&pack, Default::default());
+    let expressions = modifiers
+        .resolve(
+            (SHADERS[0], SHADERS[1]),
+            &program,
+            &[INFO_BLOCK, sunrise_polytone::globals::BLOCK],
+        )
+        .expect("the uniforms resolve");
+    let mut core = CoreLightmap::new(&device, &program, &expressions).expect("the pipeline");
+    core.set_readback(&device, true);
+    assert!(core.extra.reads_globals());
+    core.extra.evaluate(&Default::default());
+    let globals = sunrise_polytone::globals::Globals {
+        player: [3.5, 64.2, 7.0],
+        ..Default::default()
+    }
+    .std140();
+    for (given, texel) in [
+        (Some(&globals), [64, 153, 51, 255]),
+        (None, [0, 153, 51, 255]),
+    ] {
+        let pixels = draw_with(&device, &queue, &mut core, &PROBE, given);
+        for drawn in pixels.chunks(4) {
+            assert_eq!(drawn, texel);
+        }
+    }
+}
+
 /// A device binds at most `max_uniform_buffers_per_shader_stage` blocks to each stage (12 by
 /// default): each block counts only for the stages that read it. Seven expression uniforms in
 /// each stage are drawn (seven and eight with `LightmapInfo`); twelve in the fragment stage
@@ -521,4 +595,11 @@ fn copies_from_before_fullbright_are_never_read() {
     frame(&mut core, &STATES[0], true);
     assert!(core.collect(&mut pixels));
     assert_eq!(pixels[2], 0);
+}
+
+/// The `notGamma` scale multiplies left to right as `lightmap.fsh` writes it. At 0.0015 Java's
+/// float `1.0f - x * x * x * x` (jshell) gives bits 1002711808; squaring twice gives 1002711680.
+#[test]
+fn the_not_gamma_scale_multiplies_in_the_shaders_order() {
+    assert_eq!(max_scaled(0.0015).to_bits(), 1_002_711_808);
 }

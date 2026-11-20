@@ -5,8 +5,8 @@
 use super::Game;
 use mod_api::world::mod_chunk_tickets::ModTicket;
 use mod_api::{
-    BlockHit, BlockTransformPreview, ChunkRef, ChunkStatus, ClipBlock, ClipFluid, DimensionKey,
-    Hand, LevelRef, LightLayer, MapState, PlayerRef, RespawnData, TicketController, Vec3,
+    BlockHit, BlockTransformPreview, ChunkRef, ChunkStatus, ClipBlock, ClipFluid, GlobalPos, Hand,
+    Identifier, LevelRef, LightLayer, MapState, PlayerRef, RespawnData, TicketController, Vec3,
 };
 use sunrise_client::{streaming::Streaming, world::World};
 use sunrise_core::{
@@ -813,15 +813,20 @@ impl Game<'_> {
             return None;
         }
         let [yaw, pitch] = self.level.world_spawn_angle;
+        let [x, y, z] = self.level.world_spawn?;
+        let dimension = self
+            .level
+            .world_spawn_dimension
+            .as_deref()
+            .unwrap_or("minecraft:overworld");
         Some(RespawnData {
-            pos: self.level.world_spawn?,
+            position: GlobalPos::new(Identifier::parse(dimension).ok()?, BlockPos::new(x, y, z)),
             yaw,
             pitch,
         })
     }
-    /// `/setworldspawn`'s write (`set_world_spawn`), for the Overworld's handle. False for
-    /// another level, a stale handle, a client, a non-finite angle and a position outside the
-    /// spawnable bounds.
+    /// `/setworldspawn`'s write (`set_world_spawn`) in the handle's level. False for a stale
+    /// handle, a client, a non-finite angle and a position outside the spawnable bounds.
     pub(super) fn level_set_respawn_data(
         &mut self,
         level: LevelRef,
@@ -830,13 +835,12 @@ impl Game<'_> {
         pitch: f32,
     ) -> bool {
         if !self.native_world_data_allowed(level)
-            || level.dimension() != DimensionKey::OVERWORLD
             || !(yaw.is_finite() && pitch.is_finite())
             || self.level_in_spawnable_bounds(level, pos) != Some(true)
         {
             return false;
         }
-        self.set_world_spawn(pos, [yaw, pitch]);
+        self.set_world_spawn(super::Dim::from_id(level.dimension_id()), pos, [yaw, pitch]);
         true
     }
     /// Map `id`'s saved data as it stands (`with_map`). None on a client, for a stale handle
@@ -1296,25 +1300,44 @@ mod tests {
             // RespawnData.of: the yaw wraps to -180..180 and the pitch clamps to -90..90.
             assert!(level.set_respawn_data(game, [10, 70, -4], 270.0, 120.0));
             let data = level.respawn_data(game).unwrap();
-            assert_eq!(data.pos, [10, 70, -4]);
+            assert_eq!(data.position.dimension().to_string(), "minecraft:overworld");
+            assert_eq!(data.position.pos(), BlockPos::new(10, 70, -4));
             assert_eq!((data.yaw, data.pitch), (-90.0, 90.0));
             assert_eq!(
                 game.level.world_spawn,
                 Some([10, 70, -4]),
                 "level.dat's spawn"
             );
-            assert!(
-                !nether.set_respawn_data(game, [0, 64, 0], 0.0, 0.0),
-                "Overworld only"
-            );
             assert!(!level.set_respawn_data(game, [0, 64, 0], f32::NAN, 0.0));
             assert!(!level.set_respawn_data(game, [30_000_001, 64, 0], 0.0, 0.0));
             assert!(!stale.set_respawn_data(game, [0, 64, 0], 0.0, 0.0));
             assert_eq!(stale.respawn_data(game), None);
             assert_eq!(
-                level.respawn_data(game).unwrap().pos,
-                [10, 70, -4],
+                level.respawn_data(game).unwrap().position.pos(),
+                BlockPos::new(10, 70, -4),
                 "refusals change nothing"
+            );
+            assert!(
+                !nether.set_respawn_data(game, [3, 40, 9], 0.0, 0.0),
+                "a level not open yet"
+            );
+            // SetWorldSpawnCommand in another level: the world spawn moves there, and every
+            // level's handle reads it with that level.
+            game.enter_level(crate::game::Dim::Nether).unwrap();
+            game.enter_level(crate::game::Dim::Overworld).unwrap();
+            assert!(nether.set_respawn_data(game, [3, 40, 9], 0.0, 0.0));
+            for handle in [level, nether] {
+                let data = handle.respawn_data(game).unwrap();
+                assert_eq!(
+                    data.position.dimension().to_string(),
+                    "minecraft:the_nether"
+                );
+                assert_eq!(data.position.pos(), BlockPos::new(3, 40, 9));
+            }
+            assert_eq!(
+                game.level.world_spawn_dimension.as_deref(),
+                Some("minecraft:the_nether"),
+                "level.dat's spawn.dimension"
             );
 
             // A map repainted through the handle reads back and is marked to save and redraw.

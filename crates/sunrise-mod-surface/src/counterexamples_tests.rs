@@ -1278,6 +1278,7 @@ fn every_review_finding_answers_as_it_should() {
             Ok(uses) => match fits(uses.entries(), &surface(Some(change))) {
                 Fit::Fits => Fits,
                 Fit::DoesNotFit(_) => Refused,
+                Fit::Unversioned(hooks) => panic!("{finding}: no version of {hooks:?}"),
             },
         };
         assert_eq!(got, answer, "{finding}");

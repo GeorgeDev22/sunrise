@@ -5,7 +5,8 @@ use super::{
 };
 use mod_api::__private::game::*;
 use mod_api::{
-    DragKind, EntityRef, MenuClick, MenuRef, MenuSlotBacking, MouseButton, PlayerRef, SwapWith,
+    DragKind, EntityRef, LevelReadError, MenuClick, MenuRef, MenuSlotBacking, MouseButton,
+    PlayerRef, SwapWith,
 };
 use sunrise_client::{
     containers::BlockEntity,
@@ -125,6 +126,21 @@ impl Game<'_> {
         )
     }
 
+    pub(super) fn menu_merchant_offers(
+        &self,
+        menu: MenuRef,
+    ) -> Result<Option<&[sunrise_client::merchant::MerchantOffer]>, LevelReadError> {
+        if self.native_client_menu_name(menu) != Some("minecraft:merchant") {
+            return Ok(None);
+        }
+        let merchant = self
+            .station
+            .as_ref()
+            .and_then(|station| station.merchant.as_ref())
+            .ok_or(LevelReadError::Unavailable)?;
+        Ok(Some(&merchant.session.offers))
+    }
+
     pub(super) fn native_client_menu_name(&self, menu: MenuRef) -> Option<&str> {
         let remote = self.remote.as_ref().filter(|remote| remote.logged_in)?;
         let epoch = self.native_lifecycle.epoch()?;
@@ -168,9 +184,9 @@ impl Game<'_> {
         (guest.menu_generation == menu.fields().generation).then_some(())?;
         if let Some(open) = &guest.menu {
             // A native menu's slots are the mods' own: its hidden ones only
-            // keep the game's shift-clicks out (`place_menu_click`).
-            let hidden_ok = open.hidden.is_empty() || open.slots == Slots::Native;
-            (open.window == menu.fields().window && hidden_ok).then_some(guest)
+            // keep the game's clicks out. The handle remains live so visible
+            // slots can still be backed and used.
+            (open.window == menu.fields().window).then_some(guest)
         } else {
             let play = host.play.get(&guest.conn);
             let menus = host.menus.get(&guest.conn);
@@ -187,8 +203,8 @@ impl Game<'_> {
     }
 
     /// A player's current supported menu. Refuses crafting tables, merchants,
-    /// workstations, lecterns, mounts and block-backed menus with slots hidden at open.
-    /// Hidden slots do not refuse code-opened native windows. Also refuses stale
+    /// workstations, lecterns and mounts. Hidden slots remain unavailable through
+    /// the slot methods without invalidating the menu handle. Also refuses stale
     /// players and players whose state is swapped out by another active turn.
     /// The acting player's inventory, equipment, cursor and ender reads use Game's state.
     /// On a client, only the local player's supported menu is available.
@@ -271,6 +287,9 @@ impl Game<'_> {
                 _ => None,
             };
         };
+        if slot < open.size && open.hidden.contains(&slot) {
+            return None;
+        }
         // A block menu whose block entities no longer show its slots (a chest's, over a
         // furnace set in its place) backs none of them, the player's included, until the close
         // pass ends it (`Container.stillValid`).

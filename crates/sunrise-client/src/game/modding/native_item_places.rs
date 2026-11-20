@@ -1073,6 +1073,15 @@ pub(super) mod tests {
             viewer.sent_chunks.insert((0, 0));
             game.lan.as_mut().unwrap().hub.guests.push(viewer);
 
+            // With no tickets every chunk is entity-ticking; the zombie must lie outside that
+            // range for the tracker to describe it idle (`ChunkMap.tick`).
+            game.tickets
+                .update(Some(sunrise_client::ticket_levels::Sources {
+                    players: vec![(40, 40)],
+                    view_distance: 2,
+                    simulation_distance: 2,
+                    ..Default::default()
+                }));
             let id = zombie(game);
             let living = game.living(game.entity(id).unwrap()).unwrap();
             let slot = EquipmentSlot::Chest;

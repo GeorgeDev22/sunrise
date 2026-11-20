@@ -55,7 +55,12 @@ fn untouched_writeback_runtime_and_mutants() {
         } else {
             ""
         };
-        methods.push_str(&format!("fn {name}(&mut self, value: &mut Stack, entity: &mut Stack, carried: &mut Option<Stack>, stack: &mut Stack, cancel: &mut bool, handled: &mut bool) {{ let player = 0; let pos = [0; 3]; let context = &(); let container_slots = 1; let slot = 0; {bind_stack} {body} }}"));
+        let menu_bindings = if name == "menu_button" {
+            "let entity = Some(entity); let menu = \"test:menu\"; let block = None::<&str>;"
+        } else {
+            ""
+        };
+        methods.push_str(&format!("fn {name}(&mut self, value: &mut Stack, entity: &mut Stack, carried: &mut Option<Stack>, stack: &mut Stack, cancel: &mut bool, handled: &mut bool) {{ let player = 0; let pos = [0; 3]; let context = &(); let container_slots = 1; let slot = 0; {bind_stack} {menu_bindings} {body} }}"));
     }
     let fixture = r#"
 #![allow(unused)]
@@ -92,7 +97,7 @@ impl Game {
     fn native_anvil_update(&mut self, _: u128, _: &mut Stack, _: [i32; 3], stack: &mut Stack, _: &mut bool) { if self.change { stack.0 = 252; } }
     fn native_grindstone_place(&mut self, a: u128, b: &mut Stack, c: [i32; 3], d: &mut Stack, e: &mut bool) { self.native_anvil_update(a,b,c,d,e); }
     fn native_grindstone_take(&mut self, a: u128, b: &mut Stack, c: [i32; 3], d: &mut Stack, e: &mut bool) { self.native_anvil_update(a,b,c,d,e); }
-    fn native_menu_button(&mut self, _: &(), _: &mut Stack, stack: &mut Option<Stack>) { if self.change { *stack = Some(Stack(252)); } }
+    fn native_menu_button(&mut self, _: &str, _: Option<&str>, _: &(), _: Option<&mut Stack>, stack: &mut Option<Stack>) { if self.change { *stack = Some(Stack(252)); } }
     fn native_menu_quick_move(&mut self, _: [i32; 3], _: &mut Stack, _: usize, _: usize, stack: &mut Option<Stack>, handled: &mut bool) { if self.change { *stack = Some(Stack(252)); } *handled = true; }
     METHODS
 }

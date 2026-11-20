@@ -149,17 +149,17 @@ impl Renderer {
     /// reads: that frame's, or an error, never an older one. The last frame's PNG has already
     /// waited for it, without a limit, as `screenshot` does.
     pub fn finish_sequence_frame(&mut self) -> Result<()> {
-        self.device
-            .poll(wgpu::PollType::Wait {
+        super::in_flight::poll_live(
+            &self.device,
+            &self.device_lost,
+            wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: Some(std::time::Duration::from_secs(30)),
-            })
-            .map_err(|e| format!("the frame didn't finish on the GPU: {e}"))?;
-        if self.device_lost() {
-            return Err("the graphics device was lost".into());
-        }
+            },
+        )
+        .map_err(|e| format!("the frame didn't finish on the GPU: {e}"))?;
         if let Some((_, Some(post))) = &mut self.pack_post {
-            post.take_center_depth(&self.device)?;
+            post.take_center_depth()?;
         }
         Ok(())
     }

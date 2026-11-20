@@ -7,6 +7,21 @@ use crate::*;
 #[sunrise_mod_api_macros::host_area]
 pub trait LevelBlocksBackend {
     /// Side: both.
+    /// The contextual friction of `state` at `pos` (`IBlockExtension.getFriction`).
+    /// The state need not occupy the position. `entity` is the optional id and type
+    /// passed to the block's part. Returns `Ok(None)` for a nested query that repeats
+    /// an active read or exceeds the nesting bound. A stale level, unknown state, or
+    /// unavailable host or phase returns a typed read error.
+    /// The query never loads chunks or changes the world.
+    #[access(WorldOnly)]
+    fn level_friction(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+        state: BlockState,
+        entity: Option<(u32, &str)>,
+    ) -> Result<Option<f32>, LevelReadError>;
+    /// Side: both.
     /// How fast `tool` (None is an empty hand) mines the block at `pos`: the tool's own mining
     /// speed on that block (`ItemStack.getDestroySpeed`, 1.0 for no tool; for a block it has no
     /// rule for, the tool's default mining speed), before the player's enchantments, attributes, water, ground and
@@ -131,8 +146,10 @@ pub trait LevelBlocksBackendMut {
     /// Side: server.
     /// Run `Block.setPlacedBy` on the block currently at `pos`, without a placer. `stack` is
     /// a detached item value (`None` is the empty stack); the block may inspect its components.
-    /// Write the initial state and load any block entity data before calling. The callback can
-    /// write companion cells and produce block-specific effects, but will not load stack NBT.
+    /// Write the initial state and load any block entity data before calling. Vanilla's part can
+    /// write companion cells and produce block-specific effects, but does not load stack NBT.
+    /// The block's subscribed `BlockPart::set_placed_by` runs after vanilla's work, with
+    /// the same read-only stack and no placer. This does not notify the item's part.
     /// `Ok(false)` at an unloaded or out-of-height origin or on carrier-transfer refusal.
     /// The fence check covers the origin and cells the callback writes directly, including
     /// companions; neighbour updates follow the level's normal rules.
@@ -148,6 +165,7 @@ pub trait LevelBlocksBackendMut {
     ) -> Result<bool, LevelWriteError>;
     /// Side: server.
     /// Remove a block in place (`Level.removeBlock`), preserving its fluid.
+    /// In a Host transaction the removal is tentative and its effects wait for commit.
     #[access(WorldOnly)]
     fn level_remove_block(&mut self, level: LevelRef, pos: [i32; 3], moved: bool) -> bool;
     /// Side: server.
@@ -156,8 +174,8 @@ pub trait LevelBlocksBackendMut {
     /// stacks without spawning their item entities; otherwise return an empty list after
     /// spawning them. The one level drop path runs loot, block-drop hooks and experience
     /// once, in vanilla's random order. `drop` false suppresses resources entirely.
-    /// None means nothing broke: air, a refused write, a stale handle, a client, an
-    /// unloaded/out-of-height position, or a parked level.
+    /// `Ok(None)` means nothing broke: air, a refused write, a stale handle, a client, an
+    /// unloaded/out-of-height position, a parked level, or an open Host transaction.
     #[access(WorldOnly)]
     fn level_destroy_block(
         &mut self,

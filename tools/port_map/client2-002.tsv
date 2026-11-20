@@ -130,8 +130,8 @@ WeatherEffectRenderer.render	port	crates/sunrise-client-render/src/gfx/weather.r
 WeatherEffectRenderer.createSnowColumnInstance	port	crates/sunrise-client-render/src/weather.rs::snow_column	snow drift and brightened light
 WeatherEffectRenderer.prepareInstances	port	crates/sunrise-client-render/src/weather.rs::column_quad	gap: minor: one column per call; the loop over columns is in the caller
 WorldBorderRenderer.renderOit	inline	crates/sunrise-client-render/src/gfx.rs::Renderer::draw_frame	border wall draw when frame.border is set
-WorldBorderRenderer.prepareRenderPass	inline	crates/sunrise-client-render/src/border_render.rs::BorderRenderer::transforms	the uniforms (colour, offset, texture scroll) for the wall
-WorldBorderRenderer.shouldRebuildWorldBorderBuffer	port	crates/sunrise-client-render/src/border_render.rs::BorderRenderer::prepare	rebuilds when the border moved or was invalidated
+WorldBorderRenderer.prepareRenderPass	inline	crates/sunrise-border/src/border_render.rs::BorderRenderer::transforms	the uniforms (colour, offset, texture scroll) for the wall
+WorldBorderRenderer.shouldRebuildWorldBorderBuffer	port	crates/sunrise-border/src/border_render.rs::BorderRenderer::prepare	rebuilds when the border moved or was invalidated
 FluidRenderer.getHeight	inline	crates/sunrise-client-render/src/mesher/fluid.rs::tesselate	corner heights from own_height and the neighbour average
 ChunkSectionLayer.byTransparency	inline	crates/sunrise-client-render/src/mesher.rs::Mesher::face	a face goes to the translucent list when it is translucent
 ChunkSectionsToRender.renderGroup	port	crates/sunrise-client-render/src/gfx.rs::Renderer::draw_sections	gap: minor: draws the given page runs; the terrain uniforms are bound by the caller

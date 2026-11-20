@@ -11,7 +11,8 @@ Register during `Hooks::register`, in dependency order. `payload_handlers().regi
 returns a `PayloadRegistrar` view. Versions are exact, nonblank strings, not semver ranges.
 Main-thread handling and required peer support are the defaults.
 For a complete declaration value, `PayloadDeclaration::new` takes the channel,
-version, protocol, direction, optional flag, and handler thread explicitly;
+version, protocol, direction, optional flag, handler thread and delivery
+(`Reliable` or `Droppable`) explicitly;
 registration still owns channel and version validation.
 
 A trait mod overrides `Hooks::register` directly; it does not need to implement a

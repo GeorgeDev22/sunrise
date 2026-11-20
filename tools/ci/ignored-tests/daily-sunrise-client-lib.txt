@@ -341,6 +341,7 @@ sunrise-client-lib mobs::undead::turtle_egg_tests::the_egg_break_pitch_draws_fro
 sunrise-client-lib mobs::undead::wither_arrow_tests::a_piglin_angry_at_a_mob_does_not_target_the_player lib daily resources
 sunrise-client-lib mobs::undead::wither_arrow_tests::a_wither_skeletons_shot_leaves_with_the_ignite lib daily resources
 sunrise-client-lib mobs::vex::owner_save_tests::a_vex_does_not_copy_a_dead_owners_target lib daily resources
+sunrise-client-lib mobs::vex::owner_save_tests::a_vexs_first_tick_falls_and_then_saves_no_gravity lib daily resources
 sunrise-client-lib mobs::villager_brain::farming_tests::planting_posts_block_place_with_villager_and_crop_state lib daily resources
 sunrise-client-lib mobs::villager_brain::mob_map_tests::hostile_sensor_matches_registered_ids_and_world_snapshot lib daily resources
 sunrise-client-lib mobs::villager_brain::trades_tests::displayed_trade_items_have_no_drop_chance_and_clear_restores_it lib daily resources

@@ -6,6 +6,60 @@ through `RenderAssets::model` after resources are published. World render hooks 
 copies in a group. GUI scenes, mobs and kept/spinning renderers use their
 CPU routes; groups are a world-drawing facility, not another renderer.
 
+## Local player skins
+
+Implement `Hooks::resolve_player_skin` to change the local player's appearance
+without changing their profile. Upload the skin with
+[`create_dynamic_texture`](dynamic-textures.md) as a 64×64 RGBA image once per
+skin file. Normalize legacy 64×32 skins before uploading. Keep the texture id
+and its model width, then select them in the hook:
+
+```rust,ignore
+fn resolve_player_skin(&self, _: &dyn ClientHost, event: &mut ResolvePlayerSkinEvent<'_>) {
+    if let Some(skin) = self.selected_skin() {
+        *event.selection = Some(PlayerSkinOverride::new(skin.texture.clone(), skin.model));
+    }
+}
+```
+
+Use `PlayerModel::Wide` for four-pixel arms and `PlayerModel::Slim` for
+three-pixel arms. The selection starts at `None` each frame; listeners can leave
+an earlier answer alone or clear it with `*event.selection = None`. A missing,
+freed or wrongly sized texture keeps the original texture **and** model.
+The selection affects the third-person avatar and its skin layers, first-person
+arms, and inventory and creative previews. It does not change the cape, tab
+list, or anyone else's view.
+
+## Third-person held items
+
+Attach an `ItemPart` with `Registrar::item_part` (or `item_part_tag`) to tint an
+item in players', mobs' or armor stands' hands in the world, including vanilla
+items. `held_item_tint` runs on the client just before the resolved item is
+submitted. Use the holder's current level entity ID and logical `Hand::Main`
+or `Hand::Off`, not the left or right arm:
+
+```rust,ignore
+#[mod_api::sunrise_part]
+impl ItemPart for ChargedTint {
+    fn held_item_tint(
+        &self,
+        _host: &dyn ClientHost,
+        event: &mut HeldItemTintEvent<'_>,
+    ) -> Option<u32> {
+        self.is_charged(event.entity_id, event.hand).then_some(0xFFA040)
+    }
+}
+```
+
+The event also borrows the rendered stack and carries the frame's `partial_tick`.
+The first `Some(0xRRGGBB)` wins; return `None` to let the next Part answer or keep
+the model's colors. The multiplier applies to that draw's RGB before lighting,
+including a shield's base and banner patterns. It leaves alpha, glint, outline
+and pose alone, and does not affect first person, GUI previews, worn armor, item
+frames or dropped items. Keep the handler fast: it can run once for each held
+stack submitted during a frame. Rendering is not a source of combat state; see
+[Syncing remote item cooldowns](networking.md#syncing-remote-item-cooldowns).
+
 ## Worn humanoid equipment
 
 An item attaches one `ClientItemExtensions` Part in
@@ -64,16 +118,13 @@ Model and texture references are scoped to the resource load. A stale reference
 returned during drawing uses vanilla's model or the supplied default texture,
 with one diagnostic per provider until reload, never a panic. A failed callback
 discards all of the piece's custom layers, draws the piece with vanilla behaviour,
-and disables that provider until reload, with one diagnostic. This includes refused
-or trapped wasm callbacks, even after an earlier layer succeeded. Native and
-wasm use the same Part, methods and handler tokens. Only references and layer
-values cross Wire during a frame: no geometry, rebakes or native-only escape path.
+and disables that provider until reload, with one diagnostic. A failure discards the custom drawing even if an earlier layer succeeded.
+Callbacks work with references and layer values, not geometry or rebakes.
 
 ## Bake-time standalone forms
 
 `standalone_models` contract version 2 keeps `event.models: &mut Vec<String>` for plain
-file ids and adds `event.forms: &mut Vec<StandaloneModelForm>`. Both native and wasm
-listeners receive `RegistrationContext`, not a runtime `Host`. Forms are attributed
+file ids and adds `event.forms: &mut Vec<StandaloneModelForm>`. Listeners receive `RegistrationContext`, not a runtime `Host`. Forms are attributed
 to the registering mod by dispatch:
 
 ```rust,ignore
@@ -111,6 +162,29 @@ forms rebake from current resources on every successful load. Resolve result ids
 This API bakes quads only, not a mod-defined baked result type.
 
 
+## Colour, hidden faces and translucency of copies
+
+`ModelInstance` carries two more fields, set with `with_color` and `with_hidden_faces`:
+
+- `color` (`0xAARRGGBB`, default white) multiplies every face of the copy, tinted or not, after
+  `tint`; its alpha multiplies every face's alpha. `tint` keeps its meaning (tinted faces only).
+- `hidden_faces` (bits 0 to 5: down, up, north, south, west, east) leaves out the faces whose
+  `cull` side is set, so a structure of many copies can drop the sides its neighbours cover.
+
+A copy whose colour alpha is below `0xFF` draws every quad in the translucent material described below.
+A model with translucent faces otherwise keeps its per-quad routing: only those faces take the translucent
+material. Copies with a colour other than white, hidden faces, a model with translucent faces or a block state model are baked on the CPU
+instead of drawn as GPU instances; the 16,384-copy budget bounds that cost.
+`overlay` (the hurt tint) has no effect on a copy on the translucent or block state model route, including any
+opaque faces it holds. `color` (the whole baked block model, multiplied at draw time) and `hidden_faces` (a
+cull mask the caller supplies) are Sunrise's options for mod copies.
+
+`block_state_model(state)` (on `RenderAssets`) resolves a block state as one model: the parts
+its blockstate file selects for its properties, weighted alternatives at the fixed seed
+`BlockEntityDrawContext::block` uses, each tinted face in the block's default tint. It draws
+through `draw_model_instances`, instance groups and `draw.terrain_model`, not `draw.model`.
+Resolve it once per state in `client_setup` and `client_resources_reloaded`.
+
 ## Terrain materials in a block entity
 
 `draw.model(model, tint)` draws a resolved model as an entity model. A block entity, mob or
@@ -126,11 +200,12 @@ let options = TerrainModelOptions::default()
 draw.terrain_model(self.belt, options)?;
 ```
 
-- Faces sample the animated block sprites, cull back faces and write colour and depth like
+- Faces sample the animated block sprites (mipmapped, linear minification and nearest
+  magnification, as vanilla samples a moving block), cull back faces and write colour and depth like
   opaque terrain. Light is the draw's own, raised by each quad's emission.
 - `material`: `Model` keeps each quad's `render_type` (solid, `cutout`, `cutout_mipped`), and
-  a translucent quad refuses the draw. `Solid`, `Cutout` (alpha under 0.1 discarded, no
-  mipmaps) and `CutoutMipped` (under 0.5, mipmapped) choose one material for all quads.
+  draws a translucent quad in the translucent material (below). `Solid`, `Cutout` (alpha under
+  0.1 discarded) and `CutoutMipped` (under 0.5) choose one material for all quads.
 - `shade`: `Model` follows each quad's `shade` flag, `Off` turns directional shading off, and
   `Entity` shades every quad by the level's entity light directions. Full-bright light never
   turns shading off.
@@ -138,15 +213,23 @@ draw.terrain_model(self.belt, options)?;
   `uv_shrink_ratio` (`0.0..=1.0`, default `0.0`) pulls UVs towards each face's centre first,
   for a model baked with an older `FaceBakery`'s atlas shrink. The engine never guesses it.
 - `tint` (`0xRRGGBB`) multiplies only quads with a tint index.
+- `color` (`0xAARRGGBB`, default white) multiplies every quad's colour after its own and the
+  tint, alpha included; white skips the multiply. An alpha below `0xFF` puts every quad in the
+  translucent material.
+- **Translucent material.** The one vanilla draws a translucent block with outside the terrain
+  (`translucent_moving_block`): alpha blended, back faces culled, depth tested **and written**,
+  fragments under alpha 0.1 discarded, the quad's directional shade baked into its colour. The
+  renderer sorts the quads of all translucent models far to near each frame, as vanilla's
+  `sortOnUpload` does, so submission order does not matter.
 - A stale handle returns `TerrainModelError::Model(ModelError)`. If any quad can't be drawn, the result is
-  `TerrainModelError::Refused` and nothing is drawn. That covers a translucent quad under
-  `Model`, a missing sprite, a pose that flattens the model, a ratio out of range, and a shift
+  `TerrainModelError::Refused` and nothing is drawn. That covers an unknown render type, a
+  missing sprite, a pose that flattens the model, a ratio out of range, and a shift
   whose numbers aren't finite, whose sprites are unknown or whose source sprite no face uses.
 
 ## Persistent groups
 
-- `host.create_group(model, capacity)` reserves up to 16,384 copies of a solid model.
-  Initial drawn length is zero. Translucent models are refused.
+- `host.create_group(model, capacity)` reserves up to 16,384 copies of a model.
+  Initial drawn length is zero.
 - `group.write(host, first, copies)` atomically overwrites a range and extends drawn
   length if needed. Unwritten slots start as white, full-bright identity copies at
   world origin. Invalid coordinates or light, or a range beyond capacity, change nothing.
@@ -173,14 +256,15 @@ tint conversion, but cull and stage visible copies each frame. Every visible
 GPU-routed copy uploads each frame; groups do not retain a private GPU buffer.
 Frequent whole-group pose changes rebuild every live record and can cost more than
 uncached transient copies. Shader-pack selection, missing prepared GPU records and
-overlays use the same CPU baking path as transient batches, including tint and light.
+overlays use the same CPU baking path as transient batches, including tint and light. Translucent
+copies and copies of a block state model take the terrain model materials, not the
+block-entity program a `shaders/` pack replaces.
 There is no simulation-tick work.
 
 Only the creating mod can access a group. A foreign handle returns `GroupError::Stale`,
 as does a destroyed group, a group after resource reload or world close, or a group
 whose mod was disabled. Re-enabling starts without groups: recreate them from the
-newly published model handles. Slot reuse never revives an old handle. Native and
-wasm use the same ownership, budgets, lifetime and rendering implementation.
+newly published model handles. Slot reuse never revives an old handle.
 
 ## Still fluids in a block entity
 
@@ -193,14 +277,21 @@ let options = FluidBoxOptions::new(false, 4.0 / 1024.0);
 draw.fluid_box(&tank.stack, [0.125, 0.0625, 0.125, 0.875, level, 0.875], options)?;
 ```
 
-- The stack is `minecraft:water` or `minecraft:lava` with no components. Any other fluid,
-  an unresolved one or a component patch is `FluidBoxError::UnsupportedFluid`.
-- Each face tiles the fluid's animated still sprite once per block, cut at whole-block lines.
+- The stack's fluid is `minecraft:water`, `minecraft:lava` or any fluid with a look
+  (`data/<mod>/sunrise/fluid/<name>.json`: `sprite`, `tint`; [fluid looks](../content-mods/fluid-container-models.md)
+  holds the format). A stack with components is drawn like one without: they change neither the
+  sprite nor the tint, so a mod colours a potion-like stack with `with_argb` from its own
+  components. A registered fluid with no look is `FluidBoxError::MissingSprite`; an unresolved
+  fluid and the empty fluid are `FluidBoxError::UnsupportedFluid`.
+- Each face tiles the fluid's animated still sprite (a look's `sprite`; a look with no sprite
+  draws its tint as a flat colour) once per block, cut at whole-block lines.
   Each tile keeps its place in the sprite. The box is not inset. `uv_shrink_ratio` is the
   sprite's `TextureAtlasSprite.uvShrinkRatio` (`0.0..=1.0`), and `render_bottom` adds the bottom face.
-- The colour is the stack's tint (plain water `0xFF3F76E4`, lava white), never the biome's
-  water colour. `with_argb` replaces it, alpha included. Faces have no directional shading.
-  Sky light is the draw's own, and block light rises to the fluid's (lava 15).
+- The colour is the fluid's tint (water `0xFF3F76E4`, lava white, a mod fluid's look `tint`, grey
+  `0xFF9A9A9A` when it has none, as `DrawContext::fluid` draws it), never the biome's water colour. `with_argb` replaces it, alpha
+  included. Faces have no directional shading. Sky light is the draw's own, and block light
+  rises to the fluid's `light_level` (lava 15, water 0, a mod fluid's block's).
+- Each fluid's look is resolved once per resource load; a box does one indexed read.
 - The faces use a material of their own: sorted far to near, alpha blended, culled from behind,
   and depth-writing. They draw with the block entities, before the level's translucent terrain,
   under shader packs too.
@@ -275,6 +366,19 @@ level's partial tick, not the camera's partial tick or the server's day time. Pa
 holds that clock; `/tick freeze` holds the level partial at 1 and stops texture ticks.
 Camera motion during a freeze does not spin a part backwards. Server time updates do
 not reset animation. Held-arm, hand, mob and scene draws use this same level partial.
+
+Directional shading on `quad` and `cube` follows `spin`, but light stays fixed by default.
+To use the level's sky and block light, call `BlockEntityDrawContext::level_light` in a world
+block-entity or entity renderer. Each element uses one level-light sample. The centre is the
+unit-cell centre for `block`, `model` and `terrain_model`, the box midpoint for `cube`, or the
+mean of the corners for `quad`, transformed by the pose and any applied `spin`. Baked emission
+and other per-channel light floors still apply. Items and text keep the fixed light.
+
+After `keep`, spun elements sample the cell they turn into each frame without a new submit.
+Stationary elements keep their original sample until the draw is invalidated. If the centre
+falls outside representable cell coordinates, the element uses its fixed light instead.
+Level-less scenes, previews and mob model frames also stay fixed. `light()` always reports the
+fixed setting; `set_light` returns subsequent draws to fixed light.
 
 ## Copycat faces
 

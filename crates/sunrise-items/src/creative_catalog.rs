@@ -74,6 +74,8 @@ pub struct TabRecipe {
     pub id: String,
     #[serde(rename = "type")]
     pub kind: Kind,
+    /// The English text of the tab's title: the export's, or a mod tab file's `title`.
+    pub title: String,
     build: Vec<Row>,
     operator_build: Option<Vec<Row>>,
 }
@@ -356,7 +358,7 @@ mod tests {
         let both = "PARENT_AND_SEARCH_TABS";
         let data = json!({
             "schema": 4,
-            "tabs": [{"id":"test:catalog", "type":"CATEGORY", "build":[
+            "tabs": [{"id":"test:catalog", "title":"Catalog", "type":"CATEGORY", "build":[
                 row(json!({"kind":"stack", "snbt":"{id:\"test:behind_flag\",count:1}"}), both),
                 row(json!({"kind":"paintings", "placeable":true}), both),
                 row(json!({"kind":"potions", "item":"minecraft:potion"}), both),
@@ -429,10 +431,10 @@ mod tests {
     fn search_reads_the_current_prefix_and_previous_suffix_in_registry_order() {
         let catalog = Catalog::parse(&json!({
             "schema":4,"item_features":{},"potion_features":{},"tabs":[
-                {"id":"test:hotbar","type":"HOTBAR","build":[]},
-                {"id":"test:search","type":"SEARCH","build":[]},
-                {"id":"test:category","type":"CATEGORY","build":[]},
-                {"id":"test:inventory","type":"INVENTORY","build":[]}
+                {"id":"test:hotbar","title":"hotbar","type":"HOTBAR","build":[]},
+                {"id":"test:search","title":"search","type":"SEARCH","build":[]},
+                {"id":"test:category","title":"category","type":"CATEGORY","build":[]},
+                {"id":"test:inventory","title":"inventory","type":"INVENTORY","build":[]}
             ]
         }))
         .unwrap();

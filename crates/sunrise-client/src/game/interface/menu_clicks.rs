@@ -522,6 +522,12 @@ impl Game<'_> {
             menu.set_player_item(40, self.offhand.clone());
         }
         menu.settle(&env);
+        // A server's client menu never works out its crafting result (`on_client`): the crafting
+        // menus' result slot (InventoryMenu's and CraftingMenu's slot 0, which `game_of` doesn't
+        // map) holds what the server's ContainerSetSlot put there. Another menu's slot 0 is its own.
+        if matches!(kind, Kind::Inventory | Kind::Crafting) && self.remote.is_some() {
+            menu.set_slot(&env, 0, self.craft_result());
+        }
         if kind == Kind::Loom
             && let Some((selected, patterns)) = station_menu
         {

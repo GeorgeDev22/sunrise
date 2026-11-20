@@ -86,7 +86,7 @@ every OS), the dedicated loop answers `server-status` with TPS, MSPT (average, P
 clock `/tick query` uses), players (name, UUID, address, ping, position), loaded chunks and uptime. It answers
 `console <line>` with the command's output. `server-mods` reads the canonical `LoadedMods` package
 inventory on this same server thread and answers `{"mods":[{"id":"example","version":"1"}]}`.
-It includes native, wasm and content packages installed in that inventory, in inventory order; an empty
+It includes native and content packages installed in that inventory, in inventory order; an empty
 inventory is `{"mods":[]}`. The supervisor's `GET /api/v1/mods` uses this query, never a build-record fallback.
 
 **A proxy moving a player between two servers** uses more requests on this endpoint (`lan/arrivals.rs`,
@@ -323,8 +323,8 @@ velocity that is not finite numbers (a rotation past what a float holds too). A 
 (`RootVehicle`) puts the player back on it at the vehicle's own place, so a request that names a position for such a
 record is refused. The border, the blocks and the chunks are not checked,
 as a vanilla server does not check the place its player file names. The player is teleported to the position (the
-client confirms a new teleport id), so an anticheat never sees the arrival as a move, however far it is from the
-export.
+client confirms a new teleport id), so the arrival is a teleport, never judged as a move (vanilla's speed and
+collision checks), however far it is from the export.
 
 **The view follows the imported position.** `recentered` says whether the import moved the player to another chunk
 than the one its view was built around (only possible with the `position` part, and only once the player has been sent
@@ -531,16 +531,6 @@ The owner edits only `server.toml`. The supervisor writes `server.properties` fr
 start, so the engine stays exactly vanilla. The file is short: typed sections for what owners change, and
 a `[properties]` table that passes any other vanilla key through unchanged.
 
-For Unix wasm compilation, add `"wasm.compile_timeout_secs" = "120"` under
-`[properties]` to allow 120 seconds per uncached module. The engine reads this
-runtime setting from the dedicated game directory's `server.properties`; edit the
-TOML when using the supervisor. Zero or non-numeric values publish a refusal naming
-the setting and value, excluding the affected package's code and content. Unix cache
-trust/write failures and compiler failures refuse compilation rather than drop the
-deadline; restore a private writable `.sunrise-cache/wasm` and working executable.
-Removing the key restores the available-thread default; see the
-[wasm compilation settings](modding/src/how-to/wasm-mods.md#compilation-time-setting)
-for the exact formula and platform limitations.
 
 ```toml
 # Sunrise server settings (docs/server.md). The server writes them into server.properties before

@@ -231,7 +231,9 @@ fn ender_pearl_clears_impulse_before_next_fall() {
     let player = game.player.as_mut().unwrap();
     assert_eq!(player.position, destination);
     assert_eq!(player.fall_distance, 0.0);
+    let side = game_side!(game);
     let damaged = MotionWorld {
+        side: &side,
         entities: &[],
         player,
         scene: &mut game.world,

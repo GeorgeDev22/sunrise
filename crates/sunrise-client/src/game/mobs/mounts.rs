@@ -960,7 +960,9 @@ impl Game<'_> {
         let Some(player) = self.player.as_mut() else {
             return;
         };
+        let side = game_side!(self);
         let _ = MotionWorld {
+            side: &side,
             entities: &[],
             player,
             scene: &mut self.world,

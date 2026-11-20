@@ -562,7 +562,7 @@ impl super::Game<'_> {
                 sunrise_client::ui::nine_slice(
                     batch,
                     atlas,
-                    "gui/sprites/toast/tutorial",
+                    "toast/tutorial",
                     x,
                     y,
                     160.0,
@@ -579,7 +579,7 @@ impl super::Game<'_> {
                 };
                 batch.sprite_scaled(
                     atlas,
-                    &format!("gui/sprites/toast/{icon}"),
+                    &format!("toast/{icon}"),
                     x + 6.0,
                     y + 6.0,
                     20.0,

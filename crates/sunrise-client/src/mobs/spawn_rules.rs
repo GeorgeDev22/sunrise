@@ -769,6 +769,7 @@ mod light_draw_tests {
                         ("minecraft:the_end", &[32][..]),
                     ] {
                         let level = MobWorld {
+                            side: sunrise_client::motion::dry_side(),
                             dimension_type: DimensionFacts::vanilla(type_id).unwrap(),
                             ..w.clone()
                         };

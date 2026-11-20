@@ -383,7 +383,10 @@ impl Game<'_> {
             g.spawn.map(|s| Vec3::new(s[0], s[1], s[2])),
         );
         let respawn = (self.respawn_config.take(), self.level.spawn);
-        self.respawn_config = g.respawn_elsewhere.as_ref().map(RespawnConfig::from_saved);
+        self.respawn_config = g
+            .respawn_elsewhere
+            .as_ref()
+            .and_then(RespawnConfig::from_saved);
         let message = self.message.take();
         // The guest's own ender inventory; one the host has open goes back
         // into the host's while the guest acts.
@@ -450,18 +453,12 @@ impl Game<'_> {
             &mut self.applied_modifiers,
             std::mem::take(&mut play.modifiers),
         );
-        // Its worn armour on its attributes, when it changed.
-        let selected_item = self.inventory.get(self.selected).and_then(Option::as_ref);
-        let unchanged = play.equipped.as_deref().is_some_and(|eq| {
-            eq.len() == self.armor.len() + 1
-                && eq[..self.armor.len()] == self.armor[..]
-                && eq[self.armor.len()].as_ref() == selected_item
-        });
-        if !unchanged {
-            let mut equipped: Vec<Option<ItemStack>> = self.armor.to_vec();
-            equipped.push(selected_item.cloned());
-            self.apply_equipment();
-            play.equipped = Some(equipped);
+        // Its equipment's modifiers on its attributes from its first turn. A later change
+        // waits for the guest's body tick (`equipment_changed`, tick.rs).
+        if play.equipped.is_none() {
+            let held = self.inventory.get(self.selected).and_then(Option::as_ref);
+            equipment_changed(&mut play.equipped, &self.armor, held, self.offhand.as_ref());
+            self.put_equipment_modifiers();
         }
         // The player's effects are on the new body before anything it does
         // (the movement that brought it, a landing): vanilla keeps the same
@@ -881,7 +878,7 @@ impl Game<'_> {
             g.vehicle = guest_vehicle;
             let fell_asleep = bed.is_some() && g.bed.is_none();
             (g.bed, g.sleep_timer, g.spawn) = (bed, guest_sleep_timer, guest_spawn);
-            g.respawn_elsewhere = guest_respawn.map(|c| c.saved());
+            g.respawn_elsewhere = RespawnConfig::kept(g.respawn_elsewhere.take(), guest_respawn);
             g.sleeping = g.bed.is_some();
             if fell_asleep {
                 g.woke_from = None;

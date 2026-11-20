@@ -7,34 +7,17 @@ use crate::*;
 pub struct ModEntry {
     pub(crate) id: &'static str,
     pub(crate) hooks: Box<dyn Hooks>,
-    /// Whether the game loaded it as a wasm module: what its registrations are checked against,
-    /// whatever the module says of itself.
-    pub(crate) wasm: bool,
 }
 
 impl ModEntry {
     /// Bind a hook implementation to its nonempty bundle id.
     pub fn new(id: &'static str, hooks: Box<dyn Hooks>) -> Self {
         assert!(!id.is_empty(), "native mod id must not be empty");
-        Self {
-            id,
-            hooks,
-            wasm: false,
-        }
-    }
-
-    /// Bind a loaded wasm module's hook proxy to its bundle id.
-    // hidden: the wasm runtime's side, not part of the mod surface
-    #[doc(hidden)]
-    pub fn wasm(id: &'static str, hooks: Box<dyn Hooks>) -> Self {
-        Self {
-            wasm: true,
-            ..Self::new(id, hooks)
-        }
+        Self { id, hooks }
     }
 
     /// Marks the thread as inside this mod's `hook` until the guard drops, so a panic in it
-    /// names both. A trait injection's generated dispatch calls it.
+    /// names both. The generated hook dispatcher calls it.
     // hidden: a game-side helper, not part of the mod surface
     #[doc(hidden)]
     pub fn enter(&self, hook: &'static str) -> crate::content::crash::ModGuard {
@@ -166,11 +149,22 @@ pub(crate) fn install(mods: Mods) -> &'static Installed {
     }
 }
 
+/// Checkpoint for an owning action around isolated dispatch. A trapped listener
+/// resets its outputs, but the owner must also abort any tentative Host writes.
+/// Unrelated threads do not affect the checkpoint.
+// hidden: the game's own decide/fire/apply actions read it; it is not a mod-facing call.
+#[doc(hidden)]
+pub fn isolated_failures() -> u64 {
+    LISTENER_SERIAL.get().1
+}
+
 /// Mark `id`'s listener of `hook` poisoned for the session (#2414 ruling):
 /// it is skipped by that one hook alone — its other hooks and Parts are
 /// untouched, unlike a whole-mod disable. Called only from a listener's
 /// `catch_unwind` handler, so an installation is always in place.
 pub(crate) fn poison(hook: generated::HookId, id: &'static str) {
+    let (entered, trapped) = LISTENER_SERIAL.get();
+    LISTENER_SERIAL.set((entered, trapped.wrapping_add(1)));
     let installed = installed().expect("a poison lands inside a dispatch");
     let mut poisons = installed.poisons.lock().unwrap();
     let sets =
@@ -390,8 +384,7 @@ pub(crate) fn outside_world() -> bool {
 }
 
 /// Runs a listener's call. With `contained` (outside `World`) a Host call the phase gate refuses
-/// comes back as `Err`, and the caller answers as a refused wasm call does; otherwise it is the
-/// plain call.
+/// comes back as `Err`. In `World` the listener is called directly.
 #[inline]
 pub(crate) fn refusable<T>(
     contained: bool,
@@ -585,17 +578,18 @@ impl ListenerScope {
 }
 
 thread_local! {
-    /// Every listener entered on this thread, including listeners of different nested hooks.
-    static LISTENER_SERIAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Listener entries (including nested hooks) and poisoned traps on this thread.
+    static LISTENER_SERIAL: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 #[inline]
 fn bump_listener_serial() {
-    LISTENER_SERIAL.with(|serial| serial.set(serial.get().wrapping_add(1)));
+    let (entered, trapped) = LISTENER_SERIAL.get();
+    LISTENER_SERIAL.set((entered.wrapping_add(1), trapped));
 }
 
 pub(crate) fn listener_serial() -> u64 {
-    LISTENER_SERIAL.with(std::cell::Cell::get)
+    LISTENER_SERIAL.get().0
 }
 
 #[cfg(test)]

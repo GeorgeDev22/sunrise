@@ -1,6 +1,6 @@
 //! Build each API-only native mod as its own Rust dylib from SDK metadata.
 //! The executable is fixed and the engine archive is never read.
-use super::{api, dependencies, internals, prebuilt};
+use super::{api, dependencies, prebuilt};
 use crate::rust::Toolchain;
 use std::collections::HashMap;
 use std::fs;
@@ -32,8 +32,7 @@ pub fn compile(
         |edition: &str| prebuilt::rustc_with(rust, &[&deps, &host, &runtime_deps, out], edition);
     let mut libraries = HashMap::new();
     for (package, name) in api::PACKAGES {
-        // The API route has no game's wasmtime: only a mod with a `[[native.*]]` row may name it.
-        if package != api::INTERNALS_PACKAGE && package != api::WASMTIME_PACKAGE {
+        if package != api::INTERNALS_PACKAGE {
             libraries.insert(name, prebuilt::library(&runtime_deps, name)?);
         }
     }
@@ -52,7 +51,6 @@ pub fn compile(
             &prebuilt::library_entry(
                 &api::template(&api.join(TEMPLATE))?,
                 &[&project.bundle.manifest],
-                &internals::Catalog::read(api)?,
                 sdk.commit(),
                 &project.bundle.manifest.id,
                 &project.bundle.manifest.version.to_string(),

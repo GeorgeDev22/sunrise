@@ -1,6 +1,8 @@
 //! Installing from a local test registry: a real content `.smod`, an index
 //! naming it, and the game folder the launcher shares.
 use super::*;
+use std::path::PathBuf;
+use sunrise_mod_package::index::browser_state::MANIFEST;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -315,30 +317,29 @@ fn a_mod_the_player_put_there_is_never_replaced() {
     fs::remove_dir_all(&home).unwrap();
 }
 
-/// A wasm package can declare only registries too; the browser must inspect the package,
+/// A native package can declare only registries too; the browser must inspect the package,
 /// rather than treat that capability list as proof that it contains no code.
 #[test]
 fn code_packages_never_reach_the_content_browser_install_path() {
-    // The smallest shared group member: `dylink.0` memory info and the two guest exports.
-    let module = &[
-        b"\0asm\x01\0\0\0".as_slice(),
-        b"\0\x0f\x08dylink.0\x01\x04\0\0\0\0",
-        b"\x01\x04\x01\x60\0\0",
-        b"\x03\x04\x03\0\0\0",
-        b"\x07\x1d\x02\x0asunrise_in\0\x01\x0csunrise_hook\0\x02",
-        b"\x0a\x0a\x03\x02\0\x0b\x02\0\x0b\x02\0\x0b",
-    ]
-    .concat()[..];
     let manifest = format!(
-        "id = \"ruby\"\nname = \"Ruby\"\nversion = \"1.0\"\napi = \"0.2\"\nside = \"both\"\ncapabilities = [\"registries\"]\n[wasm]\nsha512 = \"{}\"\ntoolchain = \"1.99.1\"\nbuilt_with = \"test\"\n",
-        sunrise_mod_package::manifest::sha512_of(module)
+        "id = 'ruby'\nname = 'Ruby'\nversion = '1.0'\napi = '0.2'\nside = 'both'\ncapabilities = ['registries']\n[native]\ngame = '26.3'\nsunrise = '{}'\n",
+        "a".repeat(40),
     );
-    let bytes =
-        sunrise_mod_package::Package::write_files(&manifest, &[("mod.wasm", module)]).unwrap();
+    let bytes = sunrise_mod_package::Package::write_files(
+        &manifest,
+        &[
+            (
+                "Cargo.toml",
+                b"[package]\nname = 'ruby'\nversion = '1.0.0'\n",
+            ),
+            ("src/lib.rs", b"// No code needed for the fixture.\n"),
+        ],
+    )
+    .unwrap();
     let index = registry("1.0", &bytes, "file:///ruby.smod");
     let home = scratch("code");
     let error = install(&index, &home, "ruby", &serve(bytes.clone())).unwrap_err();
-    assert!(error.contains("code mods"), "{error}");
+    assert!(error.contains("it is a native-mod"), "{error}");
     assert!(!home.join("sunrise-mods/ruby.smod").exists());
     assert!(!home.join("mod-browser/downloads/ruby.smod.part").exists());
     assert!(!home.join(MANIFEST).exists());

@@ -1009,10 +1009,10 @@ mod tests {
                 (113.0, 98.0, 98.0, "gui.advancements", 4, true),
             ],
             icons: [
-                (173.0, 122.0, "gui/sprites/pause_menu/bug"),
-                (197.0, 122.0, "gui/sprites/pause_menu/social_interactions"),
-                (221.0, 122.0, "gui/sprites/friends/friends"),
-                (245.0, 122.0, "gui/sprites/pause_menu/player_reporting"),
+                (173.0, 122.0, "pause_menu/bug"),
+                (197.0, 122.0, "pause_menu/social_interactions"),
+                (221.0, 122.0, "friends/friends"),
+                (245.0, 122.0, "pause_menu/player_reporting"),
             ],
         };
         state.sync(

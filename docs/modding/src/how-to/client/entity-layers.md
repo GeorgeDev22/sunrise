@@ -4,7 +4,7 @@ A client mod can draw over a living entity without replacing its model: a mod's 
 backpack, something held or worn. This is the counterpart of NeoForge 26.3's
 `EntityRenderersEvent.AddLayers` and `RenderLayer`: the mod adds a layer to a living entity type or to
 a player model, and the game draws it over every entity of that target in view, after its model and
-the layers before it. Native and wasm mods add and draw layers the same way.
+the layers before it.
 
 ## 1. Write the layer
 
@@ -82,8 +82,7 @@ carry over, so add them each time. The event also tells what renderers this load
   and the vanilla layers, and `parts` is none: the renderer's model has no vanilla parts.
 - An entity whose `render_living_pre` or `render_player_pre` a mod canceled draws none of its layers,
   as NeoForge's canceled `RenderLivingEvent.Pre` skips them.
-- `submit` returns `Ok(())` to keep what it drew. A layer that returns an `Err`, panics, or (in a wasm
-  mod) has its call refused or trapped is logged once and asked no more until the next resource load
+- `submit` returns `Ok(())` to keep what it drew. A layer that returns an `Err` or panics is logged once and asked no more until the next resource load
   adds it again; what it drew that frame is dropped.
 
 ## Where layers draw

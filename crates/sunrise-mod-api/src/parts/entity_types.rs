@@ -8,8 +8,10 @@ impl GeneralTypesRegistrar for PartRegistrar {
         category: GeneralEntityCategory,
         width: f64,
         height: f64,
+        passenger_attachment: Option<[f64; 3]>,
         save_policy: GeneralSavePolicy,
         summonable: bool,
+        pickable: bool,
         tracking_chunks: i32,
         update_interval: i32,
         payload_version: u16,
@@ -57,7 +59,11 @@ impl GeneralTypesRegistrar for PartRegistrar {
             {
                 return Err(Error::Duplicate);
             }
-            if ![width, height].into_iter().all(f64::is_finite) {
+            if ![width, height]
+                .into_iter()
+                .chain(passenger_attachment.into_iter().flatten())
+                .all(f64::is_finite)
+            {
                 return Err(Error::NotFinite);
             }
             for feature in required_features {
@@ -75,8 +81,10 @@ impl GeneralTypesRegistrar for PartRegistrar {
                     category,
                     width,
                     height,
+                    passenger_attachment,
                     save_policy,
                     summonable,
+                    pickable,
                     tracking_chunks,
                     update_interval,
                     payload_version,
@@ -121,8 +129,10 @@ mod tests {
             GeneralEntityCategory::Misc,
             width,
             height,
+            None,
             GeneralSavePolicy::Save,
             true,
+            false,
             tracking_chunks,
             update_interval,
             1,
@@ -183,6 +193,30 @@ mod tests {
         assert_eq!(registrar.general_entity_types.len(), 2);
         assert_eq!(registrar.general_entity_types[0].id, "mymod:robot");
         assert_eq!(registrar.refused.len(), 8);
+    }
+
+    #[test]
+    fn a_non_finite_passenger_attachment_refuses_registration() {
+        crate::__private::initialize().unwrap();
+        let (_phase, mut registrar) = registrar();
+        assert_eq!(
+            registrar.declare_general_entity(
+                "robot",
+                GeneralEntityCategory::Misc,
+                0.8,
+                1.9,
+                Some([1.0, f64::NAN, 0.0]),
+                GeneralSavePolicy::Save,
+                true,
+                false,
+                8,
+                3,
+                1,
+                &[],
+            ),
+            Err(Error::NotFinite)
+        );
+        assert!(registrar.general_entity_types.is_empty());
     }
 
     #[test]
@@ -323,8 +357,10 @@ mod tests {
                 GeneralEntityCategory::Misc,
                 0.8,
                 1.9,
+                None,
                 GeneralSavePolicy::Save,
                 true,
+                false,
                 8,
                 3,
                 1,

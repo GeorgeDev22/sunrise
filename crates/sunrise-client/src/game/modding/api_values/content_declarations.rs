@@ -396,7 +396,7 @@ mod tests {
         item.components = vec![
             (
                 "!minecraft:lore".into(),
-                Some(Tag::Compound(BTreeMap::new())),
+                Some(Tag::Compound(sunrise_core::nbt::Compound::new())),
             ),
             ("minecraft:lore".into(), None),
         ];

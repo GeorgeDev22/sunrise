@@ -488,6 +488,17 @@ fn commit_unloads(world: &mut World, keys: &[(i32, i32)]) -> Vec<Arc<Chunk>> {
         .collect()
 }
 
+/// `set_forced_loaded`'s load barrier: a forced column is loaded once it can
+/// tick — a locally generated one lit with its 3x3 neighbourhood resident
+/// (vanilla's ticking-chunk future); a remote server's column arrives lit
+/// with its packet, so residency suffices.
+fn forced_ready(remote: bool, world: &World, x: i32, z: i32) -> bool {
+    match world.chunks.get(&(x, z)) {
+        Some(chunk) => remote || (chunk.lit && world.chunks.surrounded((x, z))),
+        None => false,
+    }
+}
+
 /// An update paused before removing its out-of-range live chunks.
 pub struct StreamingUpdate {
     uploads: Vec<((i32, i32, i32), SectionMesh)>,
@@ -1301,7 +1312,7 @@ impl Streaming {
         let key = (chunk.x, chunk.z);
         self.lighting.remove(&key);
         self.light_snapshots.remove(&key);
-        world.chunks.insert(key, Arc::new(chunk));
+        world.install_light_column(chunk);
         self.lit.insert(key);
         self.generated_total += 1;
         let mask = SectionMask::below(world.layout().sections());
@@ -1367,7 +1378,7 @@ impl Streaming {
     pub fn take_remote_columns(world: &mut World, gone: &FxHashSet<(i32, i32)>) -> Vec<Arc<Chunk>> {
         let mut chunks = Vec::with_capacity(gone.len());
         for key in gone {
-            chunks.extend(world.chunks.remove(key));
+            chunks.extend(world.unload_chunk(*key));
         }
         chunks
     }
@@ -1541,7 +1552,11 @@ impl Streaming {
         let new = self.dropped_new.remove(&key) || chunk.generated;
         world.loaded_chunks.push((key.0, key.1, new));
         chunk.dynamic_pending = self.light_tables.holds_dynamic(&chunk);
-        world.chunks.insert(key, Arc::new(chunk));
+        if loaded {
+            self.light_tables
+                .publish_section_status(&mut chunk, world.shape);
+        }
+        world.install_light_column(chunk);
         if loaded {
             self.lit.insert(key);
             for sy in 0..world.layout().sections() as i32 {
@@ -2709,11 +2724,14 @@ impl Streaming {
         changed
     }
     /// `ServerLevel.setChunkForced`: a newly forced column is present before
-    /// returning. Repeated adds and removals only report the set change.
+    /// returning, lit and with the 3x3 it ticks with (`ChunkMap.prepareTickingChunk`
+    /// demands the neighbourhood with the chunk: a saved tick restored on load
+    /// waits for all of them, and ambient passes alone can take tens of ticks to
+    /// stream them, #3341). Repeated adds and removals only report the set change.
     pub fn set_forced_loaded(&mut self, world: &mut World, x: i32, z: i32, forced: bool) -> bool {
         let changed = self.set_forced(x, z, forced);
         if forced && changed {
-            while !world.chunks.contains_key(&(x, z)) {
+            while !forced_ready(self.remote, world, x, z) {
                 assert!(!self.paused, "forced chunk load before streaming started");
                 assert!(
                     !self
@@ -2730,7 +2748,7 @@ impl Streaming {
                 let (meshes, unloaded) = self.finish_update(world, plan);
                 debug_assert!(unloaded.is_empty());
                 self.free(meshes);
-                if !world.chunks.contains_key(&(x, z)) {
+                if !forced_ready(self.remote, world, x, z) {
                     self.wait(std::time::Duration::from_millis(5));
                 }
             }
@@ -3464,10 +3482,25 @@ fn take_resent_column(
     // section often changes in a bulk edit, is mostly sections that did not).
     let mut cells = crate::light::LightChanges::default();
     cells.keyed(world.layout());
+    // A pad has no mesh of its own. Only the adjacent row can be sampled by the
+    // boundary sections in this column or its horizontal neighbours.
+    let pads = [
+        (chunk.min_y() - 1, 0),
+        (chunk.max_y(), chunk.sections.len() as i32 - 1),
+    ];
+    for (y, s) in pads {
+        if (0..16).any(|z| (0..16).any(|x| old.light(x, y, z) != chunk.light(x, y, z))) {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    world.dirty_sections.insert((key.0 + dx, s, key.1 + dz));
+                }
+            }
+        }
+    }
     let kept = keep_unchanged_sections(old, &mut chunk, &mut cells);
     chunk.light_loaded = old.light_loaded;
     chunk.lit = true;
-    world.chunks.insert(key, Arc::new(chunk));
+    world.install_light_column(chunk);
     world.revision = world.revision.wrapping_add(1);
     // A section with new biomes and the same blocks remeshes now (its tint), with its neighbours, whose tint
     // blends across the border: above and below too, as a block's tint can sample the biome quart of the
@@ -3660,6 +3693,31 @@ mod tests {
         assert!(world.chunks.contains_key(&(1, 0)));
         assert!(world.block_entities.contains_key(&(0, 64, 0)));
         assert!(Streaming::take_remote_columns(&mut world, &gone).is_empty());
+    }
+
+    /// The barrier `set_forced_loaded` holds `/forceload add` to: a locally
+    /// generated column is loaded once it can tick — lit, with the 3x3
+    /// neighbourhood vanilla's ticking-chunk future demands. A remote
+    /// server's column arrives lit with its packet; residency suffices (#3341).
+    #[test]
+    fn forced_column_is_loaded_once_it_can_tick() {
+        let mut world = World::new(sunrise_world::registry::BlockStateId(0), 0);
+        assert!(!forced_ready(false, &world, 4, 4));
+        world.chunks.insert((4, 4), Arc::new(Chunk::empty(4, 4)));
+        assert!(!forced_ready(false, &world, 4, 4));
+        assert!(forced_ready(true, &world, 4, 4));
+        Arc::make_mut(world.chunks.get_mut(&(4, 4)).unwrap()).lit = true;
+        assert!(!forced_ready(false, &world, 4, 4));
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if (dx, dz) != (0, 0) {
+                    world
+                        .chunks
+                        .insert((4 + dx, 4 + dz), Arc::new(Chunk::empty(4 + dx, 4 + dz)));
+                }
+            }
+        }
+        assert!(forced_ready(false, &world, 4, 4));
     }
 
     #[test]
@@ -4934,6 +4992,30 @@ mod tests {
         chunk.lit = true;
         world.chunks.insert((2, -3), Arc::new(chunk.clone()));
         chunk
+    }
+
+    #[test]
+    fn a_pad_only_resend_dirties_the_boundary_mesh_and_its_neighbours() {
+        use crate::chunk::SECTIONS;
+        use crate::light::light_from_layers;
+        for (pad, boundary) in [(0, 0), (SECTIONS + 1, SECTIONS - 1)] {
+            let mut world = World::new(sunrise_world::registry::BlockStateId(0), 0);
+            let mut old = Chunk::empty(2, -3);
+            let mut layers = vec![(None, None); SECTIONS + 2];
+            layers[pad].1 = Some(vec![0x22; 2048]);
+            light_from_layers(&mut old, &layers, true);
+            world.install_light_column(old.clone());
+            let mut new = old.clone();
+            layers[pad].1 = Some(vec![0x77; 2048]);
+            light_from_layers(&mut new, &layers, true);
+            take_resent_column(&mut world, (2, -3), &old, new, false);
+            assert_eq!(world.dirty_sections.len(), 9);
+            for z in -4..=-2 {
+                for x in 1..=3 {
+                    assert!(world.dirty_sections.contains(&(x, boundary as i32, z)));
+                }
+            }
+        }
     }
 
     /// A server's resent column uses the light in its packet, as vanilla's

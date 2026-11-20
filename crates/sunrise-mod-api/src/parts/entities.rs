@@ -172,7 +172,6 @@ impl EntitiesRegistrar for PartRegistrar {
         self.attach(|p| &mut p.entities, kind, entity, part);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn declare_entity_part_state(
         &mut self,
         entity: &str,

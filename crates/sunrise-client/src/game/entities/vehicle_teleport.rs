@@ -95,7 +95,12 @@ pub(super) fn cart_known_movement(velocity: Vec3) -> Vec3 {
 /// The entity id a vehicle's riders point at, for the targets that carry some.
 fn vehicle_id(t: Target) -> Option<u32> {
     match t {
-        Target::Boat(id) | Target::Cart(id) | Target::Mob(id) => Some(id),
+        Target::Boat(id)
+        | Target::Cart(id)
+        | Target::Mob(id)
+        | Target::General(id)
+        | Target::Stand(id)
+        | Target::Other(id) => Some(id),
         _ => None,
     }
 }
@@ -266,7 +271,7 @@ impl Game<'_> {
             };
             let attachment = Self::mob_passenger_attachment(
                 self.mob_object(root).unwrap(),
-                m,
+                sunrise_client::mobs::drops::is_animal(m.species()),
                 seat,
                 children.len(),
             );
@@ -329,11 +334,28 @@ impl Game<'_> {
         motion: TeleportMotion,
     ) -> sunrise_client::Result<Option<bool>> {
         if let Target::General(id) = target {
-            return Ok(Some(self.teleport_general_tree_across(
-                id,
-                destination,
-                at,
-            )?));
+            let tree = self.vehicle_tree_ids(id);
+            if tree.iter().all(|&id| {
+                self.general_row(id).is_some()
+                    && self.riding != Some(id)
+                    && !self.ridden_by_guest(id)
+            }) {
+                return Ok(Some(self.teleport_general_tree_across(
+                    id,
+                    destination,
+                    at,
+                )?));
+            }
+            return self
+                .teleport_vehicle_across(target, destination, at, rotation, turn_riders, motion)
+                .map(Some);
+        }
+        if let Target::Stand(id) | Target::Other(id) = target
+            && self.general_passengers(id).next().is_some()
+        {
+            return self
+                .teleport_vehicle_across(target, destination, at, rotation, turn_riders, motion)
+                .map(Some);
         }
         if let Some(moved) = self.teleport_lone_across(target, destination, at, rotation, motion)? {
             return Ok(Some(moved));
@@ -468,6 +490,11 @@ impl Game<'_> {
             // Open the destination before changing or removing any entity.
             game.enter_level(destination)?;
             game.enter_level(source)?;
+            if game.general_transfer_conflicts(root, destination) {
+                return Err(
+                    "a travelling general entity UUID is already in the destination".into(),
+                );
+            }
             if game
                 .mobs
                 .iter()
@@ -475,12 +502,52 @@ impl Game<'_> {
             {
                 game.dismount_mob(root);
             }
+            if let Some(mount) = game.general_row(root).and_then(|row| row.mount) {
+                game.dismount_general(root, mount);
+                if game.general_row(root).is_none_or(|row| row.mount.is_some()) {
+                    return Ok(false);
+                }
+            }
             game.prepare_vehicle_transition(root);
             let kept = match motion {
                 TeleportMotion::Keep => game.transition_motion(target),
                 TeleportMotion::Stop => None,
             };
-            let from = game.place_teleport_in_level(target, at, rotation, [false; 3], turn_riders);
+            let from = if let Target::General(id) = target {
+                let row = game
+                    .resident_entities
+                    .general
+                    .rows
+                    .iter_mut()
+                    .find(|row| row.id == id)
+                    .ok_or("missing general vehicle")?;
+                let before = row.position;
+                let before_rotation = row.rotation;
+                let after = Vec3::new(at[0], at[1], at[2]);
+                row.position = after;
+                row.previous = after;
+                if let Some([yaw, pitch]) = rotation {
+                    if yaw.is_finite() {
+                        row.rotation[0] = yaw;
+                    }
+                    if let Some(pitch) = absolute_pitch(pitch) {
+                        row.rotation[1] = pitch;
+                    }
+                }
+                if kept.is_none() {
+                    row.velocity = Vec3::ZERO;
+                }
+                let rotation = rotation
+                    .filter(|_| turn_riders)
+                    .map(|after| PlacedRotation {
+                        before: before_rotation,
+                        after,
+                    });
+                game.move_riders(id, before, after, rotation);
+                Some([before.x, before.y, before.z])
+            } else {
+                game.place_teleport_in_level(target, at, rotation, [false; 3], turn_riders)
+            };
             if let Some(from) = from
                 && game.options.dedicated.is_some()
             {
@@ -490,9 +557,10 @@ impl Game<'_> {
                 Some(kept) => game.restore_transition_motion(target, kept),
                 None => game.teleport_stops(target),
             }
-            let mounts: Vec<_> = game.mob_objects().map(|m| (m.id, m.extra.mount)).collect();
-            let tree = super::persist::vehicle_tree(root, &mounts);
-            let tag = game.vehicle_tree_nbt(root).ok_or("missing vehicle tree")?;
+            let tree = game.vehicle_tree_ids(root);
+            let tag = game
+                .vehicle_tree_nbt_for(root, true)
+                .ok_or("missing vehicle tree")?;
             let state = game
                 .capture_vehicle_tree_state(root)
                 .ok_or("missing vehicle object state")?;
@@ -522,12 +590,8 @@ impl Game<'_> {
                     }
                 }
             }
-            game.mobs.retain(|m| !tree.contains(&m.id));
-            game.persist.off_level.retain(|id, _| !tree.contains(id));
-            game.boats.retain(|b| !tree.contains(&b.id));
-            game.carts.retain(|c| !tree.contains(&c.id));
+            game.remove_vehicle_rows(&tree);
             for id in tree {
-                game.release_vehicle_container(id);
                 game.detach_entity(id);
             }
             game.native_leaves_flush();
@@ -619,7 +683,9 @@ impl Game<'_> {
         to: [f64; 3],
         rotation: Option<PlacedRotation>,
     ) {
-        let Some(id) = vehicle_id(t) else {
+        // General cross-level vehicles place their rows directly above; the
+        // command route has not yet given general rows same-level placement.
+        let Some(id) = vehicle_id(t).filter(|_| !matches!(t, Target::General(_))) else {
             return;
         };
         let (old, new) = (
@@ -635,7 +701,7 @@ impl Game<'_> {
         new: Vec3,
         rotation: Option<PlacedRotation>,
     ) {
-        let riders = self.mob_passenger_ids(vehicle);
+        let riders = self.vehicle_passenger_ids(vehicle);
         let mut guest_steps = Vec::new();
         for id in riders {
             let mut carried = None;
@@ -657,6 +723,20 @@ impl Game<'_> {
                     m.previous_yaw = yaw;
                     m.previous_head_pitch = pitch;
                 }
+            } else if let Some(row) = self
+                .resident_entities
+                .general
+                .rows
+                .iter_mut()
+                .find(|row| row.id == id)
+            {
+                let from = row.position;
+                row.position = passenger_destination(old, new, row.position);
+                row.previous = row.position;
+                if let Some(placed) = rotation {
+                    row.rotation = passenger_rotation(placed.before, placed.after, row.rotation);
+                }
+                carried = Some((from, row.position));
             }
             // Each rider's `teleportSetPosition` is a position update of its own.
             if let Some((from, to)) = carried {

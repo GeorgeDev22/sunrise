@@ -97,6 +97,7 @@ impl Template {
         if !v.is_object() && !v.is_string() {
             return None;
         }
+        sunrise_world::item_defaults::validate_stack(v).ok()?;
         let components = v.get("components").map(json_tag);
         let (damage, extra) = crate::item_data::decode_components(components.as_ref());
         Some(Self {
@@ -1556,6 +1557,7 @@ impl ResolvedSources {
         mut sources: Vec<(String, Value)>,
         context: &sunrise_world::native_load_context::LoadContext,
     ) -> Result<Self> {
+        sources.retain(|(name, value)| Ingredient::validate_persistence(value, name));
         // Every consumer keeps vanilla's resource-file registration order.
         sources.sort_by_cached_key(|(name, _)| registration_key(name));
         let listened = mod_api::__private::listened(mod_api::HookId::Ingredient);

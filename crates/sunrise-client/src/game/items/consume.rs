@@ -408,7 +408,9 @@ impl Game<'_> {
             return false;
         };
         let bounds = player.dimensions.bounds(at);
+        let side = game_side!(self);
         let free = sunrise_client::motion::MotionWorld {
+            side: &side,
             entities: &entities,
             player,
             scene: &mut self.world,

@@ -51,12 +51,22 @@ impl Observation {
 pub enum Prepared {
     Client(PreparedPayload),
     Server(crate::lan::conn::PreparedPayload),
+    /// A `Droppable` send: it reserves nothing, and publication queues it for the writer.
+    Droppable(
+        Arc<super::droppable::Queue>,
+        Arc<mod_api::__private::game::DropCounters>,
+        Vec<u8>,
+    ),
 }
 impl Prepared {
     pub fn publish(self) -> Result<(), PayloadSendError> {
         match self {
             Self::Client(send) => send.publish(),
             Self::Server(send) => send.publish(),
+            Self::Droppable(queue, counters, body) => {
+                queue.push(std::time::Instant::now(), &counters, body);
+                Ok(())
+            }
         }
     }
 }
@@ -146,6 +156,11 @@ impl Endpoint {
             });
         }
         let len = encoded_len(epoch.phase, self.side(), id, bytes.0.len());
+        if epoch.peer.local.has_droppable()
+            && let Some(counters) = epoch.peer.local.droppable(&id.0)
+        {
+            return self.prepare_droppable(epoch, id, bytes, len, counters);
+        }
         match &self.0 {
             Target::Client {
                 writer,
@@ -179,6 +194,47 @@ impl Endpoint {
                     .map(Prepared::Client)
             }
         }
+    }
+    /// A `Droppable` send takes no reservation: it is bounded by its own queue. Frame limits
+    /// still refuse here, so no waiting send can fail framing later.
+    fn prepare_droppable(
+        &self,
+        epoch: &Arc<Epoch>,
+        id: &PayloadId,
+        bytes: PayloadBytes,
+        len: usize,
+        counters: &Arc<mod_api::__private::game::DropCounters>,
+    ) -> Result<Prepared, PayloadSendError> {
+        let framing = match &self.0 {
+            Target::Client {
+                writer,
+                configuring,
+                ..
+            } => {
+                if configuring.load(Ordering::Acquire) != (epoch.phase == Phase::Configuration) {
+                    return Err(PayloadSendError::WrongProtocol(id.clone()));
+                }
+                let writer = writer.lock().unwrap();
+                writer
+                    .as_ref()
+                    .ok_or(PayloadSendError::Disconnected)?
+                    .framing()
+            }
+            Target::Server(sender) => sender.payload_framing(),
+            Target::Configuration(sender) => sender.framing(),
+        };
+        preflight(framing, usize::MAX, len, id)?;
+        let queue = self
+            .transport()
+            .connection
+            .as_ref()
+            .and_then(|connection| connection.droppable())
+            .ok_or(PayloadSendError::Disconnected)?;
+        Ok(Prepared::Droppable(
+            queue.clone(),
+            counters.clone(),
+            encode(epoch.phase, self.side(), id, bytes),
+        ))
     }
     /// A failure closes this physical connection only; a client reason joins its ordered events.
     pub fn disconnect(&self, reason: Text) {

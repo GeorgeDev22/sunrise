@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
-// no wire: the payload of an unwind inside one process, never data a mod or a wasm guest sees.
+// no wire: the payload of an unwind inside one process, not serialized data.
 /// What the phase gate records and unwinds with when a native mod calls a Host method its load
 /// phase does not admit. `contain_refusal` turns it into an `Err` at the entry point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,8 +33,7 @@ impl std::fmt::Display for PhaseRefusal {
 }
 
 impl PhaseRefusal {
-    /// Logs the refusal the first time this mod's operation is refused, in the wording of a
-    /// refused wasm call (`wasm refusal: <mod> hook <hook>: ...`).
+    /// Logs the first refusal of this operation for this mod.
     pub fn report(&self) {
         static LOGGED: OnceLock<Mutex<HashSet<(&'static str, &'static str)>>> = OnceLock::new();
         let first = LOGGED

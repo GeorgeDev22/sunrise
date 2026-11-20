@@ -42,7 +42,6 @@ disconnecting discards it. Reads allocate nothing and do not rescan recipes or r
 A client without this mod predicts vanilla here; the server corrects it.
 
 Parts that read `context.setting(..)` or `side()` have no counterpart on the Host.
-Named injections for `menu_slot_rules` request `hook_version = 5`.
 
 ### Who and where: the slot's context
 
@@ -140,12 +139,18 @@ with the caller's transaction. A stack not held in a menu slot or cursor is refu
 `CraftedByError::NotHeld`. This operation does **not** perform the separate
 `recipe_crafted` criterion ([tracking](https://github.com/sunrise-org/sunrise/issues/1977)).
 
-## Keeping a block menu open
+## Keeping a mod menu open
 
-The server closes a player's block menu when `AbstractContainerMenu.stillValid` says no: by default when the
-block entity is gone or the player's eyes are farther than their block interaction range plus 4 from it. A
-large machine whose menu belongs to a core block deep inside it answers `menu_still_valid` on its menu type
-instead, as a Java menu overrides `stillValid`:
+The server asks the open mod menu's `MenuPart` for `menu_still_valid` each tick and before processing a
+matching non-spectator container click, as a Java menu overrides `AbstractContainerMenu.stillValid`. A click
+for a different window is dropped; a matching spectator click resends the menu without asking the part.
+`event.menu` is the menu type. For menus opened without a backing block, `event.valid` starts true and
+`event.pos` is `None`, even if `player_open_mod_menu` was given a position for the client's screen. Set
+`valid` to false to close the menu and return the cursor stack as on a normal close.
+
+For a block menu, `event.pos` is the backing block and `valid` starts as the reach check: the player's
+eyes must be within their block interaction range plus 4 of each backing block. A large machine with a
+core block deep inside it can override that answer:
 
 ```rust,ignore
 struct ShellReach;
@@ -156,10 +161,10 @@ impl mod_api::MenuPart for ShellReach {
         _: &dyn mod_api::LoopContext,
         event: &mut mod_api::MenuStillValidEvent<'_>,
     ) {
-        // `event.valid` arrives as the game's answer; keep the menu open while
-        // the player stands within 12 blocks of the core.
+        // Keep the block's menu open while the player stands within 12 blocks of the core.
+        let Some(pos) = event.pos else { return };
         let d: f64 = (0..3)
-            .map(|k| (event.eye[k] - (f64::from(event.pos[k]) + 0.5)).powi(2))
+            .map(|k| (event.eye[k] - (f64::from(pos[k]) + 0.5)).powi(2))
             .sum();
         event.valid = d < 12.0 * 12.0;
     }
@@ -168,9 +173,9 @@ impl mod_api::MenuPart for ShellReach {
 // registrar.menu_part("mymod:torus", ShellReach);
 ```
 
-It is asked each tick the menu is open and before each click on it, on the server only, and only for a mod
-menu type: vanilla menu types keep their own check. A part that leaves `valid` alone keeps the game's answer,
-and a menu whose block entity is gone closes without asking. Answer from the event and `LoopContext` alone; this callback has no `Host`.
+Vanilla menu types keep their own check. A part that leaves `valid` alone keeps the game's answer, and a menu
+whose block entity is gone closes without asking. Answer from the event and `LoopContext` alone; this
+callback has no `Host`.
 
 
 ## Reading and clicking
@@ -254,7 +259,7 @@ Inside `menu_clicked`, `ItemPlace::MenuSlot` can take from and give to the click
 player's inventory and hotbar slots as well as the menu's own storage. Inserts fill
 only the named slot and return the amount that fits. Abort the transaction if a
 partial move should leave both places unchanged. Stale menu or player identities
-refuse writes. The same storage path is used by native and wasm listeners.
+refuse writes.
 
 ## A mod's chest menu
 
@@ -373,7 +378,12 @@ player's open block menu before its own grid transfer, on the same thread.
 `slot_count` entries. It describes the client's layout and content declaration,
 not the server's backing or acceptance rules. `Player(index)` uses hotbar 0–8,
 main 9–35, armour 36–39 (feet to head), off hand 40. Container equipment is
-`Equipment`; linked storage is `Storage`. Workstations without a classified layout (anvil, enchanting table, loom,
+`Equipment`. General storage, including unmarked linked slots, is `Storage`.
+Furnaces, blast furnaces, and smokers report the ingredient and fuel slots as `Input`
+and the output as `Result`. Brewing stands report the bottle, ingredient, and fuel
+slots as `Input`. Content menus report `Input` for the slots listed in their
+[menu type's `inputs`](../../how-to/content-mods.md#menu-types), even when those slots
+are linked. Workstations without a classified layout (anvil, enchanting table, loom,
 and similar types) return `Other` for every slot, including player slots. A game menu with no known client slot count returns `None`, as do
 stale or foreign handles, missing content types, and calls without an open menu
 or outside a world. Creative returns the underlying inventory menu's 46 slots,

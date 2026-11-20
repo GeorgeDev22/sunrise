@@ -166,3 +166,62 @@ fn terminal_disconnect_drains_even_when_last_handle_drops() {
     assert_eq!(peer.recv().unwrap(), (2, vec![22]));
     assert!(peer.recv().is_err());
 }
+
+/// Every packet the peer reads until a closing sentinel (id 0x7e), as (id, payload).
+fn read_until_sentinel(peer: &mut Connection) -> Vec<(i32, Vec<u8>)> {
+    let mut all = Vec::new();
+    loop {
+        let packet = peer.recv().unwrap();
+        if packet.0 == 0x7e {
+            return all;
+        }
+        all.push(packet);
+    }
+}
+
+#[test]
+fn the_writer_thread_frames_waiting_droppable_packets() {
+    let (a, b) = Pipe::pair();
+    let (_, writer) = Connection::local(a).split();
+    let writer = QueuedWriter::new(writer).unwrap();
+    let queue = crate::raw_payloads::droppable::Queue::new(u32::MAX, None);
+    writer.attach_droppable(queue.clone());
+    let mut peer = Connection::local(b);
+    peer.reader
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    for n in 0..3u8 {
+        queue.push(
+            std::time::Instant::now(),
+            &Arc::default(),
+            vec![0x40 + n, n],
+        );
+    }
+    for n in 0..3u8 {
+        assert_eq!(peer.recv().unwrap(), (i32::from(0x40 + n), vec![n]));
+    }
+}
+
+#[test]
+fn a_dropped_droppable_leaves_the_framed_stream_as_if_never_sent() {
+    let run = |push: bool| {
+        let (a, b) = Pipe::pair();
+        let (_, writer) = Connection::local(a).split();
+        let writer = QueuedWriter::new(writer).unwrap();
+        // A zero budget drops every droppable send at the queue.
+        let queue = crate::raw_payloads::droppable::Queue::new(0, None);
+        writer.attach_droppable(queue.clone());
+        let mut peer = Connection::local(b);
+        peer.reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writer.send(&[3, 1, 2]).unwrap();
+        if push {
+            queue.push(std::time::Instant::now(), &Arc::default(), vec![0x40, 9]);
+        }
+        writer.send(&[4, 5]).unwrap();
+        writer.send(&[0x7e]).unwrap();
+        read_until_sentinel(&mut peer)
+    };
+    assert_eq!(run(true), run(false));
+}

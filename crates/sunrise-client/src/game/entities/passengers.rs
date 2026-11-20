@@ -34,6 +34,7 @@ impl Game<'_> {
         if self.riding == Some(id)
             || self.ridden_by_guest(id)
             || self.mob_objects().any(|mob| mob.extra.mount == Some(id))
+            || self.general_passengers(id).next().is_some()
         {
             vehicle.retire_attachment_registration();
             self.persist.removed_vehicles.insert(id, vehicle);
@@ -46,6 +47,7 @@ impl Game<'_> {
             && self.riding != Some(id)
             && !self.ridden_by_guest(id)
             && !self.mob_objects().any(|mob| mob.extra.mount == Some(id))
+            && self.general_passengers(id).next().is_none()
         {
             self.persist.removed_vehicles.remove(&id);
             self.forget_entity(id);
@@ -217,7 +219,7 @@ impl Game<'_> {
     /// Shared by ordinary positioning and Entity.teleportPassengers after dismount.
     pub(super) fn mob_passenger_attachment(
         vehicle: &sunrise_client::mobs::Mob,
-        rider: &sunrise_client::mobs::Mob,
+        rider_is_animal: bool,
         seat: usize,
         count: usize,
     ) -> [f64; 3] {
@@ -226,7 +228,7 @@ impl Game<'_> {
                 vehicle,
                 seat,
                 count,
-                sunrise_client::mobs::drops::is_animal(rider.species()),
+                rider_is_animal,
             )
         } else if vehicle.species() == Species::HappyGhast {
             riders::happy_ghast_attachment(seat)
@@ -252,10 +254,25 @@ impl Game<'_> {
                 riders.entry(v).or_default().push(j);
             }
         }
+        // The general vehicles mobs ride, for the general tick that follows: from this pass's own
+        // map, so a level with no general rows pays nothing.
+        let mut general_vehicles =
+            std::mem::take(&mut self.resident_entities.general.riders.mob_vehicles);
+        general_vehicles.clear();
+        if !self.resident_entities.general.rows.is_empty() {
+            general_vehicles.extend(
+                riders
+                    .keys()
+                    .copied()
+                    .filter(|&vehicle| self.general_object(vehicle).is_some()),
+            );
+        }
+        self.resident_entities.general.riders.mob_vehicles = general_vehicles;
         self.seat_boat_mobs(&riders);
         self.seat_cart_mobs(&riders);
         self.seat_tnt_mobs(&riders);
         self.seat_cushion_mobs(&riders);
+        self.position_remote_general_passengers();
         self.seat_static_mobs(&riders);
         let index: HashMap<u32, usize> = self
             .mobs
@@ -277,7 +294,7 @@ impl Game<'_> {
                     // riders above, each in its own seat and from the
                     // vehicle's drawn position; re-seating them here from the
                     // shared seat 0 yanked boat riders between two places.
-                    if self.seats_own_riders(v) {
+                    if self.seats_own_riders(v) || self.general_seat(v, false).is_some() {
                         continue;
                     }
                     // A mob a mod seated on a server player (`native_ride_player.rs`).
@@ -326,68 +343,21 @@ impl Game<'_> {
                     continue;
                 };
                 let vehicle = &self.mobs[j];
-                let mut place = (0, 1);
-                if sunrise_client::mobs::camel::is_camel(vehicle.species()) {
-                    // Camel.getPassengerAttachmentPoint: the seat follows the
-                    // rider's place in `getPassengers` (load order).
-                    let mut aboard: Vec<usize> = (0..self.mobs.len())
-                        .filter(|&k| self.mobs[k].extra.mount == Some(v))
-                        .collect();
-                    let player_aboard = vehicle.rider.is_some() || self.riding == Some(v);
-                    let (seat, count) = if player_aboard {
-                        let mob_seat = aboard.iter().position(|&k| k == i).unwrap_or(0);
-                        (mob_seat + 1, aboard.len() + 1)
-                    } else {
-                        if let Some(driver) = vehicle.extra.rider
-                            && let Some(pos) =
-                                aboard.iter().position(|&k| self.mobs[k].id == driver)
-                            && pos != 0
-                        {
-                            let driver_idx = aboard.remove(pos);
-                            aboard.insert(0, driver_idx);
-                        }
-                        let seat = aboard.iter().position(|&k| k == i).unwrap_or(0);
-                        (seat, aboard.len())
-                    };
-                    let (seat, count) = if self.persist.off_level.is_empty() {
-                        (seat, count)
-                    } else {
-                        let seats = self.seated_passengers(v);
-                        (
-                            seats
-                                .iter()
-                                .position(|&(_, id, _)| id == self.mobs[i].id)
-                                .unwrap_or(seat),
-                            seats.len(),
-                        )
-                    };
-                    place = (seat, count);
-                }
-                if vehicle.species() == sunrise_client::mobs::Species::HappyGhast
+                // Camel, happy ghast and content seats follow the rider's place in `getPassengers`.
+                let place = if sunrise_client::mobs::camel::is_camel(vehicle.species())
+                    || vehicle.species() == sunrise_client::mobs::Species::HappyGhast
                     || vehicle.kind.passenger_attachments.len() > 1
                 {
-                    // Built-in and content seats follow the rider's actual
-                    // place in getPassengers, including retained objects.
-                    // `Entity.addPassenger` puts a player first, so a mob that
-                    // boards after one sits at index 1.
-                    let player_aboard = vehicle.rider.is_some() || self.riding == Some(v);
-                    let seat = usize::from(player_aboard)
-                        + self.mobs[..i]
-                            .iter()
-                            .filter(|r| r.extra.mount == Some(v))
-                            .count();
-                    let seat = if self.persist.off_level.is_empty() {
-                        seat
-                    } else {
-                        self.seated_passengers(v)
-                            .iter()
-                            .position(|&(_, id, _)| id == self.mobs[i].id)
-                            .unwrap_or(seat)
-                    };
-                    place = (seat, 1);
-                }
-                let attach =
-                    Self::mob_passenger_attachment(vehicle, &self.mobs[i], place.0, place.1);
+                    self.passenger_place(v, self.mobs[i].id)
+                } else {
+                    (0, 1)
+                };
+                let attach = Self::mob_passenger_attachment(
+                    vehicle,
+                    sunrise_client::mobs::drops::is_animal(self.mobs[i].species()),
+                    place.0,
+                    place.1,
+                );
                 let (pos, prev) = (vehicle.position, vehicle.previous);
                 let (yaw, prev_yaw) = (vehicle.yaw, vehicle.previous_yaw);
                 let (body, prev_body) = (vehicle.body_yaw, vehicle.previous_body_yaw);
@@ -424,6 +394,8 @@ impl Game<'_> {
                 m.ai.nav.stop();
             }
         }
+        // General rows riding a mob that was just seated.
+        self.position_remote_general_passengers();
         // Displays and interaction boxes riding anything the client tracks,
         // as NPC plugins put a name over a head or a model's bones on a
         // pivot: `Entity.rideTick` -> `positionRider`, the vehicle's passenger
@@ -534,6 +506,53 @@ impl Game<'_> {
             || self.tnts.iter().any(|t| t.id == vehicle && t.id != 0)
     }
 
+    /// The passengers of `vehicle` in `getPassengers` order, from the one source of each side: the
+    /// server's own list, or the applied `SetPassengers` seats on a client.
+    pub(super) fn passenger_order(&self, vehicle: u32) -> Vec<u32> {
+        if let Some(remote) = &self.remote {
+            let mut seats: Vec<_> = remote.passenger_seats(vehicle).collect();
+            seats.sort_unstable_by_key(|&(_, index)| index);
+            return seats.into_iter().map(|(id, _)| id).collect();
+        }
+        self.seated_passengers(vehicle)
+            .into_iter()
+            .map(|(_, id, _)| id)
+            .collect()
+    }
+
+    /// `rider`'s seat index and the passenger count on `vehicle`.
+    pub(super) fn passenger_place(&self, vehicle: u32, rider: u32) -> (usize, usize) {
+        let order = self.passenger_order(vehicle);
+        let index = order.iter().position(|&id| id == rider).unwrap_or(0);
+        (index, order.len().max(1))
+    }
+
+    /// `Entity.positionRider` for a general passenger, whose own vehicle attachment is zero: the
+    /// same per-vehicle seat the mobs of that vehicle use (`Seat`, `Boat::seat`, the cart and TNT
+    /// seats, `mob_passenger_attachment`), with no rider offset.
+    pub(super) fn general_passenger_position(&self, vehicle: u32, rider: u32) -> Option<Vec3> {
+        if let Some(seat) = self.seat(vehicle) {
+            return Some(seat.passenger_position(0.0));
+        }
+        if let Some(b) = self.boats.iter().find(|b| b.id == vehicle) {
+            let (index, count) = self.passenger_place(vehicle, rider);
+            return Some(b.seat(index, count, false, 0.0, false));
+        }
+        if let Some(c) = self.carts.iter().find(|c| c.id == vehicle) {
+            return Some(super::minecarts::cart_general_seat(c.position));
+        }
+        if let Some(t) = self.tnts.iter().find(|t| t.id == vehicle && t.id != 0) {
+            return Some(super::tnt::tnt_general_seat(t.position));
+        }
+        if let Some(v) = self.mobs.iter().find(|m| m.id == vehicle && !m.removed) {
+            let (index, count) = self.passenger_place(vehicle, rider);
+            let attachment = Self::mob_passenger_attachment(v, false, index, count);
+            return Some(riders::seat(attachment, 0.0, v.position, v.yaw));
+        }
+        let at = self.passenger_riding_position(vehicle, None, None, &HashMap::new())?;
+        Some(Vec3::new(at.x, at.y, at.z))
+    }
+
     /// `Entity.getPassengerRidingPosition` of a vehicle: where the feet of a
     /// passenger whose own vehicle attachment is 0 land.
     pub(super) fn passenger_riding_position(
@@ -622,12 +641,16 @@ impl Game<'_> {
             };
             return Some(at + glam::DVec3::Y * height);
         }
+        if let Some(seat) = self.general_seat(vehicle, false) {
+            let at = seat.passenger_position(0.0);
+            return Some(glam::DVec3::new(at.x, at.y, at.z));
+        }
         // Any other tracked entity sits on its feet; an area effect cloud is
         // 0.5 tall, and ModelEngine parks a model's pivot half a block below
         // its feet for exactly that.
         let remote = self.remote.as_ref()?;
         let (kind, position) = remote.tracked(vehicle as i32)?;
-        let position = if let Some(&parent) = remote.passenger_vehicles.get(&vehicle) {
+        let position = if let Some(parent) = remote.passenger_vehicle(vehicle) {
             let at = self.passenger_riding_position_inner(parent, me, own_seat, index, path)?;
             [at.x, at.y, at.z]
         } else {

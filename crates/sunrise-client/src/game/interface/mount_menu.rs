@@ -479,34 +479,29 @@ impl Game<'_> {
         if open.columns > 0 {
             batch.sprite_region(
                 atlas,
-                "gui/sprites/container/horse/chest_slots",
+                "container/horse/chest_slots",
                 [ox + 79.0, oy + 17.0, open.columns as f32 * 18.0, 54.0],
                 90.0,
                 54.0,
             );
         }
         if open.show_saddle {
-            batch.sprite(atlas, "gui/sprites/container/slot", ox + 7.0, oy + 17.0);
+            batch.sprite(atlas, "container/slot", ox + 7.0, oy + 17.0);
         }
         if open.show_armor {
-            batch.sprite(atlas, "gui/sprites/container/slot", ox + 7.0, oy + 35.0);
+            batch.sprite(atlas, "container/slot", ox + 7.0, oy + 35.0);
         }
         self.draw_screen_phase(batch, sunrise_client::screen_draw::RenderPhase::Background);
         if open.show_saddle && open.saddle.is_none() {
-            batch.sprite(
-                atlas,
-                "gui/sprites/container/slot/saddle",
-                ox + 8.0,
-                oy + 18.0,
-            );
+            batch.sprite(atlas, "container/slot/saddle", ox + 8.0, oy + 18.0);
         }
         if open.show_armor && open.armor.is_none() {
             let sprite = if llama::is_llama(open.species) {
-                "gui/sprites/container/slot/llama_armor"
+                "container/slot/llama_armor"
             } else if nautilus::is_nautilus(open.species) {
-                "gui/sprites/container/slot/nautilus_armor_inventory"
+                "container/slot/nautilus_armor_inventory"
             } else {
-                "gui/sprites/container/slot/horse_armor"
+                "container/slot/horse_armor"
             };
             batch.sprite(atlas, sprite, ox + 8.0, oy + 36.0);
         }

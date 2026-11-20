@@ -1723,6 +1723,8 @@ impl Items {
             entity_levels: None,
             block_levels: None,
             target: None,
+            target_entity: None,
+            interacting_entity: None,
             location: None,
             keep_empty,
         };
@@ -1821,6 +1823,8 @@ impl Items {
             entity_levels: None,
             block_levels: roll.levels.map(|_| &ask as &LootLevels<'_, R>),
             target: None,
+            target_entity: None,
+            interacting_entity: None,
             location: roll.location,
             keep_empty: roll.keep_empty,
         };
@@ -1888,6 +1892,8 @@ impl Items {
             entity_levels: None,
             block_levels: None,
             target,
+            target_entity: None,
+            interacting_entity: None,
             location: None,
             keep_empty,
         };
@@ -1911,6 +1917,8 @@ impl Items {
         table: &Value,
         block: &str,
         properties: &sunrise_world::chunk::BlockProperties,
+        interacting: Option<EntityTarget<'_>>,
+        location: Option<&dyn Fn(&Value) -> Option<bool>>,
         random: &mut R,
     ) -> Vec<ItemStack> {
         let ctx = LootContext {
@@ -1925,7 +1933,9 @@ impl Items {
             entity_levels: None,
             block_levels: None,
             target: None,
-            location: None,
+            target_entity: None,
+            interacting_entity: interacting,
+            location,
             keep_empty: false,
         };
         ctx.roll_root(Some(id), table, random)
@@ -1954,6 +1964,8 @@ impl Items {
             entity_levels: None,
             block_levels: None,
             target: None,
+            target_entity: None,
+            interacting_entity: None,
             location: None,
             keep_empty: false,
         };
@@ -2091,6 +2103,8 @@ impl Items {
             entity_levels: levels,
             block_levels: None,
             target,
+            target_entity: None,
+            interacting_entity: None,
             location: None,
             keep_empty,
         };
@@ -2100,6 +2114,16 @@ impl Items {
 /// `DataComponents.BLOCK_STATE`.
 const BLOCK_STATE: &str = "minecraft:block_state";
 impl<R: RandomSource> LootContext<'_, R> {
+    /// The entity a condition's `entity` field (a `LootContext.EntityTarget`)
+    /// names, when the roll carries it.
+    fn named_entity(&self, name: &str) -> Option<&EntityTarget<'_>> {
+        match name {
+            "this" => self.target.as_ref(),
+            "target_entity" => self.target_entity.as_ref(),
+            "interacting_entity" => self.interacting_entity.as_ref(),
+            _ => None,
+        }
+    }
     /// Raw evaluation: nested tables share this context, without splitting
     /// output or completing the queried table id.
     fn evaluate(&self, table: &Value, random: &mut R) -> Vec<ItemStack> {
@@ -2181,6 +2205,10 @@ struct LootContext<'a, R> {
     /// Asked only at block enchantment readers; None keeps vanilla's level.
     block_levels: Option<&'a LootLevels<'a, R>>,
     target: Option<EntityTarget<'a>>,
+    /// `LootContextParams.TARGET_ENTITY`.
+    target_entity: Option<EntityTarget<'a>>,
+    /// `LootContextParams.INTERACTING_ENTITY`.
+    interacting_entity: Option<EntityTarget<'a>>,
     /// Bound only for the actual loot-mine location subset.
     location: Option<&'a dyn Fn(&Value) -> Option<bool>>,
     /// Command replacement consumes the emitted list positions, including empty stacks.
@@ -2363,24 +2391,22 @@ impl<R: RandomSource> LootContext<'_, R> {
                 };
                 random.next_float() < chance
             }
-            "minecraft:entity_properties"
-                if c["entity"].as_str() == Some("this") && self.target.is_some() =>
-            {
-                let (target, matcher) = self.target.unwrap();
-                matcher(&c["predicate"], target)
-            }
             // `this` with no checks (snow, chorus flower) holds when an entity
             // broke the block (LootItemEntityPropertyCondition needs the entity).
-            "minecraft:entity_properties"
-                if self.this_entity
-                    && c["entity"].as_str() == Some("this")
-                    && c["predicate"].as_object().is_none_or(|p| p.is_empty()) =>
-            {
-                true
+            "minecraft:entity_properties" => {
+                let name = c["entity"].as_str().unwrap_or("");
+                match self.named_entity(name) {
+                    Some((target, matcher)) => matcher(&c["predicate"], target),
+                    None => {
+                        self.this_entity
+                            && name == "this"
+                            && c["predicate"].as_object().is_none_or(|p| p.is_empty())
+                    }
+                }
             }
             // Entity flags, equipment and damage-source predicates: none hold
             // for an unenchanted player kill without fire or lightning.
-            "minecraft:entity_properties" | "minecraft:damage_source_properties" => false,
+            "minecraft:damage_source_properties" => false,
             // LocationCheck reads the world at its offset, which this engine
             // does not have: held true (a double plant's other half is taken
             // as there). Unknown types fail, as in loot.rs.
@@ -2621,11 +2647,7 @@ impl<R: RandomSource> LootContext<'_, R> {
                             sunrise_world::loot::copy::nbt_source(
                                 source,
                                 place.as_deref(),
-                                |target| {
-                                    (target == "this")
-                                        .then(|| self.target.map(|(entity, _)| entity))
-                                        .flatten()
-                                },
+                                |target| self.named_entity(target).map(|(entity, _)| *entity),
                             )
                         },
                     ) {
@@ -2691,10 +2713,9 @@ impl<R: RandomSource> LootContext<'_, R> {
                                     ),
                                 )
                             }),
-                            "this" => self.target.map(|(entity, _)| {
+                            target => self.named_entity(target).map(|(entity, _)| {
                                 sunrise_world::loot::copy::entity_components(entity)
                             }),
-                            _ => None,
                         },
                         |id, value| {
                             patch.insert(id.as_str().into(), value.clone());
@@ -4537,6 +4558,8 @@ mod tests {
             entity_levels: None,
             block_levels: None,
             target: None,
+            target_entity: None,
+            interacting_entity: None,
             location: None,
             keep_empty: false,
         }
@@ -5254,6 +5277,8 @@ mod tests {
         let answered = |pick| LootContext {
             block_levels: Some(&levels),
             target: None,
+            target_entity: None,
+            interacting_entity: None,
             ..ctx(&items, pick, &props, "minecraft:stone")
         };
         let count = json!({"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"minecraft:diamond","modifier":[{"type":"minecraft:apply_bonus","enchantment":"minecraft:fortune","formula":"minecraft:uniform_bonus_count","parameters":{"bonusMultiplier":2}}]}]}]});
@@ -5288,6 +5313,8 @@ mod tests {
         let context = LootContext {
             block_levels: Some(&levels),
             target: None,
+            target_entity: None,
+            interacting_entity: None,
             ..ctx(&items, None, &props, "minecraft:stone")
         };
         for bonus in [

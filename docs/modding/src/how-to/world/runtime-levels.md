@@ -2,7 +2,7 @@
 
 A mod opens a level of its own while the server runs and closes it again: an instanced dungeon, a
 minigame arena, a pocket dimension per player. `host.runtime_levels()` has `open`, `unload`, `delete`
-and `is_open`, the same on a native and a wasm mod.
+and `is_open`.
 
 ```rust,ignore
 fn run_mod_command(&self, host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>) -> Flow {
@@ -29,8 +29,7 @@ fn run_mod_command(&self, host: &mut dyn ServerHost, event: &mut RunModCommandEv
   name is `UnknownDimensionType`; a data pack's own dimension types are not offered yet.
 - **`generator`** is `RuntimeGenerator::Flat` (bedrock, two dirt, a grass block, over plains),
   `Void` (air), or `Mod(name)`, a chunk generator a native mod registered
-  ([`register_chunk_generator`](dimension-shape.md#chunk-generators)). A wasm mod can name a
-  generator a native mod installed; one nobody installed is `UnknownGenerator`. A noise
+  ([`register_chunk_generator`](dimension-shape.md#chunk-generators)). An unregistered generator returns `UnknownGenerator`. A noise
   generator is `NoiseUnsupported` for now.
 - **`seed`** is the level's own. It reaches the mod generator (`ChunkAccess::seed`), the level's block-tick
   and level randoms and the hashed seed clients are sent. It does not change structures or

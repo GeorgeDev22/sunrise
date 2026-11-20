@@ -460,7 +460,7 @@ fn a_players_move_by_stops_at_a_boat() {
 #[test]
 #[ignore = "daily"]
 fn a_players_move_by_is_the_mover_a_colliders_stack_exempts() {
-    use sunrise_client_render::moving_colliders::{Placed, Prepared, in_level};
+    use sunrise_client_render::moving_colliders::{Placed, Prepared, Scope};
     use sunrise_core::geometry::{
         Aabb,
         oriented::{ColliderBoxes, Frame, OrientedCollider},
@@ -487,10 +487,10 @@ fn a_players_move_by_is_the_mover_a_colliders_stack_exempts() {
             block(900, x + 1.0, vec![900, player]),
             block(901, x + 3.0, vec![901]),
         ]);
-        let by = in_level(placed, || {
-            game.entity_move_by(b.entity(), [4.0, 0.0, 0.0], MoveCause::SelfMovement)
-        })
-        .unwrap();
+        let _scope = Scope::enter_level(game.collider_level(), placed);
+        let by = game
+            .entity_move_by(b.entity(), [4.0, 0.0, 0.0], MoveCause::SelfMovement)
+            .unwrap();
         assert!(
             by[0] > 1.5 && by[0] < 2.8,
             "passed the collider it rides with and stopped at the other, moved {by:?}"

@@ -435,8 +435,8 @@ impl<H: ActionHost> ActionTarget<H> for Menu {
 }
 
 /// No mutable borrow crosses decide or fire. The guard aborts on unwind in
-/// decide/apply as well as dispatch; native unwind and a recoverable wasm trap
-/// both become ListenerFailed. Process abort and failed rollback are not caught.
+/// decide/apply as well as dispatch. An unwind becomes ListenerFailed.
+/// Process abort and failed rollback are not caught.
 struct ActionGuard<'a, H: ActionHost> {
     host: &'a mut H,
     savepoint: u64,

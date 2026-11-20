@@ -591,7 +591,9 @@ impl Game<'_> {
             if self.player.as_ref().is_some_and(|p| p.ground.on_ground) {
                 let entities = self.entity_collisions(Mover::Player);
                 if let Some(player) = self.player.as_mut() {
+                    let side = game_side!(self);
                     let _ = MotionWorld {
+                        side: &side,
                         entities: &entities,
                         player,
                         scene: &mut self.world,
@@ -1387,15 +1389,20 @@ impl Game<'_> {
         }
     }
     /// ThrownTridentRenderer.
-    pub(super) fn trident_geometry(&self, camera: glam::DVec3, alpha: f64, out: &mut Vec<Vertex>) {
+    pub(super) fn trident_geometry(
+        &self,
+        camera: glam::DVec3,
+        alpha: f64,
+        out: &mut Vec<Vertex>,
+        run: std::ops::Range<usize>,
+    ) {
         // AbstractArrow.shouldRenderAtSqrDistance: ten times the default.
         let range = 10.0
             * super::entity_culling::default_range(
                 glam::DVec3::splat(2.0 * HALF),
                 self.view_scale(),
             );
-        let live = self
-            .tridents
+        let live = self.tridents[run]
             .iter()
             .filter(|t| {
                 // EntityRenderer.shouldRender; ThrownTridentRenderer grows the box by 1.5.

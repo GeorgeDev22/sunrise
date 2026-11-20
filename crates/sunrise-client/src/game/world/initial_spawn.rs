@@ -91,17 +91,15 @@ impl Game<'_> {
         }
     }
     /// ChunkGenerator.getOrigin and getSpawnHeight of the overworld.
-    fn spawn_origin(&self) -> Result<((i32, i32), i32)> {
-        if let Some(flat) =
-            sunrise_client::save::world_gen_settings(&self.world_root).and_then(|s| {
-                sunrise_client::flatgen::FlatTerrain::from_settings(
-                    &s,
-                    self.pack.assets.registry,
-                    world_biomes!(self),
-                    self.level_shapes.overworld,
-                )
-            })
-        {
+    pub(super) fn spawn_origin(&self) -> Result<((i32, i32), i32)> {
+        if let Some(flat) = self.level.generator.as_ref().and_then(|g| {
+            sunrise_client::flatgen::FlatTerrain::from_settings(
+                g.settings(),
+                self.pack.assets.registry,
+                world_biomes!(self),
+                self.level_shapes.overworld,
+            )
+        }) {
             return Ok(((0, 0), flat.spawn_height()));
         }
         if self.options.test_terrain {

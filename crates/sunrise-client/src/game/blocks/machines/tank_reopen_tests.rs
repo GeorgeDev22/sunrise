@@ -7,8 +7,8 @@
 //! creating a flat world folder; the chunk streamed in under a `/forceload` ticket; the block
 //! placed with `/setblock`; `Game::save_game` (the autosave's and the pause menu's save) writing
 //! the region file; the game dropped; then a second game opening the same folder and streaming
-//! the chunk back from that file. Not covered: LAN guests, a dedicated server process, wasm
-//! mods, and `close_world`'s closing save, which finishes over event-loop stages a test can't
+//! the chunk back from that file. Not covered: LAN guests, a dedicated server process,
+//! and `close_world`'s closing save, which finishes over event-loop stages a test can't
 //! run.
 use super::{BlockEntity, Game};
 use crate::game::native_entity_refs::tests::{run_fresh_cases, with_game_at};

@@ -680,6 +680,7 @@ mod tests {
             slots: 201,
             data_slots: 0,
             results: vec![200],
+            inputs: Vec::new(),
             links: None,
             crafting: None,
         };

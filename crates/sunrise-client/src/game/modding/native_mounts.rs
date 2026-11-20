@@ -73,6 +73,10 @@ impl Game<'_> {
             self.target_type(Target::Stand(id))
         } else if self.others.iter().any(|o| o.id == id) {
             self.target_type(Target::Other(id))
+        } else if let Some(row) = self.general_object(id) {
+            super::general::general_type_catalog()
+                .key(row.type_slot)
+                .to_owned()
         } else if self.player_vehicle(id).is_some() {
             "minecraft:player".into()
         } else {
@@ -96,7 +100,16 @@ impl Game<'_> {
             return false;
         }
         let kind = match rider {
-            Some(id) => self.mob_object(id).map_or_else(String::new, mob_kind),
+            Some(id) => self.mob_object(id).map_or_else(
+                || {
+                    self.general_object(id).map_or_else(String::new, |row| {
+                        super::general::general_type_catalog()
+                            .key(row.type_slot)
+                            .to_owned()
+                    })
+                },
+                mob_kind,
+            ),
             None => "minecraft:player".into(),
         };
         let vehicle_kind = self.native_vehicle_kind(vehicle);
@@ -128,7 +141,7 @@ impl Game<'_> {
         self.native_mount_allowed(None, vehicle, false)
     }
 
-    /// The mob `rider` is about to board (`mounting`) or leave `vehicle`: false when a mod
+    /// The non-player `rider` is about to board (`mounting`) or leave `vehicle`: false when a mod
     /// canceled it.
     pub(super) fn native_mob_may_ride(&mut self, rider: u32, vehicle: u32, mounting: bool) -> bool {
         self.native_mount_allowed(Some(rider), vehicle, mounting)

@@ -1,6 +1,6 @@
 //! Real menu storage and Game journal integration, before hook-route migration.
 //! These exercise Menu::click, not the synthetic MenuState planner. They do not
-//! assert public hook dispatch or native/wasm coverage.
+//! assert public hook dispatch.
 use super::*;
 use crate::game::{
     native_entity_refs::tests::run_fresh_cases, native_guest_turn_tests::with_guests,

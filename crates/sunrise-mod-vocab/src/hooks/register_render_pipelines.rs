@@ -15,8 +15,7 @@ pub trait Hooks {
 `Hooks::register_render_pipelines` is the client registration-phase counterpart of NeoForge's
 `RegisterRenderPipelinesEvent` (and of 1.21.1's `RegisterShadersEvent`, which it replaced). A
 pipeline is plain data: its id, a WGSL fragment shader in the mod's assets, a blend mode and a
-depth mode. No GPU object or shader handle crosses the mod API, so a native mod and a wasm mod
-register the same way.
+depth mode. Registration takes no GPU object or shader handle.
 
 ```rust,ignore
 fn register_render_pipelines(

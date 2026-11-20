@@ -59,7 +59,7 @@ pub trait Rules {
     }
 }
 
-/// An open block container.
+/// A guest's open container menu.
 pub struct Menu {
     pub window: i32,
     /// The `minecraft:menu` registry id.
@@ -105,14 +105,14 @@ pub struct ModCraft {
     pub result: Option<ItemStack>,
 }
 
-/// Dispatch a mod menu type's `stillValid` answer for a player's block
-/// menu: `valid` arrives as the game's own answer and the scoped part may change it.
+/// Dispatch a mod menu type's `stillValid` answer for a player's menu:
+/// `valid` arrives as the game's own answer and the scoped part may change it.
 #[inline(always)]
 pub fn native_menu_still_valid(
     context: &LoopContext,
     player: u128,
     menu: &str,
-    pos: [i32; 3],
+    pos: Option<[i32; 3]>,
     eye: [f64; 3],
     valid: &mut bool,
 ) {
@@ -128,19 +128,22 @@ pub fn asks_still_valid(mod_type: Option<&crate::containers::ModMenuType>, menu:
 impl Menu {
     /// `AbstractContainerMenu.stillValid` of this menu for the guest: its
     /// slots' own answer (`Slots::still_valid`), which the parts on its mod
-    /// menu type may change (`menu_still_valid`). Vanilla menu types, menus
-    /// with no block behind them (a chest vehicle, a native mod's menu) and
-    /// menus whose type no part answers are not asked, nor is one whose block
-    /// entities are gone: it closes.
+    /// menu type may change (`menu_still_valid`). A mod menu with no backing
+    /// block passes `None` even if its opener supplied a screen position.
+    /// Vanilla menu types, vehicles and menus without an answering part are
+    /// not asked. A menu whose backing block entities are gone closes without asking.
     pub fn still_valid(&self, context: &LoopContext, world: &World, guest: &Guest) -> bool {
+        if !self.asks_still_valid {
+            return self.slots.still_valid(world, guest, self.pos);
+        }
         let block = match self.slots {
             Slots::Block(k) | Slots::Double(k, _) => Some(k),
             Slots::Ender => self.pos,
             Slots::Native => None,
         };
-        let Some(k) = block.filter(|k| self.asks_still_valid && k.1 != VEHICLE_KEY_Y) else {
+        if block.is_some_and(|(_, y, _)| y == VEHICLE_KEY_Y) {
             return self.slots.still_valid(world, guest, self.pos);
-        };
+        }
         if !self.slots.valid(world) {
             return false;
         }
@@ -149,7 +152,7 @@ impl Menu {
             context,
             guest.uuid,
             &self.registry_id,
-            [k.0, k.1, k.2],
+            block.map(|(x, y, z)| [x, y, z]),
             guest.eye(),
             &mut valid,
         );
@@ -299,19 +302,19 @@ impl Slots {
         let m = guest.menu.as_ref().filter(|m| m.slots == self)?;
         m.linked()
     }
-    fn halves(self) -> Vec<(i32, i32, i32)> {
+    fn halves(self) -> impl Iterator<Item = (i32, i32, i32)> {
         match self {
-            Slots::Block(k) => vec![k],
-            Slots::Double(a, b) => vec![a, b],
-            Slots::Ender | Slots::Native => Vec::new(),
+            Slots::Block(k) => [Some(k), None],
+            Slots::Double(a, b) => [Some(a), Some(b)],
+            Slots::Ender | Slots::Native => [None, None],
         }
+        .into_iter()
+        .flatten()
     }
     /// Whether the block entities behind the slots are still there
     /// (`Container.stillValid`).
     pub fn valid(self, world: &World) -> bool {
-        self.halves()
-            .iter()
-            .all(|k| world.block_entities.contains_key(k))
+        self.halves().all(|k| world.block_entities.contains_key(&k))
     }
     /// How many slots the block entities behind a block menu show now, a missing one none;
     /// none for the ender chest's and a mod's chest menu, which no block holds.
@@ -320,7 +323,6 @@ impl Slots {
             Slots::Ender | Slots::Native => None,
             _ => Some(
                 self.halves()
-                    .into_iter()
                     .map(|k| shown(world, k).map_or(0, <[_]>::len))
                     .sum(),
             ),
@@ -335,16 +337,12 @@ impl Slots {
     /// The reach half of `still_valid`: the guest is within its block
     /// interaction range plus 4 of each block behind the slots.
     fn in_reach(self, guest: &Guest, at: Option<(i32, i32, i32)>) -> bool {
-        let blocks = match self {
-            Slots::Ender => at.into_iter().collect(),
-            Slots::Native => Vec::new(),
-            _ => self.halves(),
-        };
+        let ender_chest = if self == Slots::Ender { at } else { None };
         // A vehicle's container is kept under a key, not a block: the game
         // checks its reach to the vehicle (`isChestVehicleStillValid`).
-        blocks
-            .iter()
-            .all(|k| k.1 == VEHICLE_KEY_Y || guest.within_block_range([k.0, k.1, k.2], 4.0))
+        self.halves()
+            .chain(ender_chest)
+            .all(|(x, y, z)| y == VEHICLE_KEY_Y || guest.within_block_range([x, y, z], 4.0))
     }
     /// Container slot `n`.
     pub fn get(self, world: &World, guest: &Guest, mut n: usize) -> Option<ItemStack> {
@@ -1137,6 +1135,25 @@ fn pickup(view: &mut View, slot: i32, button: i32, rules: &dyn Rules) {
     if let Some(outcome) = rules.stacked() {
         (canceled, handled) = (outcome.canceled, outcome.handled);
         if canceled && handled {
+            // The replacement goes through the clicked slot's rules (`mayPickup`, `mayPlace`, its
+            // size); one they refuse changes nothing.
+            if let Some(clicked) = &outcome.clicked
+                && clicked.as_ref() != view.get(i).as_ref()
+                && (view.get(i).is_some() && !view.may_pickup(i, rules)
+                    || clicked.as_ref().is_some_and(|stack| {
+                        let (may_place, max) = view.slot_rules(i, stack, rules);
+                        let max = view
+                            .container_limits
+                            .get(i)
+                            .copied()
+                            .flatten()
+                            .map_or(max, |limit| max.min(limit));
+                        !may_place || stack.count > max
+                    }))
+            {
+                outcome.refused.set(true);
+                return;
+            }
             if let Some(carried) = outcome.carried.clone() {
                 view.guest.carried = carried;
             }
@@ -2047,6 +2064,7 @@ pub(crate) mod tests {
             slots: 5,
             data_slots: 0,
             results: vec![],
+            inputs: Vec::new(),
             links: None,
             crafting: Some(ModCrafting {
                 grid: 1,
@@ -2175,6 +2193,7 @@ pub(crate) mod tests {
             slots: 6,
             data_slots: 0,
             results: vec![],
+            inputs: Vec::new(),
             crafting: None,
             links: Some(ModLinks { from: 2, count: 4 }),
         }));

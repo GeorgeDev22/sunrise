@@ -91,6 +91,32 @@ impl_tags!(super::Game<'_>, game, game.native_tag_items());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_resolves_the_same_tag_key_without_loaded_membership() {
+        use mod_api::{Hooks, Identifier, ModEntry, Registrar, RegistrationContext, Tags};
+        use std::sync::{Arc, OnceLock};
+
+        struct ResolveTag(Arc<OnceLock<TagKey>>);
+        #[mod_api::__subscriptions]
+        impl Hooks for ResolveTag {
+            fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+                let _ = self.0.set(r.tag_key("registrar_tag_lookup"));
+            }
+        }
+
+        let found = Arc::new(OnceLock::new());
+        crate::game::api_values::install_parts(&[ModEntry::new(
+            "tag_reader",
+            Box::new(ResolveTag(found.clone())),
+        )])
+        .unwrap();
+        struct UnloadedTags;
+        impl_tags!(UnloadedTags, _view, None);
+        let name = Identifier::parse("minecraft:registrar_tag_lookup").unwrap();
+        assert_eq!(*found.get().unwrap(), UnloadedTags.key(&name).unwrap());
+    }
+
     #[test]
     fn block_members_preserve_authoritative_order_reload_and_atomic_refusal() {
         crate::game::api_values::install_parts(&[]).unwrap();

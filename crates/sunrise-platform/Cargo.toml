@@ -13,12 +13,11 @@ world = ["dep:sunrise-world"]
 # A server's own files: server.properties, the op, white and ban lists, the user cache.
 server-files = ["dep:sunrise-server-files", "dep:sunrise-java-properties"]
 
-mod-build = ["dep:sunrise-mod-api-gen", "dep:sunrise-mod-point-shape"]
+mod-build = ["dep:sunrise-mod-api-gen"]
 
 [dependencies]
 sunrise-guest-stack = { path = "../sunrise-guest-stack" }
 sunrise-mod-api-gen = { path = "../sunrise-mod-api-gen", optional = true }
-sunrise-mod-point-shape = { path = "../sunrise-mod-point-shape", optional = true }
 sunrise-core = { path = "../sunrise-core" }
 sunrise-system = { path = "../sunrise-system" }
 sunrise-bench = { path = "../sunrise-bench" }

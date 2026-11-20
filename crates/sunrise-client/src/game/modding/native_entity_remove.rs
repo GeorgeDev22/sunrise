@@ -62,13 +62,21 @@ impl Game<'_> {
             .into_iter()
             .filter(|passenger| {
                 vehicle_y.is_none()
-                    || !matches!(self.native_entity_target(*passenger), Some(Target::Mob(_)))
+                    || !matches!(
+                        self.native_entity_target(*passenger),
+                        Some(Target::Mob(_) | Target::General(_))
+                    )
             })
             .collect();
         // `Entity.setRemoved`: the reason first, so the hooks below see
-        // it removed; then the passengers get off and the level is told.
-        // Only players and mobs ride, so this kind has no vehicle to leave.
+        // it removed; then the riding links are ended and the level is told.
+        let mount = self.native_vehicle_id(t);
         self.persist.removals.push(t);
+        if let Some(vehicle) = mount {
+            // The object is already leaving even if its dismount is vetoed.
+            self.native_mob_may_ride(entity.id(), vehicle, false);
+            self.release_removed_vehicle(vehicle);
+        }
         self.retire_vehicle_registration(t);
         if vehicle_y.is_some() {
             self.persist.notified_vehicle_removals.insert(entity.id());
@@ -140,6 +148,7 @@ impl Game<'_> {
         if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
             m.removed = true;
         }
+        self.dismount_general_passengers(id);
         self.native_entity_left(id);
     }
     /// What a killed mob's effects do on removal (Oozing's slimes, Weaving's cobwebs, Wind
@@ -243,6 +252,15 @@ impl Game<'_> {
                     self.native_entity_left(id);
                 }
                 Target::Player | Target::Guest(_) | Target::Mob(_) => {}
+                // Both command kill and handle removal already notified this row's
+                // leave. Retire its owning slot so tracking drops the row too.
+                Target::General(id) => {
+                    let rows = &mut self.resident_entities.general.rows;
+                    if let Some(index) = rows.iter().position(|row| row.id == id) {
+                        rows.remove(index);
+                        self.forget_entity(id);
+                    }
+                }
                 // The remaining kinds `/kill` already removes with no death.
                 t => self.kill_target_in_level(t),
             }

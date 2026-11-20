@@ -118,7 +118,7 @@ impl Game<'_> {
                 if self.pick_camera_id() == Some(root) && self.remote_camera_id().is_none() {
                     self.riding
                 } else if let Some(remote) = &self.remote {
-                    remote.passenger_vehicles.get(&root).copied()
+                    remote.passenger_vehicle(root)
                 } else {
                     self.vehicle_of_any(root)
                 };

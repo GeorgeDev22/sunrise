@@ -541,6 +541,13 @@ fn column(x: i32, z: i32) -> usize {
 pub fn index(x: i32, y: i32, z: i32) -> usize {
     ((y & 15) << 8 | (z & 15) << 4 | (x & 15)) as usize
 }
+/// What a read outside a column's sections finds when no padding section is stored there.
+pub enum Outside<'a> {
+    /// The sky light of this section's bottom row at the read's X and Z, with no block light.
+    Row(&'a Section),
+    /// This light everywhere.
+    Uniform(u8),
+}
 #[derive(Clone)]
 pub struct Section {
     pub blocks: PalettedContainer,
@@ -648,6 +655,17 @@ pub struct Chunk {
     /// The minimum block Y of `sections[0]` (the layout's when it was made).
     min_y: i32,
     pub sections: Vec<Arc<Section>>,
+    /// The light section one below the column and the one above it, as the server or save stored
+    /// them (`LevelLightEngine.getMinLightSection`): an all-air section holding only light. `None`
+    /// is a section vanilla's light storage keeps nothing for (see [`Self::section_at`]).
+    pub pad_below: Option<Arc<Section>>,
+    pub pad_above: Option<Arc<Section>>,
+    /// Packet/save DataLayer presence, indexed from the lower pad. Computed light is dense
+    /// inside the column and has no computed pads yet.
+    pub(crate) light_layers: Option<[crate::section_mask::SectionMask; 2]>,
+    pub(crate) light_sky: bool,
+    /// Padded light sections kept by this column's published non-air sections.
+    pub(crate) light_support: crate::section_mask::SectionMask,
     /// `Heightmap.Types.WORLD_SURFACE` per column (`z << 4 | x`): one above
     /// the highest non-air block, or the column's minimum Y. Built on the first read; a
     /// `set` that can move a column's surface marks that column, found again on its next read.
@@ -704,6 +722,11 @@ impl Chunk {
             z,
             min_y: layout.min_y(),
             sections: (0..layout.sections()).map(|_| empty.clone()).collect(),
+            pad_below: None,
+            pad_above: None,
+            light_layers: None,
+            light_sky: true,
+            light_support: crate::section_mask::SectionMask::EMPTY,
             surface: Heights::default(),
             motion_blocking: Heights::default(),
             lit: false,
@@ -920,19 +943,62 @@ impl Chunk {
     }
     #[inline]
     pub fn light(&self, x: i32, y: i32, z: i32) -> u8 {
-        match self.section_at(y) {
-            Ok(section) => section.light(index(x, y, z)),
-            Err(light) => light,
+        match self.section_index(y) {
+            Some(s) => self.sections[s].light(index(x, y, z)),
+            None => self.light_outside(x, y, z),
         }
     }
-    /// The section holding block height `y`, or the light of the air outside the
-    /// column's sections there: none below them, full sky above.
+    #[cold]
+    #[inline(never)]
+    fn light_outside(&self, x: i32, y: i32, z: i32) -> u8 {
+        match self.section_at(y) {
+            Ok(section) => section.light(index(x, y, z)),
+            Err(Outside::Row(section)) => section.light(index(x, 0, z)) & 0xF0,
+            Err(Outside::Uniform(light)) => light,
+        }
+    }
+    /// Publish that terrain section `s` is non-air: it supports the three light sections
+    /// touching it, in this column and its eight neighbours.
+    pub fn add_light_support(&mut self, s: usize) {
+        for b in s..=s + 2 {
+            self.light_support.insert(b);
+        }
+    }
+
+    /// Stored sky and block presence for a hydrated light section `b` (0 is the lower pad).
+    /// Computed columns have no sparse DataLayer map.
+    pub fn stored_light_layers(&self, b: usize) -> Option<[bool; 2]> {
+        self.light_layers
+            .map(|[sky, block]| [sky.contains(b), block.contains(b)])
+    }
+
+    pub(crate) fn light_section(&self, b: usize) -> Option<&Arc<Section>> {
+        match b {
+            0 => self.pad_below.as_ref(),
+            _ if b == self.sections.len() + 1 => self.pad_above.as_ref(),
+            _ => self.sections.get(b - 1),
+        }
+    }
+
+    /// The section holding block height `y`; outside the column's sections, the stored padding
+    /// section there, else what vanilla's storage answers without one
+    /// (`SkyLightSectionStorage.getLightValue`): below, the bottom row of the lowest stored section
+    /// above `y` (sky only, no block light); above, full sky.
     #[inline]
-    pub fn section_at(&self, y: i32) -> Result<&Section, u8> {
-        match self.section_index(y) {
-            Some(s) => Ok(&self.sections[s]),
-            None if y < self.min_y => Err(0),
-            None => Err(0xF0),
+    pub fn section_at(&self, y: i32) -> Result<&Section, Outside<'_>> {
+        if let Some(s) = self.section_index(y) {
+            return Ok(&self.sections[s]);
+        }
+        if y >= self.min_y {
+            return match &self.pad_above {
+                Some(pad) if y < self.max_y() + 16 => Ok(pad),
+                _ => Err(Outside::Uniform(if self.light_sky { 0xF0 } else { 0 })),
+            };
+        }
+        match &self.pad_below {
+            Some(pad) if y >= self.min_y - 16 => Ok(pad),
+            Some(pad) => Err(Outside::Row(pad)),
+            None => Err(Outside::Row(&self.sections[0])),
         }
     }
     /// Heap bytes held by the sections (benchmark accounting).
@@ -1125,10 +1191,9 @@ mod tests {
                 assert_eq!(layout.section_index(y), None);
                 assert_eq!(chunk.section_index(y), None);
                 assert_eq!(chunk.get(0, y, 0), 0);
-                assert_eq!(
-                    chunk.light(0, y, 0),
-                    if y < layout.min_y() { 0 } else { 0xf0 }
-                );
+                // Nothing is stored past the sections: full sky above, and below the bottom row of
+                // the lowest section (full sky here).
+                assert_eq!(chunk.light(0, y, 0), 0xf0);
                 chunk.set(0, y, 0, 9);
             }
             assert_eq!(chunk.get(0, layout.min_y(), 0), 7);
@@ -1427,7 +1492,8 @@ mod tests {
         chunk.set(5, 999, 6, stone);
         assert_eq!(chunk.highest(0, |y| y < 1000), Some(999));
         assert_eq!(chunk.light(0, 2100, 0), 0xF0);
-        assert_eq!(chunk.light(0, -65, 0), 0);
+        // A column with no stored section reads full sky past its sections too.
+        assert_eq!(chunk.light(0, -65, 0), 0xF0);
         chunk.set_biome_cell(0, 130 * 4 + 3, 0, 9);
         assert_eq!(chunk.biome(0, 5000, 0), 9);
     }

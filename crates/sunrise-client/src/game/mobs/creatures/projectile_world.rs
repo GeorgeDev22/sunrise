@@ -67,6 +67,14 @@ impl ProjectileWorld for ProjWorld<'_, '_> {
             "minecraft:fire" | "minecraft:soul_fire"
         )
     }
+    fn lava_height(&self, p: BlockPos) -> Option<f64> {
+        sunrise_client::entities::fluid_height(
+            self.w.world,
+            self.w.fluid_tables,
+            p,
+            sunrise_world::fluid::FluidKind::Lava,
+        )
+    }
     fn empty(&self, p: [i32; 3]) -> bool {
         self.w.facts.is_air(self.w.world.block(p[0], p[1], p[2]))
     }

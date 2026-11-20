@@ -14,8 +14,8 @@ use crate::connected::{Overlay, Pick, TileLayer};
 use crate::models::StateModels;
 use crate::sprites::Sprites;
 use std::{collections::HashMap, num::NonZeroU16};
+use sunrise_connected::{self as connect, Axes, Face};
 use sunrise_optifine::cem::json::Json;
-use sunrise_optifine::ctm::connect::{self, Axes, Face};
 use sunrise_optifine::fusion::{
     Connection, Layout, Tiles,
     model::{Connections, ModelType},

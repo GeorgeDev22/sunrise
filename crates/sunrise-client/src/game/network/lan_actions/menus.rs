@@ -542,10 +542,9 @@ impl Game<'_> {
         g.menu.as_ref().is_none_or(|m| {
             m.slots.valid(&self.world)
                 && m.still_valid(&host.hub.loop_context, &self.world, g)
-                && !m.pos.is_some_and(|k| {
-                    k.1 == crate::game::minecarts::CART_KEY_Y
-                        && !self.chest_vehicle_still_valid(k.2, g)
-                })
+                && !matches!(m.slots, Slots::Block((_, y, id))
+                    if y == crate::game::minecarts::CART_KEY_Y
+                        && !self.chest_vehicle_still_valid(id, g))
         })
     }
 
@@ -589,11 +588,12 @@ impl Game<'_> {
     /// window with it, so the click lands on nothing
     /// (`ServerGamePacketListenerImpl.handleContainerClick` and the others
     /// ask `stillValid` first).
-    pub(super) fn guest_validate_menu(&mut self, conn: u32) {
+    pub(super) fn guest_validate_menu(&mut self, conn: u32) -> bool {
         if self.guest_menu_still_valid(conn) {
-            return;
+            return true;
         }
         self.guest_close_menus_and_tell(conn);
+        false
     }
 
     /// `ServerPlayer.closeContainer`: the client is told to close each window first, and

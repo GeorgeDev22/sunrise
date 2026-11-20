@@ -1,6 +1,7 @@
 //! The pinned SDK in a mod project's `.sunrise/sdk/`: what `sunrise-mod-api`'s path dependency
 //! (`.sunrise/sdk/api/crates/sunrise-mod-api`) points at, fetched by every command that needs it
-//! when it is missing or another build's. Only a verified release lands there: the release's
+//! when it is missing, another build's, or was fetched under different trust. Only a verified
+//! release lands there: the release's
 //! `SHA256SUMS` must carry Sunrise's signature for the tag `sdk-<build id>`, `sdk.json` must be the
 //! file those sums list and describe that build, and every other file must match `sdk.json`.
 //! `SUNRISE_SDK_BASE` (a URL or a folder) replaces the releases' base for a mirror or offline use;
@@ -23,13 +24,34 @@ use sunrise_release_sign::PublicKey;
 pub(crate) const DIR: &str = ".sunrise/sdk";
 /// Other builds' folders in a project, one per build id.
 pub(crate) const CACHE: &str = ".sunrise/cache";
-/// The folder in a build's folder its build data (`points.json`, `internals.json`, …) is
+/// The folder in a build's folder its build data (`internals.json`, `loops.json`, `functions.json`) is
 /// unpacked to.
 pub(crate) const BUILD_DATA: &str = "build-data";
 /// The releases' base, when `SUNRISE_SDK_BASE` names none.
 const BASE: &str = sunrise_addresses::SDK_RELEASES;
-/// The file naming the build a folder holds, written last: a folder without it is not one.
+/// The build and signing policy a folder was verified under. Write this stamp last, so an old
+/// commit-only stamp or an incomplete fetch is never taken for a verified cache hit.
 const STAMP: &str = "build";
+
+pub(crate) struct CacheStamp(String);
+
+impl CacheStamp {
+    pub(crate) fn new(build: &str, keys: &[PublicKey]) -> Self {
+        let mut keys = keys.to_vec();
+        keys.sort_unstable();
+        keys.dedup();
+        Self(format!("{build}:{:x}", Sha256::digest(keys.as_flattened())))
+    }
+
+    fn matches(&self, dir: &Path) -> bool {
+        fs::read_to_string(dir.join(STAMP)).is_ok_and(|stamp| stamp == self.0)
+    }
+
+    pub(crate) fn write(&self, dir: &Path) -> Result<(), String> {
+        let path = dir.join(STAMP);
+        fs::write(&path, &self.0).map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
 const SURFACE: &str = "surface.json";
 const API_SOURCE: &str = "api-source.tar.xz";
 /// The most a small file (`sdk.json`, the sums, the signature, `surface.json`) may be.
@@ -54,7 +76,7 @@ pub(crate) struct PinnedSdk {
 }
 
 /// The SDK the project at `project` pins, in its `.sunrise/sdk/`, fetched first when the folder is
-/// missing or holds another build.
+/// missing or its build or signing policy differs.
 pub(crate) fn ensure_sdk(project: &Path) -> Result<PinnedSdk, String> {
     fetch_pinned(project, &pin(project)?)
 }
@@ -66,7 +88,7 @@ pub(crate) fn fetch_pinned(project: &Path, build: &str) -> Result<PinnedSdk, Str
 
 /// The game checkout the project at `project` builds against, when its `sunrise-mod-api`
 /// dependency is a path to `crates/sunrise-mod-api` of a game workspace the project itself lies in
-/// (the game's own wasm fixtures): such a project builds against that tree and fetches no SDK. A
+/// (such as a fixture in the game repository): it builds against that tree and fetches no SDK. A
 /// project whose dependency points anywhere else, its own `.sunrise/sdk/` included, gets `None`.
 pub(crate) fn game_tree(project: &Path) -> Result<Option<PathBuf>, String> {
     let read = |path: &Path| -> Result<toml::Table, String> {
@@ -110,69 +132,13 @@ pub(crate) fn game_tree(project: &Path) -> Result<Option<PathBuf>, String> {
     Ok(member.then(|| root.to_path_buf()))
 }
 
-/// The build the project pins: a native mod's `[native] sunrise`, any other code mod's
-/// `[package.metadata.sunrise] sdk` in `Cargo.toml`.
+/// The build a native mod pins in `[native] sunrise`.
 pub(crate) fn pin(project: &Path) -> Result<String, String> {
-    let read = |name: &str| {
-        let path = project.join(name);
-        fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
-    };
-    let manifest = Manifest::parse(&read(MANIFEST)?)?;
-    let build = match manifest.native {
-        Some(native) => native.sunrise,
-        None => {
-            let cargo: toml::Table = read("Cargo.toml")?
-                .parse()
-                .map_err(|e| format!("Cargo.toml: {e}"))?;
-            cargo
-                .get("package")
-                .and_then(|p| p.get("metadata"))
-                .and_then(|m| m.get("sunrise"))
-                .and_then(|h| h.get("sdk"))
-                .and_then(toml::Value::as_str)
-                .ok_or("Cargo.toml has no [package.metadata.sunrise] sdk: the SDK build this mod is made for")?
-                .to_owned()
-        }
-    };
-    if !sunrise_mod_package::manifest::revision(&build) {
-        return Err(format!(
-            "the pinned SDK build `{build}` is not a full commit sha (40 lowercase hex digits)"
-        ));
-    }
-    Ok(build)
-}
-
-/// Pins the project at `project` to `build`, a full sha, and drops the SDK of the old pin: the
-/// next command fetches the new one.
-pub(crate) fn repin(project: &Path, build: &str) -> Result<(), String> {
-    // The pin's own comment and spacing stay: only its value changes.
-    let edit = |name: &str, pin: &dyn Fn(&mut toml_edit::DocumentMut) -> &mut toml_edit::Item| {
-        let path = project.join(name);
-        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut doc: toml_edit::DocumentMut = text
-            .parse()
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        let item = pin(&mut doc);
-        match item.as_value_mut() {
-            Some(value) => crate::internals::set_string(value, build),
-            None => *item = toml_edit::value(build),
-        }
-        fs::write(&path, doc.to_string()).map_err(|e| format!("{}: {e}", path.display()))
-    };
-    let manifest = Manifest::parse(
-        &fs::read_to_string(project.join(MANIFEST)).map_err(|e| format!("{MANIFEST}: {e}"))?,
-    )?;
-    if manifest.native.is_some() {
-        edit(MANIFEST, &|doc| &mut doc["native"]["sunrise"])?;
-    } else {
-        edit("Cargo.toml", &|doc| {
-            &mut doc["package"]["metadata"]["sunrise"]["sdk"]
-        })?;
-    }
-    match fs::remove_dir_all(project.join(DIR)) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{DIR}: {e}")),
-        _ => Ok(()),
-    }
+    let text = crate::bounded::read(&project.join(MANIFEST), crate::bounded::MAX_MANIFEST)?;
+    Manifest::parse(&text)?
+        .native
+        .map(|native| native.sunrise)
+        .ok_or_else(|| format!("{MANIFEST}: a content mod does not pin an SDK"))
 }
 
 /// The build id `text` names: a full sha as written; `nightly` or `nightly-<date>` through that
@@ -320,8 +286,8 @@ impl Base {
     }
 }
 
-/// `build`'s verified SDK in `dir`: reused when `dir`'s stamp names it, else fetched afresh. With
-/// `api`, the API source is unpacked too; without, only the small files are fetched.
+/// `build`'s verified SDK in `dir`: reused when the stamp matches the build and trusted keys,
+/// otherwise fetched afresh. With `api`, unpack the API source too.
 pub(crate) fn fetch(
     base: &Base,
     keys: &[PublicKey],
@@ -330,8 +296,8 @@ pub(crate) fn fetch(
     api: bool,
 ) -> Result<PinnedSdk, String> {
     let tag = format!("sdk-{build}");
-    let stamped = fs::read_to_string(dir.join(STAMP)).is_ok_and(|stamp| stamp == build);
-    if stamped {
+    let stamp = CacheStamp::new(build, keys);
+    if stamp.matches(dir) {
         let bytes = fs::read(dir.join(sdk::INDEX)).map_err(|e| format!("{DIR}: {e}"))?;
         let index = Index::read(&bytes, build).map_err(|e| format!("{tag}: {e}"))?;
         return Ok(pinned(&index, dir));
@@ -373,7 +339,7 @@ pub(crate) fn fetch(
         unpack(base, &index, API_SOURCE, dir, "api", API_LIMIT)?;
     }
     write(sdk::INDEX, &bytes)?;
-    write(STAMP, build.as_bytes())?;
+    stamp.write(dir)?;
     Ok(pinned(&index, dir))
 }
 
@@ -385,6 +351,7 @@ pub(crate) fn fetch_slices(
     index: &Index,
     target: &str,
     dir: &Path,
+    stamp: &CacheStamp,
     say: &dyn Fn(&str),
 ) -> Result<sunrise_native_build::prebuilt::Package, String> {
     let build = &index.build.commit;
@@ -393,7 +360,7 @@ pub(crate) fn fetch_slices(
         .map_err(|e| format!("sdk-{build} has no slices for this computer ({target}): {e}"))?;
     let into = dir.join(target);
     let package = sunrise_native_build::prebuilt::Package::at(&into);
-    if fs::read_to_string(into.join(STAMP)).is_ok_and(|stamp| stamp == *build) {
+    if stamp.matches(&into) {
         return Ok(package);
     }
     if let Err(e) = fs::remove_dir_all(&into)
@@ -415,7 +382,7 @@ pub(crate) fn fetch_slices(
         ));
         unpack(base, index, &name, &into, kind.name(), SLICE_LIMIT)?;
     }
-    fs::write(into.join(STAMP), build).map_err(|e| format!("{}: {e}", into.display()))?;
+    stamp.write(&into)?;
     Ok(package)
 }
 
@@ -488,7 +455,7 @@ fn build_data_from(
     let into = dir.join(BUILD_DATA);
     // The stamp is written only after the folder's SDK verified, and the build data is renamed
     // into place only after it unpacked whole from a verified archive.
-    if fs::read_to_string(dir.join(STAMP)).is_ok_and(|stamp| stamp == build) && into.is_dir() {
+    if CacheStamp::new(build, keys).matches(&dir) && into.is_dir() {
         return Ok(into);
     }
     fetch(base, keys, build, &dir, false)?;

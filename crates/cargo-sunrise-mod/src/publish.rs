@@ -23,7 +23,7 @@ use sunrise_mod_package::{
     manifest::MANIFEST,
 };
 
-const USAGE: &str = "cargo sunrise-mod publish [--out <dir>] [--registry <checkout>] [--summary <text>] [--owner <login>]… [--categories a,b] [--tags a,b] [--changelog <text>] [--key <public key> --signature <file.minisig>] [--wasm]";
+const USAGE: &str = "cargo sunrise-mod publish [--out <dir>] [--registry <checkout>] [--summary <text>] [--owner <login>]… [--categories a,b] [--tags a,b] [--changelog <text>] [--key <public key> --signature <file.minisig>]";
 
 #[derive(Default)]
 struct Options {
@@ -36,7 +36,6 @@ struct Options {
     changelog: String,
     key: Option<String>,
     signature: Option<PathBuf>,
-    wasm: bool,
 }
 
 fn list(value: &str) -> Vec<String> {
@@ -52,10 +51,6 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut o = Options::default();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
-        if arg == "--wasm" {
-            o.wasm = true;
-            continue;
-        }
         let known = [
             "--out",
             "--registry",
@@ -376,8 +371,7 @@ pub fn run(entry_point: mod_surface::child::ChildEntry, args: &[String]) -> Resu
     let package = if signature.is_some() {
         root.join("target/sunrise-mod").join(format!("{id}.smod"))
     } else {
-        let args: Vec<String> = o.wasm.then(|| "--wasm".to_owned()).into_iter().collect();
-        crate::build_command(entry_point, &args)?
+        crate::build_command(entry_point, &[])?
     };
     let package_bytes = bounded::read_bytes(&package, index::MAX_FILE, Symlinks::Refuse).map_err(|e| {
         format!("{e}: build a regular .smod within the registry's size limit with `cargo sunrise-mod build` and sign it again if needed")

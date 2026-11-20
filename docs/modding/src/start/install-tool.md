@@ -57,6 +57,7 @@ The `export` lasts for this shell. Add `export PATH="$HOME/.local/bin:$PATH"` to
 
 ### macOS (Apple silicon)
 
+<!-- quickstart-test: skip, another computer's block -->
 ```sh
 (
   set -eu
@@ -189,6 +190,7 @@ usage instead. The newest tool's commit is `commit` in
 
 If no prebuilt tool fits your computer, build it from source:
 
+<!-- quickstart-test: skip, the prebuilt tool is the one under test -->
 ```sh
 cargo install --locked --git https://github.com/sunrise-org/sunrise cargo-sunrise-mod
 ```
@@ -208,4 +210,3 @@ runs `cargo`, so Rust has to be installed in the same environment.
 
 - [Your first native mod](first-mod.md)
 - [Your first content mod](first-content-mod.md)
-- [Your first WebAssembly mod](first-wasm-mod.md)

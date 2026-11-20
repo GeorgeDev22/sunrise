@@ -39,8 +39,7 @@ typed state's current level (water at level 2 answers 2); an always-full content
 answers its maximum. Unregistered contents, including powder snow, answer `None`.
 These `WorldOnly` reads work on both sides, over the existing registration table,
 including mods and rebuilt resource generations. A client that has not built that table
-answers `None`. Native and wasm consumers receive the same plain values; there is no
-work unless called. A content lookup scans the existing content table without a mod
+answers `None`. The lookup does no work unless called. A content lookup scans the existing content table without a mod
 scan, clones its shared snapshot, and allocates only the returned level-property string
 when present; the scalar level read allocates no result.
 

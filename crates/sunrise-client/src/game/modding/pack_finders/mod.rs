@@ -124,7 +124,17 @@ impl mod_api::prelude::TextHost for DiscoveryHost {
     }
 }
 impl ClientHost for DiscoveryHost {}
-mod_api::impl_client_host_areas!(DiscoveryHost);
+mod_api::impl_client_host_areas!(DiscoveryHost, except(audio));
+// Registration opens no audio stream.
+impl mod_api::prelude::AudioClientHost for DiscoveryHost {
+    fn open_audio_stream(
+        &self,
+        _: &mod_api::StreamSpec,
+    ) -> Result<mod_api::AudioStreamRef, mod_api::AudioRefusal> {
+        Err(mod_api::AudioRefusal::Unavailable)
+    }
+}
+
 impl ServerHost for DiscoveryHost {}
 mod_api::impl_server_host_areas!(DiscoveryHost);
 
@@ -163,6 +173,7 @@ pub(super) fn data_repository(
 ) -> Vec<DataPack> {
     let mut packs = sunrise_client::datapack::discover_with_features(world, resources);
     packs.extend(additional.iter().map(|pack| (**pack).clone()));
+    packs.sort_by(|a, b| sunrise_client::datapack::compare_ids(&a.id, &b.id));
     packs
 }
 

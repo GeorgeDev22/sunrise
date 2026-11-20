@@ -26,7 +26,7 @@ pub trait ScreensClientHost {
     /// What the block's mod wrote for the mod screen that is open
     /// (`menu_extra_data` on the server), empty when it wrote nothing;
     /// None when no mod screen is open. The same for a menu `PlayerRef::open_mod_menu`
-    /// opened with its `extra`. A copy, so native and wasm read it alike. @API:menu_extra_data@.
+    /// opened with its `extra`. Returns a copy. @API:menu_extra_data@.
     #[access(ClientSetup)]
     fn screen_extra_data(&self) -> Option<Vec<u8>>;
     /// Side: client.
@@ -156,7 +156,8 @@ pub trait ScreensClientHost {
     fn debug_overlay_visible(&self) -> bool;
     /// Side: client.
     /// Whether a specific key is currently held down.
-    /// `key` is the vanilla physical key name (`key.keyboard.left.shift`, for example).
+    /// `key` is the vanilla physical key or mouse button name (`key.keyboard.left.shift`,
+    /// `key.mouse.left`, `key.mouse.4`, for example).
     /// Unknown names are not down. Modifier combinations use `ClientHost::modifiers`.
     #[access(ClientSetup)]
     fn is_key_down(&self, key: &str) -> bool;

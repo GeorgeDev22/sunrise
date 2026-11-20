@@ -175,7 +175,9 @@ impl Game<'_> {
         if !outcome.blocking_item_used {
             return;
         }
-        if self.remote.is_none() {
+        // `ItemStack.hurtAndBreak` does nothing for `hasInfiniteMaterials`, its
+        // `ITEM_USED` award included: a creative player's shield counts no use.
+        if self.remote.is_none() && !self.creative {
             self.award_stat("used", &stack.item, 1);
         }
         // Component wear can apply even when no damage was blocked. A mod's wear

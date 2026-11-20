@@ -2,8 +2,7 @@
 
 A HUD layer, a screen or a tooltip hook draws through the `DrawContext` it is handed, in GUI pixels. Each call
 is one of vanilla's `GuiGraphics` calls: `fill`, `text`, `sprite`, `item_stack` and the others. `gui_paint`
-takes a buffer of `GuiDraw` ops for the same calls, with `Push` / `Pop` for the pose. Native and wasm mods use
-the same methods and the same ops.
+takes a buffer of `GuiDraw` ops for the same calls, with `Push` / `Pop` for the pose.
 
 `ClientHost::debug_overlay_visible()` reports whether the client draws its debug overlay this frame. In
 `render_gui_post`, use it to leave space for the overlay. Always-on debug entries can make it visible with
@@ -39,7 +38,6 @@ vanilla's corner arguments: `top` stays on the `y0` edge and `bottom` on the `y1
   visible winding and colour placement. A `fill_gradient` rectangle with a NaN or infinite coordinate draws nothing.
   Zero-area calls are culled here; vanilla can retain their layering bounds without drawing pixels.
 - **Cost.** One quad on the GUI batch, as `fill`; nothing is drawn or kept when a mod doesn't call it.
-- **Wire layout.** `GuiDraw` gained the `FillGradient` variant: rebuild wasm mods against the new SDK.
 
 ## Scaled text
 

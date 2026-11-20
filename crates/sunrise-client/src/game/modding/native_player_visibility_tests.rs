@@ -241,3 +241,97 @@ fn a_client_cannot_ack_show_or_ask_who_sees() {
         assert_eq!(ghost.sees(game, ghost), Err(Refusal::Client));
     });
 }
+
+/// `hide` and `set_nickname` read back through `hidden` and `nickname`: the player's own value,
+/// shown for another, and shown again after being cleared.
+#[test]
+#[ignore = "daily"]
+fn hide_level_and_nickname_read_back() {
+    with_guests(|game| {
+        let (a, b) = (game.player(12).unwrap(), game.player(13).unwrap());
+        assert!(a.hide(game, Some(2)));
+        assert_eq!(a.hidden(game), Ok(Some(2)));
+        assert_eq!(b.hidden(game), Ok(None));
+        assert!(a.hide(game, None));
+        assert_eq!(a.hidden(game), Ok(None));
+
+        assert!(a.set_nickname(game, Some("Cap")));
+        assert_eq!(a.nickname(game), Ok(Some("Cap".to_owned())));
+        assert_eq!(b.nickname(game), Ok(None));
+        assert!(a.set_nickname(game, None));
+        assert_eq!(a.nickname(game), Ok(None));
+
+        // A vanish is kept by UUID after the player leaves; a nickname needs them online.
+        assert!(a.hide(game, Some(3)));
+        assert!(a.set_nickname(game, Some("Cap")));
+        game.lan.as_mut().unwrap().hub.guests.clear();
+        assert_eq!(a.hidden(game), Ok(Some(3)));
+        assert_eq!(a.nickname(game), Err(Refusal::Stale));
+    });
+}
+
+/// An unpublished single-player world runs a hub for its owner, but nobody else can join it
+/// yet: a hide level set there reads back as stored, before and after the world is published,
+/// as `hide` stores it, and so does a nickname.
+#[test]
+#[ignore = "daily"]
+fn an_unpublished_single_player_world_reads_the_stored_hide_level() {
+    with_guests(|game| {
+        let owner = game.player(12).unwrap();
+        game.serving = Some(super::integrated::Serving::fixture(0));
+        assert!(owner.hide(game, Some(2)));
+        assert!(owner.set_nickname(game, Some("Cap")));
+        assert_eq!(owner.hidden(game), Ok(Some(2)));
+        assert_eq!(owner.nickname(game), Ok(Some("Cap".to_owned())));
+        game.serving = Some(super::integrated::Serving::fixture(25565));
+        assert_eq!(owner.hidden(game), Ok(Some(2)));
+        assert_eq!(owner.nickname(game), Ok(Some("Cap".to_owned())));
+    });
+}
+
+/// A guest's latency is what its keep-alives measured; a fake player has none.
+#[test]
+#[ignore = "daily"]
+fn latency_reads_what_the_keep_alives_measured() {
+    use std::sync::atomic::Ordering;
+    with_guests(|game| {
+        let (a, b) = (game.player(12).unwrap(), game.player(13).unwrap());
+        assert_eq!((a.latency(game), b.latency(game)), (Ok(0), Ok(0)));
+        let guests = &game.lan.as_ref().unwrap().hub.guests;
+        for (conn, ms) in [(12, 45), (13, 120)] {
+            guests
+                .iter()
+                .find(|g| g.conn == conn)
+                .unwrap()
+                .latency
+                .store(ms, Ordering::Relaxed);
+        }
+        assert_eq!((a.latency(game), b.latency(game)), (Ok(45), Ok(120)));
+        let machine = fake(game);
+        assert_eq!(machine.latency(game), Ok(0));
+    });
+}
+
+/// A stale handle is refused as stale, for all three.
+#[test]
+#[ignore = "daily"]
+fn a_stale_handle_is_refused_latency_hide_level_and_nickname() {
+    with_guests(|game| {
+        let old = stale(game.player(12).unwrap());
+        assert_eq!(old.latency(game), Err(Refusal::Stale));
+        assert_eq!(old.hidden(game), Err(Refusal::Stale));
+        assert_eq!(old.nickname(game), Err(Refusal::Stale));
+    });
+}
+
+/// A client has no server list to read: all three name the client.
+#[test]
+#[ignore = "daily"]
+fn a_client_is_refused_latency_hide_level_and_nickname() {
+    with_client_game(|game| {
+        let player = mod_api::__private::game::player_ref(EntityRef::new(WorldEpoch::new(0), 1), 1);
+        assert_eq!(player.latency(game), Err(Refusal::Client));
+        assert_eq!(player.hidden(game), Err(Refusal::Client));
+        assert_eq!(player.nickname(game), Err(Refusal::Client));
+    });
+}

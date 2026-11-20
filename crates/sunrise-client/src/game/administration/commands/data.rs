@@ -24,6 +24,37 @@ pub(in crate::game) enum DataRef {
 fn empty() -> Tag {
     Tag::Compound(Compound::new())
 }
+/// What the model keeps outside a stored block entity's `encoded` form
+/// (`BlockEntity.saveWithFullMetadata`): the lock, the hopper's
+/// `TransferCooldown` (`HopperBlockEntity.saveAdditional`), the custom name
+/// and the pending loot table.
+pub(in crate::game) fn stored_block_entity_data(
+    world: &sunrise_client::world::World,
+    key: (i32, i32, i32),
+    name: &str,
+    entity: &BlockEntity,
+    items: &sunrise_client::items::Items,
+    hopper_cooldown: impl FnOnce() -> i32,
+) -> Tag {
+    let pending = world
+        .chunks
+        .get(&(key.0 >> 4, key.2 >> 4))
+        .and_then(|chunk| chunk.saved.as_ref())
+        .and_then(|saved| saved.pending_loot.get(&key));
+    save::block_entity_encode::data_with(
+        key,
+        entity,
+        name,
+        save::block_entity_encode::DataFields {
+            lock: world.block_lock(key),
+            custom_name: world.block_names.get(&key),
+            pending,
+            hopper_cooldown: (name == "minecraft:hopper").then(hopper_cooldown),
+        },
+        items,
+        |_, _| None,
+    )
+}
 fn set_key(tag: &mut Tag, key: &str, value: Tag) {
     if let Tag::Compound(c) = tag {
         c.insert(JavaString::from(key), value);
@@ -183,7 +214,7 @@ impl Game<'_> {
                 let b = &self.boats[i];
                 let mut tag = b.to_nbt(uuid, self.persist.raw.get(&id), self.res.items());
                 // Entity.saveWithoutId: the actual runtime passenger tree.
-                self.put_mob_passengers(&mut tag, id);
+                self.put_passengers(&mut tag, id);
                 // AbstractBoat.addAdditionalSaveData: the live or pending leash.
                 self.write_boat_leash(&mut tag, i);
                 self.save_portal_cooldown(id, &mut tag);
@@ -193,7 +224,7 @@ impl Game<'_> {
                 let uuid = self.uuid_for(id);
                 let c = self.carts.iter().find(|c| c.id == id)?;
                 let mut tag = c.to_nbt(uuid, self.persist.raw.get(&id), self.res.items());
-                self.put_mob_passengers(&mut tag, id);
+                self.put_passengers(&mut tag, id);
                 self.save_portal_cooldown(id, &mut tag);
                 tag
             }
@@ -298,7 +329,12 @@ impl Game<'_> {
                     f.rotation,
                     uuid,
                 );
-                crate::game::persist::with_raw(tag, raw)
+                let mut tag = crate::game::persist::with_raw(tag, raw);
+                if let Tag::Compound(fields) = &mut tag {
+                    // Its simulated fire, not a saved copy's (`with_raw` keeps those).
+                    fields.insert("Fire".into(), Tag::Short(f.fire_ticks as i16));
+                }
+                tag
             }
             Target::Rocket(id) => {
                 let uuid = self.uuid_for(id);
@@ -699,6 +735,7 @@ impl Game<'_> {
                     falling.drop_item = drop_item;
                     falling.fall_distance = fall_distance;
                     falling.on_ground = entity_nbt::flag(&tag, "OnGround");
+                    falling.fire_ticks = crate::game::boats::saved_fire(&tag);
                     falling.damage = damage;
                     // Keep id/join, start_pos, portal state and stuck multiplier.
                     set_key(&mut tag, "UUID", Tag::IntArray(uuid.to_vec()));
@@ -1121,12 +1158,12 @@ impl Game<'_> {
             })
             .unwrap_or(0);
         Some(Tag::compound([
+            ("OutputSignal", Tag::Int(output)),
+            ("components", empty()),
             ("id", Tag::String("minecraft:comparator".into())),
             ("x", Tag::Int(p[0])),
             ("y", Tag::Int(p[1])),
             ("z", Tag::Int(p[2])),
-            ("components", empty()),
-            ("OutputSignal", Tag::Int(output)),
         ]))
     }
 
@@ -1145,10 +1182,7 @@ impl Game<'_> {
             .moving_pistons
             .iter()
             .find(|(at, _)| *at == pos)?;
-        let mut tag = self.moving_piston_to_nbt(pos, piston);
-        // BlockEntity.saveWithoutMetadata includes the component map.
-        set_key(&mut tag, "components", empty());
-        Some(tag)
+        Some(self.moving_piston_to_nbt(pos, piston))
     }
     pub(in crate::game) fn data_ref_named(
         &mut self,
@@ -1203,9 +1237,8 @@ impl Game<'_> {
                 }
                 Ok(tag)
             }
-            // BlockDataAccessor.getData: BlockEntity.saveWithFullMetadata.
             DataRef::Block(p) => self
-                .full_block_entity_data(*p)
+                .block_entity_nbt(*p)
                 .ok_or_else(|| err("commands.data.block.invalid", &[])),
             DataRef::Storage(id) => Ok(self.score.storage.get(id)),
         }
@@ -1221,7 +1254,7 @@ impl Game<'_> {
         self.full_block_entity_data(p)
     }
     /// `BlockEntity.saveWithFullMetadata` of the stored block entity at `p`,
-    /// for `/data` (`BlockDataAccessor.getData`) and [`Self::block_entity_nbt`].
+    /// for [`Self::block_entity_nbt`].
     /// Comparators and decorated pots come from their own views; any other
     /// entry gets what the model keeps outside it: the hopper's
     /// `TransferCooldown` (`HopperBlockEntity.saveAdditional`), the custom
@@ -1233,23 +1266,25 @@ impl Game<'_> {
         let key = (p[0], p[1], p[2]);
         let name = self.data_block_name(p);
         let e = self.world.block_entities.get(&key)?;
-        let mut tag = save::command_block_entity_data(
-            self.encode_live_block_entity(key, e, &name, self.items()),
-            self.world.block_lock(key),
-        );
-        if name == "minecraft:hopper" {
-            set_key(
-                &mut tag,
-                "TransferCooldown",
-                Tag::Int(self.hopper_cooldown(key)),
-            );
-        }
-        if let (Some(custom), Tag::Compound(map)) = (self.world.block_names.get(&key), &mut tag) {
-            map.entry("CustomName".into())
-                .or_insert_with(|| custom.clone());
-        }
-        Self::write_pending_loot(&self.world, key, &mut tag);
-        Some(tag)
+        let pending = self
+            .world
+            .chunks
+            .get(&(key.0 >> 4, key.2 >> 4))
+            .and_then(|chunk| chunk.saved.as_ref())
+            .and_then(|saved| saved.pending_loot.get(&key));
+        Some(save::block_entity_encode::data_with(
+            key,
+            e,
+            &name,
+            save::block_entity_encode::DataFields {
+                lock: self.world.block_lock(key),
+                custom_name: self.world.block_names.get(&key),
+                pending,
+                hopper_cooldown: (name == "minecraft:hopper").then(|| self.hopper_cooldown(key)),
+            },
+            self.items(),
+            |kind, tag| self.capture_block_entity_payload(key, kind, tag),
+        ))
     }
     pub(in crate::game) fn set_data_of(&mut self, r: &DataRef, tag: Tag) -> R<()> {
         match r {
@@ -1362,28 +1397,8 @@ impl Game<'_> {
             ),
         }
     }
-    fn query_text(&self, r: &DataRef, data: &Tag, path: Option<&NbtPath>) -> Text {
-        // Only a block's writer supplies this provenance: the live piston's
-        // fields, or any other block entity's saveWithFullMetadata. The same
-        // compound in storage or an entity keeps default order.
-        let root = path.is_none_or(|p| p.is_field_path(&[]));
-        let piston = if let DataRef::Block(p) = r
-            && self.moving_piston_data(*p).is_some()
-        {
-            match path {
-                _ if root => Some(snbt::PistonPart::Entity),
-                Some(p) if p.is_field_path(&["blockState"]) => Some(snbt::PistonPart::State),
-                Some(p) if p.is_field_path(&["blockState", "properties"]) => {
-                    Some(snbt::PistonPart::Properties)
-                }
-                _ => None,
-            }
-        } else if matches!(r, DataRef::Block(_)) && root {
-            Some(snbt::PistonPart::BlockEntity)
-        } else {
-            None
-        };
-        let pretty = piston.map_or_else(|| snbt::pretty(data), |p| snbt::pretty_piston(data, p));
+    fn query_text(&self, r: &DataRef, data: &Tag) -> Text {
+        let pretty = snbt::pretty(data);
         match r {
             DataRef::Entity(_) => {
                 Text::translate("commands.data.entity.query", &[self.data_name(r), pretty])
@@ -1478,7 +1493,7 @@ impl Game<'_> {
             "data.get" => {
                 let data = self.data_of(&target)?;
                 if ctx.get("path").is_none() {
-                    let message = self.query_text(&target, &data, None);
+                    let message = self.query_text(&target, &data);
                     self.system_feedback(message);
                     return Ok(1);
                 }
@@ -1491,7 +1506,7 @@ impl Game<'_> {
                     return Ok(value);
                 }
                 let value = data_cmd::get_value(&tag, &path)?;
-                let message = self.query_text(&target, &tag, Some(&path));
+                let message = self.query_text(&target, &tag);
                 self.system_feedback(message);
                 Ok(value)
             }
@@ -2746,11 +2761,11 @@ mod bell_command_identity_tests {
             }
             // No raw input: factory/model and the real common writer supply metadata.
             let fresh = BlockEntity::for_block("minecraft:bell").unwrap();
-            let tag = save::block_entity_data(
+            let tag = save::block_entity_encode::data(
                 (-3, 204, 11),
                 &fresh,
                 "minecraft:bell",
-                None,
+                Default::default(),
                 &Default::default(),
             );
             assert_eq!(tag.get("x"), Some(&Tag::Int(-3)));

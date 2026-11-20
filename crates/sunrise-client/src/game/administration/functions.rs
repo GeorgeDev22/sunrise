@@ -1258,11 +1258,12 @@ impl Game<'_> {
         let previous_vanilla_disabled = self.cmds.vanilla_disabled;
         // `DataPackCommand.listAvailablePacks`: a feature pack the world's
         // features do not cover is not available.
-        let available: Vec<String> = std::iter::once("vanilla".to_owned())
+        let mut available: Vec<String> = std::iter::once("vanilla".to_owned())
             .chain(self.fns.packs.iter().map(|p| p.id.clone()))
             .filter(|p| !selected.contains(p))
             .filter(|p| self.missing_pack_features(p).is_empty())
             .collect();
+        available.sort_by(|a, b| datapack::compare_ids(a, b));
         let known = |g: &Self, n: &str| n == "vanilla" || g.fns.packs.iter().any(|p| p.id == n);
         match id {
             "datapack.create" => self.create_pack(ctx),
@@ -1497,7 +1498,10 @@ impl Game<'_> {
         let json = if id.starts_with('{') {
             let (tag, _) = sunrise_core::nbt::parse_snbt(id)
                 .map_err(|e| err("argument.nbt.invalid", &[&e]))?;
-            sunrise_client::scoreboard::tag_to_json(&tag)
+            let value = sunrise_client::scoreboard::tag_to_json(&tag);
+            sunrise_world::loot::validate_loot_condition(&value)
+                .map_err(|e| err("argument.nbt.invalid", &[&e]))?;
+            value
         } else {
             self.fns.store.predicates.get(id).cloned().ok_or_else(|| {
                 let id = if id.contains(':') {
@@ -1512,19 +1516,7 @@ impl Game<'_> {
             })?
         };
         let source = self.command_source.unwrap_or_else(|| self.player_source());
-        let view = source.entity.map(|t| {
-            let scores = self.holder_name(t).map(|holder| {
-                self.score
-                    .board
-                    .holder_scores(&holder)
-                    .into_iter()
-                    .map(|(objective, value)| (objective.name.clone(), value))
-                    .collect()
-            });
-            let mut view = self.entity_view_asked(t, &json);
-            view.scores = scores;
-            view
-        });
+        let view = source.entity.map(|t| self.entity_view_scored(t, &json));
         Ok(self.command_conditions_hold(&json, view.as_ref(), source.pos))
     }
 }

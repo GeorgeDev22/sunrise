@@ -1,6 +1,7 @@
-//! `cargo sunrise-mod registry build|review|check|list`: the registry repository's CI
+//! `cargo sunrise-mod registry build|review|check|list|release|page`: the registry repository's CI
 //! (`sunrise-org/sunrise-mods`, docs/modding/src/reference/registry-index.md). Network-free: the
 //! workflow downloads the files and publishes what this writes.
+use crate::options::Options;
 use std::path::Path;
 
 #[cfg(test)]
@@ -18,54 +19,55 @@ const USAGE: &str = "usage: cargo sunrise-mod registry build <checkout> --files 
        cargo sunrise-mod registry review <base checkout> <head checkout> --author <login> [--files <dir>] [--json]
        cargo sunrise-mod registry check <base checkout> <head checkout> --files <dir> [--json]
        cargo sunrise-mod registry list <checkout>
-       cargo sunrise-mod registry release <checkout> <id> <file> --tag <tag> --published <YYYY-MM-DD> [--notes <file>] [--signature <file>] [--game <version>]
+       cargo sunrise-mod registry release <checkout> <id> <file> --tag <tag> --published <YYYY-MM-DD> [--notes <file>] [--signature <file>] [--name <asset>] [--game <version>]
        cargo sunrise-mod registry page <checkout> <id> <sunrise-registry.toml>";
-
-fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
-    super::flag(args, name)
-}
-
-fn positional(args: &[String]) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut skip = false;
-    for a in args {
-        if skip {
-            skip = false;
-        } else if a == "--json" {
-        } else if a.starts_with("--") {
-            skip = true;
-        } else {
-            out.push(a.as_str());
-        }
-    }
-    out
-}
 
 fn lines(errors: Vec<String>) -> String {
     format!("{} problem(s):\n  {}", errors.len(), errors.join("\n  "))
 }
 
 pub fn main(args: &[String]) -> Result<(), String> {
-    let rest = args.get(1..).unwrap_or_default();
-    let pos = positional(rest);
+    let command = format!("registry {}", args.first().map_or("", String::as_str));
+    // Every subcommand's value options: one a subcommand does not read is refused by `finish`.
+    const VALUED: &[&str] = &[
+        "--files",
+        "--out",
+        "--generated",
+        "--release",
+        "--site",
+        "--counts",
+        "--author",
+        "--tag",
+        "--published",
+        "--notes",
+        "--signature",
+        "--name",
+        "--game",
+    ];
+    let mut options =
+        Options::new(&command, args.get(1..).unwrap_or_default(), VALUED).usage(USAGE);
     match args.first().map(String::as_str) {
         Some("build") => {
+            let (files, out) = (options.value("--files")?, options.value("--out")?);
+            let (generated, release) = (options.value("--generated")?, options.value("--release")?);
+            let (site, counts) = (options.value("--site")?, options.value("--counts")?);
+            let pos = options.positional();
+            options.finish()?;
             let [checkout] = pos[..] else {
                 return Err(USAGE.into());
             };
-            let (files, out) = (flag(rest, "--files"), flag(rest, "--out"));
             let (Some(files), Some(out)) = (files, out) else {
                 return Err(USAGE.into());
             };
-            let generated = flag(rest, "--generated")
+            let generated = generated
                 .map(str::to_owned)
                 .or_else(|| std::env::var("REGISTRY_GENERATED").ok())
                 .unwrap_or_default();
             let mut index = registry::build(&Sources {
                 registry: Path::new(checkout),
                 files: Path::new(files),
-                release: flag(rest, "--release").unwrap_or(RELEASE),
-                site: flag(rest, "--site").unwrap_or(SITE),
+                release: release.unwrap_or(RELEASE),
+                site: site.unwrap_or(SITE),
                 generated,
             })
             .map_err(lines)?;
@@ -73,7 +75,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
                 eprintln!("warning: {problem}");
             }
             // GitHub's download and star counts, which the workflow fetched.
-            if let Some(path) = flag(rest, "--counts") {
+            if let Some(path) = counts {
                 let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
                 let counts = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
                 registry::count(&mut index, &counts);
@@ -88,16 +90,20 @@ pub fn main(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("review") => {
+            let (author, files) = (options.value("--author")?, options.value("--files")?);
+            let json = options.switch("--json");
+            let pos = options.positional();
+            options.finish()?;
             let [base, head] = pos[..] else {
                 return Err(USAGE.into());
             };
-            let author = flag(rest, "--author").ok_or(USAGE)?;
+            let author = author.ok_or(USAGE)?;
             let base = registry::load(Path::new(base)).map_err(lines)?;
             let checkout = Path::new(head);
             let head = registry::load(checkout).map_err(lines)?;
             let mut review =
                 registry::review_with_revoked(&base.entries, &head.entries, &head.revoked, author);
-            let files = flag(rest, "--files").map(Path::new);
+            let files = files.map(Path::new);
             let sources = Sources {
                 registry: checkout,
                 files: files.unwrap_or(checkout),
@@ -129,7 +135,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
                 }
             }
             let collections = registry::review_collections(&base, &head, author);
-            if rest.iter().any(|a| a == "--json") {
+            if json {
                 let json = serde_json::json!({"errors": review.errors, "notes": review.notes, "collection_reviews": collections});
                 println!("{json}");
             } else {
@@ -159,13 +165,16 @@ pub fn main(args: &[String]) -> Result<(), String> {
                 ))
             }
         }
-        // `check` (and its trial run) on each file `head` lists and `base`
+        // `check` on each file `head` lists and `base`
         // doesn't: a pull request's new files.
         Some("check") => {
+            let (files, json) = (options.value("--files")?, options.switch("--json"));
+            let pos = options.positional();
+            options.finish()?;
             let [base, head] = pos[..] else {
                 return Err(USAGE.into());
             };
-            let files = Path::new(flag(rest, "--files").ok_or(USAGE)?);
+            let files = Path::new(files.ok_or(USAGE)?);
             let old: std::collections::HashSet<String> = match registry::load(Path::new(base)) {
                 Ok(base) => base
                     .entries
@@ -177,7 +186,6 @@ pub fn main(args: &[String]) -> Result<(), String> {
             };
             let checkout = Path::new(head);
             let head = registry::load(checkout).map_err(lines)?;
-            let json = rest.iter().any(|a| a == "--json");
             let assembled = registry::candidate(
                 &head,
                 &Sources {
@@ -253,6 +261,8 @@ pub fn main(args: &[String]) -> Result<(), String> {
         }
         // The files CI must download for `build`: `<sha256> <id> <version> <file>`.
         Some("list") => {
+            let pos = options.positional();
+            options.finish()?;
             let [checkout] = pos[..] else {
                 return Err(USAGE.into());
             };
@@ -267,19 +277,20 @@ pub fn main(args: &[String]) -> Result<(), String> {
         // A release of a project's repository, downloaded: the checks of a submission, then the
         // version as the index lists it (JSON on stdout), for the registry's release sync.
         Some("release") => {
+            let (tag, published) = (options.value("--tag")?, options.value("--published")?);
+            let (notes, signature) = (options.value("--notes")?, options.value("--signature")?);
+            let (asset, game) = (options.value("--name")?, options.value("--game")?);
+            let pos = options.positional();
+            options.finish()?;
             let [checkout, id, file] = pos[..] else {
                 return Err(USAGE.into());
             };
-            let (tag, published) = (
-                flag(rest, "--tag").ok_or(USAGE)?,
-                flag(rest, "--published").ok_or(USAGE)?,
-            );
-            let read = |name: &str| {
-                flag(rest, name)
-                    .map(|p| std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}")))
+            let (tag, published) = (tag.ok_or(USAGE)?, published.ok_or(USAGE)?);
+            let read = |path: Option<&str>| {
+                path.map(|p| std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}")))
                     .transpose()
             };
-            let (notes, signature) = (read("--notes")?, read("--signature")?);
+            let (notes, signature) = (read(notes)?, read(signature)?);
             let entry = entry_of(checkout, id)?;
             let path = Path::new(file);
             let cache = registry::Cache::read(Path::new(checkout), id)?;
@@ -297,8 +308,8 @@ pub fn main(args: &[String]) -> Result<(), String> {
                     tag,
                     published,
                     notes: notes.as_deref().unwrap_or(""),
-                    asset: flag(rest, "--name").unwrap_or(name),
-                    game: flag(rest, "--game").unwrap_or("26.3"),
+                    asset: asset.unwrap_or(name),
+                    game: game.unwrap_or("26.3"),
                     signature: signature.as_deref(),
                 },
                 path,
@@ -311,6 +322,8 @@ pub fn main(args: &[String]) -> Result<(), String> {
         }
         // The page file of a project's repository, checked against its entry: the page as JSON.
         Some("page") => {
+            let pos = options.positional();
+            options.finish()?;
             let [checkout, id, file] = pos[..] else {
                 return Err(USAGE.into());
             };

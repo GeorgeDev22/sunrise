@@ -17,18 +17,26 @@ impl HookParts {
     ) -> &[Attached<dyn MenuPart>] {
         attached(&self.menus, id)
     }
-    /// The screen hooks' lookup: the part that owns the screen of menu type `menu` opened as
-    /// mod block `block`'s menu, alone. A mod menu type has one such part (registration refuses
-    /// a second); one of vanilla's has one per mod, and a mod's block gets its own mod's.
-    /// For a registered recipe-book screen, registration allows screen Parts only from
-    /// the declaring mod, so these same lookups cannot dispatch to a foreign part.
+    /// The menu's owner lookup: only the part whose package owns the menu type, or the block
+    /// opening a vanilla menu, receives callbacks. A registered recipe-book screen is owned by
+    /// its declaring mod even though its menu type is vanilla.
     pub(crate) fn menu_screen(&self, menu: &str, block: Option<&str>) -> &[Attached<dyn MenuPart>] {
         let parts = attached(&self.menus, || Some(menu));
-        if !vanilla_menu(menu) {
-            return parts;
-        }
-        let Some((namespace, _)) = block.and_then(|b| b.split_once(':')) else {
-            return &[];
+        let owner = crate::RecipeBookLayout::declaring_mod(menu);
+        let namespace = match owner {
+            Some(owner) => owner,
+            None if vanilla_menu(menu) => {
+                let Some((namespace, _)) = block.and_then(|b| b.split_once(':')) else {
+                    return &[];
+                };
+                namespace
+            }
+            None => {
+                let Some((namespace, _)) = menu.split_once(':') else {
+                    return &[];
+                };
+                namespace
+            }
         };
         match parts
             .iter()

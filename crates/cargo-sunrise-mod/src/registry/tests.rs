@@ -206,3 +206,33 @@ fn a_refused_repo_cache_fails_build_check_and_review_without_any_collection() {
     let error = build().unwrap_err();
     assert!(error.contains("following.json"), "{error}");
 }
+
+#[test]
+fn a_registry_command_reads_its_own_options_and_refuses_others() {
+    let args = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+    // Each is refused before the checkout is read, naming the option.
+    for line in [
+        "build repo --files f --out o --relase",
+        "review a b --author x --jsno",
+        "check a b --files f --jsno",
+        "list repo --files f",
+        "release repo id file --tag t --published d --nope",
+        "page repo id file --nope",
+    ] {
+        let error = super::main(&args(line)).unwrap_err();
+        let option = line.rsplit(' ').find(|w| w.starts_with("--")).unwrap();
+        assert!(error.contains(option), "{line}: {error}");
+        assert!(error.contains("does not take"), "{line}: {error}");
+    }
+    // Every option a parser reads is taken, `release --name` among them: the command goes on to
+    // the checkout, which is not there.
+    for line in [
+        "build repo --files f --out o --release r --site s --generated g --counts c",
+        "review a b --author x --files f --json",
+        "check a b --files f --json",
+        "release repo id file --tag t --published d --notes n --signature s --name n --game 26.3",
+    ] {
+        let error = super::main(&args(line)).unwrap_err();
+        assert!(!error.contains("does not take"), "{line}: {error}");
+    }
+}

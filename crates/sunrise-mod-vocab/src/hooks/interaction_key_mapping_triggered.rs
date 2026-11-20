@@ -23,7 +23,7 @@ pub trait Hooks {
     /// dragon or crystal. Heard only when a mod also sets
     /// `hears_projectile_impacts`. Server-side. Version 2 adds bobbers and rockets;
     /// listeners retaining the earlier family set filter out `minecraft:fishing_bobber`
-    /// and `minecraft:firework_rocket`. Named injections request `hook_version = 2`.
+    /// and `minecraft:firework_rocket`.
     #[hook(
         side = "server",
         version = 2,

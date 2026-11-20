@@ -945,7 +945,8 @@ public final class VanillaProtocolClient {
             || t.equals("minecraft:block_update") || t.equals("minecraft:section_blocks_update")) {
             return null;
         }
-        if (t.equals("minecraft:keep_alive") || t.equals("minecraft:ping") || t.equals("minecraft:level_chunk_with_light")
+        // A play ping is compared, not left out: vanilla's server sends none.
+        if (t.equals("minecraft:keep_alive") || t.equals("minecraft:level_chunk_with_light")
             || t.equals("minecraft:chunk_batch_start") || t.equals("minecraft:chunk_batch_finished")
             || t.equals("minecraft:light_update") || t.equals("minecraft:bundle_delimiter")
             // Chat (the death message and /kill's feedback) is compared before the death.

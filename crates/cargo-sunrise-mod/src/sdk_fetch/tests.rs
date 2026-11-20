@@ -57,13 +57,31 @@ fn a_signed_release_is_unpacked_once_and_reused() {
     assert!(dir.join(SURFACE).is_file());
     assert!(dir.join("api/deps/a.rmeta").is_file());
     assert!(!dir.join(API_SOURCE).exists());
-    assert_eq!(fs::read_to_string(dir.join(STAMP)).unwrap(), BUILD);
-    // The stamp names the build: the folder is used as it is, with nothing read from the base.
+    // With the same trust, the folder is used as it is, with nothing read from the base.
     let gone = Base::Folder(project.path().join("nowhere"));
     assert_eq!(
         fetch(&gone, &[key], BUILD, &dir, true).unwrap().name,
         pinned.name
     );
+}
+
+#[test]
+fn a_cached_local_sdk_is_refused_under_release_only_trust() {
+    let (base, key) = release(None);
+    let base = Base::Folder(base.path().to_owned());
+    let project = tempfile::tempdir().unwrap();
+    let release_keys = sunrise_release_sign::trusted_keys();
+    let mut local_keys = release_keys.clone();
+    local_keys.push(key);
+    for api in [true, false] {
+        // Same verifier for the project's API source and the per-user native SDK metadata.
+        let dir = project.path().join(if api { DIR } else { "sdk" });
+        fetch(&base, &local_keys, BUILD, &dir, api).unwrap();
+        assert!(fetch(&base, &release_keys, BUILD, &dir, api).is_err());
+        assert!(!dir.join(STAMP).exists());
+        assert!(!dir.join(sdk::INDEX).exists());
+        assert!(!dir.join("api").exists());
+    }
 }
 
 #[test]
@@ -138,6 +156,20 @@ fn build_data_comes_from_the_signed_sdk_once_and_only_from_it() {
     );
 }
 
+#[test]
+fn cached_local_build_data_is_refused_under_release_only_trust() {
+    let (base, key) = release(None);
+    let base = Base::Folder(base.path().to_owned());
+    let project = tempfile::tempdir().unwrap();
+    let release_keys = sunrise_release_sign::trusted_keys();
+    let mut local_keys = release_keys.clone();
+    local_keys.push(key);
+    let into = build_data_from(&base, &local_keys, project.path(), BUILD).unwrap();
+    assert!(into.is_dir());
+    assert!(build_data_from(&base, &release_keys, project.path(), BUILD).is_err());
+    assert!(!into.exists());
+}
+
 fn base_folder(base: &Base) -> &Path {
     match base {
         Base::Folder(folder) => folder,
@@ -197,31 +229,6 @@ fn a_nightly_name_is_only_nightly_or_a_dated_one() {
         let error = resolve(&base, text).unwrap_err();
         assert!(error.contains("is not a build"), "{text}: {error}");
     }
-}
-
-#[test]
-fn the_pin_is_the_native_tables_or_the_cargo_metadata() {
-    let project = tempfile::tempdir().unwrap();
-    let write = |name: &str, text: &str| fs::write(project.path().join(name), text).unwrap();
-    let header = "id='m'\nname='m'\nversion='1'\napi='0.2'\ncapabilities=['registries']\n";
-    write(MANIFEST, header);
-    write("Cargo.toml", "[package]\nname='m'\nversion='1.0.0'\n");
-    assert!(
-        pin(project.path())
-            .unwrap_err()
-            .contains("[package.metadata.sunrise] sdk")
-    );
-    repin(project.path(), BUILD).unwrap();
-    assert_eq!(pin(project.path()).unwrap(), BUILD);
-    let other = "89abcdef0123456789abcdef0123456789abcdef";
-    write(
-        MANIFEST,
-        &format!("{header}[native]\ngame='26.3'\nsunrise='{BUILD}'\nmixins='{BUILD}'\n"),
-    );
-    fs::create_dir_all(project.path().join(DIR)).unwrap();
-    repin(project.path(), other).unwrap();
-    assert_eq!(pin(project.path()).unwrap(), other);
-    assert!(!project.path().join(DIR).exists());
 }
 
 #[test]

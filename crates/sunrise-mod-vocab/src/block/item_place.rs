@@ -130,9 +130,7 @@ pub enum ItemPlace {
     /// player only if they have none: into their inventory, or dropped at the root commit when
     /// it is full. Inserting nothing gives nothing. Otherwise it is the place inside.
     ///
-    /// Wrappers may nest to any depth in a mod's own code: reading and writing undo them in a
-    /// loop. One crossing the wasm boundary nests at most 15 wrappers deep (the wire's 32
-    /// levels, two for each); a deeper one is refused there.
+    /// Wrappers may nest to any depth: reading and writing undo them in a loop.
     InfiniteMaterials {
         /// The player's UUID.
         player: u128,

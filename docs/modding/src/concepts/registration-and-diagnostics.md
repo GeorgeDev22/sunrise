@@ -1,8 +1,7 @@
 # Registration and diagnostics
 
 Use `Hooks::register` to declare content and crash-report callbacks. If your bootstrap cannot
-complete, call `cx.refuse("reason")` and return. Native and wasm mods report the refusal through
-the registration error path without panicking or exiting the process.
+complete, call `cx.refuse("reason")` and return. The registration error path reports the refusal without panicking or exiting the process.
 
 ## Registration refusal
 
@@ -28,8 +27,6 @@ corrected, is a warning: `cx.warn("mymod.warn.no_jei", &["jei"])` inside `Hooks:
   row is not marked failed.
 - A mod keeps its first 16 warnings; later ones are dropped. The key and each argument are cut as
   refusal reasons are, to 4096 UTF-8 bytes at a character boundary.
-- Native and wasm mods take the same path; the game applies the cap and the cut again to what a
-  wasm mod sends.
 
 ## Native startup and hook panics
 
@@ -45,8 +42,7 @@ against this game.”
 
 A native hook panic stops the game. Its crash report and server-thread log identify
 `in native mod <id>, hook <hook>`, using the `sunrise-mod.toml` ID. Parts retain their registering
-mod's ID for startup errors and hook panics. A point listener's panic identifies its mod and method.
-See [Injections](injections.md) for injection declarations and their limits.
+mod's ID for startup errors and hook panics.
 
 ## Crash-report callbacks
 
@@ -60,10 +56,10 @@ Register callbacks inside `Hooks::register` (the counterpart to NeoForge's `Cras
 Both callbacks implement `CrashSection`. The report calls `value()` once when it is written,
 not during registration. Return `None` to omit a line.
 
-- Lines follow registration order on native and wasm, on clients and dedicated servers.
+- Lines follow registration order on clients and dedicated servers.
 - Callbacks run on a separate thread. The report waits at most two seconds for headers and
   another two seconds for system-detail sections.
-- A callback that panics, traps or times out produces `~~ERROR~~`; the report is written.
+- A callback that panics or times out produces `~~ERROR~~`; the report is written.
 - Callbacks belonging to the mod blamed for the crash are not called.
 - Control characters become spaces, and each value is limited to 4096 bytes on one line.
 
@@ -71,7 +67,7 @@ not during registration. Return `None` to omit a line.
 
 If your native runtime hosts other packages, declare their IDs with
 `mod_api::content::crash::ConvertedPackages::new(runtime_id, ids)`. Obtain a handle with
-`packages.package(id)`, then call its `enter(export, site)` method around the guest call.
+`packages.package(id)`, then call its `enter(export, site)` method around the converted package’s call.
 
 The scope adds `in converted package <id>, export <export>, call site <site>` below the runtime's
 `in native mod` line. Nested scopes restore the previous attribution on return and panic unwind.

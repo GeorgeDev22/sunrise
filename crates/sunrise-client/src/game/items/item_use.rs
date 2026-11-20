@@ -497,8 +497,26 @@ impl Game<'_> {
                 .player
                 .as_ref()
                 .is_some_and(|p| p.health.food.food < 20);
+        if !mod_api::__private::enabled_listened(mod_api::HookId::CanEat) {
+            return vanilla;
+        }
+        // The shared resolver's guards: no fake actor, a placed online guest,
+        // the integrated player only on the serving side.
+        let player = self.local_player().or_else(|| {
+            let uuid = self.lan_acting_uuid.or_else(|| {
+                self.level
+                    .player_uuid
+                    .map(sunrise_client::lan::playerdata::ints_uuid)
+            })?;
+            let entity = self.player_lookup_entity(uuid)?;
+            Some(mod_api::__private::game::player_ref(
+                mod_api::EntityRef::new(self.native_lifecycle.epoch()?, entity),
+                uuid,
+            ))
+        });
+        let Some(player) = player else { return vanilla };
         let mut answer = None;
-        self.native_can_eat(stack, vanilla, &mut answer);
+        self.native_can_eat(player, stack, vanilla, &mut answer);
         answer.unwrap_or(vanilla)
     }
 }
@@ -1235,6 +1253,10 @@ pub(super) mod interact_vibration_tests {
             )
             .unwrap(),
         );
+        game.reset_entity_residency();
+        game.native_lifecycle
+            .begin_open(mod_api::Authority::IntegratedServer);
+        super::super::native_entity_refs::tests::bind_local_player(&mut game, 41, 123);
         *game.held_mut() = Some(ItemStack::new(held, 1));
         crate::game::dispense_fixture::start_recording();
         RECORDING.set(true);
@@ -1293,6 +1315,15 @@ pub(super) mod interact_vibration_tests {
                 host: &dyn mod_api::Host,
                 event: &mut CanEatEvent<'_>,
             ) -> Option<bool> {
+                assert_eq!(event.player.entity().id(), 41);
+                assert_eq!(
+                    event.player.food(host).unwrap().level,
+                    if self.0.load(Ordering::Relaxed) < 4 {
+                        20
+                    } else {
+                        10
+                    }
+                );
                 let call = self.0.fetch_add(1, Ordering::Relaxed);
                 if event
                     .stack

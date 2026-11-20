@@ -1,11 +1,8 @@
 name: daily
 run-name: daily ${{ inputs.commit || github.sha }}${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run || github.ref != 'refs/heads/main') && ' (dry run)' || '' }}
 # The daily tier (CI tiers, owner 2026-11-13; docs/release-flow.md "Daily run"): every in-game test, once a day on
-# main's head and by root's dispatch. Its legs include the ignored-tests data shards, the wasm fixture and guest
-# stacks, fn-replace-check, the game's Windows runtime-lease tests (windows-runtime-leases.yml), cargo-sunrise-mod's
-# archives for every platform (cargo-sunrise-mod-build.yml; a pull request builds only Linux x86_64), the wasm std
-# member's names built on Linux and on Windows (wasm-std-names.yml), the machine sample built against this API
-# (machine-sample.yml) and the prebuilt SDK of the commit (prebuilt-game-build.yml), which the nightly needs. The SDK's
+# main's head and by root's dispatch. Its legs include the ignored-tests data shards, fn-replace-check, the game's
+# Windows runtime-lease tests, cargo-sunrise-mod's platform archives, the machine sample and the prebuilt SDK. The SDK's
 # Linux and Windows client jobs run the native linkage probe before packing.
 # The summary then moves the tag `daily-green` to the commit when every leg passed, or files one issue per failing
 # test (tools/ci/daily_summary.py), and on all green the nightly is published from that commit (release.yml).
@@ -130,12 +127,6 @@ jobs:
     uses: ./.github/workflows/ignored-tests.yml
     with:
       commit: ${{ needs.resolve.outputs.commit }}
-  wasm-mods:
-    needs: resolve
-    if: needs.resolve.outputs.skip == 'false'
-    uses: ./.github/workflows/wasm-mods.yml
-    with:
-      commit: ${{ needs.resolve.outputs.commit }}
   # Against this run's own SDK (the sdk job's legs, or sdk-<sha> when that is already released), signed with a
   # throwaway key that only the debug-assertions launcher it builds trusts. It reads only the Linux legs, so it waits
   # for the sdk job (the Linux legs) alone, not for sdk-windows-macos: macOS finished 53 minutes after Linux in daily
@@ -150,6 +141,21 @@ jobs:
     with:
       commit: ${{ needs.resolve.outputs.commit }}
       self_hosted: ${{ needs.resolve.outputs.self_hosted }}
+  # The modding book's start pages run as a reader would, with the mod tool alone on a runner with no launcher: the
+  # install page against the published release, then the mod pages with the tool built from this commit against this
+  # run's own SDK (as fn-replace-check; never the previous Nightly's, whose red could block the Nightly that clears it).
+  # An ordinary leg. Like fn-replace-check it waits for the Linux legs alone and runs when that job failed too.
+  book-quickstart:
+    needs: [resolve, sdk]
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.skip == 'false' }}
+    permissions:
+      contents: read
+      actions: read  # its routing reads this attempt's creation or start time (tools/ci/dyna_ci_route.sh)
+    uses: ./.github/workflows/book-quickstart.yml
+    with:
+      commit: ${{ needs.resolve.outputs.commit }}
+      self_hosted: ${{ needs.resolve.outputs.self_hosted }}
+      own_sdk: true
   # The game's Windows tests that start child processes: the runtime leases and the `windows` daily rows.
   windows-runtime-leases:
     needs: resolve
@@ -164,14 +170,6 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/cargo-sunrise-mod-build.yml
-    with:
-      commit: ${{ needs.resolve.outputs.commit }}
-  # The wasm std member built on Linux and on Windows has exactly the same import and export name lists
-  # (wasm-std-names.yml).
-  wasm-std-names:
-    needs: resolve
-    if: needs.resolve.outputs.skip == 'false'
-    uses: ./.github/workflows/wasm-std-names.yml
     with:
       commit: ${{ needs.resolve.outputs.commit }}
   # sunrise-org/sunrise-machine-sample at its pin, compiled against this commit's mod API: a red means the sample must
@@ -222,7 +220,7 @@ jobs:
   summary:
     # The resolved commit names the job: what a scheduled run's lookup (daily_summary.py --seen) matches.
     name: summary ${{ needs.resolve.outputs.commit }}${{ needs.resolve.outputs.dry_run == 'true' && ' (dry run)' || '' }}
-    needs: [resolve, shards, wasm-mods, fn-replace-check, windows-runtime-leases, cargo-sunrise-mod, wasm-std-names,
+    needs: [resolve, shards, fn-replace-check, book-quickstart, windows-runtime-leases, cargo-sunrise-mod,
             machine-sample, sdk, sdk-windows-macos, parity]
     # Not on a cancelled run: its legs did not fail, they were stopped, and a stopped leg says nothing about the commit.
     if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.skip == 'false' }}

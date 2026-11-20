@@ -83,8 +83,8 @@ impl crate::RegistrationContext {
     /// at a character boundary; shorter reasons are preserved verbatim.
     /// All this mod's declarations from this registration are discarded, including
     /// later declarations, without adding their validation errors to the report.
-    /// Other mods' declarations are unchanged. Native and wasm use the same
-    /// admission path. Returning from `Hooks::register` immediately is recommended.
+    /// Other mods' declarations are unchanged. Returning from `Hooks::register` immediately
+    /// is recommended.
     pub fn refuse(&self, reason: &str) {
         let mut reason_slot = self.self_refusal.lock().unwrap_or_else(|p| p.into_inner());
         if reason_slot.is_none() {
@@ -112,8 +112,7 @@ impl crate::RegistrationContext {
 }
 
 /// The engine consumes block/item declaration ownership refusals before loading
-/// resources. Guest dispatch retains invalid output so the owning host boundary
-/// sees and refuses it as well, rather than silently dropping a declaration.
+/// resources.
 // hidden: engine admission plumbing, re-exported through __private for the loader.
 #[doc(hidden)]
 pub fn take_declaration_refusals(context: &crate::RegistrationContext) -> Vec<String> {

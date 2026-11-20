@@ -1311,15 +1311,17 @@ impl Menu {
             return None;
         }
         if take.xp < 0 {
-            self.state.ground = Some(crate::stations::grindstone_xp_base(
-                env.enchantments,
-                take.top.as_ref(),
-                take.bottom.as_ref(),
-            ));
+            self.state.ground = Some(take.vanilla_amount(env));
         }
+        let xp = (take.xp >= 0).then_some(take.xp);
+        self.grindstone_take_inputs(env, take);
+        xp
+    }
+
+    /// Replace the inputs and run `slotsChanged`, after the server has awarded experience.
+    pub fn grindstone_take_inputs(&mut self, env: &Env, take: GrindstoneTake) {
         self.put(env, 0, take.new_top);
         self.put(env, 1, take.new_bottom);
-        (take.xp >= 0).then_some(take.xp)
     }
 
     /// `AnvilMenu.setItemName` (`ServerboundRenameItemPacket`): false when
@@ -2826,6 +2828,11 @@ impl Menu {
 impl Menu {
     /// `MerchantContainer.updateSellItem`.
     pub fn merchant_update(&mut self, env: &Env) {
+        self.merchant_update_result(env.items);
+    }
+
+    /// Update a detached menu after an accepted edit of its live offer.
+    pub fn merchant_update_result(&mut self, items: &Items) {
         self.touch();
         let Some(m) = self.state.merchant.as_mut() else {
             return;
@@ -2843,7 +2850,7 @@ impl Menu {
         }
         if !m.offers.is_empty() {
             let (active, result) =
-                crate::merchant::sell_item(&m.offers, env.items, a, b, Some(m.selection_hint));
+                crate::merchant::sell_item(&m.offers, items, a, b, Some(m.selection_hint));
             m.active = active;
             m.future_xp = if result.is_some() {
                 active.map_or(0, |i| m.offers[i].xp)
@@ -3092,6 +3099,70 @@ pub(crate) mod tests {
         let mut menu = Menu::new(kind);
         menu.creative = true;
         test(&env, &mut menu);
+    }
+
+    #[test]
+    fn a_handled_replacement_goes_through_the_clicked_slots_rules() {
+        bare_env(|env| {
+            let mut menu = Menu::new(Kind::Grindstone);
+            let handled = |clicked| StackedOutcome {
+                canceled: true,
+                handled: true,
+                clicked: Some(clicked),
+                ..StackedOutcome::default()
+            };
+            // The result slot's onTake would not run: nothing goes in, nothing is taken out.
+            menu.set_slot(env, 2, stack("dirt", 1));
+            for clicked in [None, stack("stone", 1)] {
+                let outcome = handled(clicked);
+                let env = Env {
+                    stacked: Some(&outcome),
+                    ..*env
+                };
+                menu.click(&env, 2, 0, Input::Pickup).unwrap();
+                assert!(outcome.refused.get());
+                assert_eq!(menu.slot(2), stack("dirt", 1).as_ref());
+            }
+            // An input takes a damageable item the slot's own rules admit, and only that.
+            let outcome = handled(stack("dirt", 1));
+            let env = Env {
+                stacked: Some(&outcome),
+                ..*env
+            };
+            menu.click(&env, 0, 0, Input::Pickup).unwrap();
+            assert!(outcome.refused.get());
+            assert_eq!(menu.slot(0), None);
+        });
+    }
+
+    #[test]
+    fn a_handled_replacement_cannot_skip_a_potion_slots_take_effects() {
+        bare_env(|env| {
+            let mut menu = Menu::new(Kind::Brewing);
+            menu.brewed_potion_hook = true;
+            let potion = stack("potion", 1);
+            menu.set_slot(env, 0, potion.clone());
+            let answer = StackedOutcome {
+                canceled: true,
+                handled: true,
+                clicked: Some(None),
+                carried: Some(potion.clone()),
+                ..StackedOutcome::default()
+            };
+            let handled = Env {
+                stacked: Some(&answer),
+                ..*env
+            };
+            menu.click(&handled, 0, 0, Input::Pickup).unwrap();
+            assert_eq!(menu.slot(0), potion.as_ref());
+            assert_eq!(menu.carried, None);
+            assert!(menu.brewed_potion_takes.is_empty());
+
+            menu.click(env, 0, 0, Input::Pickup).unwrap();
+            assert_eq!(menu.slot(0), None);
+            assert_eq!(menu.carried, potion);
+            assert_eq!(menu.brewed_potion_takes, [stack("potion", 1).unwrap()]);
+        });
     }
 
     #[test]
@@ -4034,6 +4105,7 @@ pub(crate) mod tests {
             slots: 2,
             data_slots: 0,
             results: vec![],
+            inputs: Vec::new(),
             links: None,
             crafting: None,
         })));
@@ -4069,6 +4141,7 @@ pub(crate) mod tests {
             slots: 1,
             data_slots: 0,
             results: vec![],
+            inputs: Vec::new(),
             links: None,
             crafting: None,
         })));
@@ -4191,24 +4264,30 @@ pub(crate) mod tests {
         };
         assert!(!trapdoor_ladder(&before));
         assert!(trapdoor_ladder(&after));
-        // A block's friction reads it too; an answer that is NaN or outside 0..=2 keeps the
-        // block's own.
+        // A block's friction reads it too; an answer that is NaN keeps the block's own
+        // and a finite one is used as given.
         let friction = |context: &LoopContext, kind: &str| {
-            let mut friction = 0.6;
-            crate::motion::native_friction(
-                context,
-                1,
-                kind,
+            use sunrise_world::registry::BlockStateId;
+            let world = crate::world::World::new(BlockStateId(0), 0);
+            crate::motion::read_friction(
+                crate::motion::FrictionLevel {
+                    context,
+                    world: &world,
+                    registry: crate::test_fixtures::air_registry(),
+                    side: crate::motion::dry_side(),
+                    coefficient: &|_| Some(0.6),
+                },
+                Some((1, kind)),
                 sunrise_core::position::BlockPos::new(0, 0, 0),
-                sunrise_world::registry::BlockStateId(0),
-                &mut friction,
-            );
-            friction
+                BlockStateId(0),
+                0.6,
+            )
+            .unwrap()
         };
         assert_eq!(friction(&before, "minecraft:player"), 0.6);
         assert_eq!(friction(&after, "minecraft:player"), 0.98);
         assert_eq!(friction(&after, "minecraft:cow"), 0.6);
-        assert_eq!(friction(&after, "minecraft:item"), 0.6);
+        assert_eq!(friction(&after, "minecraft:item"), 3.0);
         // The edge backoff and the fluid current read it too.
         let movement = |context: &LoopContext| {
             let (mut staying, mut flow) = (false, [0.25, 0.0, 0.0]);
@@ -4254,7 +4333,7 @@ pub(crate) mod tests {
         assert_eq!(step(&after, "minecraft:player", Step), answered);
         assert_eq!(step(&after, "minecraft:cow", Step), own);
         assert_eq!(step(&after, "minecraft:player", Place), own);
-        // Fall, trample, jump and the ender teleport read it as well.
+        // Fall, jump and the ender teleport read it as well.
         let landing = |context: &LoopContext| {
             let (mut distance, mut multiplier, mut cancel) = (3.0, 1.0, false);
             crate::landing::native_living_fall(
@@ -4265,8 +4344,6 @@ pub(crate) mod tests {
                 &mut multiplier,
                 &mut cancel,
             );
-            let mut trample = false;
-            crate::landing::native_farmland_trample(context, 1, [0, 0, 0], 0, 1.0, &mut trample);
             let (mut target, mut teleport) = ([1.0, 2.0, 3.0], false);
             crate::mobs::enderman::native_ender_entity_teleport(
                 context,
@@ -4277,30 +4354,15 @@ pub(crate) mod tests {
                 &mut teleport,
             );
             crate::motion::native_living_jump(context, 1, "minecraft:cow", [0.0, 0.42, 0.0]);
-            (distance, multiplier, cancel, trample, target, teleport)
+            (distance, multiplier, cancel, target, teleport)
         };
-        assert_eq!(
-            landing(&before),
-            (3.0, 1.0, false, false, [1.0, 2.0, 3.0], false)
-        );
-        assert_eq!(
-            landing(&after),
-            (4.0, 2.0, false, true, [1.0, 3.0, 3.0], true)
-        );
+        assert_eq!(landing(&before), (3.0, 1.0, false, [1.0, 2.0, 3.0], false));
+        assert_eq!(landing(&after), (4.0, 2.0, false, [1.0, 3.0, 3.0], true));
         assert_eq!(JUMPS.get(), 2);
-        // Heal, breathe and drown read it as well.
+        // Heal and drown read it as well.
         let health = |context: &LoopContext| {
             let (mut amount, mut cancel) = (2.0, false);
             crate::hunger::native_living_heal(context, 1, &mut amount, &mut cancel);
-            let (mut can_breathe, mut consume, mut refill) = (true, 1, 4);
-            crate::breathing::native_living_breathe(
-                context,
-                1,
-                "minecraft:zombie",
-                &mut can_breathe,
-                &mut consume,
-                &mut refill,
-            );
             let (mut drowning, mut damage, mut cancel_drown) = (false, 2.0, false);
             crate::breathing::native_living_drown(
                 context,
@@ -4311,18 +4373,10 @@ pub(crate) mod tests {
                 &mut 8,
                 &mut cancel_drown,
             );
-            (amount, cancel, can_breathe, consume, drowning, damage)
+            (amount, cancel, drowning, damage)
         };
-        assert_eq!(health(&before), (2.0, false, true, 1, false, 2.0));
-        assert_eq!(health(&after), (3.0, true, false, 5, true, 3.0));
-        // A listener that lets a cod breathe: on land for 300 ticks it keeps
-        // full air and takes no damage.
-        let mut air = 300;
-        for _ in 0..300 {
-            let hurt = crate::breathing::own_air(&after, 1, "minecraft:cod", &mut air, false, 300);
-            assert_eq!(hurt, None);
-        }
-        assert_eq!(air, 300);
+        assert_eq!(health(&before), (2.0, false, false, 2.0));
+        assert_eq!(health(&after), (3.0, true, true, 3.0));
         // A listener that sets `bubble_count` to 0: a drowning player takes the
         // damage and shows no bubbles (`drown_bubbles` sends nothing for 0).
         let gasp = crate::breathing::Breath {
@@ -4349,12 +4403,17 @@ pub(crate) mod tests {
             ),
             (0, true)
         );
-        let mut air = -19;
-        let hurt = crate::breathing::own_air(&after, 4, "minecraft:salmon", &mut air, false, 300);
-        assert_eq!((hurt, air), (Some(3.0), 0));
-        let mut air = -19;
-        let hurt = crate::breathing::own_air(&after, 4, "minecraft:dolphin", &mut air, false, 4800);
-        assert_eq!((hurt, air), (Some(3.0), 0));
+        // Water animals out of water: the mods' damage comes back and the air is zero.
+        let out_of_water = |kind: &str, max: i32| {
+            let mut air = -19;
+            let step = crate::breathing::AirStep::own(air, max, false);
+            let hurt = step
+                .finish(&after, 4, kind, &mut air, step.vanilla)
+                .and_then(|drowning| drowning.damage);
+            (hurt, air)
+        };
+        assert_eq!(out_of_water("minecraft:salmon", 300), (Some(3.0), 0));
+        assert_eq!(out_of_water("minecraft:dolphin", 4800), (Some(3.0), 0));
         // A server's block menu: the game's `stillValid` answer arrives first and
         // the parts on its mod menu type may change it; a vanilla menu type never
         // asks them, and a menu whose block entity is gone closes without asking.
@@ -4364,6 +4423,7 @@ pub(crate) mod tests {
                 slots: 27,
                 data_slots: 0,
                 results: vec![],
+                inputs: Vec::new(),
                 links: None,
                 crafting: None,
             }));
@@ -4441,6 +4501,37 @@ pub(crate) mod tests {
             false
         ));
         assert_eq!(asked(), 2);
+        // A mod menu with no backing block (`Slots::Native`) is asked too, with no position even
+        // though its opener supplied a screen position, and the part's answer decides.
+        let blockless = |context: &LoopContext| {
+            let world = crate::world::World::new(sunrise_world::registry::BlockStateId(0), 0);
+            let guest = crate::lan::menu::tests::guest();
+            let menu = crate::lan::menu::Menu {
+                window: 1,
+                kind: 2,
+                pos: Some(far),
+                slots: crate::lan::menu::Slots::Native,
+                size: 27,
+                state: 0,
+                sent: Vec::new(),
+                drag: None,
+                sent_data: Vec::new(),
+                hidden: Vec::new(),
+                mod_type: Some(mod_type),
+                registry_id: "test:rules".into(),
+                craft: None,
+                links: Vec::new(),
+                asks_still_valid: crate::lan::menu::asks_still_valid(Some(mod_type), "test:rules"),
+            };
+            menu.still_valid(context, &world, &guest)
+        };
+        assert!(blockless(&after));
+        assert!(!blockless(&before));
+        assert_eq!(asked(), 4);
+        assert_eq!(
+            crate::native_client_hooks::test_hooks::STILL_VALID_POS.get(),
+            None
+        );
         std::fs::remove_dir_all(&settings).unwrap();
     }
 
@@ -4531,6 +4622,7 @@ pub(crate) mod tests {
             slots: 4,
             data_slots: 0,
             results: vec![3],
+            inputs: Vec::new(),
             links: None,
             crafting: None,
         })))
@@ -4638,6 +4730,7 @@ pub(crate) mod tests {
             slots: 10,
             data_slots: 0,
             results: vec![],
+            inputs: Vec::new(),
             links: None,
             crafting: Some(crate::containers::ModCrafting {
                 grid: 1,

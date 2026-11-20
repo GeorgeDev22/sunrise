@@ -430,7 +430,6 @@ items::creative_search_items
 items::creative_stack_key
 items::creative_tab_change
 items::creative_tab_entries
-items::creative_tabs
 items::dispense_default
 items::dispense_with_remainder
 items::drop_at
@@ -910,14 +909,11 @@ player_food::player_needs_food
 player_food::player_set_exhaustion
 player_food::player_set_food_level
 player_food::player_set_saturation
-player_interaction::player_ack_block_changes
 player_interaction::player_attack_strength_scale
 player_interaction::player_can_harm
 player_interaction::player_destroy_block
 player_interaction::player_has_correct_tool_for_drops
 player_interaction::player_may_use_item_at
-player_interaction::player_place_block
-player_interaction::player_show_block
 player_interaction::player_within_entity_reach
 player_inventory::player_drop_stack
 player_inventory::player_ender_chest
@@ -981,7 +977,6 @@ player_session::player_name
 player_session::player_permission_level
 player_session::player_persistent_data
 player_session::player_profile
-player_session::player_sees
 player_session::player_set_nickname
 player_session::player_set_persistent_data
 player_session::player_text_filtering

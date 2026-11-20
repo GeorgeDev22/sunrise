@@ -30,7 +30,7 @@ impl Game<'_> {
 
 /// [`Game::structures_reaching_where`] over what it reads: the world's chunks and, asked only
 /// when a chunk refers to a structure, the terrain that locates the starts.
-pub(super) fn structures_reaching_in(
+pub(in crate::game) fn structures_reaching_in(
     world: &sunrise_client::world::World,
     locator: &dyn Fn() -> Option<std::sync::Arc<sunrise_client::vanillagen::VanillaTerrain>>,
     pos: [i32; 3],

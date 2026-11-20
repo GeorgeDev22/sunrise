@@ -50,7 +50,7 @@ same facts is `StateFacts` in `crates/sunrise-items/src/blocks.rs`.
 
 | Method | Verdict | Sunrise | Notes |
 | --- | --- | --- | --- |
-| `getFriction(state, level, pos, entity)` | Covered | `BlockPart::friction` (`hooks/friction.rs`) | Asked where an entity on the block reads its friction, with the entity's id and type and the position, from the block's own value; an answer that is not finite or is outside `0..=2` is dropped. Players, mobs, armor stands, items, experience orbs, boats and leads. The part answers from its inputs, without the level. |
+| `getFriction(state, level, pos, entity)` | Covered | `BlockPart::friction` (`hooks/friction.rs`), `LevelRef::friction` | Reads a state's friction in a borrowed level view, optionally for an entity. The state need not occupy the position, so a part can ask for a material's answer there. Recursive cycles are refused, and any finite answer is used as given and a non-finite one keeps the state's own value. Players, mobs, armor stands, items, experience orbs, boats and leads. |
 | `hasDynamicLightEmission(state)` | Covered | `BlockProperties.dynamic_light` → `StateFacts.dynamic_light` | Content data, per block, not per state: it sits on the block's row, so every state of a declared block is asked and a block with mixed states pays for all of them. An undeclared block is never asked, where NeoForge's declaration only gates a chunk's first lighting. |
 | `getLightEmission(state, level, pos)` | Covered | `BlockPart::light_emission` (`hooks/light_emission.rs`), for a block declaring `dynamic_light` | Asked with the position as a chunk comes in, as an edit sets the block and at `LevelRef::check_light` (`LevelLightEngine.checkBlock`), where vanilla's engine reads emission again, only on the thread that owns the level. A client also asks again for the sections a server's light update changed, at most once per cell per update, a Sunrise addition. Not asked for the block's own rendered light, ambient occlusion or the spawn rule, which take the state's light, nor from a light worker. The answer is clamped to 15 at the engine, where NeoForge clamps only its light manager's stored value. Without `dynamic_light`, `BlockProperties.light` is static. |
 | `ignitedByLava(state, level, pos, direction)` | Covered | `BlockPart::ignited_by_lava` (`hooks/ignited_by_lava.rs`) | Asked from the face toward the air lava would light, where `LavaFluid.isFlammable` reads it; with no answer the template's `IGNITED_BY_LAVA` state flag (`StateFacts`) decides. No content field sets it. |
@@ -298,8 +298,8 @@ cargo test -p sunrise-client --lib game::native_hooks::on_block_placed_by_tests:
 
 Menu types are content data (`MenuType` in `crates/sunrise-mod-package/src/content.rs`, files under
 `data/<id>/sunrise/menu/`), and the game's own menu engine opens them (`menu::Kind::Mod`). A `MenuPart` can answer
-slot rules and whether a player's block menu stays open (`menu_still_valid`, vanilla's `stillValid`), not
-construct a menu.
+slot rules and whether a player's mod menu stays open, with or without a backing block (`menu_still_valid`,
+vanilla's `stillValid`), not construct a menu.
 
 | Method | Verdict | Sunrise | Notes |
 | --- | --- | --- | --- |

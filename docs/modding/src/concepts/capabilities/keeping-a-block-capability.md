@@ -35,8 +35,7 @@ they were at the lookup:
 - **No provider said its answer there changed.** The level keeps a capability generation per
   position (`level.capability_generation(host, pos)`), which `invalidate_capabilities` moves on;
   see below.
-- **No mod was switched on or off since.** The count comes from the game through the host, so a
-  wasm mod's cache sees the same switches as a native one.
+- **No mod was switched on or off since.** The count comes from the game through the host.
 
 When any of these differs, `get` looks the capability up again with `LevelRef::capability`. A
 successful poll allocates nothing and asks no provider.

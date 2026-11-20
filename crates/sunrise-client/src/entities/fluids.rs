@@ -567,6 +567,7 @@ mod tests {
             None,
             &fluids,
             crate::test_resources::server_loop_context(),
+            sunrise_client::motion::dry_side(),
             &mut |_, _| {},
         ));
         assert_eq!(still.position.x, at.x);
@@ -583,6 +584,7 @@ mod tests {
             None,
             &fluids,
             crate::test_resources::server_loop_context(),
+            sunrise_client::motion::dry_side(),
             &mut |_, _| {},
         ));
         // Current pushes the orb, then underwater and air drag each widen
@@ -602,6 +604,7 @@ mod tests {
                 None,
                 &fluids,
                 crate::test_resources::server_loop_context(),
+                sunrise_client::motion::dry_side(),
                 &mut |_, _| {},
             );
         }
@@ -669,6 +672,7 @@ mod tests {
             None,
             &fluids,
             crate::test_resources::server_loop_context(),
+            sunrise_client::motion::dry_side(),
             &mut |_, _| {},
         ));
         assert!(

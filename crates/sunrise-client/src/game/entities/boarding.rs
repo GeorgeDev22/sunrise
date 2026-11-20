@@ -70,6 +70,10 @@ impl Game<'_> {
                 .filter(|m| m.extra.mount == Some(vehicle) && !m.removed)
                 .map(|m| (m.extra.vehicle_order, m.id, false)),
         );
+        seats.extend(
+            self.general_passengers(vehicle)
+                .map(|row| (row.vehicle_order, row.id, false)),
+        );
         seats.sort_by_key(|&(place, ..)| place);
         seats
     }

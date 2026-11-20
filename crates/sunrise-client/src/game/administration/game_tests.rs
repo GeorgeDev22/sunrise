@@ -1765,25 +1765,55 @@ pub(in crate::game) mod tests {
     pub(in crate::game) fn server_game<'a>(
         resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>,
     ) -> Game<'a> {
+        build_server_game(resources, false)
+    }
+
+    /// Puts the process-wide block namespaces back as it found them.
+    pub(in crate::game) struct Published(Option<Vec<String>>);
+    impl Drop for Published {
+        fn drop(&mut self) {
+            sunrise_client::save::level_mods::set_block_namespaces(self.0.take());
+        }
+    }
+
+    /// [`server_game`] over the loading screen's path, which leaves the
+    /// process-wide language and UI metadata alone (its rest tables load on a
+    /// worker joined here), with the block namespaces it publishes put back
+    /// when the returned guard drops. Bind the guard before the game.
+    pub(in crate::game) fn isolated_server_game<'a>(
+        resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>,
+    ) -> (Published, Game<'a>) {
+        let published = Published(sunrise_client::save::level_mods::block_namespaces());
+        (published, build_server_game(resources, true))
+    }
+
+    fn build_server_game<'a>(
+        resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>,
+        menu: bool,
+    ) -> Game<'a> {
         use crate::game::*;
         let root = std::path::PathBuf::from(
             std::env::var_os("SUNRISE_TEST_RESOURCES")
                 .expect("set SUNRISE_TEST_RESOURCES to prepared resources"),
         );
         let settings = Settings::default();
-        let loaded = load_resources(
+        let mut gui = None;
+        let mut loaded = load_resources(
             sunrise_assets::resource_source::ResourceRoot::directory(root.clone()),
             Vec::new(),
             None,
             &root,
             &settings,
             std::time::Instant::now(),
-            false,
+            menu,
             execution_role::ExecutionRole::IntegratedServer,
             &Progress::new(),
-            &mut |_, _| unreachable!(),
+            &mut |ui, _| gui = Some(ui),
         )
         .unwrap();
+        if let Some(rest) = loaded.rest_loader.take() {
+            rest.finish().unwrap();
+        }
         let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
         options.resources = root.clone();
         options.execution_role = execution_role::ExecutionRole::IntegratedServer;
@@ -1791,7 +1821,7 @@ pub(in crate::game) mod tests {
         let mut game = Game::new(
             res,
             loaded.pack,
-            loaded.gui.unwrap(),
+            gui.or(loaded.gui).unwrap(),
             options,
             settings,
             Audio::silent(&sunrise_assets::resource_source::ResourceSource::directory(

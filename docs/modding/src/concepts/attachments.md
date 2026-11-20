@@ -1,6 +1,6 @@
 # Attachments
 
-Declare every attachment during `Hooks::register`, for native and wasm packages:
+Declare every attachment during `Hooks::register`:
 
 ```rust,ignore
 let _ = registrar.register_attachment_type("example:counter", false);
@@ -62,7 +62,7 @@ keeps a copy for any holder it is asked about (see the sync paragraph below).
 without a codec) and `InvalidSyncPolicy` (sync without a codec), `HolderBusy` (storage temporarily
 unavailable; retry after the pass) and `UnsupportedHolder` (the holder family has
 no attachment storage; retrying does not help).
-Use the same typed methods in native and wasm mods. `host.attachments()` exposes
+`host.attachments()` exposes
 the host's `AttachmentStore`. Reading clones the value; copying a holder's data
 shares its stored values without cloning them.
 
@@ -96,9 +96,6 @@ can make the next live mutation copy row metadata and shared pointers once;
 retaining many batches keeps their old bindings alive. Values from an incompatible Rust type domain report `TypeMismatch` rather than
 falling back to saved decoding.
 
-
-
-For injection listeners, see [The typed API from injection listeners](injections/typed-api.md).
 
 ## Holders and persistence
 
@@ -173,7 +170,7 @@ spawn carries its synced entries).
 `event.player` UUID. During that hook, `event.original.attachment(host, &COUNTER)` reads
 the old value even when `copy_on_death` is false or the type has no codec;
 `COUNTER.get(host, Holder::Player(event.player))` reads the replacement's retained value
-or fresh default. This works on death and on return from the End, for native and wasm.
+or fresh default. This works on death and on return from the End.
 The original's `position`, `dimension`, `level`, and `inventory_slot` methods read the
 same pre-copy player. Inventory slot numbers are 0–35 for the main inventory,
 100–103 for boots through helmet, and -106 for the off hand. Every original read expires

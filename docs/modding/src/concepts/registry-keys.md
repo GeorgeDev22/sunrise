@@ -8,7 +8,7 @@ Request existing entries inside `Hooks::register` with `r.block_key(id)`,
 - Requests resolve after every mod's content is known, so another mod can supply an entry.
 - An unknown request refuses the load with the requesting mod and canonical ID, even if
   you never attach the key to a Part.
-- Keys are opaque `u32` slots on native and wasm, not engine numeric IDs.
+- Keys are opaque `u32` slots, not engine numeric IDs.
 - `key.id(host)` returns an owned canonical `String` for diagnostics. It needs a game-backed
   host; an invalid slot is a boundary error, not an empty name.
 
@@ -18,7 +18,7 @@ world numeric mappings and tag membership are separate reloadable data.
 
 ## Item registry numbers
 
-`ItemKey::registry_id(host)` returns `Option<u32>` on either side and on both targets.
+`ItemKey::registry_id(host)` returns `Option<u32>` on either side.
 This is the number the game uses for dropped-item scatter seeds, not the key's opaque slot.
 It returns `None` before registry completion or for an unresolved item. It reads this side's
 prepared registry, with mod items numbered after vanilla in content-plan order. A connected
@@ -35,19 +35,21 @@ Add the stack's damage separately when reproducing vanilla's nonempty stack scat
 
 `EntityRef::kind(host)` and the handles that delegate to it return
 `Option<EntityTypeKey>`, using the existing entity-type registry. The key is a
-copyable scalar on native and wasm; compare it with a retained key instead of
+copyable scalar; compare it with a retained key instead of
 allocating and comparing a type-name string on every read. A stale or missing
-entity still returns `None`. There is no separate equipment-only type read.
+entity still returns `None`. A native general row returns its declared type.
+There is no separate equipment-only type read.
 
 After the registry is available, resolve the type keys your Part needs once and
-retain them. `host.entity_type_keys()` enumerates that registry; `key.id(host)`
-explicitly requests its canonical namespaced name. Name resolution returns an
+retain them. `host.entity_type_keys()` enumerates built-in and content types in
+registry order, then native general types by declaring mod and type id.
+`key.id(host)` explicitly requests its canonical namespaced name. Name resolution returns an
 owned diagnostic string and can allocate. Persist the name, never the scalar slot.
 For example, retain the zombie key at setup, then compare
 `entity.kind(host) == Some(zombie_key)` in a predicate.
 
 The key derives `Wire` through its scalar slot: host decoding checks the registered
-slot, while a wasm guest carries the host-issued key without a separate name table.
+slot.
 
 This is a clean break from `Option<String>`: callers that need textual names must
 request `.id(host)` explicitly. `UnspawnedMobRef::kind` keeps its separate scoped
@@ -68,7 +70,7 @@ use this owned `BlockState`, including all properties. Structure reads preserve 
 selection, mirror-then-rotation and placement order; an unavailable state mapping refuses the
 whole snapshot with `None`. `DrawContext::draw_scene` checks the entire scene before drawing:
 an unknown key, invalid ordinal or unavailable mapping draws nothing, never a partial scene or
-a replacement air block. Native and wasm use the same values and refusal rules.
+a replacement air block.
 
 Tint callbacks receive immutable block metadata explicitly, without a `Host`.
 Local state ordinals retain their meaning when world numeric state IDs are reordered.
@@ -114,7 +116,7 @@ with the host: `host.block_key("minecraft:stone")`, `host.effect_key("mymod:rage
 blocks, effects, fluids and items. Names are full registry names; the lookup reads the completed
 registry and does not allocate, so a hook can call it. It returns `None` for a name the registry does
 not hold, and before the registry is complete, so a mod uses `r.block_key(id)` in `register`. These
-work on the client and the server, for native and wasm mods alike.
+work on the client and the server.
 
 ```rust
 fn resolve(host: &dyn mod_api::Host) {
@@ -188,7 +190,7 @@ levels are typed errors. A type without an engine matcher returns
 `RecipeLookupError::NotMatchable`, not an empty match. For mod-owned types, retain
 `recipes_of_type` once per load/reload and match that cached data **inside the mod**,
 with zero crossings per tick. Dynamic custom outputs and contextual predicates
-remain mod-owned; the host does not call guest code to match recipes.
+remain mod-owned; the host does not call mod code to match recipes.
 
 At publication, call `ingredient.item_keys(host)` once per ingredient to retain
 `Arc<[ItemKey]>` for local matching. This load-time read returns exactly the plain
@@ -221,8 +223,7 @@ Use API-owned values rather than importing engine or package-loader types.
 `LevelRef`, including in `server_about_to_start` and `server_starting`.
 It returns `Result<GameRuleValue, GameRuleReadError>`; an unknown identifier gives
 `GameRuleReadError::UnknownRule`. `ServerHost::game_rules()` lists every available
-rule and its current value by namespaced id. Both native and wasm mods can use
-these reads. Saved values and a new world's create-screen choices are installed
+rule and its current value by namespaced id. Saved values and a new world's create-screen choices are installed
 before the first server hook, without firing `game_rule_changed` for loading.
 Level reads use the same store once the requested level exists.
 
@@ -337,15 +338,19 @@ the engine's item table.
 zero, while `ItemStack::of(key)` makes one item. Count mutation refuses zero and arithmetic
 overflow. Registry-dependent maximum count and damage, including component overrides,
 are checked by the game when accepting a write; an oversized value is refused with a typed
-error, never silently clamped. This is the same boundary on native and wasm. Consuming
+error, never silently clamped. Consuming
 `split(n)` returns `StackSplit { taken, remainder }`, both optional; consuming `shrink(n)`
 returns the remainder or `None`. There is no empty-stack sentinel. Component descriptors
 read and write an optional owned NBT patch; a plain stack has no patch allocation.
 
-`host.tags()` and a restricted level host's `tags()` expose the same `Tags` service. Resolve
-a validated identifier once with `tags.key(&identifier)` and retain its `TagKey`. The runtime
-owns tag-name slots for the process; reload replaces membership, not names or key identity.
-`tags.is_in_tag(item_key, tag_key)` tests merged item membership. `tags.items(tag_key)`
+Resolve and retain a `TagKey` during `Hooks::register` with `r.tag_key("minecraft:logs")`,
+for example when building a Part or a recipe kind.
+A bare name uses the `minecraft` namespace; an invalid name refuses the mod at load.
+`host.tags()` and a restricted level host's `tags()` expose the same `Tags` service. Later,
+`tags.key(&identifier)` resolves the same key from a validated identifier. Naming a tag does
+not require it to have any members. Item, block and fluid tags share one name table; the
+membership method chooses the registry. Reload replaces membership, not key identity.
+`tags.is_in_tag(item_key, tag_key)` tests merged item membership. `tags.items(tag_key)`,
 `tags.blocks(tag_key)` and `tags.fluids(tag_key)` return registered keys in vanilla's member order. Unknown tags
 return false or empty lists. Clients read the tags sent by their server. Membership reads return `None` before
 authoritative tags are applied or if the relevant registry mapping is unavailable. Key resolution itself can be

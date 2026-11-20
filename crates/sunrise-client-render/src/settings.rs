@@ -714,7 +714,23 @@ impl Settings {
             ) {
                 log::warn!("Sunrise: {file} is not saved: {e}");
             }
-            self.mods.save(&crate::logging::shared_dir(dir));
+            if let Err(e) = self.mods.save(&crate::logging::shared_dir(dir)) {
+                log::warn!("Sunrise: {} is not saved: {e}", crate::mod_list::FILE);
+            }
+        }
+    }
+    /// Sets the picked shader pack, for the pack list and the toggle key alike: an empty pick
+    /// turns shaders off and keeps the last non-empty pick, a non-empty pick (or a switch to
+    /// another pack) becomes the last one too. The toggle key resumes exactly this last pick.
+    pub fn set_shader_pick(&mut self, new_key: &str) {
+        if new_key.is_empty() {
+            if !self.sunrise.shader_pack.is_empty() {
+                self.extras.last_shader_pack = self.sunrise.shader_pack.clone();
+            }
+            self.sunrise.shader_pack.clear();
+        } else {
+            self.sunrise.shader_pack = new_key.to_owned();
+            self.extras.last_shader_pack = new_key.to_owned();
         }
     }
     /// Volume of a sound source (master excluded).

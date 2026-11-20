@@ -1,28 +1,5 @@
-//! Concrete authoring extracted verbatim from the vocabulary layer.
+//! Native registration savepoint and rollback.
 use super::*;
-
-impl RegistrationRefusalRegistrar for PartRegistrar {
-    fn registration_refusal(&mut self, reason: String) {
-        if self.self_refusal.is_none() {
-            let context = crate::RegistrationContext::new();
-            context.refuse(&reason);
-            self.self_refusal = mod_vocab::__private::take_registration_refusal(&context);
-        }
-    }
-    fn registration_warning(&mut self, warning: crate::LoadingMessage) {
-        let kept = self
-            .warnings
-            .iter()
-            .filter(|(owner, _)| owner == self.mod_id)
-            .count();
-        if kept < mod_vocab::__private::MAX_LOADING_WARNINGS {
-            // A guest's message crosses the wire whole: cut its key and arguments again here.
-            let args: Vec<&str> = warning.args().iter().map(String::as_str).collect();
-            let warning = crate::LoadingMessage::new(warning.key(), &args);
-            self.warnings.push((self.mod_id.to_owned(), warning));
-        }
-    }
-}
 
 impl PartRegistrar {
     pub(crate) fn registration_checkpoint(&self) -> impl FnOnce(&mut Self) + use<> {
@@ -55,7 +32,6 @@ impl PartRegistrar {
                     registrar.recipe_book_filters = recipe_book_filters;
                     registrar.registered = registered;
                     registrar.entity_selector_bytes = entity_selector_bytes;
-                    registrar.self_refusal = None;
                 }
             }};
         }
@@ -216,36 +192,6 @@ mod tests {
         let many = crate::__private::registration_warnings("many");
         assert_eq!(many.len(), mod_vocab::__private::MAX_LOADING_WARNINGS);
         assert_eq!(many[15].args(), ["15"]);
-    }
-
-    #[test]
-    fn the_host_caps_and_cuts_what_a_guest_sends() {
-        use crate::RegistrationRefusalRegistrar;
-        let mut registrar = super::PartRegistrar::new("guest");
-        use crate::wire::{Reader, Wire, Writer};
-        let long = format!("{}é", "a".repeat(4095));
-        let args = vec![long.clone(); 20];
-        let mut wire = Writer::new();
-        long.put(&mut wire);
-        args.put(&mut wire);
-        let bytes = wire.into_bytes();
-        for _ in 0..=mod_vocab::__private::MAX_LOADING_WARNINGS {
-            // As the guest dispatch arm delivers it: the owner is the registrar's mod, not the message's.
-            let message = crate::LoadingMessage::take(&mut Reader::new(&bytes)).unwrap();
-            registrar.registration_warning(message);
-        }
-        assert_eq!(
-            registrar.warnings.len(),
-            mod_vocab::__private::MAX_LOADING_WARNINGS
-        );
-        assert!(
-            registrar
-                .warnings
-                .iter()
-                .all(|(owner, warning)| owner == "guest"
-                    && warning.key() == "a".repeat(4095)
-                    && warning.args() == vec!["a".repeat(4095); 20])
-        );
     }
 
     #[test]

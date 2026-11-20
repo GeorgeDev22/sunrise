@@ -439,6 +439,8 @@ impl Game<'_> {
                 drop_item: false,
                 fall_distance: 0.0,
                 on_ground: false,
+                fire_ticks: 0,
+                sync_velocity: false,
                 stuck: Vec3::ZERO,
                 damage: Default::default(),
                 saved: None,
@@ -1626,6 +1628,34 @@ mod entity_tick_tests {
     type Event = (bool, &'static str, Vec<u32>, Vec<String>, Vec<[f64; 3]>);
     type Heard = Arc<Mutex<Vec<Event>>>;
 
+    /// A server's `AddEntity` of an arrow, through the packet path that tracks it: a listener's
+    /// handle for a client entity resolves only for one the server told this client of.
+    fn add_arrow(game: &mut crate::game::Game<'_>, id: i32, position: [f64; 3]) {
+        let kind = game
+            .remote
+            .as_ref()
+            .unwrap()
+            .builtin
+            .get("minecraft:entity_type")
+            .unwrap()
+            .id("minecraft:arrow")
+            .unwrap();
+        game.handle_packet(sunrise_protocol::packets::play::Clientbound::AddEntity(
+            sunrise_protocol::packets::play::AddEntity {
+                id,
+                uuid: id as u128,
+                kind,
+                position,
+                velocity: [1.0, 0.0, 0.0],
+                pitch: 0,
+                yaw: 0,
+                head_yaw: 0,
+                data: 0,
+            },
+        ))
+        .unwrap();
+    }
+
     struct Listener(Heard);
 
     impl Listener {
@@ -1729,22 +1759,9 @@ mod entity_tick_tests {
                 game.block_ticks
                     .add_empty_chunk(sunrise_core::position::ChunkPos::new(0, 0))
                     .unwrap();
+                let _server = crate::game::native_client_session::tests::logged_client(game);
                 for (id, z) in [(71, 3.5), (72, 5.5)] {
-                    assert!(game.spawn_remote_projectile(
-                        "minecraft:arrow",
-                        &sunrise_protocol::packets::play::AddEntity {
-                            id,
-                            uuid: u128::from(id as u32),
-                            kind: 0,
-                            position: [3.5, 80.0, z],
-                            velocity: [1.0, 0.0, 0.0],
-                            pitch: 0,
-                            yaw: 0,
-                            head_yaw: 0,
-                            data: 0
-                        },
-                        (0.0, 0.0),
-                    ));
+                    add_arrow(game, id, [3.5, 80.0, z]);
                 }
                 game.tick_remote_projectiles(|_, at| at);
                 positions.extend(
@@ -1797,21 +1814,8 @@ mod entity_tick_tests {
                 game.block_ticks
                     .add_empty_chunk(sunrise_core::position::ChunkPos::new(0, 0))
                     .unwrap();
-                assert!(game.spawn_remote_projectile(
-                    "minecraft:arrow",
-                    &sunrise_protocol::packets::play::AddEntity {
-                        id: 71,
-                        uuid: 71,
-                        kind: 0,
-                        position: [3.5, 80.0, 3.5],
-                        velocity: [1.0, 0.0, 0.0],
-                        pitch: 0,
-                        yaw: 0,
-                        head_yaw: 0,
-                        data: 0
-                    },
-                    (0.0, 0.0),
-                ));
+                let _server = crate::game::native_client_session::tests::logged_client(game);
+                add_arrow(game, 71, [3.5, 80.0, 3.5]);
                 game.tick_remote_projectiles(|_, at| at);
                 let arrow = game.creatures.projectiles.iter().find(|p| p.id == 71);
                 let p = arrow.unwrap().position;

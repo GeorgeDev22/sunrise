@@ -96,7 +96,7 @@ impl ViewedWorld {
             C::LevelChunkWithLight(p) => match self.format.column(&p) {
                 Ok(chunk) => {
                     let key = (p.x, p.z);
-                    self.world.chunks.insert(key, Arc::new(chunk));
+                    self.world.install_light_column(chunk);
                     self.unload_block_entities(key);
                     self.block_entities.insert(key, p.chunk.block_entities);
                     column_changed(&mut self.world, key);
@@ -110,7 +110,7 @@ impl ViewedWorld {
                 column_changed(&mut self.world, key);
             }
             C::LightUpdate(p) => {
-                let (layers, _) = self.format.light(&p.light);
+                let layers = self.format.light(&p.light);
                 if let Some(chunk) = self.world.chunks.get_mut(&(p.x, p.z)) {
                     sunrise_client::light::update_light_layers(
                         Arc::make_mut(chunk),

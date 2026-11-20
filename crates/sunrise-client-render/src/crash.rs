@@ -53,7 +53,7 @@ fn attributed(message: String) -> String {
     if let Some(scoped) = mod_api::content::crash::current_converted_call()
         && scoped.runtime == call.id
     {
-        // `export` and `site` come from the runtime, and for wasm from module bytes: a name
+        // `export` and `site` come from the converted package runtime: a name
         // with a newline could forge another line of this report, so keep each on one line.
         let _ = write!(
             out,
@@ -390,9 +390,7 @@ fn mod_lines(headers: bool) -> Vec<(String, String)> {
         .collect();
     // A thread that doesn't start drops `send`: every line then reads as an error.
     let _ = sunrise_guest_stack::spawn("Crash report lines".into(), move || {
-        let failures = sunrise_mod_runtime::dispatch_failures::dispatch_failure_counter();
         for (owner, line) in asked {
-            let before = failures.get();
             let answer = contain(|| {
                 let _mod = enter_native_mod(ModCall {
                     id: owner,
@@ -401,11 +399,7 @@ fn mod_lines(headers: bool) -> Vec<(String, String)> {
                 });
                 line.value()
             });
-            // A wasm line that traps answers `None` through its proxy; the failed call tells.
-            if send
-                .send(answer.ok().filter(|_| failures.get() == before))
-                .is_err()
-            {
+            if send.send(answer.ok()).is_err() {
                 break;
             }
         }

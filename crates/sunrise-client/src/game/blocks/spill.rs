@@ -512,14 +512,61 @@ impl GameLevel<'_> {
         state: BlockStateId,
         table: &'static str,
     ) {
+        let loot = self.loot.clone();
+        let matcher = |predicate: &serde_json::Value, entity: &sunrise_world::loot::LootEntity| {
+            loot.as_ref()
+                .is_some_and(|data| data.entity_matches(predicate, Some(entity)))
+        };
+        let interacting = self.interacting.as_ref().map(|entity| {
+            (
+                entity,
+                &matcher as &dyn Fn(&serde_json::Value, &sunrise_world::loot::LootEntity) -> bool,
+            )
+        });
+        // `LocationCheck` reads from ORIGIN, the block's centre, through the
+        // advancement path's `LocationPredicate` over this level's own state.
+        // The roll draws from a copy of the level random, which the location
+        // reads of the world leave no hand on.
+        let origin = [pos.x, pos.y, pos.z];
+        let level = super::location_world::LevelLocation {
+            world: &*self.world,
+            registry: self.registry,
+            facts: self.facts,
+            biomes: self.biomes,
+            items: self.items,
+            collision: self.collision,
+            hoppers: &*self.positions.hoppers,
+            raining: self.raining,
+            thundering: self.thundering,
+            refs: self.location,
+        };
+        let location = |condition: &serde_json::Value| {
+            let centre = origin.map(|c| f64::from(c) + 0.5);
+            let at = sunrise_client::advancements::location_check_position(
+                condition,
+                Some(origin),
+                centre,
+            );
+            // `LocationPredicate.matches`: nothing matches in an unloaded chunk.
+            Some(
+                level
+                    .world
+                    .loaded(at[0].floor() as i32, at[2].floor() as i32)
+                    && sunrise_client::advancements::location(&condition["predicate"], at, &level),
+            )
+        };
+        let mut random = self.world.random.clone();
         let drops = self.items.interact_loot(
             table,
             self.registry,
             state,
-            &mut self.world.random,
+            interacting,
+            Some(&location),
+            &mut random,
             self.rand_sequences,
             self.seed,
         );
+        self.world.random = random;
         let start = self.spill.spawns.len();
         for stack in drops {
             if &*stack.item != "minecraft:air" && stack.count > 0 {

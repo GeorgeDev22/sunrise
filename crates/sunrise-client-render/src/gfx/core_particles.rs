@@ -219,14 +219,14 @@ impl CoreParticles {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         title: bool,
-        vanilla: impl FnOnce() -> Vec<u8>,
+        vanilla: impl FnOnce() -> [u8; 1024],
     ) {
         let mut batches = std::mem::take(&mut self.batches);
         if title {
             batches.clear();
         }
         let vanilla = if batches.is_empty() {
-            Vec::new()
+            [0; 1024]
         } else {
             vanilla()
         };

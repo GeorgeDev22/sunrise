@@ -1043,7 +1043,7 @@ pub fn publish(
     };
     let mut entry = entry;
     let writes = page::place(&mut entry, form, images).map_err(bad)?;
-    // Every check CI runs but the trial run: the file as its kind, its id and
+    // Validate the submitted kind, id and
     // version, its signature, the entry's fields. CI runs it all again.
     let files = file.parent().unwrap_or(Path::new("."));
     std::fs::copy(file, files.join(&sha256)).map_err(|e| bad(e.to_string()))?;
@@ -1135,7 +1135,7 @@ pub fn publish(
         "<!-- submitted-by: {login} -->\n🤖 Submitted through [{site}]({public}/mods/submit) by @{login}. The form opens the pull request with \
          the registry's token: neither Ludovic nor a reviewer wrote it.\n\n\
          | | |\n|---|---|\n| Project | `{id}` ({kind}, {new}) |\n| Version | {version} for {game} |\n| File | `{file}`, {size} bytes, SHA-256 `{sha256}` |\n| Signed | {signed} |\n| Source | {source} |\n\n{lists}\n\n\
-         The checks below run the file's own checks again and, for a mod, a trial run in the sandbox. \
+         The checks below validate the package without running mod code. \
          Reviewers: read the source and the checks' report before you approve.",
         public = config.public_url,
         site = config

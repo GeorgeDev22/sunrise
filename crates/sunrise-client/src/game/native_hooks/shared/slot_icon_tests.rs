@@ -9,7 +9,7 @@ use std::sync::{
 fn empty_slot_draws_icon_but_a_filled_slot_does_not() {
     mod_platform::testing::with_mods(mod_api::Mods::default(), || {
         crate::game::native_entity_refs::tests::with_client_game(|game| {
-            let icon = "gui/sprites/container/slot/shield";
+            let icon = "container/slot/shield";
             assert!(game.gui.atlas.sprites.contains_key(icon));
             game.screen = Screen::Inventory;
             game.container = Some((1, 2, 3));

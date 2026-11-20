@@ -2,7 +2,7 @@
 //! (1.20.5) and `ParticleUnflatteningFix`.
 use super::dynamic::{
     as_bool, as_bool_opt, as_double, as_int, as_long, as_number, as_str, as_string, empty_map,
-    int_list, is_empty_map, namespaced, remove, rename, set, stream, string,
+    int_list, is_empty_map, namespaced, put, remove, rename, set, stream, string,
 };
 use super::json;
 use sunrise_core::{
@@ -395,16 +395,16 @@ impl Stack {
             self.set_component("minecraft:custom_data", tag);
         }
         if !is_empty_map(&self.components) {
-            set(&mut result, "components", self.components);
+            put(&mut result, "components", self.components);
         }
-        // mergeRemainder: the remainder's fields under the stack's own.
+        // mergeRemainder: size from the prefix alone, then overlay the encoded
+        // stack's fields in the fresh record's iteration order.
         let mut out = self.remainder;
-        if let (Tag::Compound(o), Tag::Compound(r)) = (&mut out, result) {
-            o.extend(r);
-            out
-        } else {
-            out
+        if let (Tag::Compound(prefix), Tag::Compound(fields)) = (&mut out, result) {
+            *prefix = std::mem::take(prefix).into_shallow_copy();
+            prefix.extend(fields);
         }
+        out
     }
 }
 

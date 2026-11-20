@@ -26,8 +26,7 @@ A partial move can require additional calls. `transfer_matching(host, from, to, 
 the filter, listing the source a page at a time.
 
 **Limits the host keeps.** A `StoragePage` holds at most `MAX_STORAGE_PAGE` (256) entries whatever limit a caller asks,
-and a limit of 0 is refused with `StorageError::ZeroPage`. A handler cannot push past its page, and a page crossing the
-wasm boundary is checked again when it is read. Totals and cursors that do not fit in 64 bits are refused with
+and a limit of 0 is refused with `StorageError::ZeroPage`. A handler cannot push past its page. Totals and cursors that do not fit in 64 bits are refused with
 `StorageError::Overflow`, never wrapped.
 
 **Cost.** A bulk store can use a by-kind index to avoid scanning slots. The game's adapter answers in one pass over the slots

@@ -2,27 +2,23 @@
 //! metadata), buttons, sliders, tiled menu backgrounds, separators and the
 //! EditBox text field with vanilla cursor, selection and scrolling.
 use crate::{
-    hud::{HudAtlas, HudBatch, Rect, rgba},
+    hud::{GuiSprite, HudAtlas, HudBatch, Rect, rgba},
     text::Text,
 };
-use std::{collections::HashMap, sync::RwLock, time::Instant};
-use sunrise_assets::resource_source::ResourceSource;
+use std::time::Instant;
 
 /// `GuiSpriteScaling.NineSlice`: the sprite's size in GUI pixels, whatever
 /// its texture's resolution, its borders (left, top, right, bottom) in the
 /// same units, and whether the edges and centre stretch rather than tile.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct NineSlice {
+pub struct NineSlice {
     width: u32,
     height: u32,
     border: [u32; 4],
     stretch_inner: bool,
 }
-/// Nine-slice scaling from `.png.mcmeta` files.
-static NINE_SLICE: RwLock<Option<HashMap<String, NineSlice>>> = RwLock::new(None);
-
 /// A `gui.scaling` section of type `nine_slice`.
-fn parse_nine_slice(v: &serde_json::Value) -> Option<NineSlice> {
+pub(crate) fn parse_nine_slice(v: &serde_json::Value) -> Option<NineSlice> {
     let s = &v["gui"]["scaling"];
     if s["type"] != "nine_slice" {
         return None;
@@ -47,82 +43,6 @@ fn parse_nine_slice(v: &serde_json::Value) -> Option<NineSlice> {
         height,
         border,
         stretch_inner: s["stretch_inner"].as_bool().unwrap_or(false),
-    })
-}
-/// Read `gui.scaling` metadata for every GUI sprite under `root`.
-pub fn load_metadata(root: &ResourceSource) {
-    set_metadata(read_metadata(root));
-}
-/// The GUI sprites' nine-slice metadata of a resource root, read off the
-/// render thread by a pack reload ([`read_metadata`]) and put in use with
-/// [`set_metadata`].
-pub struct UiMetadata(HashMap<String, NineSlice>);
-/// Puts read metadata in use ([`load_metadata`] in two halves).
-pub fn set_metadata(metadata: UiMetadata) {
-    *NINE_SLICE.write().unwrap_or_else(|e| e.into_inner()) = Some(metadata.0);
-}
-/// Reads the metadata [`load_metadata`] puts in use, without putting it in use. Another
-/// namespace's sprites are named with it (`lobby:gui/sprites/...`), as the GUI atlas packs them.
-pub fn read_metadata(root: &ResourceSource) -> UiMetadata {
-    let mut map = HashMap::new();
-    for namespace in root.namespaces("assets") {
-        let base = format!("assets/{namespace}/textures/");
-        let prefix = match namespace.as_str() {
-            "minecraft" => String::new(),
-            namespace => format!("{namespace}:"),
-        };
-        for name in root.list(&format!("{base}gui/sprites/")) {
-            let Some(stripped) = name.strip_suffix(".png.mcmeta") else {
-                continue;
-            };
-            let Ok(text) = root.read_to_string(&name) else {
-                continue;
-            };
-            let Some(nine_slice) = crate::packs::first_json(text.as_bytes())
-                .ok()
-                .as_ref()
-                .and_then(parse_nine_slice)
-            else {
-                continue;
-            };
-            let key = stripped.strip_prefix(base.as_str()).unwrap_or_default();
-            map.insert(format!("{prefix}{key}"), nine_slice);
-        }
-    }
-    UiMetadata(map)
-}
-/// The sprite's nine-slice metadata, when its `.png.mcmeta` has any.
-fn nine_slice_metadata(sprite: &str) -> Option<NineSlice> {
-    NINE_SLICE
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .and_then(|m| m.get(sprite).copied())
-}
-/// The sprite's nine-slice metadata; without any (no resources loaded), its
-/// GUI size and the widgets' usual borders.
-fn scaling(sprite: &str, r: &Rect) -> NineSlice {
-    nine_slice_metadata(sprite).unwrap_or(NineSlice {
-        width: r.w,
-        height: r.h,
-        border: match sprite {
-            "sunrise/jei/button_enabled_v2"
-            | "sunrise/jei/button_disabled_v2"
-            | "sunrise/jei/button_highlight_v2" => [6; 4],
-            "sunrise/jei/search_background_v2" => [6; 4],
-            "sunrise/jei/interactive_ingredient_tooltip_background" => [16; 4],
-            "sunrise/jei/recipe_preview_background_v2" => [16; 4],
-            "sunrise/jei/scrollbar_background_v2" => [6; 4],
-            "sunrise/jei/scrollbar_marker_v2" => [2, 2, 2, 1],
-            "gui/sprites/widget/button"
-            | "gui/sprites/widget/button_highlighted"
-            | "gui/sprites/widget/button_disabled" => [3; 4],
-            "gui/sprites/widget/slider_handle" | "gui/sprites/widget/slider_handle_highlighted" => {
-                [2, 2, 2, 3]
-            }
-            _ => [1; 4],
-        },
-        stretch_inner: false,
     })
 }
 /// The region `[x, y, w, h]` of a sprite `size` GUI pixels large, in its
@@ -158,10 +78,12 @@ fn tile(batch: &mut HudBatch, r: Rect, size: [f32; 2], src: [f32; 4], dst: [f32;
         y += sh;
     }
 }
-/// `GuiGraphicsExtractor.blitNineSlicedSprite`: the corners at their size,
-/// the edges and centre tiled (or stretched with `stretch_inner`), all in
-/// the sprite's `gui.scaling` units, so a high-resolution pack's sprite draws
-/// as the default one does.
+/// `GuiGraphicsExtractor.blitSprite`: a sprite over `w` × `h` as its `gui.scaling` says: the
+/// corners at their size and the edges and centre tiled (or stretched with `stretch_inner`), all
+/// in the sprite's `gui.scaling` units so a high-resolution pack's sprite draws as the default
+/// one does, or stretched when it has no scaling, as vanilla's default (`tile`, which no vanilla
+/// sprite uses, isn't read yet: it stretches). The sprite the atlas published decides: a sprite
+/// its list removed or failed draws as the missing sprite, stretched, with no scaling of its own.
 pub fn nine_slice(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
@@ -172,39 +94,21 @@ pub fn nine_slice(
     h: f32,
     color: u32,
 ) {
-    if let Some(r) = atlas.sprites.get(sprite) {
-        match crate::hud::sprite_modifiers::draws(atlas, sprite, *r, [x, y, w, h], color) {
-            Some(draws) => {
-                for d in draws {
-                    draw_nine_slice(batch, d.rect, scaling(&d.key, &d.rect), d.at, d.color);
-                }
+    let Some(r) = atlas.gui_rect(sprite) else {
+        return;
+    };
+    // Each effective draw's own scaling: what the entry the key resolves to published.
+    let scaling = |key: &str| match atlas.gui_lookup(key) {
+        Some(GuiSprite::Present { scaling, .. }) => scaling,
+        _ => None,
+    };
+    match crate::hud::sprite_modifiers::draws(atlas, sprite, *r, [x, y, w, h], color) {
+        Some(draws) => {
+            for d in draws {
+                draw_sprite(batch, d.rect, scaling(&d.key), d.at, d.color);
             }
-            None => draw_nine_slice(batch, *r, scaling(sprite, r), [x, y, w, h], color),
         }
-    }
-}
-/// `GuiGraphicsExtractor.blitSprite`: a sprite over `w` × `h` as its
-/// `gui.scaling` says, nine-sliced, or stretched when it has no metadata.
-/// (`tile`, which no vanilla sprite uses, isn't read yet: it stretches.)
-pub fn blit_sprite(
-    batch: &mut HudBatch,
-    atlas: &HudAtlas,
-    sprite: &str,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    color: u32,
-) {
-    if let Some(r) = atlas.sprites.get(sprite) {
-        match crate::hud::sprite_modifiers::draws(atlas, sprite, *r, [x, y, w, h], color) {
-            Some(draws) => {
-                for d in draws {
-                    draw_sprite(batch, d.rect, nine_slice_metadata(&d.key), d.at, d.color);
-                }
-            }
-            None => draw_sprite(batch, *r, nine_slice_metadata(sprite), [x, y, w, h], color),
-        }
+        None => draw_sprite(batch, *r, scaling(sprite), [x, y, w, h], color),
     }
 }
 fn draw_sprite(
@@ -310,7 +214,7 @@ pub fn tiled_sized(
     size: [f32; 2],
     color: u32,
 ) {
-    let Some(r) = atlas.sprites.get(sprite).copied() else {
+    let Some(r) = atlas.gui_rect(sprite).copied() else {
         return;
     };
     tile(
@@ -655,11 +559,11 @@ fn button_with_room(
     crate::widgets::narratable(|| narration([x, y, w, h]).hovered(hover || focused));
     crate::widgets::widget_cursor(hover, active);
     let sprite = if !active {
-        "gui/sprites/widget/button_disabled"
+        "widget/button_disabled"
     } else if hover || focused {
-        "gui/sprites/widget/button_highlighted"
+        "widget/button_highlighted"
     } else {
-        "gui/sprites/widget/button"
+        "widget/button"
     };
     nine_slice(batch, atlas, sprite, x, y, w, h, u32::MAX);
     let color = if active {
@@ -771,7 +675,7 @@ fn slider_sprites(hover: bool, active: bool, dragging: bool) -> (&'static str, &
 /// flipped by Enter (`setFocused`, `keyPressed`): Sunrise's `can_change_value`
 /// for the keyboard, and a drag for the mouse, which focuses it with the value
 /// free to change. So a dragged slider keeps its plain track.
-fn slider_sprites_ext(
+pub(crate) fn slider_sprites_ext(
     hover: bool,
     active: bool,
     focused: bool,
@@ -780,14 +684,14 @@ fn slider_sprites_ext(
 ) -> (&'static str, &'static str) {
     let can_change_value = can_change_value || dragging;
     let track = if active && focused && !can_change_value {
-        "gui/sprites/widget/slider_highlighted"
+        "widget/slider_highlighted"
     } else {
-        "gui/sprites/widget/slider"
+        "widget/slider"
     };
     let handle = if active && (hover || can_change_value) {
-        "gui/sprites/widget/slider_handle_highlighted"
+        "widget/slider_handle_highlighted"
     } else {
-        "gui/sprites/widget/slider_handle"
+        "widget/slider_handle"
     };
     (track, handle)
 }
@@ -812,7 +716,7 @@ pub fn menu_background(
     } else {
         "gui/menu_background"
     };
-    if atlas.sprites.contains_key(sprite) {
+    if atlas.gui_rect(sprite).is_some() {
         tiled(batch, atlas, sprite, x, y, w, h, 32.0, u32::MAX);
     } else {
         batch.fill(atlas, x, y, w, h, rgba(0, 0, 0, 160));
@@ -1000,23 +904,14 @@ pub fn scrollbar_sprites(
     nine_slice(
         batch,
         atlas,
-        "gui/sprites/widget/scroller_background",
+        "widget/scroller_background",
         x,
         top,
         6.0,
         height,
         u32::MAX,
     );
-    nine_slice(
-        batch,
-        atlas,
-        "gui/sprites/widget/scroller",
-        x,
-        y,
-        6.0,
-        bar,
-        u32::MAX,
-    );
+    nine_slice(batch, atlas, "widget/scroller", x, y, 6.0, bar, u32::MAX);
 }
 
 /// Screen tooltip (DefaultTooltipPositioner + TooltipRenderUtil): the
@@ -1164,13 +1059,13 @@ fn tooltip_size(atlas: &HudAtlas, lines: &[Text]) -> (f32, f32) {
 }
 /// `TooltipRenderUtil.getBackgroundSprite` and `getFrameSprite` of a tooltip style
 /// (`<namespace>:<path>`): `tooltip/<path>_background` and `tooltip/<path>_frame` in the style's
-/// namespace, named as the GUI atlas packs them.
+/// namespace, named by GUI id.
 pub fn tooltip_style_sprites(namespace: &str, path: &str) -> [String; 2] {
     let prefix = match namespace {
         "minecraft" => String::new(),
         namespace => format!("{namespace}:"),
     };
-    ["background", "frame"].map(|part| format!("{prefix}gui/sprites/tooltip/{path}_{part}"))
+    ["background", "frame"].map(|part| format!("{prefix}tooltip/{path}_{part}"))
 }
 /// `TooltipRenderUtil.renderTooltipBackground`: the background sprite, then the frame sprite,
 /// each drawn by `blitSprite` (nine-sliced as its `gui.scaling` says, stretched without it)
@@ -1184,12 +1079,12 @@ pub fn tooltip_sprites(
 ) -> bool {
     if ![background, frame]
         .iter()
-        .all(|sprite| atlas.sprites.contains_key(*sprite))
+        .all(|sprite| atlas.gui_rect(sprite).is_some())
     {
         return false;
     }
     for sprite in [background, frame] {
-        blit_sprite(
+        nine_slice(
             batch,
             atlas,
             sprite,
@@ -1215,10 +1110,7 @@ fn tooltip_box(
     tooltip_sprites(
         batch,
         atlas,
-        [
-            "gui/sprites/tooltip/background",
-            "gui/sprites/tooltip/frame",
-        ],
+        ["tooltip/background", "tooltip/frame"],
         [x, y, w, h],
     );
     let mut ly = y;
@@ -1769,9 +1661,9 @@ impl EditBox {
         });
         if self.bordered {
             let sprite = skin.unwrap_or(if self.focused {
-                "gui/sprites/widget/text_field_highlighted"
+                "widget/text_field_highlighted"
             } else {
-                "gui/sprites/widget/text_field"
+                "widget/text_field"
             });
             nine_slice(
                 batch,
@@ -1914,9 +1806,9 @@ mod tests {
              \"border\": {\"left\": 34, \"top\": 8, \"right\": 34, \"bottom\": 8}}}}\n\n// 0  10\n// 1  8\n",
         )
         .unwrap();
-        let metadata = read_metadata(&ResourceSource::directory(root.clone()));
+        let text = std::fs::read(widget.join("button_highlighted.png.mcmeta")).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
-        let slice = metadata.0["gui/sprites/widget/button_highlighted"];
+        let slice = parse_nine_slice(&crate::packs::first_json(&text).unwrap()).unwrap();
         assert_eq!(
             (slice.width, slice.height, slice.border),
             (80, 20, [34, 8, 34, 8])
@@ -2184,31 +2076,31 @@ mod tests {
     fn slider_sprites_follow_focus_and_the_drag() {
         // Hovered, at rest: plain track, lit handle.
         let (track, handle) = slider_sprites(true, true, false);
-        assert_eq!(track, "gui/sprites/widget/slider");
-        assert_eq!(handle, "gui/sprites/widget/slider_handle_highlighted");
+        assert_eq!(track, "widget/slider");
+        assert_eq!(handle, "widget/slider_handle_highlighted");
         // Dragged: still a plain track, lit handle.
         let (track, handle) = slider_sprites(true, true, true);
-        assert_eq!(track, "gui/sprites/widget/slider");
-        assert_eq!(handle, "gui/sprites/widget/slider_handle_highlighted");
+        assert_eq!(track, "widget/slider");
+        assert_eq!(handle, "widget/slider_handle_highlighted");
         // Focused with the arrow keys: the value can't change, the track lights.
         let (track, handle) = slider_sprites_ext(false, true, true, false, false);
-        assert_eq!(track, "gui/sprites/widget/slider_highlighted");
-        assert_eq!(handle, "gui/sprites/widget/slider_handle");
+        assert_eq!(track, "widget/slider_highlighted");
+        assert_eq!(handle, "widget/slider_handle");
         // Focused with Tab, or Enter pressed on it: the value can change, the handle lights.
         let (track, handle) = slider_sprites_ext(false, true, true, true, false);
-        assert_eq!(track, "gui/sprites/widget/slider");
-        assert_eq!(handle, "gui/sprites/widget/slider_handle_highlighted");
+        assert_eq!(track, "widget/slider");
+        assert_eq!(handle, "widget/slider_handle_highlighted");
         // Focused while the mouse drags: the track stays plain.
         let (track, _) = slider_sprites_ext(true, true, true, false, true);
-        assert_eq!(track, "gui/sprites/widget/slider");
+        assert_eq!(track, "widget/slider");
         // Not hovered, not dragged: nothing is lit.
         let (track, handle) = slider_sprites(false, true, false);
-        assert_eq!(track, "gui/sprites/widget/slider");
-        assert_eq!(handle, "gui/sprites/widget/slider_handle");
+        assert_eq!(track, "widget/slider");
+        assert_eq!(handle, "widget/slider_handle");
         // An inactive slider highlights neither, even when focused.
         let (track, handle) = slider_sprites_ext(true, false, true, true, true);
-        assert_eq!(track, "gui/sprites/widget/slider");
-        assert_eq!(handle, "gui/sprites/widget/slider_handle");
+        assert_eq!(track, "widget/slider");
+        assert_eq!(handle, "widget/slider_handle");
     }
     #[test]
     fn separator_tiles_sample_both_rows_and_clip_the_last_column() {
@@ -2336,6 +2228,85 @@ mod tests {
         let q = quads(&batch);
         assert_eq!(q.len(), 1);
         assert_quad(q[0], ([0.0, 0.0, 27.0, 18.0], [0.0, 0.0, 1.0, 1.0]));
+    }
+    /// A GUI sprite draws as the sprite the atlas published says: an alias of a file with
+    /// nine-slice metadata is nine-sliced, a generated sprite (a cut of that file) carries none of
+    /// it and stretches, and a sprite whose origin failed draws the missing sprite stretched,
+    /// whatever the failed file's metadata said.
+    #[test]
+    fn a_sprite_is_scaled_by_the_metadata_of_the_sprite_the_atlas_published() {
+        let root = std::env::temp_dir().join(format!("sunrise-ui-scaling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let textures = root.join("assets/demo/textures/gui");
+        std::fs::create_dir_all(&textures).unwrap();
+        std::fs::create_dir_all(root.join("assets/minecraft/atlases")).unwrap();
+        let nine = r#""gui":{"scaling":{"type":"nine_slice","width":6,"height":6,"border":2,"stretch_inner":true}}"#;
+        for (name, mcmeta) in [
+            ("panel", format!("{{{nine}}}")),
+            (
+                "bad",
+                format!(r#"{{"animation":{{"width":4,"height":4}},{nine}}}"#),
+            ),
+        ] {
+            let mut encoder = png::Encoder::new(
+                std::fs::File::create(textures.join(format!("{name}.png"))).unwrap(),
+                6,
+                6,
+            );
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[255; 6 * 6 * 4])
+                .unwrap();
+            std::fs::write(textures.join(format!("{name}.png.mcmeta")), mcmeta).unwrap();
+        }
+        std::fs::write(
+            root.join("assets/minecraft/atlases/blocks.json"),
+            r#"{"sources":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("assets/minecraft/atlases/items.json"),
+            r#"{"sources":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("assets/minecraft/atlases/gui.json"),
+            r#"{"sources":[
+                {"type":"minecraft:single","resource":"demo:gui/panel","sprite":"demo:alias"},
+                {"type":"minecraft:unstitch","resource":"demo:gui/panel","divisor_x":1,"divisor_y":1,
+                 "regions":[{"sprite":"demo:made","x":0,"y":0,"width":6,"height":6}]},
+                {"type":"minecraft:single","resource":"demo:gui/bad","sprite":"demo:failed"}]}"#,
+        )
+        .unwrap();
+        let atlas = HudAtlas::build(&sunrise_assets::resource_source::ResourceSource::directory(
+            root.clone(),
+        ))
+        .unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        let drawn = |id: &str| {
+            let mut batch = HudBatch::scratch([640, 480]);
+            nine_slice(&mut batch, &atlas, id, 0.0, 0.0, 20.0, 20.0, u32::MAX);
+            quads(&batch)
+        };
+        // The alias carries its file's nine-slice: nine quads, the corners 2 GUI pixels.
+        let alias = drawn("demo:alias");
+        assert_eq!(alias.len(), 9);
+        assert_eq!(alias[0].0, [0.0, 0.0, 2.0, 2.0]);
+        // The generated cut has no scaling of its own, though its source file has: one stretched quad.
+        let made = drawn("demo:made");
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].0, [0.0, 0.0, 20.0, 20.0]);
+        // The failed origin draws the missing sprite stretched.
+        let failed = drawn("demo:failed");
+        let missing = atlas.sprites[crate::hud::MISSING_SPRITE];
+        assert_eq!(failed.len(), 1);
+        assert_eq!(
+            failed[0].1,
+            [missing.u0, missing.v0, missing.u1, missing.v1]
+        );
     }
     #[test]
     fn borders_shrink_to_half_the_drawn_size() {
@@ -2656,32 +2627,7 @@ mod tests {
             (112, 180)
         );
     }
-    #[test]
-    fn nine_slice_metadata_reads_resolved_resource_names_without_files() {
-        use sunrise_assets::resource_source::Resource;
-        let source = ResourceSource::indexed(std::collections::BTreeMap::from([
-            ("assets/minecraft/textures/gui/sprites/widget/button.png.mcmeta".to_owned(),
-             Resource::bytes(br#"{"gui":{"scaling":{"type":"nine_slice","width":20,"height":12,"border":3}}}"#.to_vec())),
-            ("assets/minecraft/textures/gui/sprites/broken.png.mcmeta".to_owned(), Resource::bytes(b"invalid".to_vec())),
-            ("assets/minecraft/textures/block/stone.png.mcmeta".to_owned(), Resource::bytes(b"{}".to_vec())),
-            ("assets/lobby/textures/gui/sprites/tooltip/gold_frame.png.mcmeta".to_owned(),
-             Resource::bytes(br#"{"gui":{"scaling":{"type":"nine_slice","width":40,"height":40,"border":6}}}"#.to_vec())),
-        ]));
-        let metadata = read_metadata(&source);
-        assert_eq!(metadata.0.len(), 2);
-        let button = metadata.0.get("gui/sprites/widget/button").unwrap();
-        assert_eq!(
-            (button.width, button.height, button.border),
-            (20, 12, [3; 4])
-        );
-        // Another namespace's sprite is named with it, as the GUI atlas packs it.
-        let frame = metadata
-            .0
-            .get("lobby:gui/sprites/tooltip/gold_frame")
-            .unwrap();
-        assert_eq!((frame.width, frame.border), (40, [6; 4]));
-    }
-    /// A tooltip style names its sprites as `TooltipRenderUtil` does, in the GUI atlas's names;
+    /// A tooltip style names its sprites as `TooltipRenderUtil` does, by GUI id;
     /// the box draws the background, then the frame, 12 pixels out from the contents, each
     /// stretched when it has no `gui.scaling` (`GuiMetadataSection.DEFAULT`), and nothing
     /// without either sprite.
@@ -2689,18 +2635,12 @@ mod tests {
     fn a_tooltip_style_draws_its_own_background_and_frame() {
         assert_eq!(
             tooltip_style_sprites("minecraft", "fancy"),
-            [
-                "gui/sprites/tooltip/fancy_background",
-                "gui/sprites/tooltip/fancy_frame"
-            ]
+            ["tooltip/fancy_background", "tooltip/fancy_frame"]
         );
         let [background, frame] = tooltip_style_sprites("lobby", "gold");
         assert_eq!(
             [background.as_str(), frame.as_str()],
-            [
-                "lobby:gui/sprites/tooltip/gold_background",
-                "lobby:gui/sprites/tooltip/gold_frame"
-            ]
+            ["lobby:tooltip/gold_background", "lobby:tooltip/gold_frame"]
         );
         let mut atlas = atlas();
         let mut batch = HudBatch::scratch([640, 480]);

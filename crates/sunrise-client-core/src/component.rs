@@ -36,9 +36,116 @@ pub fn style_flag(v: Option<&Value>) -> Option<bool> {
 /// pass it: anything else (`file:`, a UNC path, a custom protocol handler)
 /// could start a program through the system's URL handler.
 pub fn untrusted_http_url(url: &str) -> bool {
-    url.split_once(':').is_some_and(|(scheme, _)| {
-        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
-    })
+    // java.net.URI uses the RFC 2396 character classes (with IPv6 literals),
+    // not the WHATWG URL parser, which repairs malformed strings and requires a host.
+    fn valid(mut part: &str, reserved: &str) -> bool {
+        while let Some(c) = part.chars().next() {
+            part = &part[c.len_utf8()..];
+            if c == '%' {
+                let Some(hex) = part.as_bytes().get(..2) else {
+                    return false;
+                };
+                if !hex.iter().all(u8::is_ascii_hexdigit) {
+                    return false;
+                }
+                part = &part[2..];
+            } else if !(c.is_ascii_alphanumeric()
+                || "-_.!~*'()".contains(c)
+                || reserved.contains(c)
+                || (!c.is_ascii() && !c.is_whitespace() && !c.is_control()))
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    const URIC: &str = ";/?:@&=+$,[]";
+    let (main, fragment) = rest
+        .split_once('#')
+        .map_or((rest, None), |(main, frag)| (main, Some(frag)));
+    if main.is_empty() || fragment.is_some_and(|frag| !valid(frag, URIC)) {
+        return false;
+    }
+    if !main.starts_with('/') {
+        return valid(main, URIC); // Opaque scheme-specific part.
+    }
+    let (path, query) = main
+        .split_once('?')
+        .map_or((main, None), |(path, query)| (path, Some(query)));
+    let path = if let Some(suffix) = path.strip_prefix("//") {
+        let end = suffix.find('/').unwrap_or(suffix.len());
+        let (authority, path) = suffix.split_at(end);
+        if authority.is_empty() && path.is_empty() && query.is_none() && fragment.is_none() {
+            return false;
+        }
+        if let Some((prefix, literal)) = authority.split_once('[') {
+            // Brackets are allowed only around an IPv6 server address, with
+            // optional user info, scope ID and decimal port.
+            let Some((ip, port)) = literal.split_once(']') else {
+                return false;
+            };
+            let (address, scope) = ip
+                .split_once('%')
+                .map_or((ip, None), |(ip, scope)| (ip, Some(scope)));
+            let valid_address = if let Some((prefix, tail)) = address
+                .rsplit_once(':')
+                .filter(|(_, tail)| tail.contains('.'))
+            {
+                // java.net.URI also allows leading zeroes in a decimal IPv4 tail.
+                let mut octets = tail.split('.');
+                let mut next = || {
+                    let octet = octets.next()?;
+                    octet.bytes().all(|b| b.is_ascii_digit()).then_some(())?;
+                    octet.parse::<u8>().ok()
+                };
+                match (next(), next(), next(), next(), octets.next()) {
+                    (Some(a), Some(b), Some(c), Some(d), None) => format!(
+                        "{prefix}:{:x}:{:x}",
+                        u16::from_be_bytes([a, b]),
+                        u16::from_be_bytes([c, d]),
+                    )
+                    .parse::<std::net::Ipv6Addr>()
+                    .is_ok(),
+                    _ => false,
+                }
+            } else {
+                address.parse::<std::net::Ipv6Addr>().is_ok()
+            };
+            if (!prefix.is_empty()
+                && !prefix
+                    .strip_suffix('@')
+                    .is_some_and(|user| valid(user, ";:&=+$,")))
+                || !valid_address
+                || scope.is_some_and(|id| {
+                    id.is_empty()
+                        || !id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+                })
+                || (!port.is_empty()
+                    && !port.strip_prefix(':').is_some_and(|port| {
+                        port.is_empty()
+                            || (port.bytes().all(|b| b.is_ascii_digit())
+                                && port.parse::<i32>().is_ok())
+                    }))
+            {
+                return false;
+            }
+        } else if !valid(authority, "$,;:@&=+") {
+            return false;
+        }
+        path
+    } else {
+        path
+    };
+    valid(path, "/;:@&=+$,") && query.is_none_or(|query| valid(query, URIC))
 }
 
 /// A current `ClickEvent.CODEC` value, with no legacy field fallbacks.
@@ -164,6 +271,7 @@ fn object_style<'a>(
     o: &'a serde_json::Map<String, Value>,
     child: &mut dyn FnMut(&'a Value) -> Text,
     origin: Origin,
+    decoded_clicks: Option<&[crate::text::ClickEvent]>,
 ) -> Style {
     let mut style = Style::default();
     if let Some(c) = o.get("color").and_then(Value::as_str) {
@@ -178,7 +286,13 @@ fn object_style<'a>(
     style.font = o.get("font").and_then(crate::text::font_id);
     // ClickEvent.CODEC: the actions a chat line acts on here. A component
     // from a server never opens a file.
-    if let Some(e) = style_event_object(o, "click_event", "clickEvent") {
+    if let Some(clicks) = decoded_clicks {
+        style.click = o
+            .get("click_event")
+            .and_then(Value::as_u64)
+            .and_then(|index| clicks.get(index as usize))
+            .cloned();
+    } else if let Some(e) = style_event_object(o, "click_event", "clickEvent") {
         style.click = parse_click_event_origin(e, origin, true).ok().flatten();
     }
     // HoverEvent.ShowText, ShowItem and ShowEntity.
@@ -261,6 +375,22 @@ pub fn to_text_with(
         Sourced(true, Origin::Remote),
         &|_| Origin::Remote,
         None,
+        None,
+    )
+    .unwrap_or_default()
+}
+
+/// Project an already checked network component. Its `click_event` fields are
+/// indices into `clicks`, so opaque NBT never passes through the JSON renderer.
+pub fn text_with_decoded_clicks(v: &Value, clicks: &[crate::text::ClickEvent]) -> Text {
+    build(
+        v,
+        &mut |s| Text::literal(s),
+        &mut |_| None,
+        Sourced(true, Origin::Remote),
+        &|_| Origin::Remote,
+        None,
+        Some(clicks),
     )
     .unwrap_or_default()
 }
@@ -298,6 +428,7 @@ fn build_source(
         Sourced(false, Origin::Remote),
         origin,
         language,
+        None,
     )
 }
 
@@ -599,6 +730,7 @@ fn build(
     sourced: Sourced,
     origin: &dyn Fn(&Value) -> Origin,
     language: Option<&crate::lang::Language>,
+    decoded_clicks: Option<&[crate::text::ClickEvent]>,
 ) -> Option<Text> {
     enum Content<'a> {
         Decode(Option<Text>),
@@ -659,7 +791,8 @@ fn build(
                 let Value::Object(o) = value else {
                     unreachable!()
                 };
-                let style = object_style(o, &mut |v| done.take_text(v), origin(value));
+                let style =
+                    object_style(o, &mut |v| done.take_text(v), origin(value), decoded_clicks);
                 let overridden = if hover { None } else { contents(o) };
                 let needs_content = overridden.is_none();
                 let translation = o.get("translate").and_then(Value::as_str).filter(|_| {
@@ -800,6 +933,7 @@ fn build(
                     piece = Piece::new(text, language.is_some());
                 }
                 if mode.0
+                    && decoded_clicks.is_none()
                     && (o.contains_key("object")
                         || o.contains_key("player")
                         || o.contains_key("sprite"))
@@ -923,7 +1057,7 @@ pub fn inline_object_fields(
         Some("player") | None if object.contains_key("player") => {
             Some(InlineObjectFields::Player {
                 profile: object.get("player")?,
-                hat: object.get("hat").and_then(Value::as_bool).unwrap_or(true),
+                hat: style_flag(object.get("hat")).unwrap_or(true),
             })
         }
         Some("atlas") | None if object.contains_key("sprite") => Some(InlineObjectFields::Atlas {
@@ -1392,6 +1526,17 @@ mod tests {
             to_text(&gui, &mut |_| Text::empty()).plain(),
             "[hud/heart/full@gui]"
         );
+    }
+
+    #[test]
+    fn snbt_player_object_preserves_false_hat() {
+        let (component, _) =
+            parse_snbt(r#"{object:"player",player:{name:"Steve"},hat:false}"#).unwrap();
+        let text = to_text(&component, &mut |_| Text::empty());
+        assert!(matches!(
+            &text.rendered.spans[0].style.inline_object,
+            Some(InlineObject::Player { hat: false, .. })
+        ));
     }
 
     #[test]

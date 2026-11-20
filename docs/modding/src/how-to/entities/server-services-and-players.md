@@ -1,7 +1,7 @@
 # Server services and player handles
 
 Use `ServerHost` services to run commands, send messages and find connected
-players. Native and wasm mods use the same calls.
+players.
 
 ## Services
 
@@ -44,6 +44,11 @@ Read identity through `player.uuid()`, `player.name(host)`,
 connection IP without a port. An acting player without a known connection has
 an empty address.
 
+`player.latency(host)` reads the ping the Tab list shows, in milliseconds: the keep-alive round
+trips averaged three parts old to one part new. It is 0 until the first keep-alive answer, for a fake
+player and for an acting player without a known connection. It refuses with `PlayerWorldRefusal::Client`
+on a client and `PlayerWorldRefusal::Stale` for a stale handle.
+
 The online list includes connected players during nested player turns. Name,
 permission and address reads work for connected players whose bodies are displaced
 by another player's turn; stale handles are refused. Entity and living handles
@@ -66,9 +71,11 @@ identities.
 | Method | Behavior |
 |---|---|
 | `set_nickname(host, nickname)` | Changes the name shown in chat and the Tab list; `None` restores the account name. Commands, selectors, logs and events use the real name. Validate the nickname's length, filtering and conflicts yourself. |
+| `nickname(host)` | Reads the nickname `set_nickname` set: `Ok(None)` when there is none. Refuses with `PlayerWorldRefusal::Client` on a client and `Stale` for a stale or offline player. |
 | `set_sleep_ignored(host, ignored)` | Controls exclusion from the sleep count. |
 | `disconnect(host, reason)` | Disconnects the player with a `Text` reason, as `/kick` does, also inside their own hook or a payload handler (the connection closes after it). Answers `false` for a stale or unavailable handle, the single-player owner and a player already being disconnected (the first reason stands). A fake player's kick keeps the first reason and completes at the next hub poll through the shared leave path. A reason the `Text` form checks refuse returns `TextFormError` before anything changes. |
 | `hide(host, permission)` | Hides the player from players below the supplied permission level, starting next tick; `None` restores visibility. Hidden players disappear from the world and Tab list, and their join and leave messages are suppressed for those viewers. |
+| `hidden(host)` | Reads the level `hide` set: `Ok(None)` when the player is shown. A player who rejoined hidden reads it too, and a level set before the world is opened to others reads as stored. Refuses with `PlayerWorldRefusal::Client` on a client and `Stale` for a handle of an earlier open of the world. |
 
 Nickname and sleep settings require an online player. These settings survive
 reconnections until the server stops or you change them. Visibility is stored by
@@ -83,10 +90,12 @@ hook is asked once for each placed receiver, the sender included, before any of 
 `sender`, `sender_name`, the `message` players see and the `recipient`. Set `hidden` and that one receiver is sent
 nothing, no chat index and no pending acknowledgement; the others still get the line signed as it was sent, so its
 signature verifies for them. It covers a player's chat after `server_chat` let it through and `/say` and `/me`, signed
-or not; whispers (`/msg`) are not public and are not asked. It is not a second `server_chat`: that hook is heard once
-for a typed line and cancels it for everyone, while this one is per receiver and also covers `/say` and `/me`. With no
-listener nothing is asked or allocated. A wasm listener's fault or timeout answers nothing, so the line is sent. The
-server's log keeps every line, hidden or not.
+or not. For a non-player `/say` source, such as the console or a command block, `sender` is the nil UUID (`0`) and
+`sender_name` is the source's display name. Whispers (`/msg`) are not public and are not asked. It is not a second
+`server_chat`: that hook is heard once for a typed line and cancels it for everyone, while this one is per receiver
+and also covers `/say` and `/me`. With no listener nothing is asked or allocated. A `/say` requested inside
+`chat_recipient` fails instead of reentering the hook or sending an unchecked line. The server's log keeps every
+broadcast line, hidden or not.
 
 `player.respawn(host)` presses the Respawn button for a dead player, as their client's does (`PERFORM_RESPAWN`): they
 are placed at their respawn point or the world spawn and `player_respawned` is heard. Call it outside every player's
@@ -112,7 +121,7 @@ Reads accept `Host`; writes accept `ServerHost`.
 
 A second disconnect on a guest already leaving is a no-op and keeps the first reason.
 
-Vetoing a player's movement: the `player_move` hook hears each validated movement report whose position or rotation differs from the player's last reported location, after the server's own checks and before the report is committed, with the exact `from`, `to` and both rotations. The last reported location is kept on the player's connection, apart from the accepted position: it is the position given to the listener before it runs, and the destination of every server-side teleport (a join, a teleport in the level, a level change, a respawn, the resend of an unconfirmed teleport and the correction after a veto); `from` is that location. Set `cancel` and the report is not applied; the client is sent back to the accepted position and rotation. The report was already seen by the server's own checks before the hook, so what a violation of those would have done still happens. The engine applies no threshold, so a mod that wants to ignore small moves compares the two positions itself (`(to - from).length() < 1.0 / 16.0` skips anything under 1/16 of a block). A held report is ruled on in the same tick; that player's later packets (further reports, the end of the client tick, pongs) wait in order behind it, then go on in that tick, so each later report is heard from the one before. A report is out of time at its 21st tick, counting the tick it was held at as the first: it is dropped with the correction, never committed, even when a ruling arrives after that; a disconnect, teleport or level change drops it cleanly. Not heard: the first tick in a level (the tick after a join or a level change; the second is heard), a player riding something (`vehicle_moved` hears the vehicle), any teleport (its confirmation's own position is validated from the teleport's target and committed without the hook, and so is the veto's own correction; a report that arrives while a teleport is unconfirmed is not heard either) and a passage crossing (its caller reads the position at once, so the report is committed in place). The first report after a teleport that passed validation is heard, with the teleport's destination as its `from`. With no listener nothing is held or copied; with one, the cost is a held report for each moving player a tick. A fault or an epoch timeout in a wasm listener answers nothing: it is not a veto and the report is committed, like every cancellable hook; the fault is logged, counted against the mod and stops the mod's group for the session. A native listener that never returns is out of scope: it blocks the game thread like any native code, and the 20-tick deadline covers only a report held pending across ticks.
+Vetoing a player's movement: the `player_move` hook hears each validated movement report whose position or rotation differs from the player's last reported location, after the server's own checks and before the report is committed, with the exact `from`, `to` and both rotations. The last reported location is kept on the player's connection, apart from the accepted position: it is the position given to the listener before it runs, and the destination of every server-side teleport (a join, a teleport in the level, a level change, a respawn, the resend of an unconfirmed teleport and the correction after a veto); `from` is that location. Set `cancel` and the report is not applied; the client is sent back to the accepted position and rotation. The report was already seen by the server's own checks before the hook, so what a violation of those would have done still happens. The engine applies no threshold, so a mod that wants to ignore small moves compares the two positions itself (`(to - from).length() < 1.0 / 16.0` skips anything under 1/16 of a block). A held report is ruled on in the same tick; that player's later packets (further reports, the end of the client tick, pongs) wait in order behind it, then go on in that tick, so each later report is heard from the one before. A report is out of time at its 21st tick, counting the tick it was held at as the first: it is dropped with the correction, never committed, even when a ruling arrives after that; a disconnect, teleport or level change drops it cleanly. Not heard: the first tick in a level (the tick after a join or a level change; the second is heard), a player riding something (`vehicle_moved` hears the vehicle), any teleport (its confirmation's own position is validated from the teleport's target and committed without the hook, and so is the veto's own correction; a report that arrives while a teleport is unconfirmed is not heard either) and a passage crossing (its caller reads the position at once, so the report is committed in place). The first report after a teleport that passed validation is heard, with the teleport's destination as its `from`. With no listener nothing is held or copied; with one, the cost is a held report for each moving player a tick. A native listener that never returns is out of scope: it blocks the game thread like any native code, and the 20-tick deadline covers only a report held pending across ticks.
 
 ## Text conversions
 
@@ -127,7 +136,9 @@ absent), `selector` a selector and `nbt` an NBT path that parse, and a style
 field that is present and wrong (`color`, `shadow_color`, the format flags,
 `click_event`, `hover_event`, `insertion`, `font`) refuses the whole component.
 Command, URL and page click actions use `command`, `url` and `page`, respectively;
-a legacy `value`-only click for those actions is refused.
+a legacy `value`-only click for those actions is refused. `open_url` requires a
+well-formed HTTP(S) URI; a malformed URI or another scheme refuses the component
+(`Ok(None)`).
 `show_item` refuses `minecraft:air`; a component removal (`!id`) requires an object value.
 A translation's `fallback` and an `nbt` component's `interpret`, `plain` and
 `separator` of the wrong kind are dropped instead. An object whose only content

@@ -1047,19 +1047,28 @@ impl PlayerHealth {
     pub fn dead_or_dying(&self) -> bool {
         self.health() <= 0.0 || self.dead
     }
-    /// The damage-clock phases of ServerPlayer.tick and LivingEntity.baseTick.
-    /// The complete enclosing ticks, including death removal, are not yet bound.
+    /// Advance all three clock phases for callers without separate level and body ticks.
     pub fn advance_clock(&mut self) {
+        self.advance_entity_clock();
+        self.advance_damage_cooldown();
+        self.advance_body_clock();
+    }
+    /// `Entity.commonTick`: the entity-level immunity window, not the damage cooldown.
+    pub fn advance_entity_clock(&mut self) {
         self.game_time = self.game_time.wrapping_add(1);
         self.tick_count = self.tick_count.wrapping_add(1);
-        if self.hurt.cooldown > 0 {
-            self.hurt.cooldown -= 1;
-        }
-        // Entity.baseTick: the entity-level window counts down too, its own
-        // timer (#916), never the damage cooldown above.
         if self.invulnerable_time > 0 {
             self.invulnerable_time -= 1;
         }
+    }
+    /// `damageCooldownTime` runs in `ServerPlayer.tick`, not in its `LivingEntity.baseTick`.
+    pub fn advance_damage_cooldown(&mut self) {
+        if self.hurt.cooldown > 0 {
+            self.hurt.cooldown -= 1;
+        }
+    }
+    /// `LivingEntity.baseTick`'s hurt timers.
+    pub fn advance_body_clock(&mut self) {
         if self.hurt.hurt_time > 0 {
             self.hurt.hurt_time -= 1;
         }
@@ -2295,7 +2304,7 @@ mod tests {
             _: super::Hurting<'_>,
             container: &super::DamageContainer,
         ) {
-            // The plain values used by wasm must preserve the decision in both directions.
+            // Converting to plain values and back must preserve the damage decision.
             let values = DamageValues::from(container);
             assert_eq!(
                 values.should_cause_side_effects,

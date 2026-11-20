@@ -1,5 +1,6 @@
 //! Client-only surfaces: screens, input, sound, drawing and options.
 
+pub(crate) mod audio_stream;
 pub(crate) mod block_state_definition;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
@@ -9,6 +10,7 @@ pub(crate) mod client_session;
 pub(crate) mod debug_entries;
 pub(crate) mod dynamic_texture;
 pub(crate) mod entity_layers;
+pub(crate) mod entity_render_attachments;
 pub(crate) mod entity_renderers;
 pub(crate) mod item_extensions;
 // hidden: a module of game-side types; mods use their re-exports
@@ -27,6 +29,7 @@ pub mod fog;
 pub(crate) mod gui_clip;
 pub(crate) mod gui_entity;
 pub(crate) mod gui_layers;
+pub(crate) mod gui_model;
 pub(crate) mod gui_paint;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
@@ -59,6 +62,7 @@ pub mod particles;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod player_chat;
+pub(crate) mod player_skin;
 pub(crate) mod posed_parts;
 pub(crate) mod recipe_page;
 pub(crate) mod render_pipeline;

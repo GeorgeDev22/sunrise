@@ -83,7 +83,7 @@ class Plan:
             if r['dir'] == 'c2s':
                 if r['state'] != 'play':
                     self.steps.append(('await', r['name']))
-                elif wire_stream.is_mark(r['name'], bytes.fromhex(r.get('data', ''))):
+                elif wire_stream.mark_packet(r['name'], bytes.fromhex(r.get('data', ''))):
                     mark, ticks, sent = mark + 1, 0, 0
                 elif r['name'] == 'client_tick_end':
                     ticks, sent, last_end = ticks + 1, 0, r['t']
@@ -233,7 +233,7 @@ class Replay(threading.Thread):
                     with self.cond:
                         if state != 'play':
                             self.received.append(name)
-                        elif wire_stream.is_mark(name, body[p:]):
+                        elif wire_stream.mark_packet(name, body[p:]):
                             self.mark, self.ticks, self.sent = self.mark + 1, 0, 0
                             self.end_times[(self.mark, 0)] = self.last_end
                         elif name == 'client_tick_end':
@@ -273,7 +273,7 @@ def replay(vanilla, scenarios, bin_dir, out, phase=None):
             accepted += 1
         elif r.get('dir') == 'c2s' and r.get('state') == 'play' and r.get('name') == 'client_tick_end':
             ticks += 1
-        elif r.get('dir') == 'c2s' and wire_stream.is_mark(r.get('name'), bytes.fromhex(r.get('data', ''))):
+        elif r.get('dir') == 'c2s' and wire_stream.mark_packet(r.get('name'), bytes.fromhex(r.get('data', ''))):
             vanilla_accepts.append(accepted)
             window_ticks.append(ticks)
             ticks = 0

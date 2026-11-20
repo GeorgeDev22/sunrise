@@ -181,6 +181,21 @@ impl Incoming {
             }
             Err(error) => return Err(fail(error, packet)),
         };
+        // A client over the serverbound byte budget loses the send, counted, never the session.
+        if epoch.peer.local.has_droppable()
+            && epoch.peer.side == super::Side::Server
+            && let Some(counters) = epoch.peer.local.droppable(&packet.channel)
+            && let Some(queue) = transport
+                .connection
+                .as_ref()
+                .and_then(|connection| connection.droppable())
+            && !queue.admit(Instant::now(), packet.data.len())
+        {
+            counters
+                .budget
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(Classified::Raw(Vec::new()));
+        }
         let owned = packet
             .channel
             .capacity()

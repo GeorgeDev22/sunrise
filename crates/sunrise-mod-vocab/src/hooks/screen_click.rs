@@ -7,9 +7,9 @@ pub trait Hooks {
     /// (`block` as in `screen`), over no slot: set `button` to a menu button
     /// id when it is on one of yours.
     /// Sunrise sends it to the server (`ContainerButtonClick`,
-    /// `menu_button` there, the block entity's) and the press goes no
-    /// further. Only a block's menu (one `block` names) has a `menu_button`
-    /// to hear it: a button on a menu opened without one reaches no mod.
+    /// `menu_button` there) and the press goes no further. The menu type's
+    /// `MenuPart` hears a button for that type, including a menu opened
+    /// without a block.
     #[hook(
         version = 2,
         side = "client",

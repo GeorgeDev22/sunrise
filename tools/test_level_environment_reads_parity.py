@@ -102,7 +102,7 @@ def main():
               'biome zoom, closest-biome search, collision floors, dimension metadata and Level '
               'sky update/get calls. Further Game regressions cover edited cells, parked '
               'levels, client login, stale handles and no resident chunk loading. '
-              'Does not run a server tick loop, draw a GUI, or exercise guest transport.'))
+              'Does not run a server tick loop, draw a GUI.'))
     print(f'{len(rows)} level environment cases match both vanilla jars: {report}', flush=True)
 
 

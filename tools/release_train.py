@@ -621,7 +621,6 @@ def green_main_head(eligible=None):
                 seen.add(sha)
                 if eligible is not None and not eligible(sha):
                     continue
-                # The wasm fixture left main pushes for the daily run (daily-green), so the gate alone counts here.
                 if gate_jobs_passed(entry["id"], GATE):
                     return sha
         return None

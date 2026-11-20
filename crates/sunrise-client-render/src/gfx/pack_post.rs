@@ -3454,11 +3454,11 @@ impl PackPost {
     }
 
     /// `Renderer::finish_sequence_frame`: the centre depth the finished frame copied.
-    pub fn take_center_depth(&mut self, device: &wgpu::Device) -> Result<(), String> {
+    pub fn take_center_depth(&mut self) -> Result<(), String> {
         self.center_depth
             .as_mut()
             .ok_or("the shader pack copied no centre depth")?
-            .take_completed(device)
+            .take_completed()
             .map(|_| ())
     }
 
@@ -4787,13 +4787,18 @@ impl PackPost {
         }
     }
 
-    fn resize(&mut self, device: &wgpu::Device, size: [u32; 2]) {
+    fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        size: [u32; 2],
+        lost: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), String> {
         if pack_images::resize_images(device, &mut self.images, size) {
             self.forget_groups();
         }
         self.buffers.resize(device, size);
         if self.targets.as_ref().is_some_and(|t| t.size == size) {
-            return;
+            return Ok(());
         }
         self.setup_pending = true;
         self.rgb_unset = true;
@@ -4803,7 +4808,8 @@ impl PackPost {
         // them, so wait for it; a resize is rare.
         if self.targets.take().is_some() {
             self.forget_groups();
-            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            // A lost device stops the frame here, before the new targets are made.
+            super::in_flight::poll_live(device, lost, wgpu::PollType::wait_indefinitely())?;
         }
         let sizes: [[u32; 2]; BUFFERS] =
             std::array::from_fn(|i| self.sizes[i].map_or(size, |s| s.resolve(size)));
@@ -4974,6 +4980,7 @@ impl PackPost {
                 size[1]
             );
         }
+        Ok(())
     }
 
     /// The shadow pass (2.1, passes 2 and 3): the shadow buffers cleared, then the `shadowcomp`
@@ -5217,8 +5224,9 @@ impl PackPost {
         window: [u32; 2],
         pages: &[TerrainPage],
         terrain: &mut TerrainDraw<'_>,
-    ) {
-        self.resize(device, size);
+        lost: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), String> {
+        self.resize(device, size, lost)?;
         // Last frame's water patches (or a new texture's zeros) out: depth 1 is no patch.
         if self.water_mask_dirty
             && let Some((_, view)) = self.targets.as_ref().and_then(|t| t.water_mask.as_ref())
@@ -5295,22 +5303,22 @@ impl PackPost {
             }
         }
         if let Some(t) = &mut self.timing {
-            t.begin(device, queue);
+            t.begin(device, queue, lost)?;
         }
         self.uniforms.center_depth_raw = self
             .center_depth
             .get_or_insert_with(|| super::pack_center_depth::CenterDepth::new(device))
-            .collect(device);
+            .collect();
         self.uniforms.update(frame, inputs, size);
         // `smooth` starts on the first frame that knows the camera's biome.
         self.custom.world_frame(inputs.biome_known);
         self.uniforms.eval_custom(&mut self.custom);
         if self.targets.is_none() {
-            return;
+            return Ok(());
         }
         // Images start the frame cleared, before the shadow pass writes them.
         if let Some(dump) = &mut self.dump {
-            dump.read(device);
+            dump.read(device, lost)?;
             dump.copy(device, encoder, &self.images);
         }
         pack_images::clear(
@@ -5320,7 +5328,9 @@ impl PackPost {
             self.gpu.clear,
             &mut self.zeros,
         );
-        let Some(targets) = &self.targets else { return };
+        let Some(targets) = &self.targets else {
+            return Ok(());
+        };
         // Every frame starts on A. A buffer that isn't cleared and ended the last frame on B has B
         // copied back to A, and B keeps what was last written into it: a model that fits Iris 1.11.7's
         // values in probe packs of our own (#9009), not a documented Iris rule. colortex0's A is
@@ -5706,6 +5716,7 @@ impl PackPost {
             rp.set_bind_group(0, &group, &[]);
             rp.draw(0..3, 0..1);
         }
+        Ok(())
     }
 }
 

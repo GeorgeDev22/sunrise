@@ -13,14 +13,10 @@ use sunrise_protocol::payload_negotiation::Phase;
 pub(super) struct Deferred {
     epoch: Arc<Epoch>,
     prepared: Prepared,
-    #[cfg(test)]
-    probe_server_reply: bool,
 }
 const _: () = assert!(std::mem::size_of::<Deferred>() <= 256);
 impl Deferred {
     pub(super) fn publish(self) {
-        #[cfg(test)]
-        wasm_tests::publication(self.probe_server_reply);
         let _ = self.epoch.with_active(|| self.prepared.publish());
     }
 }
@@ -90,11 +86,7 @@ impl Game<'_> {
         self.after_commit(super::transactions::After::Payload(Deferred {
             epoch,
             prepared,
-            #[cfg(test)]
-            probe_server_reply: endpoint.side() == Side::Server && id.0 == "raw_probe:receipt",
         }));
-        #[cfg(test)]
-        wasm_tests::staged_reply(endpoint.side() == Side::Server && id.0 == "raw_probe:receipt");
         Ok(PayloadAccepted::Queued)
     }
     pub(super) fn receive_client_payload(
@@ -141,8 +133,6 @@ impl Game<'_> {
             return true;
         }
         let body = std::mem::replace(&mut incoming.body, Body::Payload(PayloadBytes(Vec::new())));
-        #[cfg(test)]
-        let wasm_health_before = wasm_tests::health(self, &endpoint, &incoming.id);
         let seal = self.transaction_open();
         let mut context = MainContext {
             game: self,
@@ -196,14 +186,6 @@ impl Game<'_> {
         let reason = context.disconnect.take();
         let failure = context.failure.take().or_else(|| result.err());
         context.game.transaction_close(&seal, failure.is_none());
-        #[cfg(test)]
-        wasm_tests::observe(
-            wasm_health_before,
-            context.game,
-            &endpoint,
-            &incoming.id,
-            failure.is_none(),
-        );
         if let Some(error) = failure.as_ref().filter(|_| incoming.raw) {
             // A raw channel's bytes come from any client; one declaring mod's
             // refusal rolls back its own work only, and the next mod still runs.
@@ -295,6 +277,24 @@ impl IPayloadContext for MainContext<'_, '_> {
     fn check_payload_token(&self, token: &mod_api::PayloadToken) -> Result<(), PayloadSendError> {
         mod_api::__private::game::check_payload_token(token)
     }
+    /// The main thread's group send is transactional, as every main-thread send.
+    fn send_to(
+        &mut self,
+        players: &[PlayerRef],
+        id: &PayloadId,
+        bytes: PayloadBytes,
+    ) -> Result<u32, PayloadSendError> {
+        if self.disconnect.is_some() {
+            return Err(PayloadSendError::Disconnected);
+        }
+        if self.endpoint.side() != Side::Server {
+            return Err(PayloadSendError::WrongDirection(id.clone()));
+        }
+        if self.endpoint.transport().local.droppable(&id.0).is_none() {
+            return Err(PayloadSendError::NotDroppable(id.clone()));
+        }
+        Ok(self.game.players_send_payload(players, id, bytes))
+    }
     fn disconnect(&mut self, reason: Text) {
         self.disconnect = Some(reason);
     }
@@ -337,12 +337,3 @@ mod tests;
 #[cfg(test)]
 #[path = "payload_transport/typed_tests.rs"]
 mod typed_tests;
-#[cfg(test)]
-#[path = "payload_transport/typed_wasm_tests.rs"]
-mod typed_wasm_tests;
-#[cfg(test)]
-#[path = "payload_transport/wasm_config_tests.rs"]
-mod wasm_config_tests;
-#[cfg(test)]
-#[path = "payload_transport/wasm_tests.rs"]
-mod wasm_tests;

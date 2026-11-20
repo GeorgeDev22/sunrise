@@ -159,6 +159,7 @@ fn a_mob_bounces_off_a_bouncy_block_and_not_off_stone() {
             }
         }
         let w = MobWorld {
+            side: sunrise_client::motion::dry_side(),
             mob_maps: sunrise_client::neoforge_mob_maps::NeoForgeMobMaps::vanilla(),
             professions: crate::mobs::villager::profession_table(),
             teams: Default::default(),
@@ -278,6 +279,7 @@ fn a_ridden_horse_floats_in_deep_water() {
         }
     }
     let w = MobWorld {
+        side: sunrise_client::motion::dry_side(),
         mob_maps: sunrise_client::neoforge_mob_maps::NeoForgeMobMaps::vanilla(),
         professions: crate::mobs::villager::profession_table(),
         teams: Default::default(),
@@ -425,6 +427,7 @@ fn a_falling_mob_lands_on_a_shulker_or_a_held_happy_ghast() {
     let landing = |below: &Mob| -> f64 {
         let others = [below.seen(None, &crate::items::Items::empty())];
         let w = MobWorld {
+            side: sunrise_client::motion::dry_side(),
             mob_maps: sunrise_client::neoforge_mob_maps::NeoForgeMobMaps::vanilla(),
             professions: crate::mobs::villager::profession_table(),
             teams: Default::default(),
@@ -620,6 +623,7 @@ fn the_world_border_stops_a_mob() {
         let mut east_edge = [0.0; 2];
         for (i, bordered) in [false, true].into_iter().enumerate() {
             let w = MobWorld {
+                side: sunrise_client::motion::dry_side(),
                 professions: crate::mobs::villager::profession_table(),
                 border: bordered.then_some(&border),
                 ..w.clone()

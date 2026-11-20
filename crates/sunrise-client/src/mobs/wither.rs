@@ -1018,6 +1018,7 @@ mod upstream_sync_tests {
                     let cow = Mob::new(2, Arc::new(cow_kind), Vec3::new(5.5, 65.0, 0.5), 0.0);
                     let seen = [cow.seen(None, &crate::items::Items::empty())];
                     let world = crate::mobs::MobWorld {
+                        side: sunrise_client::motion::dry_side(),
                         others: &seen,
                         ..w.clone()
                     };

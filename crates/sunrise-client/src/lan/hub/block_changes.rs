@@ -68,9 +68,6 @@ impl Hub {
         // One entry per column, so the order is the columns'.
         changes.sort_unstable_by_key(|&(column, _)| column);
         for ((x, z), sections) in changes {
-            if let Some(far) = self.far.as_mut() {
-                far.changed(x, z);
-            }
             let viewers: Vec<(usize, Option<Level>)> = self
                 .chunk_holders((x, z))
                 .into_iter()
@@ -122,9 +119,6 @@ impl Hub {
             self.encoder.warm(&columns);
             for chunk in columns {
                 let key = (chunk.x, chunk.z);
-                if let Some(far) = self.far.as_mut() {
-                    far.changed(key.0, key.1);
-                }
                 let holders = self.holders(key);
                 if holders.is_empty() {
                     continue;
@@ -162,9 +156,6 @@ impl Hub {
                 .push(p);
         }
         for ((sx, sy, sz), positions) in sections {
-            if let Some(far) = self.far.as_mut() {
-                far.changed(sx, sz);
-            }
             let holders = self.holders((sx, sz));
             if holders.is_empty() {
                 continue;

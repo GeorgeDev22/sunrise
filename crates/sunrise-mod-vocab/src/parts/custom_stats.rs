@@ -1,7 +1,7 @@
 //! Load-owned identities in the built-in custom statistic registry.
 use super::*;
 
-/// Custom statistics declared during the shared native and wasm registration phase.
+/// Custom statistics declared during registration.
 pub trait CustomStatsRegistrar {
     /// Declare `path` in the registering mod's namespace, or an explicit
     /// `namespace:path` in a manifest-owned namespace other than `minecraft`.

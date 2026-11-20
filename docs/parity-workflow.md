@@ -56,6 +56,15 @@ python3 tools/parity.py --changed-files paths.txt  # the same for listed paths, 
 
 CI runs the automatic harnesses only in the [daily on main's head](release-flow.md#parity-on-main), not on pull requests or rollups. The daily posts harness names and outcomes; its logs stay private on the runner. One selection, several shares: the plan job computes the selection once from the tested commit and splits it (`tools/ci/parity_shards.py` names the count), each runner runs exactly its share (`tools/parity.py --harness-file`), and `tools/ci/parity_verdict.py --merge` turns the shares into the one file the daily summary reads, refusing a run whose shares miss a planned harness or run one twice. A commit of main from before the shares runs as one job, as it did then.
 
+The Linux daily also runs `save_kill` and `save_corruption` through this runner, like
+`dedicated_crash_save`. To run them directly on Linux with prepared resources, use
+`python3 tools/test_save_kill_parity.py` and `python3 tools/test_save_corruption_parity.py`.
+They boot a dedicated server in disposable worlds and exercise its real save and load paths.
+The kill check uses `SUNRISE_CRASH_FIXTURE` to stop a writer at a named publish boundary,
+then sends SIGKILL and reopens the world. This tests process death, not disk power loss.
+The corruption check changes copies of the saves and checks recovery, refusal, or chunk regeneration.
+Neither runs in the PR or rollup gate.
+
 Each harness runs unmodified under a tracer that records the files it depended on: its Python modules, its Java oracle and the oracle sources javac pulled in, other repository files it read, and the Rust sources of the probes it ran (from Cargo's `.d` dep-info files). A pass stands until one of those files, the pinned vanilla artifacts, `Cargo.lock` or the Rust/Java toolchains change. State and logs are in `.local/parity-runner/`; each harness's own outputs stay in its `.local/<name>/` directory.
 
 Vanilla oracle runs are reused as well. `tools/parity_shim.py` stands in for `java` and `javac`: it records each oracle run's outputs and the content of every file under the paths its arguments name, and replays the run while those are unchanged. After a Rust-only change a harness pays only for its Rust side (`block_update`: 53 s to 5 s). Files an oracle writes outside its named paths aren't tracked, so a harness that fails while reusing oracle results is rerun fresh, and stops reusing them if it then passes. `--fresh` never reuses them; `--all` allows reuse only when
@@ -187,18 +196,18 @@ A build with `--features state-digest` and `SUNRISE_STATE_DIGEST=<file>` appends
 
 ### Fuzzing scenarios
 
-`tools/parity_fuzz.py` runs small generated scenarios in vanilla and Sunrise and reports each divergence once, shrunk, with a reproduction (#12498). A batch of scenarios runs as one command-exec script (`test_command_exec_parity.py --groups-file`). It is a tool to run by hand, not a harness: `parity.py` never selects it.
+`tools/parity_fuzz.py` runs generated scenarios in vanilla and Sunrise and reports each divergence group with a shrunk reproduction. A batch of scenarios runs as one command-exec script (`test_command_exec_parity.py --groups-file`). It is a separate tool: `parity.py` never selects it.
 
 ```sh
-python3 tools/parity_fuzz.py --smoke --binary target/fast/sunrise-client.exe   # fixed scenarios that must match (~30 s)
-python3 tools/parity_fuzz.py persist --seed 1 --count 60                          # summon or place, unload and reload, read
-python3 tools/parity_fuzz.py spawn --seed 1 --count 60                            # each spawn mechanism, read tick by tick
-python3 tools/parity_fuzz.py --replay scenarios.json                               # run these scenarios (a report's, edited)
+python3 tools/parity_fuzz.py --smoke --binary target/fast/sunrise-client  # fixed scenarios that must match
+python3 tools/parity_fuzz.py persist --seed 1                            # summon or place, unload and reload, read
+python3 tools/parity_fuzz.py spawn --seed 1                              # each spawn mechanism, read tick by tick
+python3 tools/parity_fuzz.py --replay scenarios.json                      # run saved scenario steps, not a regenerated seed
 ```
 
-- **Scenarios.** A scenario is a seed and steps: summon (with NBT), place a block (with NBT), a command, ticks, a dispenser activation, an unload and reload, and reads (`/data get`). Each gets a chunk of its own far from the player (x 4096 and up, y 300, on a stone floor), forceloaded, and syncs both engines' randoms first ("Randoms that repeat"). A reload removes the forced ticket, ticks until both engines saved and dropped the chunk (a guard checks vanilla did), and loads it back: a real save and load through each engine's chunk and entity storage. Summoned entities get fixed UUIDs, so reads find them without selectors.
-- **Families** (`tools/parity_fuzz_scenarios.py`). `persist` summons an entity or places a block entity with changed fields, maybe beside other blocks, and reads it before and after a reload. `spawn` makes an entity one way (summon, dispenser, dispenser on a redstone signal, a block broken, an explosion, a piston) and reads it before its first tick and after each of a few. Field names are vanilla's own: the first run summons every entity type and places every block entity bare and caches what vanilla saves for each in the work directory (`defaults.json`); mutations change those fields' values and keep their NBT types. A run of 60 scenarios takes a few minutes; shrinking adds one or two batches per round.
-- **Comparison.** A `/data get` read is parsed as SNBT and compared field by field, so a difference names its field. Key order is not compared, nor the order of `attributes` (vanilla's own order changes run to run). Other commands compare like the harness (feedback, styles, results). `ALLOWED` in the script lists the differences that are not bugs, each with its reason.
+- **Scenarios.** A scenario stores its seed and steps: summon or place with NBT, run a command, tick, activate a dispenser, reload a chunk, or read saved state. Each gets a forceloaded chunk away from the player. Both engines tick to the same game time before syncing their randoms ("Randoms that repeat"). A reload removes the forced ticket and ticks with chunk I/O enabled. A guard checks that the chunk is no longer loaded and vanilla has released its pending unload before it is forced back in; Sunrise's own unload is not read directly, it is inferred from the `/execute unless loaded` result. The load waits for terrain, lighting and entities without advancing game time. Summoned entities get fixed UUIDs.
+- **Families** (`tools/parity_fuzz_scenarios.py`). `persist` reads an entity or block entity with changed fields before and after a reload. It discovers vanilla's saved fields and caches them as `defaults.json` in the work directory; a crashed discovery is not cached. The default field order and set of types affect generation, so keep the steps when sharing a case. `spawn` uses its own tables, then reads the new entity across ticks. Item-drop reads observe all items in the scenario area as an unordered collection, preserving duplicate stacks: the order of entities in an area query is not something the scenarios pin down, so an order difference is not reported here.
+- **Comparison.** A `/data get` read is parsed as SNBT and compared field by field. Key order and the order of `attributes` records do not matter. Other commands compare like the harness (feedback, styles, results). Each batch also runs the same script in vanilla alone: a read that differs between the two vanilla runs is counted as `vanilla-unstable`, not compared against Sunrise.
 - **Grouping and shrinking.** Each diverging read is grouped by family, subject type, whether the read came after a reload, and first differing field. Each group's smallest scenario is shrunk (steps and NBT keys dropped, tick counts halved) while that group's divergence stays, trying all edits of a round in one batch. `report.json` in the work directory lists the groups, largest first, each with its seeds, its shrunk scenario as commands, and its differences.
 - **Triage before filing.** A group is a lead, not a bug: read the vanilla source for the field, check it isn't a seed-sync limit (above) or harness noise, and search existing issues first.
 

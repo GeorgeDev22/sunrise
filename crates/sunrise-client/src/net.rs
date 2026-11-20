@@ -117,7 +117,10 @@ pub enum Event {
     /// ClientboundResourcePackPopPacket: one pack, or every pack.
     PackPop(Option<u128>),
     /// `show_dialog` in configuration: the dialog itself.
-    ShowDialog(sunrise_core::nbt::Tag),
+    ShowDialog {
+        dialog: sunrise_core::nbt::Tag,
+        registries: Arc<Dynamic>,
+    },
     /// `clear_dialog` in configuration.
     ClearDialog,
     /// ClientboundCodeOfConductPacket: the game shows it and answers with
@@ -184,7 +187,9 @@ impl Event {
             Self::RawPayload(incoming) => size_of::<crate::raw_payloads::Incoming>()
                 .saturating_add(incoming.owned_heap_bytes()),
             Self::PackPush(packet) => packet.owned_heap_bytes(),
-            Self::ShowDialog(tag) => tag.owned_heap_bytes(),
+            Self::ShowDialog { dialog, registries } => dialog
+                .owned_heap_bytes()
+                .saturating_add(dynamic(registries)),
             Self::Transfer { host, port: _ } => host.capacity(),
             Self::ServerLinks(links) => links.owned_heap_bytes(),
             Self::Disconnected {
@@ -364,7 +369,7 @@ impl Session {
         let recorder = Arc::new(Mutex::new(None));
         let thread_recorder = recorder.clone();
         let (address_owned, name_owned) = (address.to_owned(), name.to_owned());
-        // Payload handlers of wasm mods run on this thread (the client's network root).
+        // Mod payload handlers run on this thread (the client's network root).
         let thread = sunrise_guest_stack::spawn("sunrise-net".into(), move || {
             sunrise_threads::favour_current();
             let result = captured_payloads.map_err(Reason::plain).and_then(|_| {
@@ -504,6 +509,10 @@ impl Session {
     pub fn stop_recording(&self) -> Option<std::io::Result<PathBuf>> {
         let rec = self.recorder.lock().unwrap().take()?;
         Some(rec.stop())
+    }
+    /// `Connection.isConnected`: the connection is open (a replay's never is).
+    pub fn connected(&self) -> bool {
+        self.writer.lock().is_ok_and(|writer| writer.is_some())
     }
     /// Whether recording is currently active.
     pub fn is_recording(&self) -> bool {
@@ -1056,8 +1065,15 @@ fn run(
     c.send(&cfg::Serverbound::ClientInformation(info).encode())
         .map_err(e)?;
     let (mut reader, writer) = c.split();
-    *shared_writer.lock().unwrap() =
-        Some(QueuedWriter::new(writer).map_err(|error| Reason::plain(error.to_string()))?);
+    let writer = QueuedWriter::new(writer).map_err(|error| Reason::plain(error.to_string()))?;
+    if let Some(queue) = payloads
+        .connection
+        .as_ref()
+        .and_then(|connection| connection.droppable())
+    {
+        writer.attach_droppable(queue.clone());
+    }
+    *shared_writer.lock().unwrap() = Some(writer);
     let registries = configure(
         &mut reader,
         shared_writer,
@@ -1276,6 +1292,7 @@ fn configure(
     payloads: &Arc<crate::raw_payloads::Transport>,
 ) -> Result<Dynamic, Reason> {
     let mut registries = Dynamic::default();
+    let mut dialog_snapshot = None;
     let mut content_verified = false;
     payloads.begin_configuration();
     let mut negotiation =
@@ -1290,18 +1307,9 @@ fn configure(
             None => Err(Reason::plain("Disconnected")),
         }
     };
-    // With only engine declarations the client waits for the server's query, so a vanilla
-    // server is sent nothing new.
-    if payloads.local.has_mod_declarations()
-        && let Some(control) = negotiation.initial()
-    {
-        reply(cfg::Serverbound::CustomPayload(cfg::CustomPayload {
-            channel: sunrise_protocol::payload_negotiation::CHANNEL.into(),
-            data: control
-                .encode()
-                .map_err(|error| Reason::plain(error.to_string()))?,
-        }))?;
-    }
+    // Nothing goes out before the server has spoken on the channel (its Query or Offer) or
+    // named itself Sunrise by brand: a vanilla server is sent what vanilla's client sends,
+    // whatever mods are installed.
     loop {
         let (id, payload) = reader
             .recv()
@@ -1422,9 +1430,20 @@ fn configure(
             }
             cfg::Clientbound::RegistryData(mut r) => {
                 fill_known_entries(&mut r, resources.root());
+                if r.registry == "minecraft:dialog" {
+                    dialog_snapshot = None;
+                }
                 registries.add(r);
             }
-            cfg::Clientbound::UpdateTags(t) => registries.add_tags(&t),
+            cfg::Clientbound::UpdateTags(t) => {
+                if t.registries
+                    .iter()
+                    .any(|row| row.registry == "minecraft:dialog")
+                {
+                    dialog_snapshot = None;
+                }
+                registries.add_tags(&t);
+            }
             cfg::Clientbound::CodeOfConduct(c) => {
                 let _ = send.send(Event::CodeOfConduct(c.text));
             }
@@ -1435,9 +1454,25 @@ fn configure(
             cfg::Clientbound::ResourcePackPop(p) => {
                 let _ = send.send(Event::PackPop(p.id));
             }
-            // The game shows it; the answer goes back from there.
+            // The game shows it immediately, before Joined/Reconfigured installs
+            // the play registries. Only the dialog entries and tags are dynamic
+            // lookups here; keep the snapshot for clicks from this screen too.
             cfg::Clientbound::ShowDialog(d) => {
-                let _ = send.send(Event::ShowDialog(d.dialog));
+                let snapshot = dialog_snapshot.get_or_insert_with(|| {
+                    let mut snapshot = Dynamic::default();
+                    let key = "minecraft:dialog";
+                    if let Some(entries) = registries.registries.get(key) {
+                        snapshot.registries.insert(key.into(), entries.clone());
+                    }
+                    if let Some(tags) = registries.tags.get(key) {
+                        snapshot.tags.insert(key.into(), tags.clone());
+                    }
+                    Arc::new(snapshot)
+                });
+                let _ = send.send(Event::ShowDialog {
+                    dialog: d.dialog,
+                    registries: snapshot.clone(),
+                });
             }
             cfg::Clientbound::ClearDialog(_) => {
                 let _ = send.send(Event::ClearDialog);
@@ -1812,6 +1847,105 @@ mod tests {
             } else {
                 "missing response"
             }));
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// A client with a mod's payload declaration, joined to a server that offers nothing: the
+    /// configuration phase carries no `sunrise:payloads` packet, as vanilla's carries none. When
+    /// the server Queries the channel, the client answers with its Offer, mod declaration included.
+    #[test]
+    fn mod_client_offers_payloads_only_when_the_server_asks() {
+        use sunrise_protocol::payload_negotiation::{CHANNEL, Control};
+        for server_asks in [false, true] {
+            let (root, data) = empty_item_data(&format!("mod-client-{server_asks}"));
+            let sent = crate::raw_payloads::test_support::with_client(|transport| {
+                assert!(transport.local.has_mod_declarations());
+                let (client, server) = sunrise_protocol::connection::Pipe::pair();
+                let (mut reader, writer) = Connection::local(client).split();
+                reader
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let data = data.clone();
+                let thread = std::thread::spawn(move || {
+                    let (send, _events) = event_channel();
+                    configure(
+                        &mut reader,
+                        &Arc::new(Mutex::new(Some(QueuedWriter::new(writer).unwrap()))),
+                        &Arc::new(AtomicBool::new(true)),
+                        &Language::new(),
+                        &send,
+                        &Cookies::default(),
+                        &data,
+                        &transport,
+                    )
+                });
+                let mut server = Connection::local(server);
+                let mut brand = sunrise_protocol::buf::Writer::new();
+                brand.string("vanilla");
+                let mut to_client = vec![cfg::Clientbound::CustomPayload(cfg::CustomPayload {
+                    channel: "minecraft:brand".into(),
+                    data: brand.data,
+                })];
+                if server_asks {
+                    to_client.push(cfg::Clientbound::CustomPayload(cfg::CustomPayload {
+                        channel: CHANNEL.into(),
+                        data: Control::Query.encode().unwrap(),
+                    }));
+                }
+                to_client.push(cfg::Clientbound::SelectKnownPacks(cfg::SelectKnownPacks {
+                    packs: vec![],
+                }));
+                for packet in to_client {
+                    server.send(&packet.encode()).unwrap();
+                }
+                // The known packs reply comes after any offer: the server's Query is read first.
+                let mut sent = Vec::new();
+                loop {
+                    let (id, body) = server.recv().unwrap();
+                    let packet = cfg::Serverbound::decode(id, &body).unwrap();
+                    let done = matches!(packet, cfg::Serverbound::SelectKnownPacks(_));
+                    sent.push(packet);
+                    if done {
+                        break;
+                    }
+                }
+                server
+                    .send(&cfg::Clientbound::FinishConfiguration(Empty).encode())
+                    .unwrap();
+                // A required mod channel the server lacks refuses the join at the barrier
+                // (`Missing`), as before: the join's end is not what this test pins.
+                let _ = thread.join().unwrap();
+                sent
+            });
+            let offers: Vec<_> = sent
+                .iter()
+                .filter_map(|packet| match packet {
+                    cfg::Serverbound::CustomPayload(p) if p.channel == CHANNEL => {
+                        Some(Control::decode(&p.data).unwrap())
+                    }
+                    _ => None,
+                })
+                .collect();
+            if server_asks {
+                let [Control::Offer(manifest)] = offers.as_slice() else {
+                    panic!("one Offer expected, got {offers:?}");
+                };
+                assert!(
+                    manifest
+                        .entries()
+                        .iter()
+                        .any(|e| e.id() == crate::raw_payloads::test_support::CHANNEL),
+                    "the Offer lists the mod's channel"
+                );
+            } else {
+                assert_eq!(offers, [], "nothing on the channel unasked");
+                assert_eq!(
+                    sent.len(),
+                    1,
+                    "only the known packs reply, as vanilla's client answers: {sent:?}"
+                );
+            }
             std::fs::remove_dir_all(root).unwrap();
         }
     }
@@ -2407,6 +2541,84 @@ mod tests {
         }
         assert!(thread.join().unwrap().is_ok());
         drop(writer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configuration_dialog_binds_holders_from_its_own_packets() {
+        use crate::dialog::Dialog;
+        use sunrise_core::nbt::parse_snbt;
+
+        let (root, data) = empty_item_data("dialog-registry");
+        let (client, server) = sunrise_protocol::connection::Pipe::pair();
+        let (mut reader, writer) = Connection::local(client).split();
+        let writer = Arc::new(Mutex::new(Some(QueuedWriter::new(writer).unwrap())));
+        let (send, events) = event_channel();
+        let mut server = Connection::local(server);
+        let (leaf, _) = parse_snbt("{type:notice,title:Leaf}").unwrap();
+        let (dialog, _) = parse_snbt(
+            r##"{type:dialog_list,title:{text:Open,click_event:{action:show_dialog,dialog:"test:leaf"}},dialogs:"#test:list"}"##,
+        )
+        .unwrap();
+        let tags = |tags| {
+            cfg::Clientbound::UpdateTags(cfg::UpdateTags {
+                registries: vec![cfg::RegistryTags {
+                    registry: "minecraft:dialog".into(),
+                    tags,
+                }],
+            })
+        };
+        for packet in [
+            cfg::Clientbound::RegistryData(cfg::RegistryData {
+                registry: "minecraft:dialog".into(),
+                entries: vec![cfg::RegistryEntry {
+                    id: "test:leaf".into(),
+                    data: Some(leaf.clone()),
+                }],
+            }),
+            tags(vec![cfg::TagEntry {
+                name: "test:list".into(),
+                ids: vec![0],
+            }]),
+            cfg::Clientbound::ShowDialog(cfg::ShowDialog {
+                dialog: dialog.clone(),
+            }),
+            tags(vec![]),
+            cfg::Clientbound::ShowDialog(cfg::ShowDialog { dialog }),
+            cfg::Clientbound::FinishConfiguration(Empty),
+        ] {
+            server.send(&packet.encode()).unwrap();
+        }
+        assert!(
+            configure(
+                &mut reader,
+                &writer,
+                &Arc::new(AtomicBool::new(true)),
+                &Language::new(),
+                &send,
+                &Cookies::default(),
+                &data,
+                &crate::raw_payloads::Transport::empty(),
+            )
+            .is_ok()
+        );
+        for expected in [true, false] {
+            let (event, _credit) = events.try_recv_owned().unwrap().into_parts();
+            let Event::ShowDialog { dialog, registries } = event else {
+                panic!("expected a configuration dialog");
+            };
+            let parsed = Dialog::parse_in_registry(
+                &dialog,
+                &Default::default(),
+                &|_| false,
+                Some(&registries),
+            );
+            assert_eq!(parsed.is_some(), expected);
+            if expected {
+                let id = registries.tag("minecraft:dialog", "test:list").unwrap()[0];
+                assert_eq!(registries.data("minecraft:dialog", id), Some(&leaf));
+            }
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -484,6 +484,27 @@ impl Renderer {
             })
             .flat_map(|(_, blocks)| blocks)
     }
+    /// `LevelRenderer.isSectionCompiledAndVisible`: the entity's section must have finished
+    /// its mesh (including empty sections) and reached the same fade threshold as block entities.
+    pub fn entity_section_visible(
+        &self,
+        [x, y, z]: [i32; 3],
+        fade_seconds: f32,
+        now: Instant,
+    ) -> bool {
+        let Some(sy) = self.layout.section_index(y) else {
+            return false;
+        };
+        let column = (x >> 4, z >> 4);
+        self.detail_columns
+            .get(&column)
+            .is_some_and(|mask| mask.contains(sy))
+            && chunk_visibility(
+                self.section_elapsed_ms((column.0, sy as i32, column.1), now),
+                fade_millis(fade_seconds),
+            ) >= CHUNK_VISIBILITY_THRESHOLD
+    }
+
     /// Whether a section may still be fading in over `fade_ms` (vanilla's chunk fade): one was
     /// uploaded more recently than that. Otherwise every section is whole.
     pub(super) fn sections_fading_in(&self, fade_ms: u64, now: std::time::Instant) -> bool {

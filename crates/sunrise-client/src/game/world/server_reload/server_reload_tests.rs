@@ -924,12 +924,12 @@ fn server_completion_reads_published_data_without_world_access_on_first_open() {
             assert!(!host.recipes_of_type("minecraft:smelting").is_empty());
             let refused =
                 catch_unwind(AssertUnwindSafe(|| host.level("minecraft:overworld"))).unwrap_err();
-            let text = refused
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| refused.downcast_ref::<&str>().copied())
-                .unwrap();
-            assert!(text.contains("Reloading"), "{text}");
+            assert_eq!(
+                refused
+                    .downcast_ref::<mod_api::__private::PhaseRefusal>()
+                    .map(|refusal| refusal.phase),
+                Some(ModPhase::Reloading)
+            );
             self.0.lock().unwrap().push(event.cause);
         }
     }

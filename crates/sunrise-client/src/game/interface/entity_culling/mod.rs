@@ -366,17 +366,19 @@ impl Game<'_> {
 }
 
 impl Game<'_> {
-    /// Entity.setViewScale (LevelExtractor.extractVisibleEntities): the entity
-    /// distance option times the render distance's boost — 1 at 8 chunks, 2.5
-    /// at 20 or more. The render distance is the client setting, capped by
-    /// the server's view distance when connected
-    /// (Options.getEffectiveRenderDistance).
-    pub(super) fn view_scale(&self) -> f64 {
-        let distance = match &self.remote {
+    /// Options.getEffectiveRenderDistance: the client setting, capped by the server's view distance.
+    pub(super) fn effective_render_distance(&self) -> i32 {
+        match &self.remote {
             Some(r) => self.settings.render_distance.min(r.view_distance),
             None => self.settings.render_distance,
-        };
-        entity_view_scale(distance, self.settings.entity_distance)
+        }
+    }
+    /// Entity.setViewScale: entity distance times the render distance's boost (1 at 8 chunks, 2.5 at 20+).
+    pub(super) fn view_scale(&self) -> f64 {
+        entity_view_scale(
+            self.effective_render_distance(),
+            self.settings.entity_distance,
+        )
     }
 }
 

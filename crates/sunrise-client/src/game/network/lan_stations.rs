@@ -8,10 +8,18 @@ use super::{
     Game,
     stations::{Kind as StationKind, Station},
 };
+use crate::game::{
+    decided_action::Epoch,
+    transactions::{
+        After,
+        decision::{InvalidReason, Reply},
+    },
+};
+use std::cell::{Cell, RefCell};
 use sunrise_client::{
     containers::BlockEntity,
     items::ItemStack,
-    menu::{AnvilCraft, Kind, Menu},
+    menu::{AnvilCraft, GrindstonePlace, GrindstoneTake, Kind, Menu},
 };
 use sunrise_core::random::RandomSource;
 use sunrise_protocol::packets::play::{self, Clientbound as C};
@@ -143,11 +151,18 @@ impl Game<'_> {
         click: Option<super::lan_pickup::Click>,
         op: impl FnOnce(&mut Menu, &sunrise_client::menu::Env),
     ) -> bool {
-        let Some(mut gs) = self
+        let Some((owner, mut gs)) = self
             .lan
             .as_mut()
             .and_then(|host| host.menus.get_mut(&conn))
-            .and_then(|p| p.station.take_if(|s| window.is_none_or(|w| s.window == w)))
+            .and_then(|p| {
+                let owner = p.station.id();
+                Some((
+                    owner,
+                    p.station
+                        .take_if(|s| window.is_none_or(|w| s.window == w))?,
+                ))
+            })
         else {
             return false;
         };
@@ -161,6 +176,8 @@ impl Game<'_> {
                     .as_ref()
                     .is_some_and(|h| h.hub.guests[gi].spectator())
             });
+        let mut click_seal = None;
+        let mut commit_click = true;
         if let Some(gi) = guest {
             // createResult runs when the inputs change (or a rename): a click
             // elsewhere must not hand the hooks their own result again.
@@ -182,6 +199,39 @@ impl Game<'_> {
             });
             let mut undo = None;
             let hook = gs.menu.anvil_hook;
+            // A take the mods listen to is one action with its click: the click, the hook and the
+            // take's own effects share one transaction, so a refusal puts the guest's inventory,
+            // cursor and drops back with the menu as it was (`before`).
+            let take_listened =
+                gs.menu.grind_hook && mod_api::__private::listened(mod_api::HookId::GrindstoneTake);
+            let place_listened = gs.menu.grind_hook
+                && mod_api::__private::listened(mod_api::HookId::GrindstonePlace);
+            let pos = gs.pos;
+            // Bind the owner and backing before running any part of the click. The grindstone
+            // has no block entity, so use the level's committed and tentative block epochs.
+            let admission = (take_listened || place_listened)
+                .then(|| {
+                    Some((
+                        self.guest_actor(conn)?,
+                        self.guest_station(conn)?,
+                        self.grindstone_backing(pos),
+                    ))
+                })
+                .flatten();
+            let fresh = |game: &Game<'_>| {
+                admission.is_some_and(|(_, (_, stamp), backing)| {
+                    game.guest_station(conn)
+                        .is_some_and(|(_, now)| now == stamp)
+                        && game.grindstone_backing(pos) == backing
+                })
+            };
+            if gs.kind == StationKind::Grindstone
+                && (take_listened || !self.transactions.is_empty())
+            {
+                click_seal = Some(self.transaction_open());
+                self.journal_guest_click(conn);
+                self.journal_station_click(conn, owner, &gs);
+            }
             self.guest_menu_op_decided(gi, &mut gs.menu, click, None, |menu, env| {
                 undo = hook.then(|| menu.anvil_undo());
                 op(menu, env);
@@ -215,17 +265,78 @@ impl Game<'_> {
             }
             // GrindstoneEvent.OnTakeItem: the taken result's onTake waits for the mods.
             let mut ground_xp = None;
-            if let Some(mut take) = gs.menu.grind_take.take() {
-                let (uuid, entity_id) = self
-                    .lan
-                    .as_ref()
-                    .map(|host| (host.hub.guests[gi].uuid, host.hub.guests[gi].entity_id))
-                    .unwrap_or((0, 0));
-                let mut cancel = false;
-                self.api_grindstone_take(uuid, entity_id, gs.pos, &mut take, &mut cancel);
-                cancelled |= cancel;
-                let env = self.menu_env();
-                ground_xp = gs.menu.grindstone_taken(&env, take, cancel);
+            let taken = gs.menu.grind_take.take();
+            let (uuid, entity_id) = self
+                .lan
+                .as_ref()
+                .map(|host| (host.hub.guests[gi].uuid, host.hub.guests[gi].entity_id))
+                .unwrap_or((0, 0));
+            if let Some(take) = taken {
+                if take_listened && let Some((actor, (route, _), _)) = admission {
+                    let read = gs.menu.mutation_stamp();
+                    let answer = RefCell::new(None::<GrindstoneTake>);
+                    let listener_cancelled = Cell::new(false);
+                    let applied = {
+                        let menu = RefCell::new(&mut *gs.menu);
+                        self.decided_action(
+                            "grindstone_take",
+                            route,
+                            actor,
+                            Epoch::Player,
+                            // The station is the one the click ran on, its block is as it was and
+                            // nothing the take read has changed.
+                            |game| fresh(game) && menu.borrow().mutation_stamp() == read,
+                            |game| {
+                                let mut take = take;
+                                let mut cancel = false;
+                                if let Err(reason) = game.api_grindstone_take(
+                                    uuid,
+                                    entity_id,
+                                    pos,
+                                    &mut take,
+                                    &mut cancel,
+                                ) {
+                                    return Reply::Invalid(reason);
+                                }
+                                if cancel {
+                                    listener_cancelled.set(true);
+                                    return Reply::Cancel;
+                                }
+                                if take.xp < -1
+                                    || take.new_top.as_ref().is_some_and(|s| s.count < 1)
+                                    || take.new_bottom.as_ref().is_some_and(|s| s.count < 1)
+                                {
+                                    return Reply::Invalid(InvalidReason::Plan);
+                                }
+                                *answer.borrow_mut() = Some(take);
+                                Reply::Allow
+                            },
+                            |game| {
+                                let Some(take) = answer.take() else {
+                                    return;
+                                };
+                                if take.xp < 0 {
+                                    let amount = take.vanilla_amount(&game.menu_env());
+                                    game.grindstone_taken(pos, amount);
+                                } else {
+                                    game.grindstone_award(pos, take.xp.unsigned_abs());
+                                }
+                                menu.borrow_mut()
+                                    .grindstone_take_inputs(&game.menu_env(), take);
+                            },
+                        )
+                    };
+                    // A listener's cancel keeps the click (the result is still taken) and skips
+                    // the rest of onTake; any other refusal undoes the click as well.
+                    cancelled |= !applied;
+                    commit_click = applied || listener_cancelled.get();
+                } else if take_listened {
+                    // An unidentifiable actor must not dispatch a listened hook outside an action.
+                    cancelled = true;
+                    commit_click = false;
+                } else {
+                    ground_xp = gs.menu.grindstone_taken(&self.menu_env(), take, false);
+                }
             }
             // A cancelled take runs no createResult: the inputs are untouched.
             let recomputed = !cancelled
@@ -260,10 +371,58 @@ impl Game<'_> {
                     .as_ref()
                     .map(|host| (host.hub.guests[gi].uuid, host.hub.guests[gi].entity_id))
                     .unwrap_or((0, 0));
-                let mut place = gs.menu.grindstone_place();
-                let mut cancel = false;
-                self.api_grindstone_place(uuid, entity_id, gs.pos, &mut place, &mut cancel);
-                gs.menu.grindstone_placed(place, cancel);
+                let place = gs.menu.grindstone_place();
+                if place_listened && let Some((actor, (route, _), _)) = admission {
+                    let read = gs.menu.mutation_stamp();
+                    let original = place.clone();
+                    let answer = RefCell::new(None::<GrindstonePlace>);
+                    let applied = {
+                        let menu = RefCell::new(&mut *gs.menu);
+                        self.decided_action(
+                            "grindstone_place",
+                            route,
+                            actor,
+                            Epoch::Player,
+                            |game| fresh(game) && menu.borrow().mutation_stamp() == read,
+                            |game| {
+                                let mut place = place;
+                                let mut cancel = false;
+                                if let Err(reason) = game.api_grindstone_place(
+                                    uuid,
+                                    entity_id,
+                                    pos,
+                                    &mut place,
+                                    &mut cancel,
+                                ) {
+                                    return Reply::Invalid(reason);
+                                }
+                                if cancel {
+                                    return Reply::Cancel;
+                                }
+                                if place.xp < -1
+                                    || place.output.as_ref().is_some_and(|s| s.count < 1)
+                                {
+                                    return Reply::Invalid(InvalidReason::Plan);
+                                }
+                                *answer.borrow_mut() = Some(place);
+                                Reply::Allow
+                            },
+                            |_| {
+                                if let Some(place) = answer.take() {
+                                    menu.borrow_mut().grindstone_placed(place, false);
+                                }
+                            },
+                        )
+                    };
+                    // A cancel, a refusal and a stale read all leave no result.
+                    if !applied {
+                        gs.menu.grindstone_placed(original, true);
+                    }
+                } else {
+                    // Without a subscriber use the vanilla result. A missing listener identity
+                    // on the subscribed route instead refuses it, just like a stale read.
+                    gs.menu.grindstone_placed(place, place_listened);
+                }
             }
             if recomputed && gs.kind == StationKind::Smithing {
                 let (uuid, name) = self
@@ -305,11 +464,34 @@ impl Game<'_> {
                 self.lan_enchant_offers(gi, &mut gs);
             }
         }
-        if let Some(host) = self.lan.as_mut() {
-            *host.menus.entry(conn).or_default().station = Some(gs);
+        let window = gs.window;
+        let grindstone = gs.kind == StationKind::Grindstone;
+        if let Some(menus) = self.lan.as_mut().and_then(|host| host.menus.get_mut(&conn))
+            && menus.station.id() == owner
+            && menus.station.is_none()
+        {
+            *menus.station = Some(gs);
         }
-        self.lan_send_station(conn);
+        if let Some(seal) = click_seal {
+            self.transaction_close(&seal, commit_click);
+        }
+        if grindstone {
+            self.after_commit(After::StationContent(conn, owner, window));
+        } else {
+            self.lan_send_station(conn);
+        }
         true
+    }
+
+    fn grindstone_backing(
+        &self,
+        [x, y, z]: [i32; 3],
+    ) -> (u64, u64, sunrise_world::registry::BlockStateId) {
+        (
+            self.world.revision,
+            self.transactions.block_writes(),
+            self.world.block(x, y, z),
+        )
     }
 
     /// How many slots of its own the guest's open station menu has before the
@@ -725,53 +907,74 @@ impl Game<'_> {
     /// `ServerGamePacketListenerImpl.handleContainerButtonClick`:
     /// `clickMenuButton`, then `broadcastChanges` when the menu took it.
     pub(super) fn lan_station_button(&mut self, conn: u32, window: i32, id: i32) {
-        // A mod container's menu: its mod's buttons (`native_menu_button`),
-        // as handleContainerButtonClick checks them: the open menu, not a
-        // spectator, still valid. A menu a mod opened from code
-        // (`Slots::Native`) at a block's position is that block's only when
-        // the block's container opens the same menu type, as the client
-        // tells its screen hooks (`menu_opener_block`).
+        // Route to the active menu type's listeners. Only a validated `Slots::Block`
+        // supplies the optional position and entity backing.
         let mod_menu = self.lan.as_ref().and_then(|host| {
             let g = host.hub.guest(conn)?;
             let menu = g.menu.as_ref().filter(|m| m.window == window)?;
-            let pos = menu.pos?;
-            let opened_as = (menu.slots == sunrise_client::lan::menu::Slots::Native)
-                .then(|| menu.registry_id.clone());
+            if !mod_api::__private::menu_listens(mod_api::HookId::MenuButton, &menu.registry_id) {
+                return None;
+            }
             Some((
-                pos,
-                opened_as,
+                menu.registry_id.clone(),
+                g.menu_generation,
+                match menu.slots {
+                    sunrise_client::lan::menu::Slots::Block(pos) => Some(pos),
+                    _ => None,
+                },
                 !g.spectator() && menu.still_valid(&host.hub.loop_context, &self.world, g),
                 g.carried.clone(),
                 g.uuid,
                 g.entity_id,
             ))
         });
-        if let Some((pos, opened_as, valid, mut carried, uuid, entity_id)) = mod_menu
-            && self
-                .mod_menu_at(pos)
-                .is_some_and(|m| opened_as.as_deref().is_none_or(|t| t == m))
+        if let Some((menu, menu_generation, backing, valid, mut carried, uuid, entity_id)) =
+            mod_menu
         {
             if valid {
                 // The clicking player's cursor stack (`clickMenuButton`'s
                 // other half). Single player's own player is a guest of
                 // its own host too (`lan.rs:165`), so this one path covers
                 // both single player and a LAN guest.
+                let original_carried = carried.clone();
+                let backing = backing.filter(|&pos| self.mod_menu_at(pos) == Some(menu.as_ref()));
+                let block = backing.map(|(x, y, z)| self.data_block_name([x, y, z]));
+                let mut accepted = false;
+                self.native_menu_button_valid(&menu, block.as_deref(), id, &mut accepted);
+                if !accepted {
+                    return;
+                }
                 let context = mod_api::item::menu::MenuButtonContext {
                     player: uuid,
                     player_entity_id: entity_id,
-                    pos: [pos.0, pos.1, pos.2],
+                    pos: backing.map(|(x, y, z)| [x, y, z]),
                     id,
                 };
                 // As that player: `native_acting_player` and `native_acting_id`
                 // answer for the one who pressed.
-                self.as_guest(conn, |game| game.mod_menu_button(context, &mut carried));
-                if let Some(host) = self.lan.as_mut()
-                    && host.hub.guest(conn).is_some_and(|g| g.carried != carried)
+                self.as_guest(conn, |game| {
+                    game.mod_menu_button(&menu, context, block.as_deref(), backing, &mut carried)
+                });
+                if carried != original_carried
+                    && let Some(host) = self.lan.as_mut()
                 {
                     let net = host.hub.stack(&carried);
-                    let _ = host.hub.update_guest(conn, |g| {
+                    let _ = host.hub.update_guest(conn, move |g| {
+                        if g.menu_generation != menu_generation
+                            || !g
+                                .menu
+                                .as_ref()
+                                .is_some_and(|current| current.window == window)
+                            || g.carried != original_carried
+                        {
+                            return false;
+                        }
+                        if g.carried == carried {
+                            return false;
+                        }
                         g.carried = carried;
                         g.send(&C::SetCursorItem(play::SetCursorItem { item: net }));
+                        true
                     });
                 }
             }
@@ -814,7 +1017,7 @@ impl Game<'_> {
 
     /// The whole station menu and its changed data slots for the client
     /// (`sendAllDataToRemote` / `broadcastChanges`).
-    fn lan_send_station(&mut self, conn: u32) {
+    pub(super) fn lan_send_station(&mut self, conn: u32) {
         let Some(host) = self.lan.as_mut() else {
             return;
         };

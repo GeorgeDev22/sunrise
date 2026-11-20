@@ -100,9 +100,6 @@ impl StartupMenu {
         additional_data: Arc<[Arc<sunrise_client::datapack::DataPack>]>,
         splashes: &str,
     ) {
-        sunrise_client::ui::load_metadata(
-            &sunrise_assets::resource_source::ResourceSource::directory(root.to_path_buf()),
-        );
         sunrise_client::lang::set(sunrise_client::lang::Language::load(
             &[&sunrise_assets::resource_source::ResourceSource::directory(
                 root.clone(),
@@ -859,6 +856,15 @@ impl Loading {
         }
     }
 
+    /// The title's installed-package count: the buttons crates add to the title screen
+    /// (`sunrise_hooks::title`) show by it, with the same eligibility the game's own title
+    /// screen uses. Before the menu draws or takes input.
+    fn sync_title_mods(&mut self) {
+        if let Some(title) = &mut self.menu.title {
+            title.mods = self.settings.mods.installed.len();
+        }
+    }
+
     fn menu_action(&mut self, event_loop: &dyn EventLoopCtl, action: Action) {
         match action {
             Action::Quit => event_loop.exit(),
@@ -1112,6 +1118,9 @@ impl Loading {
         event_loop: &dyn EventLoopCtl,
         event: WindowEvent,
     ) -> Result<()> {
+        // The buttons crates add to the title screen show by what is installed now
+        // (`sunrise_hooks::title`), as on the game's own title screen.
+        self.sync_title_mods();
         if let WindowEvent::KeyboardInput { event, .. } = &event
             && let PhysicalKey::Code(key) = event.physical_key
         {
@@ -1370,6 +1379,9 @@ impl Loading {
     }
 
     pub(super) fn draw_menu(&mut self, batch: &mut HudBatch) {
+        // The buttons crates add to the title screen show by what is installed now
+        // (`sunrise_hooks::title`), as on the game's own title screen.
+        self.sync_title_mods();
         let logs = sunrise_client::logging::recent_lines();
         let Some(gui) = &self.gui else {
             // The pack's screens do not exist yet: the boot screen holds the

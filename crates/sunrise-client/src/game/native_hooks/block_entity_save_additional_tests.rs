@@ -16,6 +16,9 @@ mod tests {
     use sunrise_mod_runtime::attachments::ATTACHMENTS_KEY;
     use sunrise_world::region::RegionFile;
 
+    thread_local! {
+        static SAVED_AT: std::cell::RefCell<Vec<([i32; 3], mod_api::LevelRef)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
     struct Counter(Arc<AtomicI32>);
     #[mod_api::sunrise_part]
     impl mod_api::BlockPart for Counter {}
@@ -26,6 +29,7 @@ mod tests {
             _: &dyn LevelHost,
             event: &mut BlockEntitySaveAdditionalEvent<'_>,
         ) {
+            SAVED_AT.with_borrow_mut(|seen| seen.push((event.pos, event.level)));
             let serial = self.0.fetch_add(1, Ordering::Relaxed);
             match event.tag.get(&"count".into()) {
                 Some(Tag::Int(-3)) => {
@@ -229,6 +233,13 @@ mod tests {
                         Some(Tag::Int(7))
                     );
                     assert_eq!(count.load(Ordering::Relaxed), 16);
+                    // The unload capture names the entity's place after its chunk left the world.
+                    let level = game.level("minecraft:overworld").unwrap();
+                    SAVED_AT.with_borrow(|seen| {
+                        assert!(seen.len() >= 3);
+                        assert!(seen.contains(&([1, 64, 1], level)));
+                        assert!(seen.iter().all(|(_, at)| *at == level));
+                    });
 
                     // A malformed individual payload is refused at the callback seam.
                     // Other entities' valid edits still reach the actual region record.

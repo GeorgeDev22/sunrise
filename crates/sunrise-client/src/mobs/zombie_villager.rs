@@ -332,6 +332,7 @@ mod tests {
         let world = crate::world::World::new(air, 0);
         let lid_openers = std::collections::HashMap::new();
         let w = MobWorld {
+            side: sunrise_client::motion::dry_side(),
             mob_maps: sunrise_client::neoforge_mob_maps::NeoForgeMobMaps::vanilla(),
             goal_host: None,
             live_mobs: None,

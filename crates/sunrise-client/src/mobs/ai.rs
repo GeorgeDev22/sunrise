@@ -22,7 +22,7 @@ use super::{
     undead,
 };
 use crate::blocks::Fluid;
-use crate::breathing::{Breath, breathe, drown, own_air};
+use crate::breathing::{AirStep, Breath};
 use crate::health::DamageLevel;
 use sunrise_core::{
     geometry::{Aabb, Axis, ShapeOp, Vec3, VoxelShape},
@@ -1086,42 +1086,147 @@ fn drop_invalid_player_target(m: &mut Mob, w: &MobWorld) {
         }
     }
 }
-/// A tick either completed or paused at the fox's inline consumption boundary.
+/// A tick either completed or paused where its owner must provide a mutable host.
 #[derive(Debug)]
 pub enum TickProgress {
     Complete(bool),
+    Paused(Pause),
+}
+
+/// A point where the tick needs the owning game before it can continue.
+#[derive(Debug)]
+pub enum Pause {
     Consumption {
         decision: super::fox::Consumption,
         /// The base-tick snapshot, before contact ignition or listener writes.
         was_on_fire: bool,
     },
+    Breathing {
+        air: AirPause,
+        /// `Entity.computeSpeed`, read before the tick moved the mob.
+        known_speed: Vec3,
+    },
+    /// The caller's trample slot holds the continuation.
+    Trample,
 }
 
-/// Run a whole mob tick when no owning-host pause is needed by the caller.
+#[derive(Debug)]
+enum TramplePhase {
+    Goal(super::goals::GoalTrample),
+    Travel(super::living::TravelTrample),
+}
+
+/// A suspended mob's landing and the exact remainder of its tick.
+#[derive(Debug)]
+pub struct MobTrample {
+    phase: TramplePhase,
+    was_on_fire: bool,
+    join: crate::join_seq::JoinSeq,
+    pub mob: u32,
+}
+
+impl MobTrample {
+    pub fn decision(&self) -> sunrise_world::block_landing::FarmlandTrample {
+        match &self.phase {
+            TramplePhase::Goal(goal) => goal.movement.decision(),
+            TramplePhase::Travel(travel) => travel.decision(),
+        }
+    }
+}
+
+/// A mob's air update, decided and waiting for its owner to ask the mods:
+/// the entity it concerns, what was decided, and what the base tick had read
+/// before the air that its second half still needs.
+#[derive(Debug)]
+pub struct AirPause {
+    pub mob: u32,
+    pub step: AirStep,
+    join: crate::join_seq::JoinSeq,
+    damage: AirDamage,
+    contact: Contact,
+}
+
+/// What a mob that runs out of air takes, and how it shows.
+#[derive(Clone, Copy, Debug)]
+enum AirDamage {
+    /// `LivingEntity.baseTick`: drowning, with bubbles and a teleport after the hurt.
+    Generic,
+    /// `WaterAnimal.handleAirSupply`: drowning, without bubbles.
+    Drown,
+    /// `Axolotl` and `Nautilus.handleAirSupply`: drying out.
+    DryOut,
+}
+
+/// The fire and lava contact `Entity.baseTick` read before the air, and where.
+#[derive(Debug)]
+struct Contact {
+    fire: f32,
+    lava: bool,
+    at: Vec3,
+}
+
+impl AirPause {
+    /// Whether the mob is still the live one the air was decided for, with the
+    /// air and maximum the decision read. Otherwise the update is refused.
+    pub fn still_valid(&self, m: &Mob) -> bool {
+        m.id == self.mob
+            && m.join == self.join
+            && !m.removed
+            && m.alive()
+            && m.air == self.step.air
+            && m.max_air_supply() == self.step.max
+    }
+}
+
+/// Run a whole mob tick when no owning-host pause is needed by the caller: the
+/// mods are not asked about its air, and a fox consumes without a host.
 pub fn tick(
     m: &mut Mob,
     w: &MobWorld,
     level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
 ) -> bool {
-    match tick_until_consumption(m, w, level, events) {
-        TickProgress::Complete(kept) => kept,
-        TickProgress::Consumption {
-            decision,
-            was_on_fire,
-        } => {
-            super::fox::apply_consumption(&decision, w, m, level, events);
-            resume_after_consumption(m, w, level, was_on_fire, events)
-        }
+    let mut progress = tick_until_pause(m, w, level, events, None);
+    loop {
+        progress = match progress {
+            TickProgress::Complete(kept) => return kept,
+            TickProgress::Paused(Pause::Consumption {
+                decision,
+                was_on_fire,
+            }) => {
+                super::fox::apply_consumption(&decision, w, m, level, events);
+                resume_after_consumption(m, w, level, was_on_fire, events, None)
+            }
+            TickProgress::Paused(Pause::Breathing { air, known_speed }) => {
+                let breath = Some(air.step.vanilla);
+                resume_after_breathing(m, w, level, events, air, known_speed, breath, None)
+            }
+            TickProgress::Paused(Pause::Trample) => {
+                unreachable!("hostless travel cannot pause")
+            }
+        };
     }
 }
 
-/// Stop before a fox's effect draws so its owner can provide a mutable host.
+/// Stop before a fox's effect draws, a watched `living_breathe` update, or a
+/// decided trample, so the owner can provide a mutable host. Only a trample
+/// writes the caller's continuation slot.
 pub fn tick_until_consumption(
     m: &mut Mob,
     w: &MobWorld,
     level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
+    trample: &mut Option<MobTrample>,
+) -> TickProgress {
+    tick_until_pause(m, w, level, events, Some(trample))
+}
+
+fn tick_until_pause(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    trample: Option<&mut Option<MobTrample>>,
 ) -> TickProgress {
     if m.removed {
         return TickProgress::Complete(false);
@@ -1164,7 +1269,47 @@ pub fn tick_until_consumption(
     if m.species() == Species::Strider {
         super::strider::pre_tick(m, w, events);
     }
-    let was_on_fire = base_tick(m, w, level, events);
+    match base_tick(m, w, level, events) {
+        BaseTick::Done(was_on_fire) => {
+            after_base_tick(m, w, level, events, was_on_fire, known_speed, trample)
+        }
+        BaseTick::Air(air) => TickProgress::Paused(Pause::Breathing { air, known_speed }),
+    }
+}
+
+/// Resume a mob after its owner asked `living_breathe`: apply `breath` to the air
+/// that was decided on (`None`: the answer was refused, the air stays), then the
+/// rest of the base tick and the tick.
+pub fn resume_after_breathing(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    air: AirPause,
+    known_speed: Vec3,
+    breath: Option<Breath>,
+    trample: Option<&mut Option<MobTrample>>,
+) -> TickProgress {
+    if m.removed {
+        return TickProgress::Complete(false);
+    }
+    if let Some(breath) = breath {
+        finish_air(m, w, level, events, air.step, air.damage, breath);
+    }
+    let was_on_fire = base_tick_after_air(m, w, level, events, air.contact);
+    after_base_tick(m, w, level, events, was_on_fire, known_speed, trample)
+}
+
+/// The tick after `Entity.baseTick`, up to the fox's consumption boundary.
+fn after_base_tick(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    was_on_fire: bool,
+    known_speed: Vec3,
+    trample: Option<&mut Option<MobTrample>>,
+) -> TickProgress {
     if m.impulse_grace_time > 0 {
         m.impulse_grace_time -= 1;
     }
@@ -1204,12 +1349,12 @@ pub fn tick_until_consumption(
         && !m.no_ai
         && let Some(decision) = super::fox::ai_step_until_consumption(m, w, events)
     {
-        return TickProgress::Consumption {
+        return TickProgress::Paused(Pause::Consumption {
             decision,
             was_on_fire,
-        };
+        });
     }
-    TickProgress::Complete(ai_and_finish_tick(m, w, level, was_on_fire, events))
+    ai_and_finish_tick(m, w, level, was_on_fire, events, trample)
 }
 
 /// Resume a fox after its item effect, before the living AI/movement step.
@@ -1219,12 +1364,13 @@ pub fn resume_after_consumption(
     level: &mut DamageLevel<'_>,
     was_on_fire: bool,
     events: &mut Vec<MobEvent>,
-) -> bool {
+    trample: Option<&mut Option<MobTrample>>,
+) -> TickProgress {
     if m.removed {
-        return false;
+        return TickProgress::Complete(false);
     }
     super::fox::before_living_ai_step(m, w);
-    ai_and_finish_tick(m, w, level, was_on_fire, events)
+    ai_and_finish_tick(m, w, level, was_on_fire, events, trample)
 }
 
 fn ai_and_finish_tick(
@@ -1233,7 +1379,8 @@ fn ai_and_finish_tick(
     level: &mut DamageLevel<'_>,
     was_on_fire: bool,
     events: &mut Vec<MobEvent>,
-) -> bool {
+    trample: Option<&mut Option<MobTrample>>,
+) -> TickProgress {
     if m.no_ai {
         update_fall_flying(m, w, events);
         reset_effect_fall_distance(m);
@@ -1295,13 +1442,62 @@ fn ai_and_finish_tick(
         if m.species() == Species::TraderLlama {
             super::caravan::trader_llama_tick(m, w);
         }
-    } else {
-        ai_step(m, w, level, events);
+    } else if let Some(phase) = ai_step(m, w, level, events, trample.is_some()) {
+        *trample.expect("only a game-owned tick pauses a trample") = Some(MobTrample {
+            phase,
+            was_on_fire,
+            join: m.join,
+            mob: m.id,
+        });
+        return TickProgress::Paused(Pause::Trample);
     }
     if m.no_ai && m.species() == Species::Fox {
         super::fox::finish_ai_step(m, w, events);
     }
-    finish_tick(m, w, level, was_on_fire, events)
+    TickProgress::Complete(finish_tick(m, w, level, was_on_fire, events))
+}
+
+/// Resume the exact move, then the remainder of `LivingEntity.aiStep` and the tick.
+pub(super) fn resume_after_trample(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    trample: &mut Option<MobTrample>,
+    events: &mut Vec<MobEvent>,
+) -> TickProgress {
+    let paused = trample.take().expect("the trample pause was stored");
+    if m.removed || m.join != paused.join {
+        return TickProgress::Complete(!m.removed);
+    }
+    let progress = match paused.phase {
+        TramplePhase::Travel(travel) => {
+            travel.resume(m, w, level, events);
+            hurt_teleports(m, w, events);
+            finish_ai_step(m, w, level, events);
+            None
+        }
+        TramplePhase::Goal(goal) => {
+            let paused = {
+                let BorrowedGoalSelectors { mob, goals, .. } = &mut BorrowedGoalSelectors::new(m);
+                goals.resume_after_trample(mob, &mut Cx { w, level, events }, goal)
+            };
+            if let Some(goal) = paused {
+                Some(TramplePhase::Goal(goal))
+            } else {
+                finish_server_ai_step(m, w, level, events);
+                ai_step_after_goals(m, w, level, events, true)
+                    .err()
+                    .map(TramplePhase::Travel)
+            }
+        }
+    };
+    match progress {
+        None => TickProgress::Complete(finish_tick(m, w, level, paused.was_on_fire, events)),
+        Some(phase) => {
+            *trample = Some(MobTrample { phase, ..paused });
+            TickProgress::Paused(Pause::Trample)
+        }
+    }
 }
 
 /// Resume the living tick after species AI (and the block walk and freezing
@@ -1857,35 +2053,66 @@ pub(super) fn in_rain(m: &Mob, w: &MobWorld) -> bool {
 /// `Axolotl.handleAirSupply` (unless the mob has no AI): water or rain fills
 /// it, anywhere else it runs down from the pre-tick value, and at -20 the
 /// axolotl dries out.
-fn axolotl_air_supply(m: &mut Mob, w: &MobWorld, level: &mut DamageLevel<'_>) {
+fn axolotl_air_step(m: &mut Mob, w: &MobWorld) -> Option<AirStep> {
     if m.no_ai {
         m.air = (m.air + 4).min(super::axolotl::MAX_AIR);
-        return;
+        return None;
     }
     let breathes = m.fluids.in_water || in_rain(m, w);
-    let (cx, max) = (w.loop_context, super::axolotl::MAX_AIR);
-    if let Some(damage) = own_air(cx, m.id, &m.kind.id, &mut m.air, breathes, max) {
-        m.damage(level, damage, Damage::of(DamageKind::DryOut));
-    }
+    Some(AirStep::own(m.air, super::axolotl::MAX_AIR, breathes))
 }
 /// `Nautilus.baseTick`: `LivingEntity.baseTick` refills the air of this
 /// water breather, then, unless it has no AI, `Nautilus.handleAirSupply`
 /// takes it back out of water, where the nautilus dries out.
-fn nautilus_air_supply(m: &mut Mob, w: &MobWorld, level: &mut DamageLevel<'_>) {
+fn nautilus_air_step(m: &mut Mob) -> Option<AirStep> {
     const MAX_AIR: i32 = 300;
     if m.no_ai {
         if m.alive() {
             m.air = (m.air + 4).min(MAX_AIR);
         }
-        return;
+        return None;
     }
     if !m.alive() {
         m.air = MAX_AIR;
-        return;
+        return None;
     }
-    let (cx, wet) = (w.loop_context, m.fluids.in_water);
-    if let Some(damage) = own_air(cx, m.id, &m.kind.id, &mut m.air, wet, MAX_AIR) {
-        m.damage(level, damage, Damage::of(DamageKind::DryOut));
+    Some(AirStep::own(m.air, MAX_AIR, m.fluids.in_water))
+}
+/// Apply `breath` to the air `step` decided on, and what running out of air does.
+fn finish_air(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    step: AirStep,
+    damage: AirDamage,
+    breath: Breath,
+) {
+    let Some(drowning) = step.finish(w.loop_context, m.id, &m.kind.id, &mut m.air, breath) else {
+        return;
+    };
+    match damage {
+        AirDamage::Generic => {
+            events.push(MobEvent::Drown {
+                mob: m.id,
+                at: [m.position.x, m.position.y, m.position.z],
+                bubbles: drowning.bubbles,
+            });
+            if let Some(amount) = drowning.damage {
+                m.damage(level, amount, Damage::of(DamageKind::Drown));
+                hurt_teleports(m, w, events);
+            }
+        }
+        AirDamage::Drown | AirDamage::DryOut => {
+            if let Some(amount) = drowning.damage {
+                let kind = if matches!(damage, AirDamage::Drown) {
+                    DamageKind::Drown
+                } else {
+                    DamageKind::DryOut
+                };
+                m.damage(level, amount, Damage::of(kind));
+            }
+        }
     }
 }
 /// The thin box at a body's eyes `Entity.isInWall` tests: 0.8 of the width wide (a float
@@ -1958,13 +2185,32 @@ fn keeps_its_air(m: &Mob) -> bool {
     m.species() == Species::IronGolem
 }
 
-/// Entity.baseTick + LivingEntity.baseTick + Mob.baseTick.
+/// `base_tick` finished, or stopped at its air update for the owner to ask
+/// the mods (`living_breathe`) with a host.
+enum BaseTick {
+    Done(bool),
+    Air(AirPause),
+}
+
+#[cfg(test)]
+impl BaseTick {
+    /// Whether the mob was on fire, for a test with no listener, where the base tick never stops.
+    fn was_on_fire(self) -> bool {
+        match self {
+            Self::Done(was_on_fire) => was_on_fire,
+            Self::Air(_) => panic!("the base tick stopped at its air update"),
+        }
+    }
+}
+
+/// Entity.baseTick + LivingEntity.baseTick + Mob.baseTick, up to its air update when a mod
+/// listens to `living_breathe`.
 fn base_tick(
     m: &mut Mob,
     w: &MobWorld,
     level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
-) -> bool {
+) -> BaseTick {
     if m.first_tick {
         super::villager::refresh_sleeping_position(m, w);
     }
@@ -2070,15 +2316,15 @@ fn base_tick(
         // Air supply and drowning (WaterAnimal.handleAirSupply for aquatic mobs).
         // Nautilus.baseTick: NoAI skips only the custom handler; the
         // superclass Breath/drown path must still process its air.
-        if m.species() == Species::Axolotl {
-            axolotl_air_supply(m, w, level);
+        let step = if m.species() == Species::Axolotl {
+            axolotl_air_step(m, w).map(|step| (step, AirDamage::DryOut))
         } else if m.species() == Species::Nautilus {
-            nautilus_air_supply(m, w, level);
+            nautilus_air_step(m).map(|step| (step, AirDamage::DryOut))
         } else if m.kind.flags.needs_water {
-            let (cx, wet) = (w.loop_context, m.fluids.in_water);
-            if let Some(damage) = own_air(cx, m.id, &m.kind.id, &mut m.air, wet, 300) {
-                m.damage(level, damage, Damage::of(DamageKind::Drown));
-            }
+            Some((
+                AirStep::own(m.air, 300, m.fluids.in_water),
+                AirDamage::Drown,
+            ))
         } else {
             // LivingEntity.baseTick / MobEffectUtil: bubble columns and breathing
             // effects protect submerged mobs. Nautilus alone holds air rather
@@ -2108,28 +2354,52 @@ fn base_tick(
                     4
                 },
             };
-            let breath = breathe(w.loop_context, m.id, &m.kind.id, vanilla);
-            if let Some(drowning) = drown(
-                w.loop_context,
-                m.id,
-                &m.kind.id,
-                &mut m.air,
-                max,
-                breath,
-                true,
-            ) {
-                events.push(MobEvent::Drown {
+            Some((AirStep::generic(m.air, max, vanilla), AirDamage::Generic))
+        };
+        if let Some((step, damage)) = step {
+            // The owner asks `living_breathe` with its host between deciding and applying.
+            if crate::breathing::heard() {
+                return BaseTick::Air(AirPause {
                     mob: m.id,
-                    at: [m.position.x, m.position.y, m.position.z],
-                    bubbles: drowning.bubbles,
+                    step,
+                    join: m.join,
+                    damage,
+                    contact: Contact {
+                        fire,
+                        lava,
+                        at: contact_at,
+                    },
                 });
-                if let Some(damage) = drowning.damage {
-                    m.damage(level, damage, Damage::of(DamageKind::Drown));
-                    hurt_teleports(m, w, events);
-                }
             }
+            finish_air(m, w, level, events, step, damage, step.vanilla);
         }
     }
+    BaseTick::Done(base_tick_after_air(
+        m,
+        w,
+        level,
+        events,
+        Contact {
+            fire,
+            lava,
+            at: contact_at,
+        },
+    ))
+}
+
+/// What `Entity.baseTick` does after the air update, and whether the mob was on fire.
+fn base_tick_after_air(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    contact: Contact,
+) -> bool {
+    let Contact {
+        fire,
+        lava,
+        at: contact_at,
+    } = contact;
     if m.species() == Species::Illusioner {
         super::illusioner::tick(m, events);
     }
@@ -2437,7 +2707,13 @@ fn reset_effect_fall_distance(m: &mut Mob) {
 }
 
 /// LivingEntity.aiStep (and Mob/AgeableMob/Animal additions).
-fn ai_step(m: &mut Mob, w: &MobWorld, level: &mut DamageLevel<'_>, events: &mut Vec<MobEvent>) {
+fn ai_step(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    pause_trample: bool,
+) -> Option<TramplePhase> {
     if m.species() == Species::Parrot {
         super::parrot::ai_step(m, w, level.random(), events);
     }
@@ -2484,12 +2760,26 @@ fn ai_step(m: &mut Mob, w: &MobWorld, level: &mut DamageLevel<'_>, events: &mut 
         super::piglin::before_goals(m, w, level.random(), events);
     }
     if m.alive() && !immobile {
-        server_ai_step(m, w, level, events);
+        if let Some(paused) = server_ai_until_trample(m, w, level, events, pause_trample) {
+            return Some(TramplePhase::Goal(paused));
+        }
     } else {
         m.ai.jumping = false;
         m.ai.xxa = 0.0;
         m.ai.zza = 0.0;
     }
+    ai_step_after_goals(m, w, level, events, pause_trample)
+        .err()
+        .map(TramplePhase::Travel)
+}
+
+fn ai_step_after_goals(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    pause_trample: bool,
+) -> Result<(), super::living::TravelTrample> {
     m.handle_jumping(w);
     let input = Vec3::new(
         f64::from(m.ai.xxa),
@@ -2504,10 +2794,20 @@ fn ai_step(m: &mut Mob, w: &MobWorld, level: &mut DamageLevel<'_>, events: &mut 
         m.velocity = Vec3::ZERO;
     } else if !(m.species() == Species::Mannequin && m.extra.immovable) {
         // Mannequin.isEffectiveAi: an immovable one never travels.
-        m.travel(w, level, input, events);
+        m.travel_until_trample(w, level, input, events, pause_trample)?;
         // A fall's hurt (checkFallDamage) teleports at once.
         hurt_teleports(m, w, events);
     }
+    finish_ai_step(m, w, level, events);
+    Ok(())
+}
+
+fn finish_ai_step(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+) {
     // LivingEntity.aiStep: applyEffectsFromBlocks follows travel, then
     // the freezing, before pushEntities and the water's hurt.
     m.apply_effects_from_blocks(w, events);
@@ -2960,6 +3260,7 @@ mod selector_restore_tests {
     }
 }
 
+#[cfg(test)]
 /// Mob.serverAiStep
 pub(super) fn server_ai_step(
     m: &mut Mob,
@@ -2967,6 +3268,17 @@ pub(super) fn server_ai_step(
     level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
 ) {
+    server_ai_until_trample(m, w, level, events, false);
+}
+
+/// Mob.serverAiStep through the running goals, one of which may move the mob.
+fn server_ai_until_trample(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+    pause_trample: bool,
+) -> Option<super::goals::GoalTrample> {
     // A Java `int`: past `i32::MAX` it wraps, as there.
     m.ai.no_action_time = m.ai.no_action_time.wrapping_add(1);
     // A happy ghast set up for its age (ageBoundaryReached runs at once).
@@ -2976,11 +3288,14 @@ pub(super) fn server_ai_step(
     // A saddled mount follows its rider instead of its goals.
     if super::equine::controlled(m) {
         super::equine::ridden_step(m, w.loop_context);
-        return;
+        return None;
     }
     super::riders::drive(m, w);
     let tick_count = i64::from(m.age);
     let id_based = tick_count + i64::from(m.id);
+    // Of the built-in goals, only the dolphin's rider-follow goal calls
+    // `Entity.move` directly. Dynamic goals cannot install that native goal.
+    let pause_goals = pause_trample && m.species() == Species::Dolphin;
     {
         let BorrowedGoalSelectors {
             mob,
@@ -2988,14 +3303,32 @@ pub(super) fn server_ai_step(
             goals,
         } = &mut BorrowedGoalSelectors::new(m);
         let mut cx = Cx { w, level, events };
-        if id_based % 2 != 0 && tick_count > 1 {
-            targets.tick_running(mob, &mut cx, false);
-            goals.tick_running(mob, &mut cx, false);
-        } else {
+        let force = !(id_based % 2 != 0 && tick_count > 1);
+        if force {
             targets.tick(mob, &mut cx);
+        } else {
+            targets.tick_running(mob, &mut cx, false);
+        }
+        if pause_goals {
+            if let Some(paused) = goals.tick_until_trample(mob, &mut cx, force) {
+                return Some(paused);
+            }
+        } else if force {
             goals.tick(mob, &mut cx);
+        } else {
+            goals.tick_running(mob, &mut cx, false);
         }
     }
+    finish_server_ai_step(m, w, level, events);
+    None
+}
+
+fn finish_server_ai_step(
+    m: &mut Mob,
+    w: &MobWorld,
+    level: &mut DamageLevel<'_>,
+    events: &mut Vec<MobEvent>,
+) {
     // A creaking looked at stands still: its navigation, move, look and jump
     // controls wait (CreakingPathNavigation and the Creaking*Control).
     let frozen = super::creaking::is_creaking(m) && !super::creaking::can_move(m);
@@ -3792,31 +4125,32 @@ pub fn forgive_dead_player(m: &mut Mob) {
     }
 }
 /// Species-specific travel (fish, squid, dolphins swim with their own rules).
-pub fn custom_travel(
+pub(super) fn custom_travel(
     m: &mut Mob,
     w: &MobWorld,
     level: &mut DamageLevel<'_>,
     input: Vec3,
     events: &mut Vec<MobEvent>,
-) -> bool {
+    pause: bool,
+) -> Result<bool, super::living::TravelTrample> {
     if m.species() == Species::Drowned {
-        return undead::drowned_travel(m, w, level, input, events);
+        return undead::drowned_travel(m, w, level, input, events, pause);
     }
     if m.species() == Species::Turtle {
-        return super::turtle::travel(m, w, level, input, events);
+        return super::turtle::travel(m, w, level, input, events, pause);
     }
     if m.species() == Species::Frog {
-        return super::frog::travel(m, w, level, input, events);
+        return super::frog::travel(m, w, level, input, events, pause);
     }
     match family(m.species()) {
-        Family::Aquatic => aquatic::travel(m, w, level, input, events),
-        Family::Guardian => super::guardian::travel(m, w, level, input, events),
+        Family::Aquatic => aquatic::travel(m, w, level, input, events, pause),
+        Family::Guardian => super::guardian::travel(m, w, level, input, events, pause),
         // Shulkers never move on their own.
-        Family::Shulker => true,
-        Family::Allay => super::allay::travel(m, w, level, input, events),
-        Family::Vex => super::vex::travel(m, w),
-        Family::Nautilus => super::nautilus::travel(m, w, level, input, events),
-        _ => false,
+        Family::Shulker => Ok(true),
+        Family::Allay => super::allay::travel(m, w, level, input, events, pause),
+        Family::Vex => Ok(super::vex::travel(m, w)),
+        Family::Nautilus => super::nautilus::travel(m, w, level, input, events, pause),
+        _ => Ok(false),
     }
 }
 
@@ -4107,6 +4441,7 @@ mod despawn_tests {
     fn a_named_fish_or_axolotl_never_despawns() {
         crate::mobs::world::with_test_world(&[], |w, types| {
             let far = MobWorld {
+                side: sunrise_client::motion::dry_side(),
                 // 200 blocks from the player: past the 128 a monster loses.
                 nearest_player: Some(Vec3::new(200.0, 64.0, 0.0)),
                 ..w.clone()
@@ -7637,6 +7972,7 @@ mod trader_llama_no_ai_tests {
                 ];
                 assert_eq!(seen[0].delay, 13);
                 let view = MobWorld {
+                    side: sunrise_client::motion::dry_side(),
                     others: &seen,
                     ..w.clone()
                 };

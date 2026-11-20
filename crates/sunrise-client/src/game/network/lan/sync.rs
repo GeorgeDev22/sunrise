@@ -446,7 +446,7 @@ pub(in crate::game) fn preload_sync_data(item_data: &Arc<ItemData>) -> Option<Sy
     }
     let root = item_data.root().to_owned();
     let item_data = Arc::clone(item_data);
-    // Loading recipes asks mods' ingredient and recipe property set hooks, wasm mods included.
+    // Loading recipes asks mods' ingredient and recipe property set hooks.
     sunrise_guest_stack::spawn("Server data preload".into(), move || {
         let none = sunrise_world::loot::PackOverlay::NONE;
         SyncData::load(

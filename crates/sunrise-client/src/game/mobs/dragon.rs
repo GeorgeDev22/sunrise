@@ -41,6 +41,7 @@ use sunrise_core::nbt::Tag;
 use sunrise_core::position::BlockPos;
 use sunrise_core::{
     geometry::{Aabb, Vec3, trig},
+    jmath,
     random::{LegacyRandom, RandomSource},
 };
 use sunrise_protocol::entity_data::Value;
@@ -535,6 +536,12 @@ fn vanilla_normalize(v: glam::DVec3) -> glam::DVec3 {
     } else {
         v / len
     }
+}
+
+/// `DragonStrafePlayerPhase`'s firing angle: `Math.acos` of the float dot, one
+/// `dmul` by `Mth.RAD_TO_DEG`, narrowed to float, then `+ 0.5F`.
+fn strafe_angle(dot: f32) -> f32 {
+    (jmath::acos(f64::from(dot)) * f64::from(trig::RAD_TO_DEG)) as f32 + 0.5
 }
 /// `#minecraft:is_fire`, which the dragon's parts and the crystals refuse
 /// (`isInvulnerableToBase`: both types are fire immune).
@@ -2368,10 +2375,13 @@ impl Game<'_> {
                     *charge += 1;
                     let d = self.dragon.as_ref().expect("dragon");
                     let r = f64::from(d.yaw * trig::DEG_TO_RAD);
-                    let dir = glam::DVec2::new(f64::from(trig::sin(r)), f64::from(-trig::cos(r)))
-                        .normalize();
-                    let aim = glam::DVec2::new(pp.x - pos.x, pp.z - pos.z).normalize_or_zero();
-                    let angle = dir.dot(aim).clamp(-1.0, 1.0).acos().to_degrees() + 0.5;
+                    let dir = vanilla_normalize(glam::DVec3::new(
+                        f64::from(trig::sin(r)),
+                        0.0,
+                        f64::from(-trig::cos(r)),
+                    ));
+                    let aim = vanilla_normalize(glam::DVec3::new(pp.x - pos.x, 0.0, pp.z - pos.z));
+                    let angle = strafe_angle(dir.dot(aim) as f32);
                     if *charge >= 5 && (0.0..10.0).contains(&angle) {
                         // From the head, one block back along the view vector.
                         let head = d.parts[0].0;
@@ -4126,6 +4136,7 @@ impl Game<'_> {
             horizontal_collision: false,
             needs_sync: false,
             sync_position: false,
+            sync_velocity: false,
             stepped: true,
             idle: false,
             bare: false,
@@ -6397,6 +6408,34 @@ mod tests {
         let hurt = d.hurt(level, 0, 5.0, HIT, false);
         assert_eq!(hurt, Hurt::Landed { full: true });
         assert_eq!(d.hurt_time, 10);
+    }
+
+    #[test]
+    fn the_strafe_firing_angle_matches_vanillas_floats() {
+        // `(float)(Math.acos(dot) * (180.0F / (float)Math.PI)) + 0.5F` on a JDK: dots at
+        // and around cos(10°) cross the [0, 10) gate on single ulps.
+        for (dot, angle) in [
+            (0x3f80_0000, 0x3f00_0000), // 1.0 -> 0.5
+            (0x3f7f_be77, 0x4044_00b1), // 0.999 -> 3.0625422
+            (0x3f7c_1c5f, 0x4127_ffca), // over the gate -> 10.4999485
+            (0x3f7c_1c5d, 0x4127_fff3), // under it -> 10.499988
+            (0x3f7c_1c5c, 0x4128_0007), // -> 10.500007
+            (0x3f7c_1bda, 0x4128_0a80), // -> 10.502563
+            (0x3f7c_28f6, 0x4126_fb56), // -> 10.436361
+            (0x3f7a_e148, 0x413f_a742), // 0.98 -> 11.978334
+            (0x3f00_0000, 0x4271_ffff), // 0.5 -> 60.499996
+            (0x0000_0000, 0x42b4_ffff), // 0.0 -> 90.49999
+            (0xbf80_0000, 0x4334_7fff), // -1.0 -> 180.49998
+        ] {
+            assert_eq!(
+                strafe_angle(f32::from_bits(dot)),
+                f32::from_bits(angle),
+                "dot {dot:#010x}"
+            );
+        }
+        // Past 1.0 or NaN, `Math.acos` is NaN and the gate refuses, as vanilla's does.
+        assert!(strafe_angle(f32::from_bits(0x3f80_0001)).is_nan());
+        assert!(strafe_angle(f32::NAN).is_nan());
     }
 
     #[test]

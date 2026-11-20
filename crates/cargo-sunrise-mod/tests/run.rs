@@ -9,7 +9,8 @@ fn run_of_a_native_mod_without_resources_says_how_to_make_them_before_building()
     let _ = std::fs::remove_dir_all(&dir);
     // A native mod's folder, made by hand: the resources are asked for before anything is fetched or built.
     let project = dir.join("machine");
-    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("src/lib.rs"), "").unwrap();
     std::fs::write(
         project.join("Cargo.toml"),
         "[package]\nname = 'machine'\nversion = '0.1.0'\n",
@@ -35,6 +36,16 @@ fn run_of_a_native_mod_without_resources_says_how_to_make_them_before_building()
     let error = String::from_utf8(refused.stderr).unwrap();
     assert!(error.contains("--resources <folder>"), "{error}");
     assert!(error.contains("sunrise-prepare --prepare"), "{error}");
+    // A native mod runs on its pinned SDK's game: `--game` is refused, not dropped. Without
+    // resources, a run that did not refuse it would stop at them, before any SDK is looked up.
+    let refused = Command::new(env!("CARGO_BIN_EXE_cargo-sunrise-mod"))
+        .current_dir(&project)
+        .args(["run", "--game", "some-game"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "{refused:?}");
+    let error = String::from_utf8(refused.stderr).unwrap();
+    assert!(error.contains("--game"), "{error}");
     assert!(
         !project.join("target").exists(),
         "run must stop before building"
@@ -77,7 +88,7 @@ fn content_run_keeps_the_previous_package_on_jar_refusal_and_starts_with_the_sta
     )
     .unwrap();
     fs::set_permissions(&game, fs::Permissions::from_mode(0o700)).unwrap();
-    let run = || {
+    let run_with = |more: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_cargo-sunrise-mod"))
             .current_dir(&project)
             .env("SUNRISE_HOME", scratch.path().join("player-home"))
@@ -86,9 +97,11 @@ fn content_run_keeps_the_previous_package_on_jar_refusal_and_starts_with_the_sta
             .arg(&game)
             .arg("--jars")
             .arg(&source)
+            .args(more)
             .output()
             .unwrap()
     };
+    let run = || run_with(&[]);
 
     let refused = run();
     assert!(!refused.status.success(), "{refused:?}");
@@ -101,6 +114,14 @@ fn content_run_keeps_the_previous_package_on_jar_refusal_and_starts_with_the_sta
     assert_eq!(fs::read(&output).unwrap(), previous);
 
     fs::write(source.join(format!("{SHA512}.jar")), b"abc").unwrap();
+
+    // The tool reads `--resources` for a native mod only: for this one it is refused, not dropped.
+    let refused = run_with(&["--resources", "."]);
+    assert!(!refused.status.success(), "{refused:?}");
+    let error = String::from_utf8(refused.stderr).unwrap();
+    assert!(error.contains("--resources"), "{error}");
+    assert!(!project.join("launched").exists());
+
     let ran = run();
     assert!(ran.status.success(), "{ran:?}");
     assert!(project.join("launched").is_file());

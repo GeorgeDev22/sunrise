@@ -38,8 +38,9 @@ pub(crate) use sides::sort_tinted;
 pub use sides::{Part, Sides, group_parts};
 use std::sync::Arc;
 use sunrise_assets::model::Direction as ModelDirection;
+use sunrise_connected::{Axes as CtmAxes, Face as CtmFace};
 use sunrise_core::{biome::BiomeZoom, geometry::Direction, position::BlockPos};
-use sunrise_optifine::ctm::connect::{Axes as CtmAxes, Face as CtmFace};
+pub use sunrise_render_core::UV_STEPS;
 use sunrise_world::{
     block_render::FaceVisibility,
     fluid::{FluidKind, FluidState},
@@ -102,8 +103,6 @@ fn round_to_u16(v: f32) -> u16 {
     let whole = v as u32;
     (whole + u32::from(v - whole as f32 >= 0.5)) as u16
 }
-/// Fixed-point steps per unit of `TerrainVertex` UVs, which span `[0, 2)`.
-pub const UV_STEPS: f32 = 32768.0;
 /// A model quad's own UVs in `TerrainVertex` fixed point, the packing
 /// `TerrainVertex::new` does, baked once per face (`BakedFace::uv_fixed`).
 pub(crate) fn baked_uv(uv: [[f32; 2]; 4]) -> [[u16; 2]; 4] {
@@ -747,8 +746,8 @@ struct Info {
     overlay: bool,
     /// `LeavesBlock`: with opaque leaves the faces between two leaf blocks are skipped.
     leaves: bool,
-    /// A glass pane: connected-texture tiles take the cube's UVs on it (OptiFine's pane models
-    /// drop vanilla's mirrored faces).
+    /// A pane-shaped block (`StateFacts::is_pane`): connected-texture tiles take the cube's
+    /// UVs on it (OptiFine's pane models drop vanilla's mirrored faces).
     pane: bool,
     /// A full opaque cube: `RenderShape::Model`, `can_occlude`, `solid_render`
     /// and a full collision shape. The only block leaf culling treats as solid.
@@ -1069,7 +1068,7 @@ impl MeshTables {
                 legacy_solid: s.legacy_solid,
                 overlay: s.has_class("HalfTransparentBlock") || s.has_class("LeavesBlock"),
                 leaves: s.has_class("LeavesBlock"),
-                pane: s.has_class("IronBarsBlock") && name.ends_with("glass_pane"),
+                pane: s.is_pane(),
                 opaque_cube: leaf_culling::opaque_cube(
                     s.render_shape,
                     s.can_occlude,
@@ -1460,7 +1459,8 @@ impl Padded {
                     None => Source::Missing,
                     Some(c) => match c.section_at(wy) {
                         Ok(section) => Source::Section(section),
-                        Err(light) => Source::Outside(light),
+                        Err(crate::chunk::Outside::Row(section)) => Source::Row(section),
+                        Err(crate::chunk::Outside::Uniform(light)) => Source::Outside(light),
                     },
                 })
             });
@@ -1489,6 +1489,8 @@ enum Source<'a> {
     Missing,
     /// Above or below the column's sections: air with this light.
     Outside(u8),
+    /// Above or below the column's sections: air lit by the sky light of this section's bottom row.
+    Row(&'a crate::chunk::Section),
     Section(&'a crate::chunk::Section),
 }
 /// Fills one run of a padded row, `blocks.len()` cells from x = `x0`, starting
@@ -1514,6 +1516,11 @@ fn fill_run(
         Source::Outside(v) => {
             blocks.fill(0);
             light.fill(*v);
+        }
+        Source::Row(section) => {
+            blocks.fill(0);
+            section.light.copy_run(at & 255, light);
+            light.iter_mut().for_each(|l| *l &= 0xF0);
         }
         // A neighbour not loaded continues this chunk's edge column. As lit
         // air, the outermost chunks' water drew a wall toward it (fluids show
@@ -2492,6 +2499,7 @@ impl Mesher<'_> {
                 CtmFace::ALL[q.facing as usize],
                 [world.x, world.y, world.z],
                 neighbour,
+                |s| self.tables.full_faces[s as usize],
                 || Some(tints.biome(pos[0], pos[1], pos[2])),
                 // A pane's tiles are drawn with the cube's UVs (below), so that is its texture.
                 || {

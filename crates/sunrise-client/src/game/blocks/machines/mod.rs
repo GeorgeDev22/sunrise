@@ -43,7 +43,7 @@ use sunrise_world::{
     registry::BlockStateId,
 };
 
-type Pos = (i32, i32, i32);
+pub(in crate::game) type Pos = (i32, i32, i32);
 
 /// What item automation reaches among the entities at its target (`ENTITY_AUTOMATION`).
 enum AutomationEntity {
@@ -97,18 +97,27 @@ impl HopperState {
 
 impl Game<'_> {
     pub(super) fn hopper_cooldown(&self, pos: Pos) -> i32 {
-        self.hoppers.get(&pos).map_or_else(
-            || {
-                self.world
-                    .chunks
-                    .get(&(pos.0 >> 4, pos.2 >> 4))
-                    .and_then(|c| c.saved.as_deref())
-                    .and_then(|s| s.block_entity_sources.iter().find(|(p, _)| *p == pos))
-                    .map_or(-1, |(_, tag)| HopperState::load(tag).cooldown)
-            },
-            |s| s.cooldown,
-        )
+        hopper_cooldown_in(&self.hoppers, &self.world, pos)
     }
+}
+
+/// [`Game::hopper_cooldown`] over the hoppers' state and the world.
+pub(in crate::game) fn hopper_cooldown_in(
+    hoppers: &std::collections::HashMap<Pos, HopperState>,
+    world: &sunrise_client::world::World,
+    pos: Pos,
+) -> i32 {
+    hoppers.get(&pos).map_or_else(
+        || {
+            world
+                .chunks
+                .get(&(pos.0 >> 4, pos.2 >> 4))
+                .and_then(|c| c.saved.as_deref())
+                .and_then(|s| s.block_entity_sources.iter().find(|(p, _)| *p == pos))
+                .map_or(-1, |(_, tag)| HopperState::load(tag).cooldown)
+        },
+        |s| s.cooldown,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

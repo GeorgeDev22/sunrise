@@ -32,6 +32,12 @@ struct Script {
     /// `menu_quick_move`: move 4 of the stack into the second block through its `ITEMS`
     /// capability, leave 6 in `stack`, and return unhandled.
     cross: bool,
+    /// `menu_button`: replace the open menu through the host, returning its cursor to inventory.
+    replace_menu: bool,
+    /// `menu_button`: propose a cursor edit before replacing the menu, to ensure stale edits lose.
+    change_cursor: bool,
+    /// `menu_button`: consume the player's carried stack.
+    clear_cursor: bool,
 }
 
 thread_local! {
@@ -39,6 +45,10 @@ thread_local! {
     static DISPATCHES: Cell<usize> = const { Cell::new(0) };
     /// `menu_button` calls on the depot.
     static BUTTONS: Cell<usize> = const { Cell::new(0) };
+    /// `menu_button` calls that received the depot's actual backing entity.
+    static BUTTON_ENTITIES: Cell<usize> = const { Cell::new(0) };
+    /// Optional positions delivered to menu-button listeners.
+    static BUTTON_POSITIONS: RefCell<Vec<Option<[i32; 3]>>> = const { RefCell::new(Vec::new()) };
     /// Whether a transaction was open at each dispatch: the action's savepoint.
     static IN_ACTION: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
 }
@@ -66,9 +76,6 @@ struct Part;
 impl mod_api::BlockPart for Part {}
 #[mod_api::sunrise_part]
 impl BlockEntityPart for Part {
-    fn menu_button(&self, _: &mut dyn ServerHost, _: &mut MenuButtonEvent<'_>) {
-        BUTTONS.set(BUTTONS.get() + 1);
-    }
     fn menu_quick_move(
         &self,
         host: &mut dyn ServerHost,
@@ -118,6 +125,52 @@ impl BlockEntityPart for Part {
         Flow::Continue
     }
 }
+#[mod_api::sunrise_part]
+impl mod_api::MenuPart for Part {
+    fn menu_button_valid(
+        &self,
+        _: &dyn mod_api::Host,
+        event: &mut mod_api::MenuButtonValidEvent<'_>,
+    ) -> Flow {
+        if matches!(event.id, 3 | 4) {
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
+    }
+
+    fn menu_button(&self, host: &mut dyn ServerHost, event: &mut MenuButtonEvent<'_>) {
+        BUTTONS.set(BUTTONS.get() + 1);
+        if event.entity.is_some() {
+            BUTTON_ENTITIES.set(BUTTON_ENTITIES.get() + 1);
+        }
+        BUTTON_POSITIONS.with(|positions| positions.borrow_mut().push(event.context.pos));
+        let script = SCRIPT.with(|script| script.borrow().clone());
+        if script.clear_cursor {
+            *event.carried = None;
+        }
+        if script.change_cursor {
+            *event.carried = Some(
+                mod_api::ItemStack::new(
+                    mod_api::__private::item_key("minecraft:gold_ingot").unwrap(),
+                    1,
+                )
+                .unwrap(),
+            );
+        }
+        if script.replace_menu {
+            host.open_menu(
+                event.context.player,
+                1,
+                mod_api::Text::literal("opened by menu_button"),
+                Vec::new(),
+                mod_api::MenuReplace::InPlace,
+            )
+            .unwrap()
+            .expect("the menu button's player is online");
+        }
+    }
+}
 
 struct Mod;
 #[mod_api::__subscriptions]
@@ -125,6 +178,7 @@ impl Hooks for Mod {
     fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
         let kind = r.block_entity_type("depot").blocks(&[]).build();
         r.block_entity_part(&kind, Part).unwrap();
+        r.menu_part(DEPOT_MENU, Part);
     }
     fn menu_clicked(&self, host: &mut dyn ServerHost, event: &mut MenuClickedEvent) {
         DISPATCHES.set(DISPATCHES.get() + 1);
@@ -592,52 +646,140 @@ fn depot_container(game: &mut crate::game::Game<'_>) {
 #[test]
 #[ignore = "daily"]
 fn a_code_opened_menus_button_reaches_a_blocks_menu_button_only_for_its_menu_type() {
-    let depot_menu = [(DEPOT_MENU.into(), 9, 0, Vec::new(), None, None)];
+    let depot_menu = [(DEPOT_MENU.into(), 9, 0, Vec::new(), Vec::new(), None, None)];
     sunrise_client::containers::with_mod_menu_types(depot_menu, || {
         with_mod(|| {
             with_guests(|game| {
-                let button = |game: &mut crate::game::Game<'_>, window| {
+                let button = |game: &mut crate::game::Game<'_>, window, id| {
                     game.lan_guest_packet(
                         12,
                         Serverbound::ContainerButtonClick(ContainerButtonClick {
                             container: window,
-                            button: 3,
+                            button: id,
                         }),
                     );
                 };
                 BUTTONS.set(0);
+                BUTTON_ENTITIES.set(0);
+                BUTTON_POSITIONS.with(|positions| positions.borrow_mut().clear());
                 let window = open_depot(game);
                 depot_container(game);
-                button(game, window);
+                button(game, window, 99);
+                assert_eq!(BUTTONS.get(), 0, "a menu rejects unsupported button IDs");
+                button(game, window + 1, 3);
+                assert_eq!(BUTTONS.get(), 0, "a stale window has no button owner");
+                button(game, window, 3);
                 assert_eq!(
                     BUTTONS.get(),
                     1,
                     "the block's own menu reaches its menu_button"
                 );
-                // A menu a mod opened from code at the same position: the block's when its type is
-                // the one the block's container opens (as the client tells the screen hooks).
+                assert_eq!(BUTTON_ENTITIES.get(), 1, "the block menu lends its entity");
+                BUTTON_POSITIONS.with(|positions| {
+                    assert_eq!(
+                        positions.borrow().as_slice(),
+                        &[Some([POS.0, POS.1, POS.2])]
+                    );
+                });
+                game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                    guest.carried = Some(ItemStack::new("minecraft:diamond", 2));
+                });
+                SCRIPT.with(|script| {
+                    *script.borrow_mut() = Script {
+                        clear_cursor: true,
+                        ..Script::default()
+                    }
+                });
+                button(game, window, 4);
+                SCRIPT.with(|script| *script.borrow_mut() = Script::default());
+                let guest = game.lan.as_ref().unwrap().hub.guest(12).unwrap();
+                assert_eq!(
+                    guest.carried, None,
+                    "a button can consume the carried stack"
+                );
+                assert!(
+                    !guest
+                        .inventory
+                        .iter()
+                        .flatten()
+                        .any(|stack| { &*stack.item == "minecraft:diamond" && stack.count == 2 })
+                );
+                assert_eq!(BUTTONS.get(), 2);
+                assert_eq!(BUTTON_ENTITIES.get(), 2);
+                // A code-opened native menu of this type routes by its live menu owner. The
+                // coincidental position is not entity backing; only Slots::Block lends an entity.
                 let window = open_native_menu(game);
                 game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
                     let menu = guest.menu.as_mut().unwrap();
                     menu.pos = Some(POS);
                     menu.registry_id = DEPOT_MENU.into();
                 });
-                button(game, window);
+                button(game, window, 3);
                 assert_eq!(
                     BUTTONS.get(),
-                    2,
-                    "the same type at the block is the block's menu"
+                    3,
+                    "the menu type owns its button even without block backing"
                 );
+                assert_eq!(
+                    BUTTON_ENTITIES.get(),
+                    2,
+                    "a code-opened menu's position alone does not lend the block entity"
+                );
+                BUTTON_POSITIONS.with(|positions| {
+                    assert_eq!(
+                        positions.borrow().as_slice(),
+                        &[
+                            Some([POS.0, POS.1, POS.2]),
+                            Some([POS.0, POS.1, POS.2]),
+                            None,
+                        ],
+                        "a blockless menu supplies no position even if it has a screen hint"
+                    );
+                });
                 // Another menu type at that position (another mod's menu at a machine): not the
                 // block's.
                 game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
                     guest.menu.as_mut().unwrap().registry_id = "test:native".into();
                 });
-                button(game, window);
+                button(game, window, 3);
                 assert_eq!(
                     BUTTONS.get(),
-                    2,
+                    3,
                     "another menu type reaches no block's menu_button"
+                );
+                game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                    guest.menu.as_mut().unwrap().registry_id = DEPOT_MENU.into();
+                    guest.carried = Some(ItemStack::new("minecraft:diamond", 2));
+                });
+                SCRIPT.with(|script| {
+                    *script.borrow_mut() = Script {
+                        replace_menu: true,
+                        change_cursor: true,
+                        ..Script::default()
+                    }
+                });
+                button(game, window, 4);
+                SCRIPT.with(|script| *script.borrow_mut() = Script::default());
+                assert_eq!(BUTTONS.get(), 4);
+                assert_eq!(BUTTON_ENTITIES.get(), 2);
+                let guest = game.lan.as_ref().unwrap().hub.guest(12).unwrap();
+                assert_eq!(
+                    guest.carried, None,
+                    "a cursor edit from the old menu cannot overwrite the replacement"
+                );
+                assert!(
+                    guest
+                        .inventory
+                        .iter()
+                        .flatten()
+                        .any(|stack| { &*stack.item == "minecraft:diamond" && stack.count == 2 }),
+                    "the returned cursor stack stays in the player's inventory"
+                );
+                assert!(
+                    !guest.inventory.iter().flatten().any(|stack| {
+                        &*stack.item == "minecraft:gold_ingot" && stack.count == 1
+                    }),
+                    "the stale menu's explicit cursor edit is not applied"
                 );
             });
         })

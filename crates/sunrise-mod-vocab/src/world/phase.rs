@@ -257,9 +257,7 @@ pub(crate) fn unprovided(method: &'static str, operation: &'static str, access: 
 /// crash report). The dispatcher that called the mod catches it with `contain_refusal`, drops
 /// that listener's answer and goes on. The scope latches: while it holds a refusal every later
 /// gated call in it refuses too, whatever its access class, and the refusal is reported even
-/// if the mod caught the unwind and returned normally. The wasm host dispatcher checks
-/// `access_allowed` before entering these methods and returns a named phase refusal
-/// instead; the guest must never consult its own independent phase state.
+/// if the mod caught the unwind and returned normally.
 ///
 /// Two cases are not contained. When the thread is already unwinding (a mod `Drop` running
 /// during a panic, say) the gate logs the named line and panics, and a panic during an unwind
@@ -409,10 +407,6 @@ impl PackageInfo {
     /// The icon's path inside the package, such as `icon.png`.
     pub fn icon_path(&self) -> Option<&str> {
         self.details.icon_path.as_deref()
-    }
-    /// How its code runs; `None` for a content package.
-    pub fn runtime(&self) -> Option<crate::PackageRuntime> {
-        self.details.runtime
     }
     /// One value of its manifest's `[properties]` table.
     pub fn property(&self, key: &str) -> Option<&crate::PropertyValue> {
@@ -624,7 +618,7 @@ impl std::error::Error for RegistrationReadError {}
 /// }
 /// ```
 // exhaustive: its fields are private, so mods cannot build or destructure it
-// no wire: phase context has a custom Wire layout for its derived directory value and the game's startup screen (a held resource); other host tables rebind locally.
+// no wire: the phase context owns local registration state and the startup screen.
 pub struct RegistrationContext {
     pub(crate) mods: LoadedMods,
     pub(crate) data: Option<RegistrationData>,
@@ -636,9 +630,6 @@ pub struct RegistrationContext {
     /// [`message`](Self::message); none without a game.
     pub(crate) startup: Option<Arc<dyn crate::StartupScreen>>,
     pub(crate) runtime: Option<crate::RuntimeEnvironment>,
-    /// The runtime files of the wasm mod this context was handed to (it crosses as a resource); a
-    /// native mod's come from `data`, by the mod being dispatched.
-    pub(crate) runtime_files: Option<Arc<dyn crate::RuntimeFileSource>>,
 }
 
 impl RegistrationContext {
@@ -654,7 +645,6 @@ impl RegistrationContext {
             warnings: Default::default(),
             instance_dir,
             startup: crate::world::startup_progress::installed(),
-            runtime_files: None,
             runtime,
         }
     }
@@ -681,8 +671,8 @@ impl RegistrationContext {
             .expect("registration runtime environment is installed")
     }
 
-    /// The instance directory captured before registration, identically on native
-    /// and wasm. This is data only, not permission to access a filesystem.
+    /// The instance directory captured before registration. This is data only, not permission
+    /// to access a filesystem.
     /// The value preserves the host OS's raw path encoding, including non-UTF-8 names.
     pub fn instance_dir(&self) -> Result<&crate::InstanceDirectory, RegistrationReadError> {
         self.instance_dir
@@ -1052,24 +1042,6 @@ impl WorldgenHost for OwningWorldgen<'_> {
 thread_local! {
     static TEST_PACKAGES: std::cell::RefCell<Option<Arc<[PackageInfo]>>> = const { std::cell::RefCell::new(None) };
 }
-/// Runs `f` with only the packages `ids` installed, for tests.
-#[cfg(test)]
-pub fn with_test_packages<R>(ids: &[&str], f: impl FnOnce() -> R) -> R {
-    let packages: Vec<_> = ids
-        .iter()
-        .map(|id| {
-            PackageInfo::new(
-                (*id).to_owned(),
-                "1".to_owned(),
-                PackageKind::Code,
-                crate::Side::Client,
-                vec![(*id).to_owned()],
-                vec![],
-            )
-        })
-        .collect();
-    with_test_package_inventory(packages, f)
-}
 
 #[cfg(test)]
 pub(crate) fn with_test_package_inventory<R>(
@@ -1118,7 +1090,6 @@ fn phase_authority_advances_without_a_platform_backend() {
 fn the_registration_context_lists_installed_packages_with_their_details() {
     let details = crate::PackageDetails {
         name: "Machines".to_owned(),
-        runtime: Some(crate::PackageRuntime::Native),
         ..Default::default()
     };
     let packages = vec![
@@ -1156,10 +1127,10 @@ fn the_registration_context_lists_installed_packages_with_their_details() {
         );
         let machines = context.mods().get("machines").unwrap();
         assert_eq!(machines.name(), "Machines");
-        assert_eq!(machines.runtime(), Some(crate::PackageRuntime::Native));
+        assert_eq!(machines.kind(), PackageKind::Code);
         assert!(machines.depends_on("base"));
         let base = context.mods().get("base").unwrap();
-        assert_eq!(base.runtime(), None);
+        assert_eq!(base.kind(), PackageKind::Content);
         assert!(context.mods().get("missing").is_none());
     });
 }

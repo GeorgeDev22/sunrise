@@ -7,7 +7,7 @@ A code mod's project names the mod API by the path where `cargo sunrise-mod` kee
 sunrise-mod-api = { path = ".sunrise/sdk/api/crates/sunrise-mod-api" }
 ```
 
-`sunrise-mod-points`, `sunrise-internals` and `sunrise-wasmtime` (native mods only; [the game's wasmtime](../../concepts/native-route/8-wasmtime.md)) are named the same way, by `.sunrise/sdk/api/crates/<package>`. The
+`sunrise-internals` is named the same way, by `.sunrise/sdk/api/crates/sunrise-internals`. The
 SDK does not carry a `sunrise-internals` crate: `cargo sunrise-mod build` and `internals sync` generate the
 mod's own facade in its place. A plain `cargo check` cannot resolve it. Features
 (`features = ["testing"]` on a dev-dependency) are kept.
@@ -24,10 +24,8 @@ with the line to write instead:
 
 ## The pin
 
-The build a mod is made for is its pin, always a full commit sha in the file:
-
-- a native mod: `[native] sunrise` in `sunrise-mod.toml`;
-- a wasm mod: `sdk` under `[package.metadata.sunrise]` in `Cargo.toml`.
+The build a native mod is made for is its pin, a full commit SHA in `[native] sunrise` in
+`sunrise-mod.toml`.
 
 `cargo sunrise-mod new` writes the current Nightly's build, or the one selected with `--sunrise`.
 A native project normally leaves `[native] mixins` out. When a mod uses mixins, builds and discovery use the
@@ -56,10 +54,10 @@ that has one.
 
 ## `.sunrise/sdk/`
 
-In a code mod, `new`, `build`, `build --wasm`, `check`, `hooks`, `fits` and `update` fetch the pinned build's SDK
-into `.sunrise/sdk/` when the folder is missing or holds another build, after the [checks](01-release.md#how-a-download-is-checked).
-It holds `sdk.json`, `surface.json`, the unpacked API source under `api/`, and `build`, a file naming the build. That
-file is written last, so a fetch that stopped partway is fetched again by the next command.
+In a code mod, `new`, `build`, `check`, `hooks`, `fits` and `update` fetch the pinned build's SDK
+into `.sunrise/sdk/` after the [checks](01-release.md#how-a-download-is-checked). It holds `sdk.json`,
+`surface.json`, the unpacked API source under `api/`, and `build`, a stamp written only after the fetch finishes.
+The tool fetches again if the stamp is missing or if the pinned build or trusted SDK keys have changed.
 
 `fits` and `update` fetch no SDK for a mod made for exactly one build: its manifest says so before one is needed. Any of these commands makes a fresh clone of a mod work, `check` included, since it fetches before Cargo
 reads the path. An editor needs that first command too: until it runs, `sunrise-mod-api`'s path does not exist.
@@ -78,11 +76,13 @@ launcher or sent to a registry.
 - anything else: a folder holding `sdk-<build id>/` folders, and `nightly/` or `nightly-<date>/` folders with their
   `sdk.json` for Nightly names. The launcher also reads game releases' folders there, for their build ids.
 
-Every SDK base is checked the same way, against Sunrise's signature. The launcher's own copies are described in
+Every SDK base is checked the same way, against Sunrise's signature. For a [local SDK built from a
+checkout](../../how-to/native-mods/07-local-developer-builds.md), a debug build of the mod tool can also check
+against the public key set in `SUNRISE_SDK_TRUSTED_KEY`. The launcher's own copies are described in
 [Cache and disk](../../how-to/native-mods/10-cache-and-disk.md).
 
-`internals add`, `inject add`, `inject update`, and pin changes that need catalogs read `internals.json` and
-`points.json` from the pinned build's signed SDK. The tool unpacks `build-data.tar.xz` into
-`.sunrise/cache/<build id>/build-data/`. `internals sync` checks pinned game source instead, as do the add and
-inject update commands when the mod adds `[[native.module]]` rows. Source discovery uses the Rust named by the
-signed SDK, but does not need its compiled game slices. See [Native dependency tools](../registry-index.md#native-dependency-tools).
+`internals add` and pin changes that need catalogs read `internals.json` from the pinned build's signed SDK.
+The tool unpacks `build-data.tar.xz` into `.sunrise/cache/<build id>/build-data/`. `internals sync` checks
+pinned game source instead, as does `internals add` when the mod declares `[[native.module]]` rows. Source
+discovery uses the Rust named by the signed SDK, but does not need its compiled game slices.
+See [Native dependency tools](../registry-index.md#native-dependency-tools).

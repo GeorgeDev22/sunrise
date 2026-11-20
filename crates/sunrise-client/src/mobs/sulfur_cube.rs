@@ -5,7 +5,7 @@
 //! knockback, sounds, contact damage, a TNT fuse), shearing the block out,
 //! buckets, and the outer/inner models and their render scale.
 use super::{
-    Damage, DamageKind, Mob, MobEvent, MobWorld,
+    Damage, DamageKind, Mob, MobEvent, MobWorld, NamedDamage,
     control::MoveKind,
     goals::{Cx, Goal, JUMP, LOOK, MOVE, goal_clone},
 };
@@ -962,6 +962,9 @@ pub fn prime_with_fuse(m: &mut Mob, imminent: bool, fuse: i32) -> bool {
 /// `#sulfur_cube_with_block_immune_to`: the damage a cube with a block shrugs off and is only
 /// knocked by.
 pub fn immune_to(source: &Damage) -> bool {
+    if let DamageKind::Named(named) = source.kind {
+        return named.has(NamedDamage::SULFUR_CUBE_WITH_BLOCK_IMMUNE_TO);
+    }
     matches!(
         source.kind,
         DamageKind::PlayerAttack
@@ -1004,7 +1007,7 @@ pub fn accepts_damage(
     if can_explode(m) && !primed(m) {
         if source.is_fire() {
             prime(m, false);
-        } else if matches!(source.kind, DamageKind::Explosion | DamageKind::Fireworks) {
+        } else if source.kind.is_explosion() {
             prime(m, true);
         }
     }
@@ -1601,6 +1604,28 @@ mod tnt_rule_tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn named_damage_tags_drive_block_immunity_and_explosive_fuse() {
+        let mut test_level = crate::health::TestLevel::new(0);
+        let level = &mut test_level.level();
+        let source = |tags| Damage::of(DamageKind::Named(NamedDamage::new("example:hit", tags)));
+        let mut untagged = tnt_cube();
+        assert!(accepts_damage(&mut untagged, level, &source(0), 5.0));
+        assert!(!primed(&untagged));
+        let mut tagged = tnt_cube();
+        assert!(!accepts_damage(
+            &mut tagged,
+            level,
+            &source(
+                NamedDamage::IS_EXPLOSION
+                    | NamedDamage::SULFUR_CUBE_WITH_BLOCK_IMMUNE_TO
+                    | NamedDamage::NO_KNOCKBACK,
+            ),
+            5.0,
+        ));
+        assert!(primed(&tagged));
     }
 
     #[test]

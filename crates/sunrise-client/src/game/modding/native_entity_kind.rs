@@ -15,7 +15,7 @@ impl Game<'_> {
                 .find(|p| p.id == id)?
                 .entity_type(),
             Target::Stand(_) => "minecraft:armor_stand",
-            Target::General(_) => return None,
+            Target::General(id) => self.general_kind(id)?,
             Target::Frame(id) => {
                 if self
                     .item_frames
@@ -28,22 +28,7 @@ impl Game<'_> {
                 }
             }
             Target::Painting(_) => "minecraft:painting",
-            Target::Boat(id) => {
-                let boat = self.boats.iter().find(|boat| boat.id == id)?;
-                let chest = if boat.chest { "chest_" } else { "" };
-                let suffix = if &*boat.wood == "bamboo" {
-                    "raft"
-                } else {
-                    "boat"
-                };
-                return mod_api::__private::resolved_entity_type_key_parts(&[
-                    "minecraft:",
-                    &boat.wood,
-                    "_",
-                    chest,
-                    suffix,
-                ]);
-            }
+            Target::Boat(id) => self.boats.iter().find(|b| b.id == id)?.entity_type_name(),
             Target::Cart(id) => self.carts.iter().find(|cart| cart.id == id)?.kind.id(),
             Target::Other(id) => &self.others.iter().find(|other| other.id == id)?.kind,
             Target::Crystal(_) => "minecraft:end_crystal",

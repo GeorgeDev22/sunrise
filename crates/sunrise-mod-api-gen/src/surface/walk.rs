@@ -55,27 +55,12 @@ pub(super) fn hidden(attrs: &[syn::Attribute]) -> bool {
 }
 
 /// Whether the items under `attrs` are part of a mod's default native build: `test` and every
-/// `feature` are off, `target_arch` is not `wasm32`, anything else is on.
+/// `feature` are off; other configuration keys are assumed on.
 pub(super) fn compiled(attrs: &[syn::Attribute]) -> bool {
     fn holds(meta: &syn::Meta) -> bool {
         match meta {
             syn::Meta::Path(path) => !path.is_ident("test"),
-            syn::Meta::NameValue(pair) => {
-                let value = match &pair.value {
-                    syn::Expr::Lit(syn::ExprLit {
-                        lit: syn::Lit::Str(text),
-                        ..
-                    }) => text.value(),
-                    _ => String::new(),
-                };
-                if pair.path.is_ident("feature") {
-                    false
-                } else if pair.path.is_ident("target_arch") {
-                    value != "wasm32"
-                } else {
-                    true
-                }
-            }
+            syn::Meta::NameValue(pair) => !pair.path.is_ident("feature"),
             syn::Meta::List(list) => {
                 let Ok(inner) = list.parse_args_with(
                     syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,

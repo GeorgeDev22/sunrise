@@ -9,7 +9,13 @@
 //!   through the supertraits of called traits too ([`Surface::reach`]): a sub-host trait's method
 //!   called on `&mut dyn ServerHost` counts once `ServerHost` does;
 //! - a name written after `X::`, where `X` owns a member of that name, is that member only
-//!   (`TextHover::Item` is the variant, not a type `Item`).
+//!   (`TextHover::Item` is the variant, not a type `Item`);
+//! - a tuple struct's field (`X.0`) counts only where the parser ties the read to `X`: `X(..).0`,
+//!   `v.0` where `v` is bound by `let v: X`, `let v = X(..)` or a parameter `v: X` (through `&`
+//!   and `&mut`), `self.0` in a method of an impl for `X`, and each position a pattern
+//!   `X(a, b, ..)` lists before its `..`. A position read anywhere else (on a tuple, a closure's
+//!   untyped argument, another field, a method's result, in a macro body) counts for no struct;
+//!   the compile against the target build judges it.
 //!
 //! For each struct the source names it also records how the mod builds it, read with a Rust
 //! parser ([`crate::syntax`]): [`Built::Full`] where a struct literal or call lists its fields
@@ -45,7 +51,7 @@
 //! Names assembled inside a macro from outside the mod (`paste!`, `concat_idents!`) never appear
 //! in the source and are out of the scan's reach; the compile catches them. A file that does not
 //! parse, or nests deeper than [`syntax::MAX_NESTING`], cannot be judged ([`ScanError`]), and
-//! neither can any file where the parser cannot have a stack of its own (on wasm). Even a mod
+//! neither can any file where the parser cannot reserve its own stack. Even a mod
 //! judged to fit is compiled on the player's machine against the target build, and that compile
 //! stays the final check. The scan also records the public paths the mod writes each item by:
 //! imported, written out, under an API glob (`prelude::Biome` after `use mod_api::*`), or
@@ -142,6 +148,24 @@ pub struct Entry {
     pub version: Option<u64>,
 }
 
+impl Entry {
+    /// An entry that is only an id and its hash.
+    pub fn plain(id: String, hash: String) -> Self {
+        Self {
+            id,
+            hash,
+            impls: Vec::new(),
+            built: None,
+            fields_hash: None,
+            fields: Vec::new(),
+            built_at: None,
+            paths: Vec::new(),
+            reached_from: Vec::new(),
+            version: None,
+        }
+    }
+}
+
 /// An entry and why it is there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Used {
@@ -161,6 +185,11 @@ pub struct Uses {
 impl Uses {
     pub fn entries(&self) -> impl Iterator<Item = &Entry> {
         self.items.iter().map(|used| &used.entry)
+    }
+
+    /// Checks the scanned records against the API of another build.
+    pub fn fits(&self, target: &Surface) -> Fit {
+        fit_report(None, self.entries(), target).verdict
     }
 
     /// The table a package carries for a mod made for `made_for` (a build id).
@@ -408,7 +437,7 @@ pub enum ScanError {
     /// The file nests brackets, generics or expressions deeper than the scan parses
     /// ([`syntax::MAX_NESTING`]), at this line.
     TooDeep { file: String, line: usize },
-    /// The parser's own stack could not be had (always so on wasm), so the file was not parsed.
+    /// The parser's own stack could not be reserved, so the file was not parsed.
     NoStack { file: String },
     /// The child process that parses first ([`crate::child`]) died, by a signal, an overflow or
     /// a limit on its memory or processor time, while parsing this file (none: before it
@@ -1605,6 +1634,11 @@ impl<'s, 't> Walk<'_, '_, 's, 't> {
             let Token::Ident(written_name) = token else {
                 continue;
             };
+            // A field's position (`v.0`) names no struct by itself: [`Walk::tuple_fields`]
+            // counts the reads the parser ties to one.
+            if written_name.starts_with(|c: char| c.is_ascii_digit()) {
+                continue;
+            }
             let place = (path, *line);
             let start = file.path_starts[at];
             let (name, unqualified) = match *written_name {
@@ -1703,6 +1737,51 @@ impl<'s, 't> Walk<'_, '_, 's, 't> {
                     }
                 };
                 found.build(id, place, full, build.brace);
+            }
+        }
+    }
+
+    /// Every tuple struct field the parser ties a read to ([`syntax::TupleField`]), with the
+    /// struct's name read as for a build: `Self` through the impl it stands in, an unqualified
+    /// name the mod's own type defines nothing of the API's, and a variant (`Shape::Pos(a, ..)`)
+    /// is no struct.
+    fn tuple_fields(&mut self) {
+        let Walk {
+            resolver,
+            found,
+            index,
+            path,
+        } = self;
+        let (index, path) = (*index, *path);
+        let files = resolver.files;
+        let file = &files[index];
+        for field in &file.syntax.tuple_fields {
+            let place = (path, field.line);
+            let (name, unqualified) = match &field.path[..] {
+                ["Self"] => match resolver.impl_at(index, field.byte) {
+                    Some(Some(target)) => (*target.last().unwrap_or(&"Self"), target.len() == 1),
+                    _ => continue,
+                },
+                [.., last] => (*last, field.path.len() == 1 && !field.rooted),
+                [] => continue,
+            };
+            resolver.lookup(name);
+            let resolver: &Resolver<'_, 's, 't> = resolver;
+            let resolved = &resolver.memo[name];
+            if (unqualified && !resolved.aliased && resolver.own_in(index, name))
+                || (!resolved.aliased && resolver.is_member(&field.path, field.rooted))
+            {
+                continue;
+            }
+            let api = resolver.index;
+            for id in &resolved.ids {
+                if api.kind(id) != Some(TypeKind::TupleStruct) {
+                    continue;
+                }
+                let member = format!("{id}.{}", field.position);
+                if let Some((member, _)) = api.hashes.get_key_value(member.as_str()) {
+                    found.name(member, place);
+                }
             }
         }
     }
@@ -2008,6 +2087,7 @@ pub(crate) fn uses<'t>(
         };
         walk.names();
         walk.builds();
+        walk.tuple_fields();
         walk.paths();
     }
     let Found {
@@ -2343,6 +2423,17 @@ pub fn item(id: &str) -> Option<(ItemKind, String)> {
 
 /// An item as people read it: its kind and the name a mod writes for it.
 fn describe(id: &str) -> String {
+    // The game's own code a mod declares (`game:<kind>:<path>`), which is no surface item.
+    if let Some((kind, path)) = id
+        .strip_prefix("game:")
+        .and_then(|rest| rest.split_once(':'))
+    {
+        let word = match kind {
+            "fn" | "method" => "function",
+            other => other,
+        };
+        return format!("the game's {word} `{path}`");
+    }
     match item(id) {
         Some((kind, name)) => format!("the {} `{name}`", kind.word()),
         None => format!("`{id}`"),
@@ -2355,12 +2446,34 @@ pub enum Fit {
     Fits,
     /// What is removed or changed in the target, sorted by id.
     DoesNotFit(Vec<Misfit>),
+    /// Nothing the list can judge changed, but it holds no version of these hooks (their ids,
+    /// sorted), so it cannot say that they still mean what the mod was written for. A list this
+    /// crate's scan writes never gives this; one an older tool wrote does, until
+    /// [`UsesTable::pin_hook_versions`] fills it.
+    Unversioned(Vec<String>),
+}
+
+/// A fit verdict and the note about entries the compile must judge, if any.
+pub struct FitReport {
+    pub verdict: Fit,
+    /// A single human-readable line, absent when nothing was deferred to the compile.
+    pub deferred: Option<String>,
 }
 
 /// Whether every entry exists in `target` with an equal hash and under every path the mod writes,
 /// every type keeps its impls, every struct the mod builds can still be built (and keeps its
-/// field set when built in full), and every named hook version is unchanged.
-pub fn fits<'a>(entries: impl IntoIterator<Item = &'a Entry>, target: &Surface) -> Fit {
+/// field set when built in full), and every hook keeps the version the entry names. A hook entry
+/// that names none is [`Fit::Unversioned`] when nothing else changed.
+#[cfg(test)]
+pub(crate) fn fits<'a>(entries: impl IntoIterator<Item = &'a Entry>, target: &Surface) -> Fit {
+    fit_report(None, entries, target).verdict
+}
+
+fn fit_report<'a>(
+    table: Option<&UsesTable>,
+    entries: impl IntoIterator<Item = &'a Entry>,
+    target: &Surface,
+) -> FitReport {
     let hashes: BTreeMap<&str, &str> = target.entries().collect();
     let types: BTreeMap<&str, &Type> = target.types.iter().map(|t| (t.id.as_str(), t)).collect();
     let versions: BTreeMap<&str, u64> = target
@@ -2382,11 +2495,13 @@ pub fn fits<'a>(entries: impl IntoIterator<Item = &'a Entry>, target: &Surface) 
         public_paths.insert(&m.id, &m.paths);
     }
     let entries: Vec<&Entry> = entries.into_iter().collect();
+    let mut legacy = crate::legacy_hash::LegacyFit::new(table, target, &entries);
     // What each trait a member is reached from leads to in the target, along references built
     // once: a table's `reached_from` strings are many and its own, the surface's size is not.
     let refs = target.refs(true);
     let mut leads: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut misfits = Vec::new();
+    let mut unversioned = Vec::new();
     for entry in &entries {
         let id = entry.id.as_str();
         let mut misfit = |change| {
@@ -2396,10 +2511,12 @@ pub fn fits<'a>(entries: impl IntoIterator<Item = &'a Entry>, target: &Surface) 
             })
         };
         let Some(hash) = hashes.get(id) else {
-            misfit(Change::Removed);
+            if legacy.check_missing_record(id) {
+                misfit(Change::Removed);
+            }
             continue;
         };
-        if *hash != entry.hash {
+        if !legacy.matches(id, hash, &entry.hash) {
             misfit(Change::Changed);
         }
         for path in &entry.paths {
@@ -2412,7 +2529,7 @@ pub fn fits<'a>(entries: impl IntoIterator<Item = &'a Entry>, target: &Surface) 
         }
         if let Some(record) = types.get(id) {
             for name in &entry.impls {
-                if !record.impls.contains(name) {
+                if !record.impls.contains(name) && legacy.check_missing_impl(id, name) {
                     misfit(Change::LostImpl(name.clone()));
                 }
             }
@@ -2455,27 +2572,38 @@ pub fn fits<'a>(entries: impl IntoIterator<Item = &'a Entry>, target: &Surface) 
                 }
             }
         }
-        if let (Some(named), Some(now)) = (entry.version, versions.get(id))
-            && named != *now
-        {
-            misfit(Change::Version { named, now: *now });
+        match (entry.version, versions.get(id)) {
+            (Some(named), Some(now)) if named != *now => {
+                misfit(Change::Version { named, now: *now })
+            }
+            (None, Some(_)) => unversioned.push(entry.id.clone()),
+            _ => {}
         }
     }
     misfits.sort();
     misfits.dedup();
-    if misfits.is_empty() {
-        Fit::Fits
-    } else {
+    unversioned.sort();
+    let verdict = if !misfits.is_empty() {
         Fit::DoesNotFit(misfits)
+    } else if !unversioned.is_empty() {
+        Fit::Unversioned(unversioned)
+    } else {
+        Fit::Fits
+    };
+    FitReport {
+        verdict,
+        deferred: legacy.deferred_note(),
     }
 }
 
 /// The schema [`UsesTable`] writes.
-pub const USES_SCHEMA: u32 = 2;
+pub const USES_SCHEMA: u32 = 3;
 
 /// The schema before it, which [`UsesTable::read`] still reads: published packages carry it. Its
-/// lists recorded a build wherever the scan was in doubt, so how they say a struct is built is
-/// not read, and the compile judges it.
+/// lists recorded a build wherever the scan was in doubt, with nothing to tell a doubt from a
+/// literal the scan had placed, so how they say a struct is built is not read and the compile
+/// judges it: a literal that no longer builds fails there, under the mod's name. They hold no
+/// hook versions either ([`Fit::Unversioned`]).
 const DOUBTING_SCHEMA: u32 = 1;
 
 /// The file a mod carries its [`UsesTable`] in, beside its `sunrise-mod.toml`.
@@ -2518,7 +2646,7 @@ impl std::fmt::Display for UsesError {
             Self::Json(error) => write!(f, "the uses table is not valid: {error}"),
             Self::Schema(schema) => write!(
                 f,
-                "the uses table has schema {schema}; this tool reads schemas {DOUBTING_SCHEMA} and {USES_SCHEMA}"
+                "the uses table has schema {schema}; this tool reads schemas {DOUBTING_SCHEMA}–{USES_SCHEMA}"
             ),
             Self::DuplicateId(id) => write!(f, "the uses table lists {id} twice"),
         }
@@ -2528,6 +2656,16 @@ impl std::fmt::Display for UsesError {
 impl std::error::Error for UsesError {}
 
 impl UsesTable {
+    /// Checks the entries covered by the typed API. The caller judges any native engine-code
+    /// entries separately against the target build's executable catalog.
+    pub fn fits<'a>(
+        &'a self,
+        api: impl IntoIterator<Item = &'a Entry>,
+        target: &Surface,
+    ) -> FitReport {
+        fit_report(Some(self), api, target)
+    }
+
     /// Reads a table: refuses an oversized document, an unknown schema, malformed JSON and
     /// repeated ids, and unknown fields: the table is this crate's own format, and a field a newer
     /// writer adds is a check this reader would silently skip. Entries come back sorted by id.
@@ -2541,7 +2679,7 @@ impl UsesTable {
         }
         let header: Header =
             serde_json::from_slice(bytes).map_err(|e| UsesError::Json(e.to_string()))?;
-        if ![USES_SCHEMA, DOUBTING_SCHEMA].contains(&header.schema) {
+        if !(DOUBTING_SCHEMA..=USES_SCHEMA).contains(&header.schema) {
             return Err(UsesError::Schema(header.schema));
         }
         let mut table: Self =
@@ -2563,36 +2701,10 @@ impl UsesTable {
         Ok(table)
     }
 
-    /// Gives each hook entry that holds no version the one `made_for`, the surface of the build
-    /// the list was made for, has: a list of the schema before this one says none.
-    pub fn pin_hook_versions(&mut self, made_for: &Surface) {
-        let versions: BTreeMap<&str, u64> = made_for
-            .hooks
-            .iter()
-            .map(|h| (h.id.as_str(), h.contract.version))
-            .collect();
-        for entry in &mut self.entries {
-            entry.version = entry
-                .version
-                .or_else(|| versions.get(entry.id.as_str()).copied());
-        }
-    }
-
-    /// Whether the list cannot say that some hook of it keeps its version in `target`: the entry
-    /// holds no version, and the hook there is past version 1, the one every hook starts at.
-    /// [`fits`] does not judge such a hook, so a caller that cannot [`Self::pin_hook_versions`]
-    /// treats the list as none.
-    pub fn lacks_a_hook_version(&self, target: &Surface) -> bool {
-        let unversioned: BTreeSet<&str> = self
-            .entries
-            .iter()
-            .filter(|e| e.version.is_none())
-            .map(|e| e.id.as_str())
-            .collect();
-        target
-            .hooks
-            .iter()
-            .any(|h| h.contract.version != 1 && unversioned.contains(h.id.as_str()))
+    /// Pins missing hook versions in a legacy list from its made-for SDK's `surface.json`.
+    /// This projects only hook ids and versions, never the old surface contracts.
+    pub fn pin_hook_versions(&mut self, made_for: &[u8]) -> Result<(), crate::ReadError> {
+        crate::legacy_hash::pin_hook_versions(self, made_for)
     }
 
     /// The table as written: pretty JSON, entries sorted by id, ending in a newline.

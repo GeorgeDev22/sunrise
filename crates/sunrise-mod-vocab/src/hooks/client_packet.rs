@@ -22,8 +22,7 @@ The read-only `event.packet` is a `mod_api::ClientPacket`: `id` identifies the
 packet type (for example, `minecraft:custom_payload`); `custom_payload` contains
 the channel and raw bytes for a custom payload, or `None` otherwise. An id
 outside the protocol's packet table is reported as `sunrise:unknown`.
-Other decoded fields are not exposed. This one plain-data contract works
-for native and wasm mods, with a generated codec.
+Other decoded fields are not exposed.
 
 The hook cannot cancel or replace a packet. It also observes chunk packets
 handled by the batching path, once each. Configuration packets and the network

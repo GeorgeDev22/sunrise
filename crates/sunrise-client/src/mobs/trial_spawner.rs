@@ -1181,16 +1181,16 @@ mod tests {
         let tag = tag("{registered_players:[[I;0,0,0,1],[I;0,0,0,16]]}");
         let previous = TrialSpawner::load_with(&tag, &|_| None, Some(&previous));
         let fresh = TrialSpawner::load_with(&tag, &|_| None, None);
-        let order = |s: &TrialSpawner| {
-            s.detected_players
-                .iter()
-                .map(|u| u.0[3])
-                .collect::<Vec<_>>()
-        };
         // Temurin 25.0.5: clear a 40-member set and addAll the two UUIDs
         // from a HashSet(Collection), versus adding into a new default set.
-        assert_eq!(order(&previous), [1, 16]);
-        assert_eq!(order(&fresh), [16, 1]);
+        for (spawner, order) in [(previous, [1, 16]), (fresh, [16, 1])] {
+            let saved = Tag::compound(spawner.save());
+            let uuids = order.into_iter().map(|i| Tag::IntArray(vec![0, 0, 0, i]));
+            assert_eq!(
+                saved.get("registered_players"),
+                Some(&Tag::List(uuids.collect()))
+            );
+        }
     }
 
     #[test]

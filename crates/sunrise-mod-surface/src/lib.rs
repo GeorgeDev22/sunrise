@@ -2,8 +2,7 @@
 //!
 //! The generator (`sunrise-stage surface`) writes it from the declarations the build parses;
 //! nothing in it is kept by hand. This crate holds its record types, their contract hashes, the
-//! strict reader and the one shape function. It has no engine or parser dependency and builds
-//! for `wasm32-unknown-unknown`.
+//! strict reader and shape hashing. It has no engine dependency.
 //!
 //! # Ids
 //!
@@ -30,16 +29,14 @@
 //! | Part kind | `part:<kind>` |
 //! | capability | `capability:<key>` (`registries`, `sunrise:fluids`) |
 //! | behaviour | `behaviour:<name>` (`add_to_merging`) |
-//! | injection point | `point:<target>` |
 //! | published loop | `loop:<name>` |
 //! | listed internal | `internal:<kind>:<path>` (with ` [<cfg>]` for a guarded row) |
 //!
 //! # Hashes
 //!
 //! A record's `hash` is [`contract_hash`] of its contract: every field except `id`, `hash`,
-//! `doc`, `wasm_reason`, `paths`, a hook's `engine` and `counterparts`, a type's `shape` and
-//! `impls`, its `wire` and `wire_form` (how it crosses to wasm, which `shape` and the build's
-//! wasm layout cover), a struct's `constructible` and `non_exhaustive` (which matter only to a
+//! `doc`, `paths`, a hook's `engine` and `counterparts`, a type's `shape`, `impls`, `wire` and
+//! `wire_form`, a struct's `constructible` and `non_exhaustive` (which matter only to a
 //! mod that builds it, judged by the fit test), and its member records. Each
 //! member (a method, field or variant) has its own hash, so adding a method to `Host`, adding a
 //! hook or adding a field to a type mods cannot build changes no existing record's hash. A
@@ -61,10 +58,8 @@
 //! own, like a hook's, and its `doc` and `tests` are outside the hash.
 //!
 //! A trait's `role` says whether mods implement it, call it, or neither: the generator takes it
-//! from the WebAssembly boundary's lists of the traits a mod implements (its exports, with the
-//! handler traits capability keys name) and calls (its imports), resolved to the trait itself,
-//! not its name. A trait on neither list has role `none`. Whether a method is on wasm is hashed
-//! as a boolean; the reason is documentation (`wasm_reason`).
+//! from the vocabulary's role lists, resolved to the trait itself, not its name.
+//! A trait on neither list has role `none`.
 //!
 //! Every member record lists its owner (the trait or type) in `refs`, so
 //! [`Surface::closure`] from a member reaches its owner.
@@ -75,13 +70,13 @@
 //! typed [`ReadError`], and ignores fields it does not know. It does not recompute record
 //! hashes: a newer writer may hash contract fields this reader does not know, and the file's
 //! integrity is the signature's job.
+pub mod build_data;
 pub mod child;
 pub mod diff;
+mod legacy_hash;
 pub mod records;
 pub mod scan;
 pub mod shape;
-// On wasm the scan answers "cannot judge" before parsing, which leaves the reader unused.
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
 mod syntax;
 pub mod uses;
 
@@ -91,9 +86,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The schema this crate writes and reads. Adding a field does not change it; removing or
-/// redefining one does. 2: `fields_hash` is over the sorted fields, and a hook argument's
-/// references are matched by full path.
-pub const SCHEMA: u32 = 2;
+/// redefining one does. Schema 3 records hash only the native contract.
+pub const SCHEMA: u32 = 3;
 
 /// The whole document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,7 +119,7 @@ pub struct Surface {
     /// Older readers ignore this additive collection without a schema change.
     #[serde(default)]
     pub extension_tags: Vec<ExtensionTag>,
-    /// Injection points, native loops and listed internals for CI and local audits. Omitted
+    /// Native loops and listed internals for CI and local audits. Omitted
     /// from SDK exports and not inferred by the API source-use scanner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub engine_items: Vec<EngineItem>,
@@ -154,11 +148,23 @@ impl std::fmt::Display for ReadError {
 
 impl std::error::Error for ReadError {}
 
+/// First 128 bits of SHA-256, formatted as 32 lowercase hex digits.
+pub fn digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let hash = Sha256::digest(text.as_bytes());
+    let mut out = String::with_capacity(32);
+    for byte in &hash[..16] {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 /// The contract hash of a record: the first 128 bits, as 32 lowercase hex digits, of the SHA-256
 /// of the contract's compact JSON (fields in declaration order, absent optional fields left out).
 pub fn contract_hash<T: Serialize>(contract: &T) -> String {
     let text = serde_json::to_string(contract).expect("contracts serialize");
-    mod_call::digest(&text)
+    digest(&text)
 }
 
 /// The identifier a mod writes for an id: the last path segment, or the field or variant name.
@@ -196,8 +202,8 @@ macro_rules! sealed {
 }
 
 sealed!(
-    Method(MethodContract) { wasm_reason, call },
-    Function(FunctionContract) { wasm_reason, paths },
+    Method(MethodContract) {},
+    Function(FunctionContract) { paths },
     Macro(MacroContract) { paths },
     Field(FieldContract) {},
     Variant(VariantContract) {},
@@ -273,7 +279,6 @@ impl Hook {
             doc: doc.into(),
             engine,
             counterparts,
-            call: None,
             contract,
             fields,
         }
@@ -307,7 +312,7 @@ pub fn fields_hash_of<'a>(fields: impl IntoIterator<Item = (&'a str, &'a str)>) 
         .map(|(name, ty)| format!("{name}: {ty}\n"))
         .collect();
     lines.sort();
-    mod_call::digest(&lines.concat())
+    digest(&lines.concat())
 }
 
 impl Trait {
@@ -351,8 +356,8 @@ impl Type {
         fields: Vec<Field>,
         variants: Vec<Variant>,
     ) -> Self {
-        // How a type crosses to wasm is its `shape`'s and the build's wasm layout's: a native mod
-        // cannot observe it, so `wire` and `wire_form` stay out of the hash. Whether a struct can
+        // `shape`, `wire` and `wire_form` describe encoding, not the Rust contract hashed here.
+        // Whether a struct can
         // be built with a literal matters only to a mod that builds it, which the fit test judges
         // from `constructible` itself.
         let struct_like = matches!(
@@ -586,7 +591,7 @@ impl Surface {
             text.push_str(hash);
             text.push('\n');
         }
-        mod_call::digest(&text)
+        digest(&text)
     }
 
     /// The identifiers a mod's source may contain for each id: its [`leaf`], and a capability

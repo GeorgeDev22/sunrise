@@ -1789,9 +1789,12 @@ mod tests {
             heroes: input.into_iter().map(|i| [i, 0, 0, i]).collect(),
         });
         // Temurin 25.0.5: `live.addAll(new HashSet<>(list))`, not `live.addAll(list)`.
+        let expected = [5, 10, 0, 2, 1, 12, 11, 13, 14, 15, 3, 4, 8, 6, 7, 9]
+            .into_iter()
+            .map(|i| Tag::IntArray(vec![i, 0, 0, i]));
         assert_eq!(
-            raid.heroes().iter().map(|u| u[0]).collect::<Vec<_>>(),
-            [5, 10, 0, 2, 1, 12, 11, 13, 14, 15, 3, 4, 8, 6, 7, 9],
+            raid.to_nbt().get("heroes_of_the_village"),
+            Some(&Tag::List(expected.collect())),
         );
     }
 

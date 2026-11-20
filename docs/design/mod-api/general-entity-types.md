@@ -6,20 +6,24 @@ Provisional answer to [#792](https://github.com/arismoko/horizon/issues/792): re
 
 `Hooks::register` receives `&mut dyn Registrar`, whose `GeneralTypesRegistrar`
 supertrait provides `declare_general_entity(path, category, width, height,
-save_policy, summonable, tracking_chunks, update_interval, payload_version,
-required_features)`. Use `GeneralEntityCategory::Misc` and
+passenger_attachment, save_policy, summonable, pickable, tracking_chunks, update_interval,
+payload_version, required_features)`. Use `GeneralEntityCategory::Misc` and
 `GeneralSavePolicy::{Save, NoSave}`. The path must belong to the declaring
 mod's namespace. Registration is only available during the registration phase,
 requires a both-side package, and refuses duplicates and unavailable required
 mods with `GeneralEntityRegistrationError` while recording a refusal.
 
-Dimensions must be finite. Tracking distance and interval use signed `i32`
+Dimensions and passenger attachment coordinates must be finite. A passenger
+attachment is a vehicle-local point in blocks, rotated with the vehicle's yaw.
+Use `None` for `[0.0, height, 0.0]`, the top center of the box. `pickable` opts the
+type's declared box into the player's crosshair pick once the row is shown. It does not
+add collision or a middle-click result. Tracking distance and interval use signed `i32`
 values directly, matching the vanilla builder; `i32::MAX` means no update
 interval. There is no 64-block, 32-chunk or 1200-tick ceiling.
 
 The engine freezes declarations in mod-id/type-id order into non-narrowed
 catalog indices. The record validator preserves the general-record policies
-of 65,536 payload bytes, passenger depth 16 and decoded payload nesting 32.
+of 65,536 payload bytes and decoded payload nesting 32. A passenger chain has no bound of its own, as in vanilla: only the saved NBT nesting limit applies.
 A record of a namespace no loaded mod owns is quarantined: kept byte for
 byte as it loaded, never ticked or visible to the mod API, and written back
 unchanged on save, up to 69,632 encoded bytes per record and 256 records
@@ -67,6 +71,9 @@ Use one dense general-entity store per level, with constant-time identity-to-slo
 
 EntityPart is shared behavior, not mutable per-instance storage. Follow [PR #2328](https://github.com/arismoko/horizon/pull/2328), the provisional #796 state design: existing attachments are the sole Part-data store, with typed authoring erased at registration, snapshot reads and checked transactional edits. Do not introduce a parallel entity data map. #779 supplies entity scope and scoped moments; it does not by itself supply entity ownership. Generate new methods only for named verified moments, with ServerHost or ClientHost and the existing dependency dispatch order. No Game references escape.
 
+Content entity types and general entity types share one key space. A package that declares the same
+key through both routes is refused when its content loads.
+
 ## Tick and residency
 
 At the authoritative entity phase, walk eligible general rows once in stable join order, with an indexed iteration schedule maintained on mutation rather than sorting each tick. For each root run common bookkeeping, its subscribed server behavior, then its passenger subtree. A passenger is not also ticked as a root. Newly committed spawns first tick next phase; a row removed before its turn receives no tick. Buffer structural edits until safe boundaries. Revalidate deferred operations after listener writes and refuse stale decisions without recomputing.
@@ -89,7 +96,7 @@ Persistence does not imply synchronization: only declared fields cross the netwo
 
 The [moving-structures carrier](moving-structures.md) remains a game-owned specialized type and does not depend on general registration. Share identity, residency, tracking and save boundaries; its cell ownership, swept collision and assembly journal remain specialized. Never create two carrier tickers or serialize its cells twice.
 
-### Implemented: tracking and the client table (stage 5, first part)
+### Implemented: tracking, the client table and the renderer handoff (stage 5)
 
 - **The tracker.** General rows join the level's one tracker (`lan_general_states` in `game/network/lan_entities.rs`). A row's range and interval are its declaration's (`tracking::general` in `lan/tracking.rs`): the range in chunks is capped by the view distance, and an interval of `i32::MAX` or below 1 never updates. Deltas are on. A quarantined record never becomes a row, so it is never tracked.
 - **Pairing.** A general key is in no client registry, so pairing sends a `sunrise:general_entity` spawn (`crates/sunrise-protocol/src/general_entity.rs`) in place of `AddEntity`. Only a client that negotiated that engine channel is paired (`Viewer::general_entity`, `Guest::negotiated_general_entity`). After the spawn:
@@ -97,7 +104,8 @@ The [moving-structures carrier](moving-structures.md) remains a game-owned speci
   - the row's declared fields are its synced attachments, whose snapshot tracking start queues as for any entity.
 - **Vanilla clients.** A vanilla client is never paired with a row: no packet names it. Refusing such a client when required general types exist is still the open question below.
 - **The client.** A Sunrise client keeps the rows it was shown in `game/network/remote/general.rs`. Each row's type is resolved in the client's frozen catalog. It moves with the non-living interpolation (3 steps), keeps the position and rotation of the tick before for a frame's partial tick, and is dropped on removal or a world change. An unknown key or a duplicate id is ignored with one warning. No mod code runs on the client.
-- **Still to come.** The renderer handoff follows in the next part: renderer slots for general types, and drawing a row from its synced attachments.
+- **Shown with its fields.** The server sends every row its first attachment snapshot at tracking start, empty or not, and the client shows a row only once the spawn and that snapshot are both there.
+- **The renderer handoff.** `resolve_entity_renderers` resolves a renderer registered for a general key into a slot per catalog slot (`EntityRendererTable`, `game/modding/native_entity_renderers.rs`), so a frame does no lookup by name. Each frame, shown rows are culled by distance, frustum and section eligibility. The visible list preserves client entity lookup order. Each extracted row goes to its type's renderer (`game/mobs/general_draw.rs`) through the guard every route shares, at `lerp(previous, position, partial)`, with `EntityRenderState`'s identity, age and angles interpolated the same way. Extraction captures a bounded, immutable snapshot of only that row's synced attachments, built when sync changes. Native and Wasm renderers both read it via `EntityRenderState::attachments` and draw through `EntityRenderer::submit`, without a live host. A type with no renderer draws nothing and is named once a resource load; a failed renderer draws nothing until the next load, and a reload re-resolves the slots without touching the rows.
 
 ## Lifecycle route owners and migration obligations
 
@@ -121,7 +129,7 @@ Every creation source must reach the general insertion coordinator: summon, mod/
 
 Native and wasm use the same registry, dependencies, state model and generated contract. Native exact-build checks and wasm interface linking remain loader concerns. Existing native-only registration is not evidence of wasm parity; enable this feature only when both adapters implement registration, tick, codecs and client handoff.
 
-Treat registration, callback results, serialized input and packets as untrusted. Reject NaN/infinite positions or dimensions, negative/overflowed lengths, unknown owned type ids, duplicate UUIDs and stale handles before writes. Unrelated unknown ids retain their existing behavior. Propose payload limit 64 KiB per entity, nesting 32, passenger depth 16, positive dimensions at most 64 blocks, tracking at most 32 chunks and update interval 1–1200 ticks; confirm these provisional limits before implementation. Quarantined records of a missing mod are bounded too — 69 632 encoded bytes per record, 256 records per chunk; both provisional, with no vanilla analogue (vanilla deletes such entities rather than preserving them). Bound aggregate decoding and outgoing bytes per connection too.
+Treat registration, callback results, serialized input and packets as untrusted. Reject NaN/infinite positions or dimensions, negative/overflowed lengths, unknown owned type ids, duplicate UUIDs and stale handles before writes. Unrelated unknown ids retain their existing behavior. Propose payload limit 64 KiB per entity, nesting 32, positive dimensions at most 64 blocks, tracking at most 32 chunks and update interval 1–1200 ticks; confirm these provisional limits before implementation. Quarantined records of a missing mod are bounded too — 69 632 encoded bytes per record, 256 records per chunk; both provisional, with no vanilla analogue (vanilla deletes such entities rather than preserving them). Bound aggregate decoding and outgoing bytes per connection too.
 
 Catch native unwinding and wasm traps at dispatch: abort the callback transaction, discard buffered effects, restore lifts, disable the failing subscriber and report it. A native process-aborting panic cannot be recovered. No irreversible external I/O inside transactional callbacks. A subsequent built-in action must still succeed.
 

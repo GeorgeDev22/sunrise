@@ -1,4 +1,4 @@
-//! Registered raw custom-payload vocabulary shared by native and wasm mods.
+//! Registered raw custom-payload vocabulary.
 #[path = "payload/registrar.rs"]
 mod registrar;
 pub use registrar::{
@@ -8,7 +8,6 @@ pub use registrar::{
 mod typed;
 pub use typed::{PayloadToken, ToClient, ToServer};
 
-use crate::wire::{Reader, Wire, WireError, Writer};
 use crate::{ClientHost, PlayerRef, ServerHost, Text};
 use std::sync::Arc;
 
@@ -57,6 +56,40 @@ pub enum HandlerThread {
     Network,
 }
 
+/// What a send may suffer on a congested connection. `Reliable`, the default, is vanilla's: a
+/// queued send is delivered in order or the connection fails. `Droppable` is for data that is
+/// worthless late (voice, a live position): a send waits in the engine's own queue for the
+/// writer and is dropped, and counted, past a watermark, after 250 ms or at the switch to play,
+/// and over the connection's byte budget. Droppable channels are play-only, and a peer that
+/// declares the other delivery refuses the join like another version: the delivery is part of
+/// the negotiated version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
+// exhaustive: a send is either never lost or may be dropped; a third kind would change every sender's contract.
+pub enum PayloadDelivery {
+    /// Queued sends are delivered in order (the default).
+    Reliable,
+    /// Queued sends may be dropped, never reordered within one channel and sending thread.
+    Droppable,
+}
+
+/// Marks a `Droppable` declaration in its negotiated version, ahead of a typed schema's marker.
+pub const PAYLOAD_DROPPABLE_MARKER: &str = "+delivery.droppable";
+
+/// How many sends of one `Droppable` channel the engine dropped while they waited, by cause,
+/// since the game started (this process, both directions and every connection).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
+// exhaustive: the closed set of drop causes the delivery contract names.
+pub struct PayloadDropCounts {
+    /// Waited longer than 250 ms.
+    pub stale: u64,
+    /// Pushed out by newer sends past the queue's byte watermark.
+    pub watermark: u64,
+    /// Refused or pushed out by the connection's byte budget.
+    pub budget: u64,
+    /// Still waiting when the connection left configuration for play, or ended.
+    pub switch: u64,
+}
+
 /// A registration's complete compatibility and scheduling declaration.
 #[derive(Clone, Debug, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
 // exhaustive: callers construct the complete compatibility and scheduling record explicitly.
@@ -73,6 +106,8 @@ pub struct PayloadDeclaration {
     pub optional: bool,
     /// The receiving executor.
     pub thread: HandlerThread,
+    /// Whether queued sends may be dropped; `Droppable` is play-only.
+    pub delivery: PayloadDelivery,
 }
 
 impl PayloadDeclaration {
@@ -85,6 +120,7 @@ impl PayloadDeclaration {
         direction: PayloadDirection,
         optional: bool,
         thread: HandlerThread,
+        delivery: PayloadDelivery,
     ) -> Self {
         Self {
             id,
@@ -93,6 +129,7 @@ impl PayloadDeclaration {
             direction,
             optional,
             thread,
+            delivery,
         }
     }
 }
@@ -162,6 +199,8 @@ pub enum PayloadSendError {
     /// declaration, direction and value type it claims: forged, from another load, of another
     /// type, or its owner is off. Nothing is sent.
     StaleToken(PayloadId),
+    /// `IPayloadContext::send_to` is for `Droppable` channels only.
+    NotDroppable(PayloadId),
 }
 
 impl crate::NoBackend for PayloadSendError {
@@ -255,9 +294,6 @@ pub enum PayloadHandleError {
     },
 }
 
-crate::wire::wire_handlers::handler!(dyn IPayloadHandler, "IPayloadHandler");
-crate::wire::wire_handlers::handler!(dyn PayloadWork, "PayloadWork");
-
 /// One receiving owner for a registered id and direction, never an all-mod broadcast.
 /// Return `Failed` when application decoding fails. For a typed or declared payload the session
 /// names the channel and fails instead of silently dropping the malformed message. For a raw
@@ -305,6 +341,20 @@ pub trait IPayloadContext {
     /// Check a typed payload's token against this load's frozen declarations before a typed
     /// reply: `StaleToken` for one the registrar did not hand out as it claims.
     fn check_payload_token(&self, token: &PayloadToken) -> Result<(), PayloadSendError>;
+    /// Queue the same bytes on a `Droppable` channel to each of `players`, from a `Network`
+    /// handler or the main thread, on the server only. `players` is the mod's own snapshot,
+    /// refreshed on the main thread (a `PlayerRef` is a plain value: keep a list in the handler's
+    /// state behind a lock and replace it from a tick or join hook); a player who left or whose
+    /// connection is not in play is skipped. Returns how many sends were queued: each follows the
+    /// channel's drop rules, so a queued send may still be dropped later. `Reliable` channels
+    /// refuse with `NotDroppable`, the client with `WrongDirection`. Sends from the network thread and
+    /// the main thread on one channel have no order relative to each other.
+    fn send_to(
+        &mut self,
+        players: &[PlayerRef],
+        id: &PayloadId,
+        bytes: PayloadBytes,
+    ) -> Result<u32, PayloadSendError>;
     /// Disconnect this session with the supplied component.
     fn disconnect(&mut self, reason: Text);
     /// Run now on the main thread or schedule there from the network executor.

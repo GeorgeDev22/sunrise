@@ -250,7 +250,9 @@ impl Game<'_> {
                     } else {
                         empty_template_ran = true;
                         let player = self.use_context();
+                        let actor = self.interacting_loot_entity();
                         self.with_block_use_level(|b, level, ticks| {
+                            level.interacting = Some(actor.clone());
                             b.use_without_item(level, ticks, state, block_hit, player)
                         })
                     };

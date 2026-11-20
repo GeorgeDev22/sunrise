@@ -419,6 +419,11 @@ fn cart_seat(cart: Vec3, seat_offset: f64) -> Vec3 {
     Vec3::new(cart.x, cart.y + seat_offset, cart.z)
 }
 
+/// A general rider's seat on a cart: the cart's passenger attachment with no vehicle attachment of its own.
+pub(super) fn cart_general_seat(cart: Vec3) -> Vec3 {
+    cart_seat(cart, PASSENGER_Y)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Shape {
     NorthSouth,
@@ -2028,14 +2033,8 @@ impl Game<'_> {
             }
             let p = self.carts[i].position;
             let kind = self.carts[i].kind.id();
-            let source = sunrise_client::health::HurtSource {
-                damage_type: "minecraft:lava",
-                causing: 0,
-                direct: 0,
-                position: None,
-            };
             let vanilla = self.saved_refuses_damage(id, "minecraft:lava", false);
-            if !self.native_nonliving_invulnerable(id, kind, source, vanilla) {
+            if !self.refuses_lava_hurt(id, kind, vanilla) {
                 self.hurt_cart(i, 4.0, false, true, CartHit::default());
             }
             self.lava_hurt_sound([p.x, p.y, p.z]);
@@ -2497,6 +2496,9 @@ impl Game<'_> {
             }
         }
     }
+    /// The seed vanilla picks a block state model's weighted alternatives with outside the
+    /// world (`BlockModelResolver.MODEL_SEED`).
+    pub(super) const BLOCK_MODEL_SEED: i64 = 42;
     /// Baked block-state faces with default block tints and terrain shade or diffuse lighting.
     pub(super) fn block_model_vertices(
         &self,
@@ -2507,11 +2509,17 @@ impl Game<'_> {
         diffuse: bool,
         out: &mut Vec<Vertex>,
     ) {
-        // BlockTintSource.color(state) with no level: each tinted face's default colour.
+        let tint = self.default_block_tint(state);
+        self.tinted_block_model_vertices(state, seed, m, |_| light, diffuse, tint, out);
+    }
+    /// `BlockTintSource.color(state)` with no level: each tinted face's default colour.
+    pub(super) fn default_block_tint(
+        &self,
+        state: BlockStateId,
+    ) -> impl Fn(i32) -> Option<u32> + '_ {
         let grass = self.pack.item_renderer.grass_color(0.5, 1.0) as u32;
         let tables = &self.pack.context.tables;
-        let tint = |index: i32| tables.default_tint(state, index, grass);
-        self.tinted_block_model_vertices(state, seed, m, |_| light, diffuse, tint, out);
+        move |index| tables.default_tint(state, index, grass)
     }
     /// `block_model_vertices` with each face multiplied by `tint` of its
     /// tint index (RGB, `None` for untinted faces) and lit by `light` of
@@ -2608,6 +2616,7 @@ impl Game<'_> {
         camera: glam::DVec3,
         alpha: f64,
         out: &mut Vec<Vertex>,
+        run: std::ops::Range<usize>,
     ) {
         let a = alpha as f32;
         let Some(uv) = self
@@ -2622,7 +2631,7 @@ impl Game<'_> {
         // Entity.shouldRenderAtSqrDistance: 64 times the bounding box's mean
         // edge, scaled by the view scale.
         let range = (WIDTH + HEIGHT + WIDTH) / 3.0 * 64.0 * self.view_scale();
-        for c in &self.carts {
+        for c in &self.carts[run] {
             let Some(model) = self.cart_models.models.get(&c.kind) else {
                 continue;
             };
@@ -2806,6 +2815,7 @@ impl Game<'_> {
             glyph: &|c| self.gui.atlas.glyph_cell(c),
             glyphs: self.gui.atlas.font.epoch(),
             font: Some(&self.gui.atlas.font),
+            inline_images: None,
             dynamic_visible: None,
         };
         self.res
@@ -3079,6 +3089,8 @@ pub(super) struct PreparedModelFace {
     uv: [[f32; 2]; 4],
     pub(super) facing: sunrise_assets::model::Direction,
     pub(super) tint_index: i32,
+    /// The side that hides this face when a neighbour covers it (`ModelQuad::cull`).
+    pub(super) cull: Option<sunrise_assets::model::Direction>,
     light_emission: u8,
 }
 
@@ -3097,8 +3109,14 @@ impl PreparedModelFace {
             }),
             facing: quad.facing,
             tint_index: quad.tint_index,
+            cull: quad.cull,
             light_emission: quad.light_emission,
         }
+    }
+
+    /// Whether `hidden` (`ModelInstance::hidden_faces`) leaves this face out.
+    pub(super) fn hidden_by(&self, hidden: u8) -> bool {
+        self.cull.is_some_and(|side| hidden >> side as u8 & 1 != 0)
     }
 
     pub(super) fn positions(&self) -> [[f32; 3]; 4] {
@@ -3188,9 +3206,9 @@ pub(super) fn emit_model_faces(
 }
 
 /// Vanilla multiplies tint, alpha included, only when `tintIndex != -1`.
-pub(in crate::game) fn scale_tint_alpha(
+pub(in crate::game) fn scale_tint_alpha<'f>(
     vertices: &mut [Vertex],
-    faces: &[PreparedModelFace],
+    faces: impl IntoIterator<Item = &'f PreparedModelFace>,
     tint: u32,
 ) {
     let alpha = tint >> 24;
@@ -3198,7 +3216,7 @@ pub(in crate::game) fn scale_tint_alpha(
         return;
     }
     let (quads, _) = vertices.as_chunks_mut::<4>();
-    for (face, quad) in faces.iter().zip(quads) {
+    for (face, quad) in faces.into_iter().zip(quads) {
         if face.tint_index < 0 {
             continue;
         }

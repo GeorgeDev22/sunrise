@@ -76,35 +76,19 @@ impl CoreLines {
         // in this scope.
         // Each block a stage reads is bound to the stages reading it: vanilla's four, then the
         // expression uniforms.
-        let extra = super::expression_blocks::ExpressionBlocks::new(expressions, 1024);
+        let extra = super::expression_blocks::ExpressionBlocks::new(program, expressions, 1024);
         let blocks = super::expression_blocks::vanilla_blocks(program);
-        let entries: Vec<wgpu::BindGroupLayoutEntry> = (blocks.iter())
-            .map(|&(binding, _, size, stages)| {
-                super::expression_blocks::block_entry(binding, size, stages)
-            })
-            .chain(extra.layout())
-            .collect();
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Resource pack lines"),
-            entries: &entries,
-        });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Resource pack lines uniforms"),
             size: extra.size(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let resources: Vec<wgpu::BindGroupEntry> = (blocks.iter())
-            .map(|&(binding, offset, size, _)| wgpu::BindGroupEntry {
-                binding,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &uniform,
-                    offset,
-                    size: wgpu::BufferSize::new(size),
-                }),
-            })
-            .chain(extra.entries(&uniform))
-            .collect();
+        let (entries, resources) = super::expression_blocks::bindings(&blocks, &extra, &uniform);
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Resource pack lines"),
+            entries: &entries,
+        });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Resource pack lines"),
             layout: &layout,
@@ -168,8 +152,8 @@ impl CoreLines {
         })
     }
 
-    /// Uploads the frame's blocks: `data` (the pipeline's own, [`uniforms`]), then each
-    /// expression uniform's value.
+    /// Uploads the frame's blocks: `data` (the pipeline's own, [`uniforms`]), then its Polytone
+    /// blocks (the frame's `PolyGlobals` and each expression uniform's value).
     pub(super) fn upload(
         &self,
         uploads: &mut super::upload::Uploads,
@@ -211,10 +195,10 @@ pub(super) fn uniforms(
     layering: f32,
     fog_color: [f32; 4],
     fog: [f32; 6],
-) -> Vec<u8> {
+) -> [u8; 1024] {
     let projection = jitter * view.projection * pose;
     let model_view = view.view * Mat4::from_scale(glam::Vec3::splat(layering));
-    let mut data = vec![0f32; 256];
+    let mut data = [0f32; 256];
     data[64..80].copy_from_slice(&projection.to_cols_array());
     let transforms = 128;
     data[transforms..transforms + 16].copy_from_slice(&model_view.to_cols_array());
@@ -222,7 +206,8 @@ pub(super) fn uniforms(
     data[transforms + 32..transforms + 36].fill(1.0);
     data[192..196].copy_from_slice(&fog_color);
     data[196..202].copy_from_slice(&fog);
-    let mut bytes: Vec<u8> = bytemuck::cast_slice(&data).to_vec();
+    let mut bytes = [0u8; 1024];
+    bytes.copy_from_slice(bytemuck::cast_slice(&data));
     bytes[..48].copy_from_slice(&globals);
     bytes
 }
@@ -318,15 +303,17 @@ mod tests {
     /// One edge across the middle of a 64 by 64 target, 4 pixels wide, blue (ARGB `ff0000ff`),
     /// at `GameTime` 0.25, drawn with `program`: the RGBA rows read back.
     fn draw_edge(device: &wgpu::Device, queue: &wgpu::Queue, program: &CoreProgram) -> Vec<u8> {
-        draw_edge_with(device, queue, program, &[])
+        draw_edge_with(device, queue, program, &[], None)
     }
 
-    /// [`draw_edge`] with `expressions` evaluated and uploaded as in a frame (`CoreLines::upload`).
+    /// [`draw_edge`] with `expressions` evaluated and uploaded as in a frame (`CoreLines::upload`),
+    /// beside `poly_globals`.
     fn draw_edge_with(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         program: &CoreProgram,
         expressions: &[ExpressionUniform],
+        poly_globals: Option<&super::super::expression_blocks::PolyGlobalsBytes>,
     ) -> Vec<u8> {
         const SIZE: u32 = 64;
         let mut lines = CoreLines::new(
@@ -382,6 +369,7 @@ mod tests {
         );
         let mut uploads = super::super::upload::Uploads::new(device);
         let mut upload = device.create_command_encoder(&Default::default());
+        lines.extra.set_globals(poly_globals);
         lines.upload(&mut uploads, &mut upload, &data);
         uploads.finish(&upload);
         queue.submit([upload.finish()]);
@@ -483,9 +471,59 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("Tint", fragment)]
         );
-        let pixels = draw_edge_with(&device, &queue, &program, &expressions);
+        let pixels = draw_edge_with(&device, &queue, &program, &expressions, None);
         let middle = &pixels[(32 * 64 + 32) * 4..(32 * 64 + 32) * 4 + 4];
         assert_eq!(middle, [51, 0, 255, 255]);
+    }
+
+    /// A pack's outline importing Polytone's built-in `polytone_globals.glsl` reads the
+    /// `PolyGlobals` the frame gives, beside its expression uniform: the player's block height
+    /// (64) in red, `Tint` (its file's `0.1 * 2`, evaluated: 51) in green; zeros when none is
+    /// given.
+    #[test]
+    #[ignore = "daily"]
+    fn a_pack_outline_reads_poly_globals() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU: skipping");
+            return;
+        };
+        let fsh = "#version 330\n#moj_import <polytone_globals.glsl>\n\
+                   layout(std140) uniform Tint {\n    float value;\n};\n\
+                   layout(location = 2) in vec4 vertexColor;\n\
+                   layout(location = 0) out vec4 fragColor;\n\
+                   void main() {\n    fragColor = vec4(float(PolyPlayerBlockPos.y) / 255.0, value, \
+                   vertexColor.b, 1.0);\n}\n";
+        let with_globals = |id: &str| {
+            include(id).or_else(|| {
+                sunrise_polytone::globals::is_include(id)
+                    .then(|| sunrise_polytone::globals::GLSL.to_owned())
+            })
+        };
+        let globals = sunrise_polytone::globals::BLOCK;
+        let program = crate::core_shader::translate_core_with(
+            LINES_VSH,
+            fsh,
+            &[],
+            &with_globals,
+            &GLUE,
+            &|block| block == "Tint" || block == globals,
+        )
+        .expect("the shaders translate");
+        let id = super::super::expression_blocks::LINES[0];
+        let modifiers = modifiers(r#"{"Tint": "0.1 * 2"}"#);
+        let expressions = modifiers.resolve((id, id), &program, &[globals]).unwrap();
+        let bytes = sunrise_polytone::globals::Globals {
+            player: [0.5, 64.9, 0.5],
+            ..Default::default()
+        }
+        .std140();
+        let middle = |given| {
+            let pixels = draw_edge_with(&device, &queue, &program, &expressions, given);
+            pixels[(32 * 64 + 32) * 4..(32 * 64 + 32) * 4 + 4].to_vec()
+        };
+        assert_eq!(middle(Some(&bytes)), [64, 51, 255, 255]);
+        assert_eq!(middle(None), [0, 51, 255, 255]);
     }
 
     /// The packs' `shader_modifiers/core/rendertype_lines.json`, `file`.

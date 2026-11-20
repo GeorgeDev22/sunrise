@@ -53,7 +53,7 @@ pub(super) const NO_ANSWER: &str =
 /// The server thread holds its `Game` by value and runs every tick on it.
 /// It reserves what every guest-capable thread does under the engine's stack policy.
 fn server_thread_stack_floor() -> usize {
-    sunrise_guest_stack::engine().reservation()
+    sunrise_guest_stack::reservation()
 }
 
 /// The server thread's stack size: [`server_thread_stack_floor`], or what `RUST_MIN_STACK` asks for
@@ -339,6 +339,20 @@ struct LoadPhase {
     done: bool,
 }
 impl Serving {
+    /// A server thread's handle with no thread behind it, published on `port` (0: not).
+    #[cfg(test)]
+    pub(super) fn fixture(port: u16) -> Self {
+        let flags = Arc::new(Flags::default());
+        flags.published.store(port, Ordering::Relaxed);
+        let (_sender, tasks) = channel();
+        Self {
+            flags,
+            tasks,
+            owner: 1,
+            pending: None,
+            load: LoadPhase::default(),
+        }
+    }
     /// The window reads this as `MinecraftServer.isCurrentlySaving`.
     pub(super) fn set_saving(&self, saving: bool) {
         self.flags.saving.store(saving, Ordering::Relaxed);
@@ -1157,6 +1171,11 @@ impl Game<'_> {
             self.serve_owner_request(request);
             self.apply_publish();
         }
+    }
+    /// Whether anyone but a single-player owner can join this world: any hub of a client or
+    /// a dedicated server, an integrated server's only once published to LAN.
+    pub(super) fn open_to_others(&self) -> bool {
+        self.lan.is_some() && (!self.serving() || self.published_port().is_some())
     }
     /// `IntegratedServer.getPort` while published.
     pub(super) fn published_port(&self) -> Option<u16> {

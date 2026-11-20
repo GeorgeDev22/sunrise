@@ -1,7 +1,7 @@
 //! Placement-state reads, placement writes and the `Block.setPlacedBy` step.
-use super::{Game, native_server::PlayerRead};
+use super::{Game, api_values::block_state::block_listens, native_server::PlayerRead};
 use mod_api::{
-    BlockKey, BlockUpdateFlags, LevelReadError, LevelRef, LevelWriteError, PlayerRef,
+    BlockKey, BlockUpdateFlags, HookId, LevelReadError, LevelRef, LevelWriteError, PlayerRef,
     PlayerWorldRefusal as Refusal,
 };
 use sunrise_client::{containers::BlockEntity, items::ItemStack};
@@ -256,6 +256,13 @@ impl Game<'_> {
                 _ => {}
             }
         }
-        self.check_wither_spawn(pos)
+        self.check_wither_spawn(pos)?;
+        if self.is_logical_server()
+            && block_listens(HookId::SetPlacedBy, placed)
+            && let Some(level) = self.level(self.dim.id())
+        {
+            self.native_set_placed_by(level, pos, placed, placer.map(PlayerRef::entity), stack);
+        }
+        Ok(())
     }
 }

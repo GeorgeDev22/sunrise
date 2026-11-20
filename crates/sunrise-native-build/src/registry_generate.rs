@@ -194,7 +194,6 @@ pub fn generate<T: Toolchain>(
     bundle: &Bundle,
     update: bool,
 ) -> Result<(), String> {
-    // A wasm mod with `[[inject]]` rows is a bundle too, and pins no game build to lock against.
     let native = bundle.manifest.native.as_ref().ok_or_else(|| {
         crate::host::trf(
             "{path} is not a native mod.",
@@ -326,30 +325,6 @@ mod tests {
             );
         }
     }
-    #[test]
-    fn a_wasm_mod_with_injections_has_no_game_build_to_lock_against() {
-        let manifest = sunrise_mod_package::Manifest::parse(&format!(
-            "id='wasm_inject'\nname='Wasm inject'\nversion='1.0.0'\napi='0.2'\ncapabilities=['registries']\n[wasm]\nsha512='{}'\ntoolchain='fixture'\n[[inject]]\nid='tick'\nat='game::tick'\nkind='head'\nwith='tick'\n",
-            "0".repeat(128)
-        ))
-        .unwrap();
-        let bundle = Bundle {
-            manifest,
-            dir: "wasm-inject".into(),
-        };
-        let unreached = || -> Result<crate::rust::Unpacked, String> {
-            panic!("no toolchain before the refusal")
-        };
-        let error = generate(
-            unreached,
-            |_| panic!("no game lock before the refusal"),
-            &bundle,
-            true,
-        )
-        .unwrap_err();
-        assert_eq!(error, "wasm-inject is not a native mod.");
-    }
-
     #[test]
     fn local_dependencies_are_traversed_but_cannot_escape() {
         let input = tempfile::tempdir().unwrap();

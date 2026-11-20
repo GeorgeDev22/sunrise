@@ -89,6 +89,25 @@ pub trait PlayersClientHost {
     /// nothing changes, with no player of its own.
     #[access(WorldOnly)]
     fn set_local_player_on_ground(&mut self, on_ground: bool) -> bool;
+    /// Side: client.
+    /// Moves the local player by `delta` in blocks, as `Entity.move(MoverType.SELF, delta)`.
+    /// The move uses the player's usual collisions and step height, and updates its ground
+    /// and fall state, including the usual effects of collisions and blocks on velocity.
+    /// Available to client hooks with world access. For per-tick movement call from the local
+    /// player's client-side `player_tick_pre`, before its own movement. This sends no packet
+    /// and fires no `entity_move` hook (that hook is server-only). A section change is
+    /// reported through `entity_entering_section` at the position write, before the move
+    /// updates collision flags, ground, fall distance and velocity.
+    /// The normal position report carries the result and the server checks it as usual.
+    /// Returns the displacement actually made, or `Ok(None)` without moving if there is no
+    /// local player, the player is dead, sleeping or riding, or a component is non-finite or
+    /// outside ±64 blocks. `Err(LevelWriteError::Unavailable)` means the call is outside a
+    /// world phase or the engine couldn't finish the move.
+    #[access(WorldOnly)]
+    fn move_local_player_by(
+        &mut self,
+        delta: [f64; 3],
+    ) -> Result<Option<[f64; 3]>, LevelWriteError>;
     /// Moves the window's player through `passage` (#3775), one its server told it of, as
     /// Immersive Portals' client does: its feet, where it was a tick ago (so the frames
     /// between two ticks do not jump), its velocity and its look come out at the far side,

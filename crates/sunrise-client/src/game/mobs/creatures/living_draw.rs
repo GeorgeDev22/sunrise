@@ -121,7 +121,8 @@ impl Game<'_> {
         };
         // A mod's renderer for the type (`register_entity_renderers`) draws in place of its
         // model and vanilla layers; the mods' layers and post hooks still follow.
-        let modded = self.mod_living_renderer_geometry(mob, alpha as f32, camera, packed, out);
+        let modded =
+            self.mod_living_renderer_geometry(mob, alpha as f32, camera, packed, true, out);
         if mob.species() == Species::SulfurCube && !mob.is_invisible() && !modded {
             self.sulfur_cube_body_geometry(
                 mob,

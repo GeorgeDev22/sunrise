@@ -12,8 +12,7 @@ pub trait Hooks {
     /// and `/loot replace block` offers ask it. Inserts query with the remaining offer
     /// before clamping to room. Default `STORAGE.space_for` does not ask this hook: for a
     /// subscribed slot it bounds insertion by physical room after face and input checks.
-    /// Menus use `menu_slot_rules` instead (`Slot.mayPlace`). A subscribed wasm part costs
-    /// one Wire call per queried slot.
+    /// Menus use `menu_slot_rules` instead (`Slot.mayPlace`).
     ///
     /// Seed a filter from an accepted write, not this query. Default capability writes to
     /// mod-owned storage do not emit `contents_changed`; use an explicit `set_changed`
@@ -24,7 +23,6 @@ pub trait Hooks {
         out = "allowed",
         scope = "block_entity",
         key = "entity",
-        non_exhaustive = true,
         neoforge = "none (vanilla Container.canPlaceItem; the item capability wraps this decision)"
     )]
     fn can_place_item();

@@ -106,16 +106,17 @@ use entity_batch::EntityBatch;
 pub use entity_batch::{
     ADDITIVE_PARTICLE_OVERLAY, DISSOLVE_OVERLAY, DRAGON_RAYS_OVERLAY, ENERGY_SWIRL_OVERLAY,
     FLUID_OVERLAY, OIT_ENTITY, SHADOW_OVERLAY, TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY,
-    TERRAIN_MODEL_CUTOUT_OVERLAY, TERRAIN_MODEL_SOLID_OVERLAY, TEXT_POLYGON_OFFSET_OVERLAY,
-    TRANSLUCENT_GLINT_ITEM_OVERLAY, TRANSLUCENT_ITEM_OVERLAY, TRANSLUCENT_PARTICLE_OVERLAY,
-    WATER_MASK_OVERLAY, WORLD_TEXT_OVERLAY, WORLD_TEXT_POLYGON_OFFSET_OVERLAY, is_native_terrain,
-    mark_oit,
+    TERRAIN_MODEL_CUTOUT_OVERLAY, TERRAIN_MODEL_SOLID_OVERLAY, TERRAIN_MODEL_TRANSLUCENT_OVERLAY,
+    TEXT_POLYGON_OFFSET_OVERLAY, TRANSLUCENT_GLINT_ITEM_OVERLAY, TRANSLUCENT_ITEM_OVERLAY,
+    TRANSLUCENT_PARTICLE_OVERLAY, WATER_MASK_OVERLAY, WORLD_TEXT_OVERLAY,
+    WORLD_TEXT_POLYGON_OFFSET_OVERLAY, is_native_terrain, mark_oit,
 };
 use external::{shadow_box, shadow_runs};
 pub use frustum::{Cull, Frusta, JoinedFrusta, ShadowCull};
 use frustum::{block_entities_within_reach, frustum, shadow_casters, taa_frustum};
 pub use section_fade::{CHUNK_VISIBILITY_THRESHOLD, chunk_visibility, fade_millis};
 use section_fade::{FadeInputs, compiled_and_visible, section_instance, section_visibility};
+pub use sunrise_render_core::SectionKey;
 pub use view::{View, ViewSet};
 
 /// Whether Translucent Batching is offered (`graphics::offer_translucent_batching`): where
@@ -172,6 +173,7 @@ pub mod capture;
 mod celestial;
 mod census;
 pub mod compositor;
+pub(crate) mod core_clouds;
 pub(crate) mod core_lightmap;
 pub use core_lightmap::SHADERS as LIGHTMAP_SHADERS;
 pub(crate) mod core_lines;
@@ -303,7 +305,6 @@ fn next_block_entity_revision() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-pub type SectionKey = (i32, i32, i32);
 const MAX_OUTLINE_EDGES: u64 = 256;
 /// Staging buffer size for section meshes: a frame of uploads while
 /// exploring fits in a few.
@@ -432,6 +433,8 @@ pub struct Renderer {
     /// A resource pack's `core/lightmap`, which draws the light texture in place of the native
     /// one.
     core_lightmap: Option<core_lightmap::CoreLightmap>,
+    /// A resource pack's `core/clouds`, which draws the clouds in place of the native ones.
+    core_clouds: Option<core_clouds::CoreClouds>,
     /// Polytone GPU particle types with their own shader, and this frame's batches of them.
     core_particles: core_particles::CoreParticles,
     /// Gizmo lines: opaque ones (`RenderTypes.lines`, which writes depth),
@@ -497,7 +500,7 @@ pub struct Renderer {
     text_polygon_offset_pipeline: wgpu::RenderPipeline,
     world_text_pipeline: wgpu::RenderPipeline,
     fluid_pipeline: wgpu::RenderPipeline,
-    terrain_model_pipelines: [wgpu::RenderPipeline; 3],
+    terrain_model_pipelines: [wgpu::RenderPipeline; 4],
     celestial: celestial::Celestial,
     celestial_buffer: wgpu::Buffer,
     end_sky: end_sky::EndSky,
@@ -1270,7 +1273,7 @@ impl Renderer {
         );
         self.terrain_model_group = terrain_group(
             &self.device,
-            "Native cutout model resources",
+            "Native model resources",
             &self.terrain_layout,
             &self.globals,
             &self.sprite_views,
@@ -1742,6 +1745,24 @@ struct PackLoading {
 
 /// Sets its flag when dropped: `PackLoading`'s cancel, which `PackPost::new` checks per program.
 struct CancelOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Renderer {
+    /// Once the device is lost, the window's surfaces are left alive: wgpu refuses to present
+    /// or discard a frame on a lost device and keeps that frame acquired, and destroying the
+    /// swapchain under an acquired frame panics (while a panic unwinds, an abort).
+    fn drop(&mut self) {
+        if !self.device_lost() {
+            return;
+        }
+        std::mem::forget(self.surface.take());
+        std::mem::forget(
+            self.spare_surface
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
+    }
+}
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {

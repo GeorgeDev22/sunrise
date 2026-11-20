@@ -289,7 +289,7 @@ impl Game<'_> {
         if spawn.dimension == r.level {
             return Err(RouteError::OwnLevel(slot));
         }
-        let format = r.level_format(spawn, self.res.environment());
+        let format = r.level_format(spawn);
         let default_clock = default_clock(r, &format.dimension);
         let facts = format.facts.clone().unwrap_or_else(|| {
             let key = sunrise_core::LevelKey::parse(&spawn.dimension)

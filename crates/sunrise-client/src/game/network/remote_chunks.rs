@@ -102,13 +102,17 @@ impl ChunkFormat {
             };
             section.compact();
             chunk.sections[target as usize] = Arc::new(section);
+            // `LevelChunkSection.read` publishes this count, and `hasOnlyAir` reads it.
+            if s.non_empty != 0 {
+                chunk.add_light_support(target as usize);
+            }
         }
         let biomes: Vec<_> = sections.iter().map(|s| &s.biomes).collect();
         self.put_biomes(&mut chunk, &biomes);
         // ClientPacketListener.applyLightData: the column keeps the light
         // the server sent; nothing is relit.
-        let (layers, above) = self.light(&p.light);
-        sunrise_client::light::light_from_layers(&mut chunk, &layers, above, self.has_skylight);
+        let layers = self.light(&p.light);
+        sunrise_client::light::light_from_layers(&mut chunk, &layers, self.has_skylight);
         // From the single-player server thread: its own sections where they
         // are the same.
         sunrise_client::lan::handoff::take(&mut chunk);
@@ -165,30 +169,21 @@ impl ChunkFormat {
     }
 
     /// `ClientPacketListener.readSectionList`: the sky and block layers of a
-    /// light packet, by section of the client's column, and the sky light
-    /// above the column's top section (from the light section just above
-    /// it, else open sky).
-    pub(super) fn light(&self, light: &LightData) -> (Vec<SectionLight>, [u8; 256]) {
+    /// light packet, by light section of the client's column: the column's
+    /// sections with the padding section one below and one above them, so
+    /// index `i` is the column's section `i - 1` (`light_from_layers`).
+    pub(super) fn light(&self, light: &LightData) -> Vec<SectionLight> {
         let column = self.column.sections() as i32;
-        let mut layers: Vec<SectionLight> = vec![(None, None); self.column.sections()];
-        let sky = self.has_skylight;
-        let mut above = [if sky { 15 } else { 0 }; 256];
+        let mut layers: Vec<SectionLight> = vec![(None, None); self.column.sections() + 2];
         // Light section b is the dimension's section b - 1.
         let first = (self.min_y - self.column.min_y()).div_euclid(16) - 1;
         for (b, layer) in light.layers(self.sections + 2).into_iter().enumerate() {
             let si = first + b as i32;
-            if (0..column).contains(&si) {
-                layers[si as usize] = layer;
-            } else if si == column
-                && sky
-                && let Some(l) = &layer.0
-            {
-                for (i, a) in above.iter_mut().enumerate() {
-                    *a = (l[i >> 1] >> ((i & 1) * 4)) & 15;
-                }
+            if (-1..=column).contains(&si) {
+                layers[(si + 1) as usize] = layer;
             }
         }
-        (layers, above)
+        layers
     }
 }
 
@@ -593,7 +588,7 @@ impl Game<'_> {
         if !self.world.chunks.contains_key(&(p.x, p.z)) {
             return;
         }
-        let (layers, _) = format.light(&p.light);
+        let layers = format.light(&p.light);
         let Some(chunk) = self.world.chunks.get_mut(&(p.x, p.z)) else {
             return;
         };

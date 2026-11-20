@@ -669,19 +669,13 @@ fn shader_packs_pass_the_game_s_own_check() {
     assert!(open(&Kind::Shader).is_ok());
 }
 
-/// A wasm package (a module the loader accepts, its `[wasm]` hash and one `runtime/` file) as a `.smod`.
-fn wasm_package(name: &str, nav: &[u8]) -> PathBuf {
+/// A native source package with one `runtime/` file.
+fn native_package(name: &str, nav: &[u8]) -> PathBuf {
     use std::io::Write;
-    let module = wat::parse_str(
-        r#"(module (@custom "dylink.0" "\01\04\00\00\00\00")
-            (func (export "sunrise_layout")) (func (export "sunrise_in")) (func (export "sunrise_hook")))"#,
-    )
-    .unwrap();
-    let module = module.as_slice();
     let manifest = format!(
         "id='ruby'\nname='Ruby'\nversion='0.1.0'\napi='0.2'\ncapabilities=['registries']\n\
-         [wasm]\nsha512='{}'\ntoolchain='test'\n[runtime]\n\"nav.bin\"='{}'\n",
-        crate::manifest::sha512_of(module),
+         [native]\ngame='26.3'\nsunrise='{0}'\nmixins='{0}'\n[runtime]\n\"nav.bin\"='{1}'\n",
+        "a".repeat(40),
         crate::manifest::sha512_of(b"tables"),
     );
     let path = std::env::temp_dir().join(format!("{name}-{}.smod", std::process::id()));
@@ -689,7 +683,6 @@ fn wasm_package(name: &str, nav: &[u8]) -> PathBuf {
     let options = zip::write::SimpleFileOptions::default();
     for (entry, bytes) in [
         (crate::manifest::MANIFEST, manifest.as_bytes()),
-        ("mod.wasm", module),
         (
             "Cargo.toml",
             b"[package]\nname='ruby'\nversion='0.1.0'\n".as_slice(),
@@ -705,12 +698,12 @@ fn wasm_package(name: &str, nav: &[u8]) -> PathBuf {
 }
 
 #[test]
-fn installing_a_wasm_mod_checks_its_runtime_files_against_the_manifest() {
-    let good = wasm_package("runtime-wasm-ok", b"tables");
-    let facts = inspect(&Kind::Mod, &good);
+fn installing_a_native_mod_checks_its_runtime_files_against_the_manifest() {
+    let good = native_package("runtime-native-ok", b"tables");
+    let facts = inspect(&Kind::NativeMod, &good);
     // The same name and length, different bytes.
-    let edited = wasm_package("runtime-wasm-edited", b"tablez");
-    let refused = inspect(&Kind::Mod, &edited);
+    let edited = native_package("runtime-native-edited", b"tablez");
+    let refused = inspect(&Kind::NativeMod, &edited);
     std::fs::remove_file(good).unwrap();
     std::fs::remove_file(edited).unwrap();
     assert_eq!(facts.unwrap().id.as_deref(), Some("ruby"));

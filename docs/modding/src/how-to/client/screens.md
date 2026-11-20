@@ -40,6 +40,26 @@ the sign's block position and whether its front side is being edited. It returns
 editor open, or outside a world. A close of the sign editor always sends the sign update, however it
 closes; there is no close that skips it, because the vanilla client never omits that packet.
 
+## Reading open trades
+
+From a client hook in the world, get the menu from `host.local_player()` and
+`PlayerRef::container_menu(host)`, then call `menu.merchant_offers(host)`. The result is an owned
+snapshot of the latest offers the server sent to the open merchant menu, in display order. Each
+`MerchantOffer` has the first payment, an optional second payment, the result stack and its
+components, and stock and pricing data. Use `offer.cost_a_count(host)` for the adjusted first
+payment and `offer.out_of_stock()` to check availability.
+
+On a Sunrise server, an edit accepted by `trade_with_villager` reaches this snapshot when the
+whole result click commits. A listener that only observes a trade does not move the ordinary
+server offer refresh earlier. A take is stale if a listener wrote through the `Host` to a player's
+inventory, cursor or menu storage (the take read its own player's; a write to any player's counts).
+A refused click sends the authoritative offers and contents again to correct the client's prediction.
+
+`Ok(None)` means the handle is no longer current, doesn't belong to the local player, or isn't a
+merchant menu. An open merchant menu can return `Ok(Some(vec![]))` before the offers arrive.
+`Err(LevelReadError::Unavailable)` means the snapshot couldn't be read. The call doesn't select
+an offer, buy anything, or send packets; the server still decides every trade.
+
 ## Frame coordinates
 
 `screen_draw` and `screen_tooltip` version 3 carry `pointer: [i32; 2]`
@@ -67,7 +87,7 @@ The stack's tooltip image and style, and the rule hiding slot tooltips while
 carrying an item (except items such as bundles), are unchanged. This is the
 screen-side replacement point, not a second item-tooltip hook. NeoForge's
 tooltip events do not carry a slot index; the index here is a Sunrise convenience
-over the screen override. Native and wasm use the same hook and menu indices.
+over the screen override.
 
 ## Moving or hiding a mod screen's slots
 
@@ -141,7 +161,7 @@ are supplied; draw them yourself from `screen_draw` instead.
 
 The default inventory label is at y 72 for a standard 166-high screen and y 39
 for a 133-high hopper layout. Chest layouts use `height - 94`; a shulker box's
-167-high image places it at y 73. Native and wasm use the same declaration.
+167-high image places it at y 73.
 When building a complete `Screen` literal, include `title_label: None` and
 `inventory_label: None`, or use `..Default::default()`.
 
@@ -195,3 +215,36 @@ It refuses, answering no line at all, a `TextLinesRefusal` naming why: a width t
 that dividing by `scale` overflows), a `scale` that is not finite or is zero or less, text that wraps
 into more than 512 lines, lines holding more than 8192 characters together, and text deeper than 512
 component nodes — which the other text-drawing methods refuse too.
+
+## An item or a model turned in 3D
+
+`DrawContext::model_3d(subject, view)` draws one item or one resolved standalone model in a
+screen under a turn of the mod's own: a symmetry wand's screen shows its wand turned about all
+three axes and its mirror under a pose it built itself.
+
+```rust,ignore
+// 30 degrees about the viewer's axis, as a row-major 3x4 matrix.
+let (s, c) = 30f32.to_radians().sin_cos();
+let turn = [c, -s, 0.0, 0.0, s, c, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+draw.model_3d(Gui3dSubject::Item(wand), Gui3dView::new([60.0, 80.0], 64.0, turn))?;
+draw.model_3d(Gui3dSubject::Model(self.mirror), Gui3dView::new([120.0, 60.0], 40.0, IDENTITY_TRANSFORM))?;
+```
+
+- `Gui3dSubject::Item(stack)` is the item as a slot draws it, without its count, damage bar or
+  cooldown: its model's `gui` display transform first, then `view.transform`, lit with the GUI
+  light that model asks for. `Gui3dSubject::Model(model)` is a handle from `RenderAssets::model`,
+  its 0 to 1 cube drawn about its centre, full bright and shaded by face as a scene's blocks are.
+- `Gui3dView { at, size, transform }`: `at` is where the subject's centre goes, in GUI pixels,
+  and `size` the pixels per block (an item is a slot's size when `size` is 16). `transform` is a
+  row-major 3x4 affine matrix applied about the centre in the frame `x` right, `y` up, `z`
+  towards the viewer, so a rotation about any axis, roll included, needs no agreed Euler order.
+  Animate by passing a new matrix each frame.
+- The view is orthographic. Both subjects have a depth of their own: a draw never intersects
+  what the screen drew before or after it, and later drawing covers it in call order. An item's
+  faces meet each other by depth, as a model's do, and its enchantment glint follows them. The
+  OptiFine CIT glint layers of a stack are not drawn on this path yet
+  ([#3555](https://github.com/sunrise-org/sunrise/issues/3555)). There is no z input. `push_clip` cuts both
+  as it cuts `fill`.
+- Refusals draw nothing: `Gui3dError::Unavailable` (no game, or a server), `NotFinite` (a value,
+  or a corner the turn sends, that is not finite, or a size that is not positive), `UnknownItem`
+  (an empty stack or unknown item) and `Model(ModelError)` (a stale or unknown handle).

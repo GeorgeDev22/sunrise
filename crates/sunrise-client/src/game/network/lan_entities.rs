@@ -253,6 +253,25 @@ impl Game<'_> {
                 pass.insert(0, d);
             }
         }
+        let mut mixed = sunrise_client::fast_hash::FxHashSet::default();
+        for row in &self.resident_entities.general.rows {
+            if let Some(vehicle) = row.mount
+                && !self
+                    .persist
+                    .removals
+                    .contains(&super::commands::Target::General(row.id))
+            {
+                riding.add(vehicle as i32, row.id as i32);
+                mixed.insert(vehicle);
+            }
+        }
+        for vehicle in mixed {
+            let seats = self.seated_passengers(vehicle);
+            if let Some(passengers) = riding.passengers.get_mut(&(vehicle as i32)) {
+                passengers
+                    .sort_by_key(|&id| seats.iter().position(|&(_, rider, _)| rider == id as u32));
+            }
+        }
         // Players carry passengers only when a mod seated a mob on one.
         self.tell_vehicle_players(riding);
     }
@@ -758,9 +777,11 @@ impl Game<'_> {
             m.needs_sync = false;
             m.sync_position = false;
         }
-        self.creatures
-            .projectiles
-            .for_each_mut(|p| p.needs_sync = false);
+        self.creatures.projectiles.for_each_mut(|p| {
+            p.needs_sync = false;
+            p.sync_velocity = false;
+        });
+        self.falling.for_each_mut(|f| f.sync_velocity = false);
         for d in &mut self.dropped {
             d.needs_sync = false;
         }
@@ -863,6 +884,7 @@ impl Game<'_> {
                 f.on_ground,
             );
             e.velocity = at(f.velocity);
+            e.sync_velocity = f.sync_velocity;
             // getAddEntityPacket: the block state; DATA_START_POS.
             e.data = f.state.0 as i32;
             if f.no_gravity {
@@ -885,6 +907,7 @@ impl Game<'_> {
             e.pitch = p.pitch;
             e.velocity = at(p.velocity);
             e.needs_sync = p.needs_sync;
+            e.sync_velocity = p.sync_velocity;
             // Projectile.getAddEntityPacket: the owner's id.
             e.data = data;
             let uuid = e.uuid;

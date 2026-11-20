@@ -115,14 +115,12 @@ Owner decision (2026-11-09): the derive is always written on the type by hand. N
 Every place where a type has to cross, and that is known at compile time, is a trait bound. So a missing derive is a **compile error** that names the type:
 - a field of a derived type, through the `out.put(&self.f)` bound;
 - a parameter or return in a call table (the generator emits a bound check per signature type);
-- a point record field (#2242's records are built from `mod_api` types);
 - a mod hook's event and a mod registry's value: `ModHook` and `ModRegistry` require `E: Wire` / `T: Wire`. The bound costs nothing when nothing crosses, and it means a library's hooks and registries never have to refuse a cross-target addon.
 
 `Wire` gets `#[diagnostic::on_unimplemented(message = "`{Self}` has no Wire form", label = "add #[derive(mod_api::Wire)] to it")]`.
 
-A **refusal at load or registration** is left only where the type is decided at run time:
-- a point on an engine function whose parameter has no API type, which is #2242's existing refusal naming the parameter (an engine type, not a derive question);
-- a cross-target dependency whose recorded layout differs, refused naming the type.
+A **refusal at load or registration** is left only where the type is decided at run time: a cross-target
+dependency whose recorded layout differs is refused naming the type.
 
 ### The trait stays unsealed
 
@@ -177,7 +175,7 @@ The restructure can be stacked on D1, or D1's attribute edits can be done inside
 
 ### Contract
 
-A mod hook is a hook in the same sense as a catalog hook or a point under [#2242](https://github.com/arismoko/horizon/pull/2242). It has a listener of the form `fn(&mut <Side>Host, &mut Event)`, a contract, priority and dispatch order. Its name is owned by a mod and not taken from the catalog or from an engine function.
+A mod hook follows the same model as a catalog hook. It has a listener of the form `fn(&mut <Side>Host, &mut Event)`, a contract, priority and dispatch order. Its name is owned by a mod and not taken from the catalog or from an engine function.
 
 ```rust
 // chemlib's crate
@@ -205,7 +203,7 @@ The names in the example are only illustrations and still need API review.
 | Name | `<declaring mod id>:<path>`. `declare_hook` refuses a namespace other than the declaring mod's id, and refuses a second declaration of the same name, naming both mods. |
 | Side | `Server`, `Client` or `Both`, as the catalog's `side`. It fixes the host the listener gets (`&mut dyn ServerHost`, `&mut dyn ClientHost`, or `HostSide`), so a listener on the wrong side doesn't compile. |
 | Contract | The catalog's four: `listen`, `cancel` (a `cancelled` field), `collect` (a `Vec` field listeners push to) and `replace` (an `Option` field, where the last writer in dispatch order wins, as the catalog's `out`). Using one set keeps a library's hooks reading like the game's. |
-| Registration | `TANK_FILLED.listen(r, …)` during `register`. `Registrar` stays object-safe: the typed generic methods (`listen`, `declare_hook`, and in later sections `attach`, `provide`, `register`) live on the key types and call one erased, object-safe core on `Registrar` (name, owner, erased handle, options). The `r.listen(&KEY, …)` spelling in the examples is shorthand. A mod may listen to one hook more than once, and its listeners keep their registration order, as points tie on inject id. `Subscribers` lists a mod once per hook today, so mod hooks need a list that keeps one entry per listener; it extends `Subscribers` and is not a second table. Listening to a name that no loaded mod declares is refused at load, naming both. A listener whose event type differs from the declaration's is refused, naming both types. This is the same check the capability key plan adds for keys. |
+| Registration | `TANK_FILLED.listen(r, …)` during `register`. `Registrar` stays object-safe: the typed generic methods (`listen`, `declare_hook`, and in later sections `attach`, `provide`, `register`) live on the key types and call one erased, object-safe core on `Registrar` (name, owner, erased handle, options). The `r.listen(&KEY, …)` spelling in the examples is shorthand. A mod may listen to one hook more than once, and its listeners keep their registration order. `Subscribers` lists a mod once per hook today, so mod hooks need a list that keeps one entry per listener; it extends `Subscribers` and is not a second table. Listening to a name that no loaded mod declares is refused at load, naming both. A listener whose event type differs from the declaration's is refused, naming both types. This is the same check the capability key plan adds for keys. |
 | Order | Priority descending, then dependency order, then registration order within the mod. This is `Subscribers`' rule. |
 | Cancellation | When a listener cancels, the listeners that follow are skipped unless they registered `receive_cancelled`. Those still run, see `cancelled`, and may clear it. `post` returns the outcome, and the poster decides what cancelling means. |
 | Host and transactions | Listeners get the host the poster passed, so their writes run inside the poster's transaction (*every hook gets a `Host`*). |
@@ -213,7 +211,7 @@ The names in the example are only illustrations and still need API review.
 | Lifetime | Declarations and listeners are fixed when registration seals, and the order is resolved once. A mod the player switches off is skipped, through `mod_index_on`, as for catalog hooks. |
 | Errors | A native listener's panic is handled exactly as a catalog hook listener's: the `mark_mod` guard only *attributes* it (mod and hook name) while it unwinds, and nothing catches it. This design adds no containment; whether native listener panics should be contained is a separate contract for all hooks. A wasm trap stops the group, which is also the library's group. Posting depth is bounded across all mod hooks together, not per hook, so a chain A → B → A is caught too: a post 32 levels deep is refused with a log line naming the chain's last hook, not a stack overflow. |
 
-**Points.** Under #2242 a point is a hook named by an engine function path, with a generated record. A mod hook is a hook named by a mod identifier, with a record the mod writes. Both use the same listener shape, contracts, order, switch and refusal style. The one difference is registration. Points are declared in `[[inject]]`, because the game fills compiled slots at load without source. Mod hooks are registered in code, because the library's type is a Cargo dependency anyway. `[[inject]]` applies only to engine API points, never to a mod's own hooks or functions, so `[[inject]] at = "chemlib:tank_filled"` is not a supported way to listen (question 2).
+Mod hooks are registered in code because the library's type is a Cargo dependency.
 
 ### On wasm
 
@@ -378,19 +376,19 @@ Sizes are estimates.
 | 0 | This note. | docs | — |
 | D1–D2 | `#[derive(Wire)]`, as section 0's plan. **First.** | see section 0 | #2242; D1 before or with the restructure |
 | 1 | (after D1) An erased table shared by owner, kind and name: the declare-once and namespace refusals, type-agreement checks, and the load-phase "resolved table" call into wasm groups. Ported onto it: `OwnProvider`, with the capability key plan's name/type refusals. | ~600 | the restructure (lands into `runtime`) |
-| 2 | Mod hooks: `ModHook`, `declare_hook`, `listen`, the four contracts, `Subscribers` reused, the switch, crash attribution, the depth limit. Tests: a real wasm library and addon (`real_library` style) and the same source natively, covering order, cancel, `receive_cancelled`, a switched-off mod, an undeclared hook, type mismatch, and no listeners meaning no work. Sample: chem-api plus an addon listener in sunrise-machine-sample. | ~900 | 1, and #2242 merged (shares listener shape and order code) |
+| 2 | Mod hooks: `ModHook`, `declare_hook`, `listen`, the four contracts, `Subscribers` reused, the switch, crash attribution, the depth limit. Tests: a real wasm library and addon (`real_library` style) and the same source natively, covering order, cancel, `receive_cancelled`, a switched-off mod, an undeclared hook, type mismatch, and no listeners meaning no work. Sample: chem-api plus an addon listener in sunrise-machine-sample. | ~900 | 1 |
 | 3 | Mod registries: `ModRegistry`, slots through `Names`, sync during configuration, tags, saves by name. | ~900 | 1; coordinate the key space with #2332 |
 | 4 | Part kinds on the shared table, including registry scope. | ~600 | 1, 3 (for registry scope) |
 | 5 | Scoped state and `ServiceKey`; `AttachmentHolder::Server` if question 4 says yes. | ~600 | 1 |
 | 6 | Mixed targets: the cross-target refusals with clear messages (they can land early and small), then cross-target hook forwarding and registry value reads over the derive's per-mod layouts. | ~300 + ~800 | D2, 2, 3; question 1 |
 | 7 | Optional: `#[mod_api::extension]` cross-target trait calls. | large | 6; an owner decision |
 
-Each stage updates this book page into a how-to and adds rustdoc. None of them touches point machinery before #2242 merges.
+Each stage updates this book page into a how-to and adds rustdoc.
 
 ## Open questions for root
 
 1. **Mixed targets.** Should a native library with wasm addons (or the reverse) be supported through the game, as proposed above? That needs a stateless "types crate" in the package model. The alternative is refusing mixed targets outright with a clear message. Recommendation: land the clear refusals first (stage 6a) and decide the types crate when a real library needs it.
-2. **Mod hooks use code registration.** A library mod publishes its own hooks and functions; `[[inject]]` applies only to engine API points, never to mod functions.
+2. **Mod hooks use code registration.** A library mod publishes its own hooks and functions in code.
 3. **Capability keys and Part kinds.** Should `CapabilityKey` be merged into `PartKind` (a part kind with a context and first-answer lookup)? Recommendation: keep NeoForge's name and API for capabilities and share only the storage.
 4. **Server-wide saved data.** Should `AttachmentHolder::Server` be added for state that belongs to a server and not a level? NeoForge's public saved data guide attaches such data to `MinecraftServer#getDataStorage`.
 5. **Replacing a service provider.** May a mod override another mod's service provider? Recommendation: no, refuse two providers, until a concrete case exists.

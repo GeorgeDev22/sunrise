@@ -9,8 +9,8 @@
 //! undone with every write the listener made rolled back.
 use super::*;
 use crate::game::transactions::decision::{
-    self, ActionTarget, GameHost, Identity, InvalidReason, MenuId, Outcome, Reply, Side,
-    StaleReason,
+    self, ActionTarget, GameHost, Identity, InvalidReason, MenuId, Outcome, OwnerStamp, Reply,
+    Side, StaleReason,
 };
 use mod_api::EntityRef;
 use std::{cell::RefCell, rc::Rc};
@@ -25,6 +25,12 @@ pub(in crate::game) enum Epoch {
     /// cautious refusal, never a partial move. A write to another block, which a mod's move
     /// legitimately makes, does not make the decision stale.
     Player,
+}
+
+/// The decision's menu owner and the lifecycle identity of its actor and target.
+pub(in crate::game) struct DecidedTarget {
+    pub(in crate::game) route: MenuId,
+    pub(in crate::game) identity: Identity,
 }
 
 #[cfg(test)]
@@ -111,14 +117,37 @@ impl Game<'_> {
         fire: impl FnOnce(&mut Game<'_>) -> Reply,
         perform: impl FnOnce(&mut Game<'_>) + 'p,
     ) -> bool {
+        self.decided_action_on(
+            name,
+            DecidedTarget {
+                route,
+                identity: Identity {
+                    side: Side::Server,
+                    world: actor.epoch(),
+                    actor,
+                    target: actor,
+                },
+            },
+            epoch,
+            fresh,
+            fire,
+            perform,
+        )
+    }
+
+    /// Run a decision whose action target is distinct from its acting player.
+    pub(in crate::game) fn decided_action_on<'p>(
+        &mut self,
+        name: &'static str,
+        target: DecidedTarget,
+        epoch: Epoch,
+        fresh: impl Fn(&Game<'_>) -> bool + 'p,
+        fire: impl FnOnce(&mut Game<'_>) -> Reply,
+        perform: impl FnOnce(&mut Game<'_>) + 'p,
+    ) -> bool {
+        let DecidedTarget { route, identity } = target;
         #[cfg(test)]
         DECIDED.set(DECIDED.get() + 1);
-        let identity = Identity {
-            side: Side::Server,
-            world: actor.epoch(),
-            actor,
-            target: actor,
-        };
         let target = Action {
             id: route,
             shared: Rc::new(Shared {
@@ -157,6 +186,14 @@ impl Game<'_> {
         let epoch = self.native_lifecycle.epoch()?;
         let entity = self.lan.as_ref()?.hub.guest(conn)?.entity_id;
         Some(EntityRef::new(epoch, u32::try_from(entity).ok()?))
+    }
+
+    /// The decision's menu id for the guest `conn`'s open workstation, and the owner's stamp: it
+    /// advances on every access to the station, so a stamp that still matches says no one opened,
+    /// closed or replaced it since it was read (also while a click has the menu lifted out).
+    pub(in crate::game) fn guest_station(&self, conn: u32) -> Option<(MenuId, OwnerStamp)> {
+        let owner = &self.lan.as_ref()?.menus.get(&conn)?.station;
+        Some((owner.id(), owner.stamp()))
     }
 
     /// The decision's menu id for the guest `conn`'s hub menus.

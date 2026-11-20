@@ -420,8 +420,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "sunrise-game-discovery",
- "sunrise-mod-call",
- "sunrise-mod-point-shape",
  "sunrise-mod-source",
  "sunrise-mod-surface",
  "syn 2.0.119",
@@ -434,25 +432,6 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
- "sunrise-mod-point-shape",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "sunrise-mod-call"
-version = "0.1.0"
-dependencies = [
- "sha2",
-]
-
-[[package]]
-name = "sunrise-mod-point-shape"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
  "syn 2.0.119",
 ]
 
@@ -482,7 +461,7 @@ dependencies = [
  "proc-macro2",
  "serde",
  "serde_json",
- "sunrise-mod-call",
+ "sha2",
  "syn 2.0.119",
 ]
 

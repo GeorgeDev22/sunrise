@@ -264,6 +264,7 @@ impl Game<'_> {
                     let tags = world_items!(self);
                     let block_registries = &self.pack.block_registries;
                     let hooks = &self.damage_hooks;
+                    let side = game_side!(self);
                     let o = &mut self.orbs[i];
                     // An orb has no random of its own here: lava draws from one
                     // made on first use, apart from the level stream.
@@ -288,6 +289,7 @@ impl Game<'_> {
                             Some(self.border.geometry()),
                             &self.res.motion().fluids,
                             &self.loop_context,
+                            &side,
                             &mut on_sound,
                             &nearby,
                             &mut |world| {

@@ -1,6 +1,6 @@
 # Writing hooks
 
-Every code mod, native or WebAssembly, has the same shape: one crate whose root implements `mod_api::Hooks`.
+Every native mod has the same shape: one crate whose root implements `mod_api::Hooks`.
 This page gives the rules that shape follows.
 
 ## The crate

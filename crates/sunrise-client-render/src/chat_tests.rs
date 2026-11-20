@@ -204,6 +204,49 @@ fn clicking_seed_copies_the_raw_value_only_inside_the_link() {
 }
 
 #[test]
+fn inline_images_rewrap_chat_and_keep_source_and_link_targets() {
+    let atlas = HudAtlas::fonts(&Default::default()).unwrap();
+    let mut chat = Chat::default();
+    chat.options.width = 0.0;
+    let click = ClickEvent::SuggestCommand("/help".into());
+    let token = ":long_token:";
+    let source = Text::literal(token)
+        .with_style(&text::Style {
+            click: Some(click.clone()),
+            ..Default::default()
+        })
+        .append(Text::literal(" end"));
+    chat.add(&atlas, source.clone(), None, ChatSource::Server, 1, false);
+    assert!(chat.lines.len() > 1);
+    let revision = Some([1, 0, 0]);
+    assert!(chat.inline_images_stale(revision));
+    chat.refresh_inline_images(&atlas, revision, |source| {
+        let mut spans = source.spans.clone();
+        spans[0] = spans[0].with_text("\u{fffc}");
+        spans[0].style.inline_object = Some(text::InlineObject::Atlas {
+            atlas: "minecraft:gui".into(),
+            sprite: "demo:token".into(),
+            fallback: token.into(),
+        });
+        Some(Text::from_spans(spans))
+    });
+    assert!(!chat.inline_images_stale(revision));
+    assert_eq!(chat.lines.len(), 1);
+    assert_eq!(chat.messages[0].content, source);
+    assert_eq!(chat.message_at(360, 5.0, 315.0), Some(":long_token: end"));
+    assert_eq!(chat.click_at(&atlas.font, 360, 11.5, 315.0), Some(click));
+    assert_eq!(chat.click_at(&atlas.font, 360, 12.0, 315.0), None);
+    chat.set_search(&atlas, Some("long_token"));
+    assert_eq!(chat.lines.len(), 1);
+    // Atlas generation changed: the sprite can no longer resolve.
+    let revision = Some([2, 0, 0]);
+    assert!(chat.inline_images_stale(revision));
+    chat.refresh_inline_images(&atlas, revision, |_| None);
+    assert!(chat.lines.len() > 1);
+    assert_eq!(chat.messages[0].content, source);
+}
+
+#[test]
 fn click_targets_match_rendered_spans_when_scaled_wrapped_and_scrolled() {
     let font = font();
     let screenshot = ClickEvent::OpenFile("/tmp/My screenshots/世界.png".into());

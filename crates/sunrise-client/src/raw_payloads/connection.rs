@@ -130,6 +130,7 @@ pub struct Connection {
     current: Mutex<Current>,
     ingress: byte_channel::Sender<()>,
     _ingress_receiver: byte_channel::Receiver<()>,
+    droppable: Option<Arc<super::droppable::Queue>>,
     payloads: Mutex<payload_queue::PayloadQueue>,
     payload_ready: Condvar,
     payload_pending: AtomicBool,
@@ -163,7 +164,17 @@ impl Connection {
     }
     pub fn new(local: Arc<Local>, side: Side) -> Arc<Self> {
         let (ingress, receiver) = byte_channel::channel(INGRESS_BUDGET).unwrap();
+        let droppable = local.has_droppable().then(|| {
+            let budgets = local.budgets;
+            match side {
+                Side::Server => {
+                    super::droppable::Queue::new(budgets.clientbound, Some(budgets.serverbound))
+                }
+                Side::Client => super::droppable::Queue::new(budgets.serverbound, None),
+            }
+        });
         Arc::new(Self {
+            droppable,
             ingress,
             _ingress_receiver: receiver,
             payloads: Mutex::default(),
@@ -201,11 +212,25 @@ impl Connection {
                 byte_channel::ReserveError::Disconnected => PayloadSendError::Disconnected,
             })
     }
-    /// Bind a Game-assigned handle; never manufacture handles on an I/O executor.
-    pub fn bind_player(&self, player: PlayerRef) {
+    /// The connection's `Droppable` queue; absent when no `Droppable` channel is declared.
+    pub fn droppable(&self) -> Option<&Arc<super::droppable::Queue>> {
+        self.droppable.as_ref()
+    }
+    /// Bind a Game-assigned handle; never manufacture handles on an I/O executor. With a
+    /// `Droppable` channel declared it also joins the server's roster for group sends.
+    pub fn bind_player(self: &Arc<Self>, player: PlayerRef) {
         let mut current = self.current.lock().unwrap();
-        if !current.closed {
-            current.player = Some(player);
+        if current.closed {
+            return;
+        }
+        let old = current.player.replace(player);
+        drop(current);
+        if self.droppable.is_some() {
+            let mut roster = self.local.roster.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(old) = old {
+                roster.remove(&old);
+            }
+            roster.insert(player, Arc::downgrade(self));
         }
     }
     pub fn closed(&self) -> bool {
@@ -223,6 +248,9 @@ impl Connection {
             old.invalidate();
         }
         self.clear_payloads();
+        if let Some(queue) = &self.droppable {
+            queue.clear();
+        }
     }
     pub fn accept(&self, entries: &[Entry]) -> Result<(), String> {
         let mut peer = self.local.freeze(entries, self.side)?;
@@ -279,18 +307,31 @@ impl Connection {
         }
         old.invalidate();
         publish()?;
+        if let Some(queue) = &self.droppable {
+            queue.clear();
+        }
         current.epoch = Some(Epoch::new(old.peer.clone(), Phase::Play));
         Ok(())
     }
     pub fn close(&self) {
         let mut current = self.current.lock().unwrap();
         current.closed = true;
-        current.player = None;
+        let player = current.player.take();
         if let Some(old) = current.epoch.take() {
             old.invalidate();
         }
         drop(current);
         self.clear_payloads();
+        if let Some(queue) = &self.droppable {
+            queue.clear();
+            if let Some(player) = player {
+                self.local
+                    .roster
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&player);
+            }
+        }
     }
 }
 impl Drop for Connection {

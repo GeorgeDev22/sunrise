@@ -104,7 +104,7 @@ impl Game<'_> {
         let observed = mod_api::__private::item_listens(mod_api::HookId::CanEquip, &stack.item);
         let source = observed
             .then(|| sunrise_client::mobs::equip::EquipInput::new(u64::from(m.id), stack.clone()));
-        let prepared = self.equip_stack(source.as_deref().unwrap_or(stack), &[&m.kind.id], &[m.id]);
+        let prepared = self.equip_stack(source.as_deref().unwrap_or(stack), &[m.id]);
         if !self.can_equip(&prepared, slot.name(), m.id, &m.kind.id, data) {
             return None;
         }

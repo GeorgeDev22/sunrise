@@ -1,0 +1,5 @@
+sunrise-client game::general::save_load_tests::a_general_entity_turns_in_place_without_dismounting lib daily resources
+sunrise-client game::general::save_load_tests::a_general_row_has_its_declared_kind_and_is_selectable_by_type lib daily resources
+sunrise-client game::general::save_load_tests::a_same_level_teleport_places_the_general_tree_and_unseats_a_separately_moved_rider lib daily resources
+sunrise-client game::general::save_load_tests::a_volume_selector_finds_a_general_rows_box_without_its_origin lib daily resources
+sunrise-client game::general::save_load_tests::killing_or_removing_a_general_row_keeps_its_passengers_in_the_level lib daily resources

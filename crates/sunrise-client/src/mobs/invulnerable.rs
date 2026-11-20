@@ -1,12 +1,19 @@
 //! Who may hurt a mob: `LivingEntity.isInvulnerableTo`'s `Entity.isInvulnerableToBase` term,
 //! and the dead-or-removed guard every damage hook runs after (`LivingIncomingDamageEvent`).
-use super::{Damage, DamageKind, Mob, Who};
+use super::{Damage, DamageKind, Mob, NamedDamage, Who};
 
 impl Mob {
     /// A player returning a ghast's fireball gets past its fire immunity.
     pub(super) fn reflected_fireball(&self, source: &Damage) -> bool {
         &*self.kind.id == "minecraft:ghast"
-            && source.kind == DamageKind::Fireball
+            && matches!(
+                source.kind,
+                DamageKind::Fireball
+                    | DamageKind::Named(NamedDamage {
+                        name: "minecraft:unattributed_fireball",
+                        ..
+                    })
+            )
             && source.attacker == Some(Who::Player)
     }
 

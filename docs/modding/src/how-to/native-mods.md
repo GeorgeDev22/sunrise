@@ -7,7 +7,7 @@ result.
 
 Native code runs with the player's rights, outside any sandbox. The first install shows a trust notice, and the
 launcher builds native mods only on an install that allows native code (`--trust-native-code`, revocable in
-**Settings > Storage**). A mod that must run in a sandbox is a [WebAssembly mod](wasm-mods.md).
+**Settings > Storage**).
 
 The pages in this section follow a mod from its source to a player's game and a server:
 
@@ -41,8 +41,7 @@ or another death dispatch.
 
 ### Custom statistics
 
-Declare custom statistic identities in `Hooks::register`, using the same
-`Registrar` route for native and wasm mods:
+Declare custom statistic identities in `Hooks::register`, using `Registrar`:
 
 ```rust,ignore
 fn register(&self, registrar: &mut dyn Registrar, _: &RegistrationContext) {
@@ -168,7 +167,7 @@ World reads and writes require the World phase. The other Host phases admit only
 
 The client setup calls of Setup can have presentation effects (a sound, a narrator line, a HUD mode) that stand
 even if the hook is refused afterwards. A native mod that calls a method in a phase that does not admit it is
-**refused, not crashed**, as a wasm mod's call is:
+**refused, not crashed**:
 
 - The call ends the mod's hook call (it unwinds out of the listener; the game makes no panic report). The game logs
   `native refusal: <mod> hook <hook>: mod API <method> is unavailable during <phase>` once for each mod and method.
@@ -176,8 +175,8 @@ even if the hook is refused afterwards. A native mod that calls a method in a ph
   refusal counts even if the mod caught the unwind itself and returned normally.
 - The listener is dropped, and the hook goes on with the next one. The event outputs the listener touched are put
   back to what they were before its call, and the answers of earlier listeners stand. What its earlier allowed calls
-  did (a sound, a narrator line, a HUD mode) stands too, as in wasm.
-- Its return value is what a refused wasm call returns: `Flow::Continue` for a cancel hook, `None` for a replace
+  did (a sound, a narrator line, a HUD mode) stands too.
+- The hook uses its default return value: `Flow::Continue` for a cancel hook, `None` for a replace
   hook that answers an `Option`, and the type's default (`false`, an empty list, `()`) for any other. A hook that
   isolates its listeners (`entity_move`) disables the refused listener for the session, and a retained callback
   (loot types, payload handlers, selectors, command argument types) is refused for that call only.

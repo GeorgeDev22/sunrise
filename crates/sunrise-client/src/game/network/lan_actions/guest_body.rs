@@ -6,6 +6,28 @@ use sunrise_client::{
 };
 use sunrise_core::geometry::Vec3;
 
+/// The server copy of the acting guest's body, borrowing its player and the level from `game`.
+/// A macro so that the borrow can end where the game itself is needed (a hook's owning host)
+/// and begin again after it.
+macro_rules! motion_world {
+    ($game:ident, $side:ident, $player:ident) => {
+        MotionWorld {
+            side: &$side,
+            entities: &[],
+            player: $player,
+            scene: &mut $game.world,
+            assets: &$game.pack.assets,
+            collision_binding: $game.collision,
+            resources: $game.motion,
+            health: &$game.health_resources,
+            tag_items: Some(world_items!($game)),
+            loop_context: &$game.loop_context,
+            damage_hooks: &$game.damage_hooks,
+            block_registries: Some(&$game.pack.block_registries),
+        }
+    };
+}
+
 pub(super) fn initialize(resources: &MotionResources, guest: &mut Guest) -> bool {
     let p = Vec3::new(guest.position[0], guest.position[1], guest.position[2]);
     let Ok(motion) = PlayerMotion::new(resources, p) else {
@@ -54,8 +76,8 @@ pub(super) fn initialize(resources: &MotionResources, guest: &mut Guest) -> bool
 }
 
 impl Game<'_> {
-    /// The guest's body on the server each tick: ServerPlayer.tick's damage
-    /// clock and Entity.baseTick's fluid phase (burning), then for each move
+    /// The guest's connection-path body: Entity.baseTick's fluid phase
+    /// (burning), then for each move
     /// ServerPlayer.doCheckFallDamage (the fall distance grows while they go
     /// down and hurts them where they land, as the host's own landing does;
     /// water resets it, lava halves it) and checkMovementStatistics (the
@@ -63,8 +85,7 @@ impl Game<'_> {
     /// hazards (drowning, lava, fire blocks, suffocation, the void), and
     /// regeneration and the food tick (ServerPlayer.doTick). Their hurt
     /// sounds are heard at the guest.
-    pub(super) fn guest_server_tick(&mut self, conn: u32, body: bool) {
-        self.guest_vehicle_tick(conn);
+    pub(in crate::game) fn guest_server_tick(&mut self, conn: u32, body: bool) {
         // The last move's fall stands in for the server's delta movement.
         let Some(host) = self.lan.as_mut() else {
             return;
@@ -72,7 +93,7 @@ impl Game<'_> {
         let fell = host
             .hub
             .guest(conn)
-            .and_then(|g| g.moves.last().map(|m| m.0[1]))
+            .and_then(|g| g.moves.last().map(|m| m.delta[1]))
             .unwrap_or(0.0);
         self.guest_glide_tick(conn, fell);
         let Some((moves, from_ground)) = self.lan.as_mut().and_then(|host| {
@@ -89,11 +110,11 @@ impl Game<'_> {
             return;
         };
         let g = self.lan.as_ref().unwrap().hub.guest(conn).unwrap();
-        // Each move the player sent put it somewhere (`handleMovePlayer`'s `setPos`).
-        let (id, end) = (g.entity_id as u32, g.position);
-        self.entity_section_walked(id, end, moves.iter().map(|m| m.0));
-        let g = self.lan.as_ref().unwrap().hub.guest(conn).unwrap();
+        let id = g.entity_id as u32;
         if g.spectator() {
+            // Spectators skip the movement replay and only file its position writes.
+            self.entity_section_walked(id, g.position, moves.iter().map(|m| m.delta));
+            let g = self.lan.as_ref().unwrap().hub.guest(conn).unwrap();
             // ServerPlayer.doTick runs the player's whole tick for a spectator
             // too, unless its box touches an unloaded chunk
             // (`touchingUnloadedChunk`, `guest_body_ticks`): its effects
@@ -113,8 +134,7 @@ impl Game<'_> {
                 let Some(player) = game.player.as_mut() else {
                     return;
                 };
-                // Entity.baseTick's clocks (hurtTime, invulnerableTime) run too.
-                player.health.advance_clock();
+                player.health.advance_body_clock();
                 let _ = player.peaceful_regeneration(&game.loop_context, rules);
                 let _ = player.food_tick(
                     &game.loop_context,
@@ -157,20 +177,9 @@ impl Game<'_> {
             player.fluids.boat = boat;
             // The supporting-block scan for this tick's moves reads the boots.
             player.leather_boots = leather_boots;
-            let mut w = MotionWorld {
-                entities: &[],
-                player,
-                scene: &mut game.world,
-                assets: &game.pack.assets,
-                collision_binding: game.collision,
-                resources: game.motion,
-                health: &game.health_resources,
-                tag_items: Some(world_items!(game)),
-                loop_context: &game.loop_context,
-                damage_hooks: &game.damage_hooks,
-                block_registries: Some(&game.pack.block_registries),
-            };
-            w.player.health.advance_clock();
+            let mut side = game_side!(game);
+            let mut w = motion_world!(game, side, player);
+            w.player.health.advance_body_clock();
             let _ = w.fluid_base_tick();
             w.player.ground.on_ground = from_ground;
             // Player.aiStep: a flying player that isn't riding starts every tick
@@ -179,30 +188,28 @@ impl Game<'_> {
             if w.player.flying && !riding {
                 w.player.fall_distance = 0.0;
             }
-            let travelled: Vec<[f64; 3]> = moves.iter().map(|m| m.0).collect();
             // The tick's whole movement, for the delta movement a glide's wall
             // hit reads (`handleMovePlayer` gives the server copy the client's
             // own movement).
-            let tick_movement = travelled.iter().fold(Vec3::ZERO, |sum, d| {
-                sum.add_vector(Vec3::new(d[0], d[1], d[2]))
+            let vector = |[x, y, z]: [f64; 3]| Vec3::new(x, y, z);
+            let tick_movement = moves.iter().fold(Vec3::ZERO, |sum, accepted| {
+                sum.add_vector(vector(accepted.delta))
             });
-            // Entity.move's movementThisTick: each move, from where the
-            // tick's first one started.
+            // Entity.move's movementThisTick, using the actual accepted endpoints.
             let end = w.player.position;
-            let start = travelled
-                .iter()
-                .fold(end, |p, d| p.subtract(Vec3::new(d[0], d[1], d[2])));
+            let start = moves.first().map_or(end, |first| {
+                vector(first.position).subtract(vector(first.delta))
+            });
             w.player.history.clear();
             let mut from = start;
-            for d in &travelled {
-                let delta = Vec3::new(d[0], d[1], d[2]);
-                let to = from.add_vector(delta);
+            for accepted in &moves {
+                let to = vector(accepted.position);
                 w.player
                     .history
                     .add(sunrise_world::entity_move::MovementRecord {
                         from,
                         to,
-                        original: Some(delta),
+                        original: Some(vector(accepted.delta)),
                     });
                 from = to;
             }
@@ -210,27 +217,67 @@ impl Game<'_> {
             // Where the first move that went up ended, if one did, and whether the player
             // was alive then: the hazards below may kill it later in this tick.
             let mut rose = None;
-            let mut at = start;
-            for (moved, on_ground) in moves {
-                let movement = Vec3::new(moved[0], moved[1], moved[2]);
-                at = at.add_vector(movement);
-                let landed = (|| -> sunrise_client::Result<()> {
-                    w.set_on_ground_with_movement(on_ground, false, movement)?;
+            let mut latest = end;
+            let mut from = start;
+            let mut replay = moves.iter().peekable();
+            while let Some(accepted) = replay.next() {
+                let movement = vector(accepted.delta);
+                let at = vector(accepted.position);
+                w.player.position = at;
+                w.player.shift_key_down = accepted.sneaking;
+                // File this accepted setPos before its landing or a later move.
+                // In particular, an intervening trample lift can cross a section too.
+                if crate::game::entity_sections::crossed(from.components(), at.components()) {
+                    let mut collected = std::mem::take(&mut w.player.events);
+                    game.entity_section_step(id, from.components(), at.components());
+                    let Some(player) = game.player.as_mut().filter(|p| p.entity_id as u32 == id)
+                    else {
+                        return (collected, None);
+                    };
+                    collected.append(&mut player.events);
+                    player.events = collected;
+                    side = game_side!(game);
+                    w = motion_world!(game, side, player);
+                }
+                let landed = (|| -> sunrise_client::Result<_> {
+                    w.set_on_ground_with_movement(accepted.on_ground, false, movement)?;
                     let pos = w.legacy_on_position()?;
                     let state = w.block_state(pos)?;
-                    w.check_fall_damage(moved[1], on_ground, state, pos)?;
-                    // handlePlayerPositionChange: a move that goes up ends the fall
-                    // (`resetFallDistance`), after that move's own fall check.
-                    if moved[1] > 0.0 {
-                        w.player.fall_distance = 0.0;
-                        rose.get_or_insert((at, !w.player.health.dead_or_dying()));
-                    }
-                    w.check_movement_statistics(movement)
+                    w.check_guest_fall_damage(movement.y, accepted.on_ground, state, pos)
                 })();
-                if landed.is_err() {
+                let Ok(landed) = landed else { break };
+                if let Some(trample) = landed {
+                    let mut collected = std::mem::take(&mut w.player.events);
+                    game.trample_farmland(id, true, trample);
+                    let Some(player) = game.player.as_mut().filter(|p| p.entity_id as u32 == id)
+                    else {
+                        return (collected, None);
+                    };
+                    collected.append(&mut player.events);
+                    player.events = collected;
+                    side = game_side!(game);
+                    w = motion_world!(game, side, player);
+                    if w.finish_trample_fall(trample).is_err() {
+                        break;
+                    }
+                }
+                // handlePlayerPositionChange: an upward move resets the fall distance
+                // after the landing, and its advancement reads the post-landing health.
+                from = w.player.position;
+                if movement.y > 0.0 {
+                    w.player.fall_distance = 0.0;
+                    rose.get_or_insert((at, !w.player.health.dead_or_dying()));
+                }
+                // Preserve a lift on the final accepted move, but do not overwrite a
+                // position set after that report or rewind if the drain stopped early.
+                if replay.peek().is_none() && at == end {
+                    latest = w.player.position;
+                }
+                if w.check_movement_statistics(movement).is_err() {
                     break;
                 }
             }
+            w.player.position = latest;
             // A ServerPlayer travels on the server too
             // (MoveSimulationType.AUTHORITATIVE_SIDE_AND_SERVER), so every tick
             // on a ladder or vine LivingEntity.handleOnClimbable resets its fall
@@ -253,7 +300,29 @@ impl Game<'_> {
             w.player.burn_from_stepping_immune = burn_immune;
             let _ = w.server_block_damage(start);
             let _ = w.update_soul_speed_block();
-            let _ = w.tick_environment_damage();
+            // LivingEntity.baseTick's air supply: decided here, then `living_breathe` is
+            // asked with the game itself, which `w` borrows, and its answer applied.
+            if let Ok(step) = w.decide_air() {
+                // This tick's events so far, kept if the hook leaves no acting player.
+                let mut collected = std::mem::take(&mut w.player.events);
+                let answer = match step {
+                    Some(step) if sunrise_client::breathing::heard() => {
+                        game.ask_player_breath(step).map(|breath| (step, breath))
+                    }
+                    step => step.map(|step| (step, step.vanilla)),
+                };
+                let Some(player) = game.player.as_mut() else {
+                    return (collected, None);
+                };
+                collected.append(&mut player.events);
+                player.events = collected;
+                side = game_side!(game);
+                w = motion_world!(game, side, player);
+                if let Some((step, breath)) = answer {
+                    let _ = w.apply_air(step, breath);
+                }
+                let _ = w.tick_lava_contact();
+            }
             let _ = w.apply_fire_contact();
             let _ = w.server_hazards_tick(in_wall);
             // LivingEntity.aiStep: a Riptide spin counts down on the server's
@@ -291,8 +360,8 @@ impl Game<'_> {
             }
             // ServerGamePacketListenerImpl.handleMovePlayer:
             // Player.checkMovementStatistics for each move.
-            for d in travelled {
-                game.movement_stats(Vec3::new(d[0], d[1], d[2]));
+            for accepted in moves {
+                game.movement_stats(vector(accepted.delta));
             }
             // LivingEntity.baseTick: a new block position runs the worn
             // enchantments' location_changed effects (frost walker).
@@ -321,20 +390,8 @@ impl Game<'_> {
             );
             events.append(&mut player.events);
             player.carry_client_movement(tick_movement);
-            let _ = MotionWorld {
-                entities: &[],
-                player,
-                scene: &mut game.world,
-                assets: &game.pack.assets,
-                collision_binding: game.collision,
-                resources: game.motion,
-                health: &game.health_resources,
-                tag_items: Some(world_items!(game)),
-                loop_context: &game.loop_context,
-                damage_hooks: &game.damage_hooks,
-                block_registries: Some(&game.pack.block_registries),
-            }
-            .server_travel();
+            let side = game_side!(game);
+            let _ = motion_world!(game, side, player).server_travel();
             // Player.aiStep's entity contacts run with the player's body,
             // even when the level and its mobs are frozen. Flush their damage
             // events and marked velocity through the existing guest path.
@@ -479,6 +536,7 @@ impl Game<'_> {
                         Some(conn),
                     );
                 }
+                // Farmland a mod listens to: asked and applied as the landing guest.
                 MotionEvent::Fall(event) => {
                     let player = self
                         .lan

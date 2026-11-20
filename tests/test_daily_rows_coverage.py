@@ -49,14 +49,6 @@ class DailyRowsCoverage(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("no leg runs sunrise-world's shard", problems[0])
 
-    def test_a_row_needing_the_fixture_runs_in_the_fixture_job_not_a_shard(self):
-        rows = [ignored_tests.Row("sunrise-relay", "b", "test:tunnel", "daily", "daily-sunrise-relay.txt", "wasm-fixture")]
-        self.assertEqual(ignored_tests.daily_rows_groups(rows), {})
-        self.assertEqual(check.daily_problems(rows, self.TARGETS, FULL), [])
-        with unittest.mock.patch.object(ignored_tests, "DAILY_INPUTS", {"wasm-fixture": "SUNRISE_NO_SUCH_INPUT"}):
-            self.assertIn("no workflow runs the tests that need SUNRISE_NO_SUCH_INPUT",
-                          check.daily_problems(rows, self.TARGETS, FULL)[0])
-
     def test_a_windows_row_is_run_by_the_windows_job_not_a_linux_leg(self):
         rows = [ignored_tests.Row("sunrise-relay", "b", "test:tunnel", "daily", "daily-sunrise-relay.txt", "windows")]
         self.assertEqual(ignored_tests.daily_rows_groups(rows), {})

@@ -12,7 +12,6 @@ fn method(id: &str, signature: &str, refs: &[&str]) -> Method {
         MethodContract {
             signature: signature.into(),
             required: false,
-            wasm: true,
             refs: strings(refs),
         },
     )
@@ -25,7 +24,6 @@ fn handle(id: &str, signature: &str, refs: &[&str]) -> Function {
         FunctionContract {
             signature: signature.into(),
             impl_generics: String::new(),
-            wasm: true,
             refs: strings(refs),
         },
     )
@@ -405,6 +403,7 @@ fn words(fit: Fit) -> Vec<String> {
     match fit {
         Fit::Fits => vec![],
         Fit::DoesNotFit(misfits) => misfits.iter().map(ToString::to_string).collect(),
+        Fit::Unversioned(hooks) => panic!("no version of {hooks:?}"),
     }
 }
 
@@ -603,10 +602,11 @@ fn a_used_hook_whose_version_changed_is_named() {
     )
     .unwrap();
     assert_eq!(entry(&made, "hook:player_logged_in").version, Some(1));
-    assert_eq!(
-        words(fits(made.entries(), &version_two)),
-        ["the hook `player_logged_in` is now version 2; this mod was made for version 1"]
-    );
+    let bumped = Fit::DoesNotFit(vec![Misfit {
+        id: "hook:player_logged_in".into(),
+        change: Change::Version { named: 1, now: 2 },
+    }]);
+    assert_eq!(fits(made.entries(), &version_two), bumped);
     // A hook the mod does not use may change its version.
     let other = uses(
         [("src/lib.rs", "fn f() {}")],
@@ -616,7 +616,8 @@ fn a_used_hook_whose_version_changed_is_named() {
     .unwrap();
     assert_eq!(fits(other.entries(), &version_two), Fit::Fits);
     // A list of the schema before this one holds no versions: the build it was made for gives
-    // them, and without it a hook past its first version cannot be shown unchanged.
+    // them, and without it no target can show the hook unchanged, since the mod may have been
+    // made for any version of it.
     let old = |pinned: bool| {
         let mut table = UsesTable {
             schema: 1,
@@ -627,17 +628,22 @@ fn a_used_hook_whose_version_changed_is_named() {
             entry.version = None;
         }
         if pinned {
-            table.pin_hook_versions(&base().build());
+            let mut surface = base().build();
+            surface.schema = 2;
+            let old_surface = surface.to_json();
+            assert!(matches!(
+                Surface::read(old_surface.as_bytes()),
+                Err(crate::ReadError::Schema(2))
+            ));
+            table.pin_hook_versions(old_surface.as_bytes()).unwrap();
         }
         table
     };
-    assert_eq!(
-        words(fits(&old(true).entries, &version_two)),
-        ["the hook `player_logged_in` is now version 2; this mod was made for version 1"]
-    );
-    assert!(old(false).lacks_a_hook_version(&version_two));
-    assert!(!old(false).lacks_a_hook_version(&base().build()));
-    assert!(!old(true).lacks_a_hook_version(&version_two));
+    assert_eq!(fits(&old(true).entries, &version_two), bumped);
+    assert_eq!(fits(&old(true).entries, &base().build()), Fit::Fits);
+    let unversioned = Fit::Unversioned(vec!["hook:player_logged_in".into()]);
+    assert_eq!(fits(&old(false).entries, &version_two), unversioned);
+    assert_eq!(fits(&old(false).entries, &base().build()), unversioned);
 }
 
 #[test]
@@ -1051,7 +1057,7 @@ fn a_table_refuses_unknown_fields_and_sorts_its_entries() {
 }
 
 #[test]
-fn a_list_of_the_schema_that_recorded_doubt_as_a_build_fits_a_new_field() {
+fn an_older_list_cannot_tell_a_literal_from_a_doubt_so_a_new_field_is_left_to_the_compile() {
     let mut target = wider();
     target.replace_type(settings(
         &[("height", "i32"), ("depth", "i32")],
@@ -1078,8 +1084,8 @@ fn a_list_of_the_schema_that_recorded_doubt_as_a_build_fits_a_new_field() {
 fn bad_tables_are_refused_by_kind() {
     let refused = |text: &[u8]| UsesTable::read(text).unwrap_err();
     assert_eq!(
-        refused(br#"{"schema":3,"made_for":"x","entries":[]}"#),
-        UsesError::Schema(3)
+        refused(br#"{"schema":4,"made_for":"x","entries":[]}"#),
+        UsesError::Schema(4)
     );
     assert!(matches!(refused(b"not json"), UsesError::Json(_)));
     assert!(matches!(
@@ -1235,6 +1241,69 @@ fn a_tuple_field_read_by_position_is_used_and_judged() {
         words(fits(uses.entries(), &target.build())),
         ["the field `Pos.0` (changed)"]
     );
+}
+
+#[test]
+fn a_position_read_on_a_value_not_tied_to_the_struct_names_no_field() {
+    // The mod names `Pos`, so its fields would count on any read of theirs.
+    let source = r#"
+use mod_api::Pos;
+pub fn origin(_: Pos) {}
+pub struct Mine(pub (i32, i32));
+impl Mine {
+    fn x(&self) -> i32 { self.0 .1 }
+}
+fn pairs(mut v: Vec<(i32, i32)>) -> i32 {
+    v.dedup_by(|a, b| a.0 == b.0);
+    let first = v[0];
+    let mine = Mine(first);
+    mine.x() + first.1 + v.iter().map(|p| p.0).sum::<i32>() + make().1
+}
+fn make() -> Pos { todo!() }
+"#;
+    let uses = scan_on(wider(), source);
+    let found = ids(&uses);
+    assert!(found.contains(&"type:Pos"));
+    assert!(!found.contains(&"type:Pos.0"));
+    assert!(!found.contains(&"type:Pos.1"));
+}
+
+#[test]
+fn a_position_read_tied_to_the_struct_names_its_field() {
+    let field = |source: &str, id: &str| ids(&scan_on(wider(), source)).contains(&id);
+    // A typed binding, through a reference.
+    assert!(field(
+        "fn f(p: &Pos) { let q: &mut Pos = todo!(); q.1 = p.1; }",
+        "type:Pos.1"
+    ));
+    assert!(field("fn f(p: (&Pos)) -> i32 { p.0 }", "type:Pos.0"));
+    // A `for` binding shadows the outer parameter only in the loop body.
+    assert!(field("fn f(p: Pos) { for p in 0..p.0 {} }", "type:Pos.0"));
+    assert!(!field(
+        "fn f(p: Pos) { for p in [(1, 2)] { let _ = p.0; } }",
+        "type:Pos.0"
+    ));
+    // A binding of a constructor, and a constructor's own field.
+    assert!(field(
+        "fn f() -> i32 { let p = Pos(1, 2); p.1 }",
+        "type:Pos.1"
+    ));
+    assert!(field("fn f() -> i32 { Pos(1, 2).1 }", "type:Pos.1"));
+    // `self` in a method of an impl for it.
+    assert!(field(
+        "trait Tr { fn f(&self) -> i32; } impl Tr for Pos { fn f(&self) -> i32 { self.1 } }",
+        "type:Pos.1"
+    ));
+    // A pattern's positions before its `..`.
+    assert!(field(
+        "fn f(p: Pos) { let Pos(_, y, ..) = p; }",
+        "type:Pos.1"
+    ));
+    // An untyped binding shadows a typed one.
+    assert!(!field(
+        "fn f(p: Pos) -> i32 { let p = (p, 1); p.1 }",
+        "type:Pos.1"
+    ));
 }
 
 #[test]
@@ -1787,7 +1856,7 @@ fn a_table_naming_many_routes_the_target_lacks_is_judged_without_a_walk_each() {
                     .all(|m| matches!(m.change, Change::Route { .. }))
             );
         }
-        Fit::Fits => panic!("fits, though no named route exists"),
+        other => panic!("{other:?}, though no named route exists"),
     }
 }
 
@@ -1831,7 +1900,7 @@ fn refused_for_the_new_field(fit: Fit) {
                 && matches!(&m.change, Change::Fields { gained, .. } if gained == &["ultrawarm"])),
             "{misfits:?}"
         ),
-        Fit::Fits => panic!("fits, though the mod builds the API's struct field by field"),
+        other => panic!("{other:?}, though the mod builds the API's struct field by field"),
     }
 }
 
@@ -2395,4 +2464,187 @@ fn self_after_a_nested_impl_is_the_outer_impls() {
     let source = "struct Settings { mine: u8 }\nimpl Settings { fn f(_: Pos) -> Self { impl Clone for Q { fn clone(&self) -> Q { Q } } Self { mine: 1 } } }";
     let uses = scan_on(wider(), source);
     assert_eq!(entry(&uses, "type:Pos").built, Some(Built::None));
+}
+
+#[test]
+fn legacy_tables_match_either_hash_of_an_unchanged_method_and_function() {
+    const METHOD: &str = "method:Api::act";
+    const FUNCTION: &str = "fn:get";
+    let act = method(
+        METHOD,
+        "fn act(&self) -> Result<(), Error>",
+        &["trait:Api", "type:Error"],
+    );
+    let get = Function::new(
+        FUNCTION,
+        "",
+        FunctionContract {
+            signature: "fn get(&self) -> u8".into(),
+            impl_generics: "<T: Copy>".into(),
+            refs: strings(&["type:Value"]),
+        },
+    );
+    let assemble = |method, functions| {
+        Surface::new(
+            vec![],
+            vec![api_trait("trait:Api", Role::Call, &[], vec![method])],
+            vec![],
+            functions,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+    };
+    let intact = assemble(act.clone(), vec![get.clone()]);
+    let changed = assemble(method(METHOD, "fn act(&self)", &["trait:Api"]), vec![]);
+    let removed = Misfit {
+        id: FUNCTION.into(),
+        change: Change::Removed,
+    };
+    let signature = Misfit {
+        id: METHOD.into(),
+        change: Change::Changed,
+    };
+    // The first two rows use the published v1/v2 recipe with each former bit value.
+    // The last uses the v3 recipe. Values are independently hashed compact JSON.
+    for (old_method, old_function, schemas) in [
+        (
+            "76bd37f1903f2f7d28199f2318858078",
+            "d82dbe00d23869939148f2bcc5e91b90",
+            &[1, 2][..],
+        ),
+        (
+            "0f10da06557544acfc8f629cfe0471e2",
+            "18aab5558a8e65aa98cf0ce41b0bb9bd",
+            &[1, 2][..],
+        ),
+        (
+            "0c14af5c91006e195b452953b5dbfa1c",
+            "e61664d5cab614b0f96e88892f96bc66",
+            &[3][..],
+        ),
+    ] {
+        for schema in schemas {
+            let table = UsesTable {
+                schema: *schema,
+                made_for: "test".into(),
+                entries: vec![
+                    Entry::plain(METHOD.into(), old_method.into()),
+                    Entry::plain(FUNCTION.into(), old_function.into()),
+                ],
+            };
+            let table = UsesTable::read(&serde_json::to_vec(&table).unwrap()).unwrap();
+            let report = table.fits(&table.entries, &intact);
+            assert_eq!(report.verdict, Fit::Fits);
+            assert_eq!(report.deferred, None);
+            let missing = assemble(act.clone(), vec![]);
+            let report = table.fits(&table.entries, &missing);
+            if *schema == 3 {
+                assert_eq!(report.verdict, Fit::DoesNotFit(vec![removed.clone()]));
+                assert_eq!(report.deferred, None);
+            } else {
+                assert_eq!(report.verdict, Fit::Fits);
+                assert_eq!(
+                    report.deferred.as_deref(),
+                    Some(
+                        "not checked: `fn:get`; list written for test before schema 3; the compile decides"
+                    )
+                );
+            }
+            let expected = if *schema == 3 {
+                vec![removed.clone(), signature.clone()]
+            } else {
+                vec![signature.clone()]
+            };
+            assert_eq!(
+                table.fits(&table.entries, &changed).verdict,
+                Fit::DoesNotFit(expected)
+            );
+            assert_ne!(
+                UsesTable {
+                    schema: if *schema == 3 { 2 } else { 3 },
+                    ..table.clone()
+                }
+                .fits(&table.entries, &intact)
+                .verdict,
+                Fit::Fits
+            );
+        }
+    }
+}
+
+#[test]
+fn only_legacy_tables_defer_a_tuple_field_that_became_private() {
+    let mut uses = scan_on(wider(), "fn read(p: Pos) -> i32 { p.0 }").table("baseline");
+    let mut target = wider();
+    let mut private = api_tuple("type:Pos", &[]);
+    private.contract.constructible = false;
+    target.replace_type(private);
+    let target = target.build();
+
+    let current = uses.fits(&uses.entries, &target);
+    assert_eq!(words(current.verdict), ["the field `Pos.0` (removed)"]);
+    assert_eq!(current.deferred, None);
+
+    uses.schema = 2;
+    let legacy = uses.fits(&uses.entries, &target);
+    assert_eq!(legacy.verdict, Fit::Fits);
+    assert_eq!(
+        legacy.deferred.as_deref(),
+        Some(
+            "not checked: `type:Pos.0`; list written for baseline before schema 3; the compile decides"
+        )
+    );
+}
+
+#[test]
+fn only_legacy_tables_defer_lost_impls_with_vanished_api_types_to_the_compile() {
+    let owner = api_type("type:Handle", "", false, vec![]);
+    let still_here = api_type("type:widgets::Visible", "", false, vec![]);
+    let uses = UsesTable {
+        schema: 2,
+        made_for: "baseline".into(),
+        entries: vec![Entry {
+            impls: strings(&["From<widgets::Old>", "From<widgets::Visible>", "Clone"]),
+            ..Entry::plain(owner.id.clone(), owner.hash.clone())
+        }],
+    };
+    let target = Pieces {
+        types: vec![owner, still_here],
+        ..base()
+    }
+    .build();
+    let expected = |names: &[&str]| {
+        Fit::DoesNotFit(
+            names
+                .iter()
+                .map(|name| Misfit {
+                    id: "type:Handle".into(),
+                    change: Change::LostImpl((*name).into()),
+                })
+                .collect(),
+        )
+    };
+    let report = uses.fits(&uses.entries, &target);
+    assert_eq!(
+        report.verdict,
+        expected(&["Clone", "From<widgets::Visible>"])
+    );
+    assert_eq!(
+        report.deferred.as_deref(),
+        Some(
+            "not checked: `type:Handle`; list written for baseline before schema 3; the compile decides"
+        )
+    );
+    let uses = UsesTable {
+        schema: USES_SCHEMA,
+        ..uses
+    };
+    let report = uses.fits(&uses.entries, &target);
+    assert_eq!(
+        report.verdict,
+        expected(&["Clone", "From<widgets::Old>", "From<widgets::Visible>"])
+    );
+    assert_eq!(report.deferred, None);
 }

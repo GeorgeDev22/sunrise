@@ -67,8 +67,7 @@ cargo sunrise-mod check
 ```
 
 `check` applies the package rules, runs `cargo check` against the pinned SDK's API source, and lists what the mod
-uses of that build. Native projects check for this computer by default; wasm projects check for wasm32. Pass
-`--wasm` or `--native` to select a target explicitly, or both flags to check both. The expected end of the output:
+uses of that build. The code check targets this computer. The expected end of the output:
 
 ```text
     Checking mod-greeter v0.1.0 (…/greeter)
@@ -109,6 +108,7 @@ When a build stops on a package the lock doesn't pin, its error ends with that c
 
 ## 6. Run it
 
+<!-- quickstart-test: skip, needs the reader's game and prepared resources -->
 ```sh
 cargo sunrise-mod run --resources <folder> -- --world Greeter --creative
 ```
@@ -152,7 +152,6 @@ itself calls.
 - [Writing hooks](writing-hooks.md): the crate root, the hook factory, events and hosts.
 - [Hooks and the Host](../concepts/hooks-and-the-host.md) and [Parts](../concepts/parts.md): how a mod reaches
   the game.
-- [Your first WebAssembly mod](first-wasm-mod.md): the same code, sandboxed.
 - [Native mods: building and shipping](../how-to/native-mods.md): how a native mod reaches players, trust,
   multiplayer and servers.
 - [Using an AI agent](../for-agents.md): the same steps on one page for a coding agent.

@@ -82,6 +82,18 @@ registry-produced metadata, independent of project package keys. The launcher
 builds native mods locally with its pinned Rust toolchain against the prebuilt
 game; registry-built native binaries are not used.
 
+## A native mod's list of what it uses
+
+A native mod file carries `uses.json`, the list of what the mod uses, made for the build the mod pins; with it a
+newer build can tell whether the mod still fits ([SDK fit](sdk/04-fit.md)). `cargo sunrise-mod build` writes the list
+when it can read the mod's source against the pinned SDK, and says what stops it when it cannot.
+
+`cargo sunrise-mod check <file>` refuses a native mod file with no list, or with one made for another build than the
+mod pins; `publish` and `registry release` run the same check on the file they are given. `registry check` applies
+it to files whose hash is new in the pull request. `registry build` and installs do not apply it, so files already
+listed stay as they are. A mod with a `[[native.module]]` or `[[native.bridge]]` row is outside
+this rule: no list can describe those rows, so its file needs none.
+
 ## Dependency checks
 
 `cargo sunrise-mod check <file>` prints the manifest's required and optional dependencies. `registry check` reports
@@ -284,7 +296,7 @@ Run these commands in your native mod’s project folder.
 | --- | --- |
 | `cargo sunrise-mod internals sync` | Checks a trusted native mod's library against an isolated copy of its pinned game source with the Rust version named by its signed SDK. Replaces top-level `internals` with compiler-discovered paths, kinds and hashes, including uses inside globs and macros. Removes unused declarations, preserves retained entries and prints additions/removals. Skips discovery when the mod neither depends on `sunrise-internals` nor declares `internals`. Never runs automatically on build. |
 | `cargo sunrise-mod internals add <path>…` | Adds each declared internal and its tool-written hash to top-level `internals` in your mod's `sunrise-mod.toml`. Reads `internals.json` from the pinned SDK, or discovers a catalog with the mod's `[[native.module]]` tables applied. Unknown paths, shape-only entries and paths available only under a `cfg` are refused before the manifest is changed. Existing declarations are refreshed, not duplicated. |
-| `cargo sunrise-mod update [--sunrise <build>]` | Moves the mod's pin to the current Nightly's build (or the build given: `nightly-<date>` or a sha); the next command fetches its SDK into `.sunrise/sdk/`. A native mod's pins are `[native] sunrise` and `[native] mixins`: `update` fetches the destination SDK's `sdk.json` (into `.sunrise/cache/<build>/`), writes its `mixins.rev` beside the new build, and changes nothing when that file is refused; `Cargo.toml` names the SDK by path, so it does not change. A wasm mod's pin is `sdk` under `[package.metadata.sunrise]` in `Cargo.toml`: only its value changes, and the native steps below are skipped. For a native mod's every declared internal, prints `missing`, `changed` (old signature → new signature), or `unchanged`, then refreshes the available hashes. Missing or gated declarations keep their old hash and must be removed or replaced before building. Build names: [the pin](sdk/03-in-a-project.md#the-pin). |
+| `cargo sunrise-mod update [--sunrise <build>]` | Moves the mod's pin to the current Nightly's build (or the build given: `nightly-<date>` or a sha); the next command fetches its SDK into `.sunrise/sdk/`. A native mod's pins are `[native] sunrise` and `[native] mixins`: `update` fetches the destination SDK's `sdk.json` (into `.sunrise/cache/<build>/`), writes its `mixins.rev` beside the new build, and changes nothing when that file is refused; `Cargo.toml` names the SDK by path, so it does not change. For a native mod's every declared internal, prints `missing`, `changed` (old signature → new signature), or `unchanged`, then refreshes the available hashes. Missing or gated declarations keep their old hash and must be removed or replaced before building. Build names: [the pin](sdk/03-in-a-project.md#the-pin). |
 
 The native-mod commands run in the mod's project folder and preserve the manifest's comments and
 layout. `sync` performs a metadata-only `cargo check` on the current host, using default features;
@@ -297,10 +309,10 @@ metadata-check game dependencies; it does not compile or link a game executable.
 check cache is not a native mod build route. `[[native.state]]` is refused with
 `E_MIXIN_STATE_LAYOUT`; use attachments for per-object mod data.
 
-Without support modules, `internals add`, `inject add` and `inject update` read `internals.json` and
-`points.json` from the pinned SDK's build data (`build-data.tar.xz`). The tool verifies the SDK release,
-`sdk-<build id>`, against its signed `SHA256SUMS`, using `SUNRISE_SDK_BASE` when set. No game or mod code is run.
-With `[[native.module]]` tables, these commands use the Rust named by the signed SDK to stage the pinned source
+Without support modules, `internals add` reads `internals.json` from the pinned SDK's build data
+(`build-data.tar.xz`). The tool verifies the SDK release, `sdk-<build id>`, against its signed `SHA256SUMS`,
+using `SUNRISE_SDK_BASE` when set. No game or mod code is run.
+With `[[native.module]]` tables, `internals add` uses the Rust named by the signed SDK to stage the pinned source
 with the mod's modules applied and save the catalog under `target/sunrise-mod/catalog-snapshots/`. Only use
 source discovery on mods you trust. It does not run the game.
 The separate `update` command compares the SDKs' build data for the old and new pins. Each build's data is kept

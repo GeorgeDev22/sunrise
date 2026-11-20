@@ -113,21 +113,17 @@ pub fn accepts_damage(m: &mut Mob, source: &Damage) -> bool {
         return false;
     }
     let by_player = source.attacker == Some(Who::Player);
-    // The direct entity must be living or a projectile (or a player must be to blame).
-    let direct = matches!(
-        source.kind,
-        DamageKind::PlayerAttack
-            | DamageKind::MaceSmash
-            | DamageKind::Spear
-            | DamageKind::MobAttack
-            | DamageKind::MobAttackNoAggro
-            | DamageKind::Arrow
-            | DamageKind::Thrown
-            | DamageKind::Fireball
-            | DamageKind::WitherSkull
-            | DamageKind::WindCharge
-            | DamageKind::Thorns
-    );
+    // Infer a direct living entity or projectile from the source kind.
+    let direct = source.implies_projectile_source()
+        || matches!(
+            source.kind,
+            DamageKind::PlayerAttack
+                | DamageKind::MaceSmash
+                | DamageKind::Spear
+                | DamageKind::MobAttack
+                | DamageKind::MobAttackNoAggro
+                | DamageKind::Thorns
+        );
     if !direct && !by_player {
         return false;
     }

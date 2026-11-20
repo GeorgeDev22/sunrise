@@ -1,4 +1,7 @@
 // Shared state, helpers and mixed tests stay at the original LAN action scope.
+
+pub(super) const RECIPE_CHECK_COST: u32 = 1;
+const RECIPE_CHECK_LIMIT: u32 = 10;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MenuOpen {
     Opened,
@@ -25,8 +28,7 @@ pub(super) struct GuestPlay {
     pub(super) chat_spam: u32,
     /// `commandSpamThrottler`: 20 for each command, one less each tick.
     pub(super) command_spam: u32,
-    /// The recipe viewer's transfer checks (`sunrise:recipe_check`): 20 for
-    /// each, one less each tick; one from 200 goes unanswered.
+    /// `sunrise:recipe_check` requests still counting against the burst limit.
     pub(super) recipe_checks: u32,
     /// `ServerCommandSuggestionsProvider`: the latest suggestion request not answered yet (a
     /// newer one replaces it, which then never gets an answer), and whether this tick's one
@@ -94,7 +96,7 @@ pub(super) struct GuestPlay {
     /// What last killed the guest outright (`/kill`): the death message's key.
     death_cause: Option<String>,
     /// The equipment modifiers on the guest's attributes (`apply_equipment`)
-    /// and the armour and main hand they were put on for: the hub's player
+    /// and the armour and hands they were put on for: the hub's player
     /// is a `ServerPlayer` too, whose worn armour counts
     /// (`LivingEntity.collectEquipmentChanges`).
     modifiers: Vec<(String, String)>,
@@ -106,6 +108,31 @@ pub(super) struct GuestPlay {
     /// What `ServerPlayer` last recorded for the guest's scoreboard criteria
     /// (`lastRecordedHealthAndAbsorption` and the others).
     score_recorded: super::scoreboard::Recorded,
+}
+
+/// `LivingEntity.collectEquipmentChanges` for a guest: whether its armor, main hand or off
+/// hand differs from what its modifiers were put on for (`equipped`), which then records them.
+/// The body tick asks (`detectEquipmentUpdates`), so the packets of a tick act with the
+/// modifiers from before it: a slot change and an attack sent in one tick hit with the old
+/// item's attack damage and charge speed (the attribute swap).
+fn equipment_changed(
+    equipped: &mut Option<Vec<Option<ItemStack>>>,
+    armor: &[Option<ItemStack>],
+    held: Option<&ItemStack>,
+    offhand: Option<&ItemStack>,
+) -> bool {
+    let unchanged = equipped.as_deref().is_some_and(|eq| {
+        eq.len() == armor.len() + 2
+            && eq[..armor.len()] == armor[..]
+            && eq[armor.len()].as_ref() == held
+            && eq[armor.len() + 1].as_ref() == offhand
+    });
+    if !unchanged {
+        let mut now = armor.to_vec();
+        now.extend([held.cloned(), offhand.cloned()]);
+        *equipped = Some(now);
+    }
+    !unchanged
 }
 
 /// A guest's command waiting for the hub (`LanHost::commands`).
@@ -236,6 +263,35 @@ pub(super) struct GuestSwap {
 }
 
 impl GuestPlay {
+    /// The guest can make a recipe check if it has room in its burst budget.
+    pub(super) fn recipe_check_available(&self) -> bool {
+        self.recipe_checks < RECIPE_CHECK_LIMIT
+    }
+
+    pub(super) fn decay_recipe_checks(&mut self) {
+        self.recipe_checks = self.recipe_checks.saturating_sub(1);
+    }
+
+    #[cfg(test)]
+    pub(in crate::game) fn arm_mining_for_test(
+        &mut self,
+        pos: [i32; 3],
+        start: u64,
+        delayed: Option<([i32; 3], u64)>,
+    ) {
+        self.digging = Some((pos, [0, 1, 0]));
+        self.dig_start = start;
+        self.mining = Some(Mining {
+            pos,
+            progress: 0.0,
+            per_tick: 0.0,
+            ticks: 1,
+            crack: None,
+        });
+        self.delayed = delayed;
+        self.last_progress = -1;
+    }
+
     /// The guest's `Player.attackStrengthTicker` outside its turn.
     pub(in crate::game) fn attack_ticks(&self) -> u32 {
         self.attack_ticks
@@ -357,20 +413,19 @@ thread_local! {
 /// The hub's current bodies, across dimensions. A borrowed ancestor's
 /// live body takes precedence over this saved state until its turn returns.
 fn building_players(host: &LanHost) -> HubBodies {
-    let guests: Vec<_> = host.hub.guests.simulation_iter().collect();
     let kept = BUILDING_CACHE.with(|c| {
         c.borrow()
             .as_ref()
             .filter(|list| {
-                list.len() == guests.len()
-                    && list
-                        .iter()
-                        .zip(&guests)
-                        .all(|(p, g)| p.get().conn == Some(g.conn))
+                list.iter().map(|p| p.get().conn).eq(host
+                    .hub
+                    .guests
+                    .simulation_iter()
+                    .map(|g| Some(g.conn)))
             })
             .cloned()
     });
-    kept.unwrap_or_else(|| shared(guests.into_iter().map(building_player)))
+    kept.unwrap_or_else(|| shared(host.hub.guests.simulation_iter().map(building_player)))
 }
 
 /// Builds the hub's bodies once for the turns to come (`Some`), or drops them.
@@ -398,7 +453,7 @@ fn refresh_building_player(host: &LanHost, _conn: u32) {
     });
 }
 
-/// Kept at LAN action scope to preserve its derived internals point identity.
+/// Kept at LAN action scope to preserve its published internals target path.
 impl Game<'_> {
     pub(super) fn vehicle_has_other_viewers(
         container: Option<(i32, i32, i32)>,
@@ -498,6 +553,8 @@ mod tests {
             source: 4,
             entity: None,
             except_entity: None,
+            seed: 0,
+            particles_before: 0,
         };
         let broken = [[1.0, 64.0, -3.0]];
         assert!(super::captured_block_break(&sound, &broken));
@@ -594,6 +651,7 @@ mod tests {
                     slots: 27,
                     data_slots: 0,
                     results: Vec::new(),
+                    inputs: Vec::new(),
                     crafting: None,
                     links: None,
                 }));
@@ -3047,6 +3105,31 @@ mod guest_close_listener_tests {
             "actual ordinary guest final close must be heard: {missing:?}"
         );
         drop(receivers);
+    }
+}
+
+#[cfg(test)]
+mod recipe_check_budget_tests {
+    use super::{GuestPlay, RECIPE_CHECK_COST};
+
+    #[test]
+    fn ten_checks_at_once_then_one_each_tick() {
+        let mut play = GuestPlay::default();
+        for _ in 0..10 {
+            assert!(play.recipe_check_available());
+            play.recipe_checks += RECIPE_CHECK_COST;
+        }
+        assert!(!play.recipe_check_available());
+        for _ in 0..20 {
+            play.decay_recipe_checks();
+            assert!(play.recipe_check_available());
+            play.recipe_checks += RECIPE_CHECK_COST;
+            assert!(!play.recipe_check_available());
+        }
+        for _ in 0..20 {
+            play.decay_recipe_checks();
+        }
+        assert_eq!(play.recipe_checks, 0);
     }
 }
 

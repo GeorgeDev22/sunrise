@@ -65,7 +65,7 @@ pub struct Parts {
     /// Block entity parts by block, for the hooks asked by block (`block_entity`).
     pub(crate) block_entities: HashMap<Box<str>, Vec<Attached<dyn BlockEntityPart>>>,
     /// Block entity parts by block entity type, for the hooks asked by the entity
-    /// (`block_entity_tick`, `menu_button`): its type id need not be its block's id.
+    /// (`block_entity_tick`): its type id need not be its block's id.
     pub(crate) block_entity_kinds: HashMap<Box<str>, Vec<Attached<dyn BlockEntityPart>>>,
     pub(crate) items: HashMap<Box<str>, Vec<Attached<dyn ItemPart>>>,
     pub(crate) menus: HashMap<Box<str>, Vec<Attached<dyn MenuPart>>>,
@@ -113,8 +113,9 @@ pub struct Parts {
     pub(crate) entity_selectors: Vec<EntitySelectorInfo>,
     /// Frozen raw payload declarations and their sole receiving owners.
     pub(crate) payloads: Option<Arc<crate::parts::payloads::Payloads>>,
-    /// Only the parts that override each scoped hook, resolved at load or reload.
-    pub(crate) hooks: Vec<Option<HookParts>>,
+    /// Only the parts that override each scoped hook, resolved at load or reload. Boxed: most of the
+    /// table is empty, and a slot holds eight maps.
+    pub(crate) hooks: Vec<Option<Box<HookParts>>>,
     /// Who listens, as plain bits derived from `hooks` when the table is resolved.
     pub(crate) listens: Arc<ListenIndex>,
 }
@@ -550,7 +551,7 @@ pub(crate) fn add_tagged<P: ?Sized>(
 
 impl Parts {
     pub(crate) fn for_hook(&self, hook: HookId) -> Option<&HookParts> {
-        self.hooks.get(hook as usize).and_then(Option::as_ref)
+        self.hooks.get(hook as usize).and_then(Option::as_deref)
     }
     pub(super) fn index_hooks(&mut self) {
         self.hooks = vec![None; HOOK_COUNT];
@@ -559,8 +560,7 @@ impl Parts {
                 for (key, parts) in &self.$field {
                     for part in parts {
                         for hook in part.part.$method().iter().flatten() {
-                            let table =
-                                self.hooks[*hook as usize].get_or_insert_with(HookParts::default);
+                            let table = self.hooks[*hook as usize].get_or_insert_with(Box::default);
                             table
                                 .$field
                                 .entry(key.clone())

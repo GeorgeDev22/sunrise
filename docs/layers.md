@@ -162,7 +162,7 @@ Sunrise's own extras and its product, and every built-in address of an outside s
 
 ## Tools
 
-Developer tools that no player runs: `xtask`, `sunrise-bots`, `sunrise-mod-api-gen-tests`, `sunrise-mod-wasm-wire-loopback`, and the Python in
+Developer tools that no player runs: `xtask`, `sunrise-bots`, `sunrise-mod-api-gen-tests`, and the Python in
 `tools/`. They may depend on anything, and no shipped crate depends on them. `cargo-sunrise-mod`, the mod author's
 tool, is one: it fetches and checks Sunrise's signed mod SDK, so it reads `sunrise-addresses` and
 `sunrise-release-sign` beside the engine's mod crates.
@@ -181,11 +181,10 @@ A feature often splits along this rule: the part others build on is platform, an
 is Sunrise (PvP & HUD and replays, [above](#controllers-replays-and-ui-pages)).
 
 The mod interface follows that split too: `sunrise-mod-vocab` is an engine crate, while
-`sunrise-mod-api` preserves the mod-facing paths through re-exports. The build-time generator,
-procedural macros and point-shape parser are engine dependencies of that interface. Sunrise's launcher
-reaches the generator and point-shape parser through `sunrise-platform`'s optional `mod-build` feature.
-The initial extraction also carries dispatch's crash markers, profiling, resource codec, phase access,
-and Parts registration state; it is not yet a stateless or unsafe-free interface ([#2587](https://github.com/arismoko/horizon/issues/2587)).
+`sunrise-mod-api` preserves the mod-facing paths through re-exports. The build-time generator
+and procedural macros are engine dependencies of that interface. The vocabulary holds dispatch and installed
+lookups; the platform owns profiling, resource access and Parts authoring. See the
+[checked state inventory](layering/mod-vocab-state.md).
 
 | I add... | Layer | Where |
 |---|---|---|
@@ -193,7 +192,7 @@ and Parts registration state; it is not yet a stateless or unsafe-free interface
 | A speed-up that keeps vanilla's results | engine | next to the code it speeds up |
 | A call to a Mojang or Microsoft service vanilla makes | engine | `auth.rs`, `realms/`, `skins.rs`, `sunrise-server-files` |
 | A place mods, ports or Sunrise can hook into | engine + platform | an extension point in the engine crate, naming no type from above; its public face in the platform |
-| A mod hook or host interface | engine + platform | `sunrise-mod-vocab` owns the engine vocabulary and dispatch; `sunrise-mod-api` re-exports it for mods and owns guest transport |
+| A mod hook or host interface | engine + platform | `sunrise-mod-vocab` owns the engine vocabulary and dispatch; `sunrise-mod-api` re-exports it for mods and links the native mod to the platform |
 | A mod package format | platform | `sunrise-mod-package` |
 | A shader or resource pack format vanilla doesn't read | platform | `sunrise-shaders`, `sunrise-optifine`, `sunrise-polytone`, or a new platform crate |
 | Controller support: a device, bindings, glyphs, pad menus | platform | the pad modules, on the engine's input hooks ([Controllers](#controllers-replays-and-ui-pages)) |
@@ -238,8 +237,7 @@ that. sunrise-plain becomes a plain build of this repository.
 **Licence.** The project's licence is being decided (the poll ends around 2026-11-10); the Sunrise repository's
 licence follows from it. If this repository becomes GPL, the official game links the Sunrise crates into the same
 executable as the engine and the platform, so the Sunrise layer must be GPL-compatible too: no closed native code in
-it. Mods loaded as WebAssembly run as separate modules, not linked into the executable, so they could stay closed
-(duckybertduck's reading; the licence decision settles it).
+it.
 
 **Every official download includes it.** These paths must ship the Sunrise layer:
 
@@ -310,16 +308,17 @@ sunrise-client`, the harnesses and sunrise-plain build, has none either. The fir
 
 ## Platform registries
 
-The spec for the three registries that let a platform or Sunrise crate add settings, pages and HUD drawing without
-an engine file naming it. Controllers, replays (M6) and Sunrise's extras (M5) move out on them.
+The spec for the four registries that let a platform or Sunrise crate add settings, pages, HUD drawing and title
+screen buttons without an engine file naming it. Controllers, replays (M6) and Sunrise's extras (M5) move out on
+them.
 Status: each registry lands in its own PR (layer plan M5, seam): the settings store (#14036), pages (#14070:
 `SunriseSettings` and every row but `Slider`; #14110: `Slider` and `tooltip`; `Title` and `Pause` next), the HUD
-hook (#14081), `seat()` (#14096).
+hook (#14081), `seat()` (#14096), the title screen buttons (#2535).
 
-**One shape for all three.** As with `Hooks` above:
+**One shape for all four.** As with `Hooks` above:
 
 - The trait and its `register` are in `sunrise-hooks` (engine; no dependencies, so it names no type from above).
-  `sunrise-platform` re-exports them as `sunrise_platform::{settings, pages, hud}`. They take plain data
+  `sunrise-platform` re-exports them as `sunrise_platform::{settings, pages, hud, title}`. They take plain data
   (strings, numbers, translation keys) and no engine type. `sunrise-platform` stays light because the launcher
   and the telemetry server build it.
 - A crate registers a `&'static` value before the game runs (`sunrise-official`'s `register()` for Sunrise,
@@ -539,6 +538,31 @@ fn draw(&self, c: &dyn Container, canvas: &mut dyn hud::Canvas);                
 - The only text is a stack's shown name. The rest is ids and numbers, so the API names no engine type
   (`ItemStack` stays in the engine).
 
+### Title screen buttons (`sunrise_platform::title`)
+
+The title registry, shaped like the ones above: full-width buttons on the title screen, each on its own row below
+Minecraft Realms, as NeoForge adds Mods. The engine's title code names none of them: the platform's mod host adds
+Mods (`sunrise-mod-host`'s `mods_button.rs`), shown while one or more mods are installed, with its label in the
+same crate's lang files, registered beside the button.
+
+```rust
+pub struct Title { pub mods: usize }            // what the screen knows: packages in the mods folder
+pub enum Opens { Mods }                         // the engine screen a press opens
+pub trait Button: Sync {
+    fn label(&self) -> &'static str;            // a translation key
+    fn shown(&self, title: &Title) -> bool;     // asked each time the buttons lay out
+    fn opens(&self) -> Opens;
+}
+pub const FIRST_ID: u8 = 200;                   // each registration takes the next main-menu id
+pub const MAX_BUTTONS: usize = 56;              // and `register` refuses one with no id left
+```
+
+- Rows keep the order buttons registered in, and a press carries the row's id, so it resolves the registration it
+  selected without asking `shown` again. The icon row, Options... and Quit Game move down a row for each shown
+  button, and lift on a short screen so they stay above the copyright line; a screen too short for the lifted
+  block to also clear the logo and edition banner shows fewer rows — the ones that fit.
+- With no button shown the title screen is vanilla's.
+
 ### Lang files (`sunrise_platform::lang`)
 
 A crate keeps the text for its keys in its own folder, `crates/<name>/assets/lang/<code>.json`, with the same
@@ -678,7 +702,6 @@ Sunrise's own and third-party addresses (Sunrise layer):
 
 These are not addresses:
 
-- `bluemap_detect.rs` lists dynamic-DNS suffixes, to guess a server's own map host;
 - `sunrise-server/src/discord.rs` lists the hosts a webhook URL may have;
 - the Windows, Apple and SOAP schema URLs in manifests and requests, and the UPnP multicast group.
 
@@ -722,15 +745,6 @@ by default), so the pipeline moves once. HDR off stays bit-exact.
 The mod API work on arismoko/horizon lands upstream as part of the platform. The API owns its types,
 `sunrise-mod-runtime` gets no game dependency, and its CI property check stays as a stricter check inside the
 platform.
-
-The portable engine crate `sunrise-engine-slots` owns the final registration seal socket
-and the generated point records, their copy-in constructors, typed dispatchers and activity table.
-The host installs its seal provider before engine startup and registers native API listeners
-after dependency ordering and installation. At sealing, `sunrise-mod-points` installs the
-set-once dispatch provider before publishing activity flags. Ordering, owner guards,
-replacement authority and listener dispatch remain in the platform registry. Staged point
-sites name only engine-owned paths; staging does not inject point dependencies into engine manifests.
-The seal refuses repeat or re-entrant sealing and late provider installation.
 
 Engine crates import `sunrise-mod-vocab` as `mod_api`. Their test-only
 `mod_platform` dependency reaches `sunrise-mod-api`; dev-dependencies are exempt

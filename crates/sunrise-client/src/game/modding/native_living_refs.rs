@@ -1779,7 +1779,8 @@ mod tests {
         game.block_ticks
             .add_empty_chunk(sunrise_core::position::ChunkPos::new(0, 0))
             .unwrap();
-        assert!(game.run_command("forceload add 0 0"));
+        game.build_registries();
+        assert!(game.as_console(|game| game.run_command("forceload add 0 0")));
         game.enter_level(Dim::Overworld).unwrap();
         let pig = summon_mob(game, "minecraft:pig", "{NoAI:1b}");
         let zombie = summon_mob(game, "minecraft:zombie", ZOMBIE_NBT);

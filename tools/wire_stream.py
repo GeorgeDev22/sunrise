@@ -178,10 +178,29 @@ def self_id(entries):
     return None
 
 
+def is_mark(command):
+    """Whether a chat command is a scenario marker: /wire-mark, or /wire-mark NN naming the scenario's number."""
+    if command is None:
+        return False
+    word, space, number = command.partition(' ')
+    return word == 'wire-mark' and (not space or number.isdigit())
+
+
+def mark_packet(name, data):
+    """Whether a serverbound play packet is a /wire-mark command itself (not its bytes inside another packet)."""
+    if name != 'chat_command':
+        return False
+    try:
+        return is_mark(Reader(data).string())
+    except (ValueError, UnicodeDecodeError):
+        return False
+
+
 def scenarios(entries, exact=False):
     """One list of ticks for each /wire-mark in the play stream, in order (the ticks after a mark run to the
     next mark); a tick is {'packets': [(name, fields)], 'wire': [(name, bytes)], 'frame': [(name, fields)],
-    'frame_wire': [(name, bytes)], 'misplaced': [name]}.
+    'frame_wire': [(name, bytes)], 'misplaced': [name], 'raw': [(where, name, payload hex)]}: 'raw' holds every
+    serverbound packet as it was on the wire, in order, before any of the rewrites below.
 
     Live (`exact` false):
 
@@ -205,7 +224,7 @@ def scenarios(entries, exact=False):
                 server_state[container] = r.varint()
             continue
         data = bytes.fromhex(e.get('data', ''))
-        if is_mark(name, data):
+        if mark_packet(name, data):
             current = [new_tick()]
             runs.append(current)
             continue
@@ -216,6 +235,7 @@ def scenarios(entries, exact=False):
             last = server_state.get(fields['container'], fields['state'])
             fields = {'container': fields['container'], 'stale': last - fields.pop('state'), **fields}
         tick = current[-1]
+        tick['raw'].append(('frame' if name in FRAME else 'packets', name, e.get('data', '')))
         if exact and isinstance(fields.get('entity'), int):
             fields['entity'] = shared.get(fields['entity'], fields['entity'])
         elif 'entity' in fields and fields['entity'] == me:
@@ -260,7 +280,7 @@ def first_frame(run, name):
 
 
 def new_tick():
-    return {'packets': [], 'wire': [], 'frame': [], 'frame_wire': [], 'misplaced': []}
+    return {'packets': [], 'wire': [], 'frame': [], 'frame_wire': [], 'misplaced': [], 'raw': []}
 
 
 def name_entities(run):

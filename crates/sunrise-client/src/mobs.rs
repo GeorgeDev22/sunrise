@@ -563,12 +563,11 @@ impl MobTypes {
     }
 }
 pub use sunrise_client_core::who::Who;
-/// A native damage type's registry name and the tags consumed by mob combat.
+/// A damage type's registry name and the tags consumed by mob combat.
 ///
-/// Native code supplies a static name and flags matching its data-pack damage
-/// tags; `NamedDamage::registered` builds both from a damage registry entry,
-/// interning its name. Register the same name/data for player damage, death
-/// messages and loot predicates. Unset tags are false.
+/// `NamedDamage::registered` builds both from a registry entry, interning
+/// its name. Code constructing a source directly supplies a static name and
+/// flags matching its registry entry. Unset tags are false.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NamedDamage {
     pub name: &'static str,
@@ -591,9 +590,11 @@ impl NamedDamage {
     pub const IS_FREEZING: u32 = 1 << 13;
     pub const WITCH_RESISTANT_TO: u32 = 1 << 14;
     pub const NO_ANGER: u32 = 1 << 15;
+    pub const BYPASSES_WOLF_ARMOR: u32 = 1 << 16;
+    pub const SULFUR_CUBE_WITH_BLOCK_IMMUNE_TO: u32 = 1 << 17;
 
     /// Each flag with the damage tag it stands for.
-    const TAG_FLAGS: [(u32, &'static str); 16] = [
+    const TAG_FLAGS: [(u32, &'static str); 18] = [
         (Self::IS_FIRE, "minecraft:is_fire"),
         (Self::BYPASSES_ARMOR, "minecraft:bypasses_armor"),
         (Self::NO_KNOCKBACK, "minecraft:no_knockback"),
@@ -616,6 +617,11 @@ impl NamedDamage {
         (Self::IS_FREEZING, "minecraft:is_freezing"),
         (Self::WITCH_RESISTANT_TO, "minecraft:witch_resistant_to"),
         (Self::NO_ANGER, "minecraft:no_anger"),
+        (Self::BYPASSES_WOLF_ARMOR, "minecraft:bypasses_wolf_armor"),
+        (
+            Self::SULFUR_CUBE_WITH_BLOCK_IMMUNE_TO,
+            "minecraft:sulfur_cube_with_block_immune_to",
+        ),
     ];
 
     pub const fn new(name: &'static str, tags: u32) -> Self {
@@ -652,7 +658,7 @@ impl NamedDamage {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DamageKind {
-    /// A registered native damage type; vanilla kinds keep their existing tags.
+    /// An exact registry type and its tags, vanilla or modded.
     Named(NamedDamage),
     PlayerAttack,
     /// `mace_smash`: a mace hit after a fall (the player attack tags too).
@@ -725,6 +731,15 @@ pub enum DamageKind {
     WitherSkull,
 }
 impl DamageKind {
+    /// DamageTypeTags.IS_EXPLOSION.
+    fn is_explosion(self) -> bool {
+        match self {
+            Self::Named(named) => named.has(NamedDamage::IS_EXPLOSION),
+            Self::Explosion | Self::Fireworks => true,
+            _ => false,
+        }
+    }
+
     /// DamageTypeTags.BYPASSES_INVULNERABILITY
     pub fn bypasses_invulnerability(self) -> bool {
         if let Self::Named(named) = self {
@@ -896,6 +911,7 @@ impl Damage {
         !matches!(
             self.kind,
             DamageKind::Fall
+                | DamageKind::FlyIntoWall
                 | DamageKind::Drown
                 | DamageKind::DryOut
                 | DamageKind::Generic
@@ -1003,6 +1019,19 @@ impl Damage {
                 | DamageKind::WindCharge
                 | DamageKind::WitherSkull
         )
+    }
+
+    /// The kinds Warden and Creaking currently use to infer a projectile
+    /// entity. This does not test a named type's projectile tag: only the
+    /// explicit ids previously represented by `Thrown` and `Fireball` count.
+    fn implies_projectile_source(&self) -> bool {
+        match self.kind {
+            DamageKind::Named(named) => matches!(
+                named.name,
+                "minecraft:mob_projectile" | "minecraft:unattributed_fireball"
+            ),
+            _ => self.is_projectile(),
+        }
     }
 }
 /// Per-mob attribute base values (the type's defaults unless changed).
@@ -3285,6 +3314,8 @@ pub struct MobWorld<'a> {
     /// What the motion value hooks are given: the loop context of the side that
     /// ticks these mobs.
     pub loop_context: &'a sunrise_world::native_load_context::LoopContext,
+    /// The side's level data beyond blocks: weather, features, tags and block entities.
+    pub side: &'a dyn crate::motion::SideLevel,
     pub world: &'a World,
     pub registry: &'a sunrise_world::registry::BlockRegistry,
     pub facts: &'a BlockFacts,
@@ -3955,7 +3986,7 @@ impl Mob {
             &mut passed_invulnerability,
         );
         if enderman && passed_invulnerability {
-            enderman::after_hurt(self, &source);
+            enderman::after_hurt(self, &source, level.attack().direct.is_some());
         }
         hurt
     }
@@ -4363,21 +4394,24 @@ impl Mob {
     fn wolf_armor_absorbs(&self, source: &Damage) -> bool {
         self.species() == Species::Wolf
             && self.extra.body_id() == Some("minecraft:wolf_armor")
-            && !matches!(
-                source.kind,
-                DamageKind::Drown
-                    | DamageKind::Magic
-                    | DamageKind::IndirectMagic
-                    | DamageKind::InWall
-                    | DamageKind::Thorns
-                    | DamageKind::OutOfWorld
-                    | DamageKind::Cramming
-                    | DamageKind::Generic
-                    | DamageKind::GenericKill
-                    | DamageKind::OutsideBorder
-                    | DamageKind::Starve
-                    | DamageKind::Wither
-            )
+            && !match source.kind {
+                DamageKind::Named(named) => named.has(NamedDamage::BYPASSES_WOLF_ARMOR),
+                kind => matches!(
+                    kind,
+                    DamageKind::Drown
+                        | DamageKind::Magic
+                        | DamageKind::IndirectMagic
+                        | DamageKind::InWall
+                        | DamageKind::Thorns
+                        | DamageKind::OutOfWorld
+                        | DamageKind::Cramming
+                        | DamageKind::Generic
+                        | DamageKind::GenericKill
+                        | DamageKind::OutsideBorder
+                        | DamageKind::Starve
+                        | DamageKind::Wither
+                ),
+            }
     }
     /// `Wolf.actuallyHurt`: the armor loses `ceil(damage)` durability, cracks
     /// at `Crackiness.WOLF_ARMOR` steps and breaks at its maximum.
@@ -4425,9 +4459,10 @@ impl Mob {
         w: &MobWorld,
         level: &mut DamageLevel<'_>,
         events: &mut Vec<MobEvent>,
+        trample: &mut Option<ai::MobTrample>,
     ) -> ai::TickProgress {
         self.prepare_tick();
-        neutral_anger::tick_until_consumption(self, w, level, events)
+        neutral_anger::tick_until_consumption(self, w, level, events, trample)
     }
     fn prepare_tick(&mut self) {
         self.track_section();
@@ -5882,15 +5917,25 @@ mod fire_resistance_damage_tests {
         kind.species = Species::Ghast;
         kind.flags.fire_immune = true;
         mob.add_effect("minecraft:fire_resistance", -1, 0);
-        let source = Damage {
-            kind: DamageKind::Fireball,
-            attacker: Some(Who::Player),
-            from: None,
-            attacker_species: None,
-        };
-        assert!(mob.damage(level, 1.0, source));
-        assert_eq!(mob.health, 10.0);
-        assert_eq!(mob.invulnerable, 0);
+        // An explicit unattributed fireball used the same source inference
+        // before it kept its own registry id.
+        for kind in [
+            DamageKind::Fireball,
+            DamageKind::Named(NamedDamage::new(
+                "minecraft:unattributed_fireball",
+                NamedDamage::IS_FIRE,
+            )),
+        ] {
+            let source = Damage {
+                kind,
+                attacker: Some(Who::Player),
+                from: None,
+                attacker_species: None,
+            };
+            assert!(mob.damage(level, 1.0, source));
+            assert_eq!(mob.health, 10.0);
+            assert_eq!(mob.invulnerable, 0);
+        }
     }
 }
 
@@ -6977,6 +7022,40 @@ mod named_damage_tests {
         assert!(still.damage(level, 2.0, fire(NamedDamage::NO_KNOCKBACK)));
         assert_eq!(still.velocity, Vec3::ZERO);
     }
+    #[test]
+    fn named_damage_uses_the_wolf_armor_bypass_tag() {
+        let mut test_level = crate::health::TestLevel::new(0);
+        let level = &mut test_level.level();
+        for (tags, health, armor_damage) in
+            [(0, 10.0, 2), (NamedDamage::BYPASSES_WOLF_ARMOR, 8.0, 0)]
+        {
+            let mut wolf = pig();
+            Arc::make_mut(&mut wolf.kind).species = Species::Wolf;
+            wolf.extra.set_body(Some("minecraft:wolf_armor".into()));
+            let kind = DamageKind::Named(NamedDamage::new(
+                "example:hit",
+                NamedDamage::BYPASSES_ARMOR | tags,
+            ));
+            assert!(wolf.damage(level, 2.0, Damage::of(kind)));
+            assert_eq!(wolf.health, health);
+            assert_eq!(wolf.extra.body_damage(), armor_damage);
+        }
+    }
+
+    #[test]
+    fn inferred_projectile_source_keeps_the_old_kind_set_not_the_projectile_tag() {
+        for (name, tags, inferred) in [
+            ("minecraft:mob_projectile", 0, true),
+            ("minecraft:unattributed_fireball", 0, true),
+            ("minecraft:indirect_magic", 0, false),
+            ("minecraft:trident", NamedDamage::IS_PROJECTILE, false),
+            ("example:shot", NamedDamage::IS_PROJECTILE, false),
+        ] {
+            let source = Damage::of(DamageKind::Named(NamedDamage::new(name, tags)));
+            assert_eq!(source.implies_projectile_source(), inferred, "{name}");
+        }
+    }
+
     #[test]
     fn named_tags_control_resistance_and_specialist_enchantments() {
         let mut test_level = crate::health::TestLevel::new(0);

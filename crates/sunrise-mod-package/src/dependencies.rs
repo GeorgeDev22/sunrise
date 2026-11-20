@@ -172,12 +172,29 @@ pub struct Mod<'a> {
     pub dependencies: &'a [Dependency],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Resolution {
     /// Original bundle indices, in dispatch order.
     pub order: Vec<usize>,
     /// What the load rules let through: a discouraged pair, an override applied.
     pub warnings: Vec<Notice>,
+    /// Direct logical dependency rows remaining after side and override filtering.
+    pub effective: mod_vocab::__private::EffectiveDependencies,
+}
+
+/// The dependency rows a standalone build can wire to the projects it was given.
+/// Keep absent optional rows so native staging can still declare their empty
+/// feature. An absent required row is checked against the installation, not
+/// Cargo metadata; an actual reference still needs a compiled library.
+pub fn build_dependencies(
+    manifest: &crate::Manifest,
+    side: Side,
+    supplied: impl Fn(&str) -> bool,
+) -> Vec<Dependency> {
+    from_manifest(&manifest.dependencies, side)
+        .into_iter()
+        .filter(|dep| dep.optional || supplied(&dep.id))
+        .collect()
 }
 
 /// Validate and order a mixed set of code and content declarations.
@@ -187,9 +204,10 @@ pub fn resolve(mods: &[Mod<'_>]) -> Result<Resolution, Error> {
 
 /// Physical library order, independent of manifest validation/dispatch overrides.
 ///
-/// Every active code dependency still needs its API package. Version ranges and
-/// dispatch order are logical rules; actual Cargo/wasm imports and ABI validation
-/// remain the compiler/linker's responsibility and never fall back silently.
+/// Only library requirements enter this projection. A supplied code dependency
+/// needs an API package; content targets (`code = false`) are skipped. Version
+/// ranges and dispatch order are logical rules; Cargo and the native linker
+/// still enforce actual imports and ABI requirements.
 pub fn resolve_links(mods: &[Mod<'_>]) -> Result<Resolution, Error> {
     resolve_all(mods, &[], &Overrides::default(), true)
 }
@@ -205,7 +223,7 @@ pub fn resolve_with_rules(
 }
 
 /// Resolve one applicable installed manifest snapshot with one shared policy for
-/// native, wasm and content packages. Indices in the result refer to `manifests`.
+/// native and content packages. Indices in the result refer to `manifests`.
 pub fn resolve_manifests(
     manifests: &[&crate::Manifest],
     running: Side,
@@ -219,7 +237,7 @@ pub fn resolve_manifests(
         .iter()
         .zip(&declared)
         .map(|(manifest, dependencies)| {
-            let code = manifest.native.is_some() || manifest.wasm.is_some();
+            let code = manifest.native.is_some();
             Mod {
                 id: &manifest.id,
                 version: &manifest.version,
@@ -370,7 +388,11 @@ fn resolve_all(
     }
     let mut edges = vec![Vec::new(); mods.len()];
     let mut warnings = Vec::new();
+    let mut effective = mod_vocab::__private::EffectiveDependencies::default();
     for (index, item) in mods.iter().enumerate() {
+        if links && !item.code {
+            continue;
+        }
         for dep in item.dependencies {
             let target = ids.get(dep.id.as_str()).copied();
             let note = diagnostic_note(dep.reason.as_deref(), dep.url.as_deref());
@@ -386,9 +408,12 @@ fn resolve_all(
                         Override::Discourage => NoticeKind::OverrideDiscouraged,
                     },
                 });
-                // These remove validation and dispatch edges only. The separate
-                // physical resolution still enforces actual library requirements.
+                // No validation, dispatch edge or Part permission remains. The
+                // physical resolution still enforces library requirements.
                 continue;
+            }
+            if !links {
+                effective.insert(item.id, &dep.id, dep.optional);
             }
             let Some(target) = target else {
                 if dep.optional {
@@ -401,7 +426,10 @@ fn resolve_all(
                 });
             };
             let other = &mods[target];
-            if item.code && (!item.has_api || !other.has_api) {
+            if links && !other.code {
+                continue;
+            }
+            if item.code && other.code && (!item.has_api || !other.has_api) {
                 return Err(Error::NoApi {
                     owner: item.id.into(),
                     target: dep.id.clone(),
@@ -513,7 +541,11 @@ fn resolve_all(
         done[next] = true;
         order.push(next);
     }
-    Ok(Resolution { order, warnings })
+    Ok(Resolution {
+        order,
+        warnings,
+        effective,
+    })
 }
 
 /// A target's staged Cargo package, or none for an absent optional mod.
@@ -987,17 +1019,82 @@ mod tests {
                 "owner is incompatible with other 1.0.0 (Bad interaction https://example.test/why)"
             );
         }
-        let mut dependent = manifest("dependent", "[dependencies]\nother='^1'");
+        let dependent = manifest("dependent", "[dependencies]\nother='^1'");
         assert_eq!(
             resolve_manifests(&[&dependent, &code], Side::Client, &Overrides::default())
                 .unwrap()
                 .order,
             [1, 0]
         );
-        dependent.native = code.native.clone();
-        assert!(
-            matches!(resolve_manifests(&[&dependent, &plain], Side::Client, &Overrides::default()), Err(Error::NoApi { owner, target, .. }) if owner == "dependent" && target == "other")
+    }
+
+    #[test]
+    fn required_content_is_deferred_by_build_but_required_by_installation() {
+        let content = manifest("data", "");
+        let native = format!(
+            "[native]\ngame='26.3'\nsunrise='{}'\nmixins='{}'",
+            "a".repeat(40),
+            "b".repeat(40)
         );
+        let dependent = manifest("behaviour", &format!("[dependencies]\ndata='^1'\n{native}"));
+        let build = build_dependencies(&dependent, Side::Client, |_| false);
+        let code = Mod {
+            id: &dependent.id,
+            version: &dependent.version,
+            has_api: true,
+            code: true,
+            dependencies: &build,
+        };
+        assert_eq!(resolve_links(&[code]).unwrap().order, [0]);
+        assert_eq!(
+            resolve_manifests(&[&dependent], Side::Client, &Overrides::default())
+                .unwrap_err()
+                .to_string(),
+            "behaviour requires missing mod data"
+        );
+        let resolved =
+            resolve_manifests(&[&dependent, &content], Side::Client, &Overrides::default())
+                .unwrap();
+        assert_eq!(resolved.order, [1, 0]);
+        assert!(resolved.effective.permits("behaviour", "data"));
+    }
+
+    #[test]
+    fn permission_and_dispatch_use_the_same_filtered_rows() {
+        use mod_vocab::DependencyKind;
+        let dependent = manifest(
+            "addon",
+            "[dependencies]\nowner={version='^1',order='before'}\nabsent={version='*',optional=true}\nserver={version='^1',side='server'}\nnone={version='^1',order='none'}\n",
+        );
+        let owner = manifest("owner", "");
+        let server = manifest("server", "");
+        let none = manifest("none", "load_before=['addon']");
+        let inputs = [&owner, &server, &dependent, &none];
+        let resolution = resolve_manifests(&inputs, Side::Client, &Overrides::default()).unwrap();
+        assert_eq!(resolution.order, [1, 3, 2, 0]);
+        assert_eq!(
+            resolution.effective.kind("addon", "owner"),
+            Some(DependencyKind::Required)
+        );
+        assert_eq!(
+            resolution.effective.kind("addon", "none"),
+            Some(DependencyKind::Required)
+        );
+        assert_eq!(
+            resolution.effective.kind("addon", "absent"),
+            Some(DependencyKind::Optional)
+        );
+        assert!(!resolution.effective.permits("addon", "server"));
+        assert!(!resolution.effective.permits("owner", "addon"));
+        assert!(!resolution.effective.permits("none", "addon"));
+        for action in ["drop", "discourage"] {
+            let overrides =
+                toml::from_str(&format!("[addon]\nowner='{action}'\nabsent='{action}'")).unwrap();
+            let resolution = resolve_manifests(&inputs, Side::Client, &overrides).unwrap();
+            assert_eq!(resolution.order, [0, 1, 3, 2]);
+            assert!(!resolution.effective.permits("addon", "owner"));
+            assert_eq!(resolution.effective.kind("addon", "absent"), None);
+        }
     }
 
     #[test]
@@ -1149,7 +1246,7 @@ mod tests {
         let mut base = item("base", "1.0.0", &[]);
         base.has_api = false;
         assert!(matches!(
-            resolve(&[item("user", "1.0.0", &required), base]),
+            resolve_links(&[item("user", "1.0.0", &required), base]),
             Err(Error::NoApi { .. })
         ));
     }

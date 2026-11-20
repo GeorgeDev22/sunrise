@@ -412,11 +412,6 @@ fn removing_each_required_input_names_it_before_work() {
                     .map(|name| (name.clone(), checkout.join(name))),
             )
             .collect();
-        assert!(
-            files
-                .iter()
-                .any(|(name, _)| name == "sunrise-wasm-std.wasm")
-        );
         assert!(files.iter().any(|(name, _)| name == "sunrise-server.exe"));
         for (_, path) in &files {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -492,20 +487,15 @@ fn how_to_make_an_input_uses_the_game_programs_profile_and_folder() {
         let program = Path::new(folder).join("sunrise-client");
         assert_eq!(inputs.how("sunrise-prepare", &program).unwrap(), flag);
     }
-    let program = Path::new("target/release/sunrise-client");
-    assert_eq!(
-        inputs.how("sunrise-wasm-std.wasm", program).unwrap(),
-        "cargo run --locked -p cargo-sunrise-mod -- wasm-std target/release/sunrise-wasm-std.wasm"
-    );
 }
 
-/// The markers around the book's table of required inputs.
-const BOOK_START: &str =
+/// The markers around the developer install guide's table of required inputs.
+const INPUTS_START: &str =
     "<!-- required inputs: crates/sunrise-mod-package/src/sdk/inputs.json, checked by a test -->";
-const BOOK_END: &str = "<!-- end of required inputs -->";
+const INPUTS_END: &str = "<!-- end of required inputs -->";
 
-/// The book's table of required inputs, as `inputs.json` says it.
-fn book_table(inputs: &Inputs) -> String {
+/// The table of required inputs, as `inputs.json` says it.
+fn inputs_table(inputs: &Inputs) -> String {
     let mut rows: Vec<(String, &str, Vec<&str>)> = Vec::new();
     for route in ["package", "package-server"] {
         let listed = inputs.route(route).unwrap();
@@ -531,7 +521,7 @@ fn book_table(inputs: &Inputs) -> String {
 }
 
 #[test]
-fn every_named_input_has_a_way_to_make_it_and_the_book_shows_the_list() {
+fn every_named_input_has_a_way_to_make_it_and_the_install_guide_shows_the_list() {
     let inputs = inputs();
     for route in inputs.routes.values() {
         for name in route.program.iter().chain(&route.checkout) {
@@ -541,22 +531,21 @@ fn every_named_input_has_a_way_to_make_it_and_the_book_shows_the_list() {
             assert!(inputs.how.contains_key(kind.name()), "{}", kind.name());
         }
     }
-    let page = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/modding/src/how-to/native-mods/07-local-developer-builds.md"),
+    let guide = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/developer-install.md"),
     )
     .unwrap()
     .replace("\r\n", "\n");
-    let section = page
-        .split_once(BOOK_START)
-        .and_then(|(_, rest)| rest.split_once(BOOK_END))
+    let section = guide
+        .split_once(INPUTS_START)
+        .and_then(|(_, rest)| rest.split_once(INPUTS_END))
         .map(|(section, _)| section.trim())
-        .expect("the book page marks its table of required inputs");
-    let table = book_table(&inputs);
+        .expect("the developer install guide marks its table of required inputs");
+    let table = inputs_table(&inputs);
     assert_eq!(
         section,
         table.trim(),
-        "the book's table differs from sdk/inputs.json; it should read:\n{table}"
+        "the guide's table differs from sdk/inputs.json; it should read:\n{table}"
     );
 }
 

@@ -5,6 +5,8 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 pub(super) struct Reader {
     pub device: wgpu::Device,
+    /// The renderer's: a wait on a lost device is refused (`in_flight::poll_live`).
+    pub device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub config: wgpu::SurfaceConfiguration,
 }
 impl Reader {
@@ -14,9 +16,11 @@ impl Reader {
         buffer.map_async(wgpu::MapMode::Read, .., move |r| {
             let _ = sender.send(r);
         });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| e.to_string())?;
+        super::in_flight::poll_live(
+            &self.device,
+            &self.device_lost,
+            wgpu::PollType::wait_indefinitely(),
+        )?;
         receiver
             .recv()
             .map_err(|e| e.to_string())?
@@ -198,6 +202,7 @@ mod tests {
             .start(
                 Reader {
                     device,
+                    device_lost: Default::default(),
                     config: wgpu::SurfaceConfiguration {
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                         format: wgpu::TextureFormat::Bgra8Unorm,

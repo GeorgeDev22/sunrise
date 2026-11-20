@@ -87,7 +87,7 @@ During registration, `r.block_capability_names()` and `r.block_capability_proxya
 the capabilities discovered so far. After publication, use `block_capability_names(host)`,
 `block_capability_proxyable(host, name)` and `block_capability_proxyable_names(host)`; the last
 returns precisely the known names whose proxyability reads `true`. These owned snapshots use the
-same published metadata on native and wasm. Proxyability is metadata for forwarding mods, not a
+published metadata. Proxyability is metadata for forwarding mods, not a
 change to provider lookup order or a guarantee that a provider will answer.
 
 These rules follow NeoForge 26.3's
@@ -126,7 +126,7 @@ transaction and return `Err` to abort. See [Transactions](transactions.md).
 
 Vanilla containers, composter-provided containers and container entities keep their direct
 automation paths even if a mod also exposes storage. Only blocks without a vanilla container
-use the storage attempt path, identically for native and portable handlers.
+use the storage attempt path.
 
 - A pull skips only a fully stacked hopper. It visits every nonempty index of the source's
   bottom-face storage in order, extracts one in a fresh transaction, then chooses the first
@@ -159,12 +159,6 @@ The comparator regression uses a supported comparator in a forced, lit chunk wit
 neighbours loaded. It drives the real scheduler before each hopper tick, retaining literal
 comparator executions on game ticks 3 and 5 rather than manually firing those ticks.
 
-`game::machines::native_items::storage_attempt_wasm_tests::compiled_guest_storage_notifies_reentrantly_before_actual_hopper_abort`
-loads the repository's compiled `wasm-fixture` package and matching shared standard library
-(`SUNRISE_WASM_FIXTURE`, `SUNRISE_WASM_STD`). Its pull and push cases invoke real guest storage,
-reenter that same active guest through `contents_changed`, and retain the callback observations
-across actual Game transaction aborts.
-
 Composters need no block entity. Their top and unsided `ITEMS` ports each expose one empty input
 slot: below level seven, each insertion consumes **one** compostable item, even when offered a
 stack, and evaluates the same vanilla layers provider and random draw algorithm as hopper insertion.
@@ -186,5 +180,4 @@ Maturation still takes twenty server ticks after committing level seven. These p
 fixed one-item limit and refuse `set_max_stack_size`.
 
 Look up a neighbour once per tick and reuse the `Capability` for that tick's moves. Look it up again
-on the next tick because the block entity may have been removed. Reusing a lookup also avoids repeated
-sandbox crossings for wasm mods.
+on the next tick because the block entity may have been removed.

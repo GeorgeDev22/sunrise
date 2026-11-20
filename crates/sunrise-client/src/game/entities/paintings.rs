@@ -499,6 +499,7 @@ impl Game<'_> {
                             height: p.height,
                         }),
                         item_frame: None,
+                        attachments: None,
                     }
                     .into();
                 let light = self.world.light(p.pos[0], p.pos[1], p.pos[2]);
@@ -508,6 +509,7 @@ impl Game<'_> {
                     &entity,
                     "minecraft:painting",
                     at - camera,
+                    Some(at),
                     p.pos,
                     packed,
                     out,

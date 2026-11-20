@@ -221,7 +221,9 @@ impl Game<'_> {
                         r.server_links = crate::game::server_links::trusted(links);
                     }
                 }
-                Event::ShowDialog(dialog) => self.show_dialog(&dialog),
+                Event::ShowDialog { dialog, registries } => {
+                    self.show_dialog_in_phase(&dialog, Some(registries));
+                }
                 Event::ClearDialog => self.clear_dialog(),
                 Event::CodeOfConduct(text) => self.handle_code_of_conduct(text),
                 Event::DecodeError(e) => {

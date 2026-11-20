@@ -53,7 +53,8 @@ pub trait DrawContext {
         unimplemented!("DrawContext::fill_gradient")
     }
     /// Part `src` (`[x, y, w, h]` in the sprite's own pixels) of sprite
-    /// `name` (vanilla's `gui/...`, a content mod's GUI texture `mymod:gui/...`, or
+    /// `name` (a GUI atlas sprite by its id, `container/slot` or a mod's `mymod:panel`, another
+    /// texture the atlas holds such as vanilla's `gui/...` files, or
     /// a client mod's dynamic texture, `ClientRenderClientHost::create_dynamic_texture`),
     /// drawn stretched into `dst` (`[x, y, w, h]` in GUI pixels), every texel multiplied by
     /// `tint` (`0xAARRGGBB`, a fluid's colour) when there is one. False when there is
@@ -226,6 +227,28 @@ pub trait DrawContext {
     fn entity(&mut self, entity: &GuiEntity, view: GuiEntityView) -> Result<(), GuiEntityError> {
         Err(GuiEntityError::Unavailable)
     }
+    /// Draws an item or a resolved standalone model in 3D at `view.at`, `view.size` GUI pixels a
+    /// block, under the 3x4 `view.transform` the caller gives (any rotation, roll included), as
+    /// Create's symmetry wand screen draws its wand and its mirror. Orthographic, in the frame
+    /// `x` right, `y` up, `z` towards the viewer.
+    ///
+    /// - An item is drawn as a slot draws it (its model's `gui` display transform, then
+    ///   `view.transform`, lit with the GUI light that model asks for: flat items side lit,
+    ///   block-like items front lit); its count, damage bar and cooldown are not drawn.
+    /// - A model is drawn full bright and shaded by face, as the blocks of a scene are.
+    /// - Both subjects have a depth of their own, so a draw never intersects what the screen
+    ///   drew before or after it, and later drawing covers it in call order. An item's faces meet
+    ///   each other by depth, as a model's do, and its enchantment glint follows them; the
+    ///   OptiFine CIT glint layers of a stack are not drawn on this path yet (sunrise#3555). There
+    ///   is no z input. Both are cut by the clips opened with [`DrawContext::push_clip`], as
+    ///   `fill` is.
+    ///
+    /// A client's call from a drawing hook (`screen_draw`, `gui_render_post`); on a server it is
+    /// refused. Per call it draws the subject's baked quads, the cached model a slot's item
+    /// uses, with nothing on the tick path.
+    fn model_3d(&mut self, subject: Gui3dSubject, view: Gui3dView) -> Result<(), Gui3dError> {
+        Err(Gui3dError::Unavailable)
+    }
     /// `Screen.renderMenuBackground`: draws the tiled menu background (32x32) across `rect`
     /// (`[x, y, w, h]` in GUI pixels). If `in_world` is true, uses the dark translucent
     /// texture (`gui/inworld_menu_background`); otherwise uses the opaque dirt-like
@@ -318,15 +341,30 @@ pub trait BlockEntityDrawContext {
     fn animation_time(&self) -> f64 {
         unimplemented!("BlockEntityDrawContext::draw_animation_time")
     }
-    /// The light the helpers draw with: the block's own
-    /// (`LevelRenderer.getLightCoords`), 16 times sky light in bits 0..8 and
-    /// 16 times block light in bits 8..16.
+    /// The fixed light setting, even while [`Self::level_light`] is enabled. It starts
+    /// as the block's or entity's light: 16 times sky light in bits 0..8 and 16 times
+    /// block light in bits 8..16.
     fn light(&self) -> u32 {
         unimplemented!("BlockEntityDrawContext::draw_light")
     }
     /// Lights what is drawn next with `light` (as `native_draw_light` reads it).
     fn set_light(&mut self, light: u32) {
         unimplemented!("BlockEntityDrawContext::draw_set_light")
+    }
+    /// Lights what is drawn next by the level's sky and block light. Each element uses
+    /// one level-light sample, at its centre under the pose and any applied `spin`:
+    /// the unit-cell centre for `block`, `model` and `terrain_model`, the box midpoint
+    /// for `cube`, or the mean of the corners for `quad`. Baked emission and other
+    /// per-channel light floors still apply. Items, text and other draws keep the fixed
+    /// light setting. `set_light` returns to fixed light, which is the default.
+    ///
+    /// Works in world block-entity and entity renderers. Level-less scenes, previews
+    /// and mob model frames use the fixed light, as does an element whose sample centre
+    /// lies outside the representable cell coordinates. With `keep`, geometry under
+    /// `spin` is sampled again each frame without a new submit; stationary geometry keeps
+    /// the light it was drawn with until the draw is invalidated.
+    fn level_light(&mut self) {
+        unimplemented!("BlockEntityDrawContext::draw_level_light")
     }
     /// Draws a quad with `corners` in blocks under `draw`'s pose, in a model
     /// face's order (top left, bottom left, bottom right, top right as seen
@@ -391,8 +429,9 @@ pub trait BlockEntityDrawContext {
     /// their phases apart (a cog meshing with its neighbour). Draw the part at rest; the
     /// game turns it each frame, and with `keep` without asking again until the block
     /// entity changes. With a new speed, pass `old_angle - animation_time() * new_speed`
-    /// as the phase to keep the part where it was. Quads drawn while it is active are lit
-    /// where they turn to. Until `still` or the next `spin`. A mob's frame draws it at rest.
+    /// as the phase to keep the part where it was. For `quad` and `cube`, directional
+    /// shading follows the turn. Light stays fixed unless `level_light` is on. Until
+    /// `still` or the next `spin`. Entity renderer and mob model frames draw it at rest.
     fn spin(&mut self, axis: [f32; 3], pivot: [f32; 3], degrees_per_tick: f32, phase: f32) {
         unimplemented!("BlockEntityDrawContext::draw_spin")
     }
@@ -410,10 +449,11 @@ pub trait BlockEntityDrawContext {
     }
     /// Draws the resolved standalone model under `draw`'s pose, as [`Self::model`] places it,
     /// with the terrain's own materials: the block sprites (animated, mipmapped as the options
-    /// set), back faces culled, colour and depth written as opaque terrain, lit by
+    /// set, sampled as vanilla's moving blocks are: linear minification, nearest
+    /// magnification), back faces culled, colour and depth written as opaque terrain, lit by
     /// `draw.light` raised by each quad's own emission. `options` picks the material
     /// (each quad's `solid`, `cutout` or `cutout_mipped`, or one for all: cutout discards
-    /// under alpha 0.1 without mipmaps, cutout-mipped under 0.5 with them), the directional
+    /// under alpha 0.1, cutout-mipped under 0.5), the directional
     /// shading (independent of light), one sprite drawn as another with moved UVs, a UV
     /// shrink, and a `0xRRGGBB` tint on quads with a tint index. What a machine's belts,
     /// shafts and casings draw with. A refusal draws nothing.
@@ -471,12 +511,15 @@ pub trait BlockEntityDrawContext {
         unimplemented!("BlockEntityDrawContext::draw_model_part")
     }
     /// Draws `stack` as a still fluid filling `bounds` (`[x0, y0, z0, x1, y1, z1]` in blocks
-    /// under `draw`'s pose), as a tank's contents: `minecraft:water` or `minecraft:lava` with no
-    /// components. Each face tiles the fluid's animated still sprite (`block/water_still`), one
-    /// tile per block, cut at whole-block lines and keeping each part's place in its tile, with
-    /// no inset of the box. The tint is the stack's, not the biome's water colour, unless
-    /// `options.argb` replaces it. Sky light stays as `draw.light`; block light rises to the
-    /// fluid's own (15 for lava). No face is shaded by direction. Faces are sorted far to
+    /// under `draw`'s pose), as a tank's contents: `minecraft:water`, `minecraft:lava` or any
+    /// fluid with a look (`data/<mod>/sunrise/fluid/<name>.json`). A stack's components change
+    /// nothing: pass `options.argb` to colour a potion-like stack. Each face tiles the fluid's
+    /// animated still sprite (`block/water_still`, a look's `sprite`; a look with no sprite draws
+    /// its tint flat), one tile per block, cut at whole-block lines and keeping each part's
+    /// place in its tile, with no inset of the box. The tint is the fluid's (water `0xFF3F76E4`,
+    /// lava white, a look's `tint`, grey `0xFF9A9A9A` when it has none, as `fluid` draws it), not the biome's water
+    /// colour, unless `options.argb` replaces it. Sky light stays as `draw.light`; block light
+    /// rises to the fluid's `light_level` (15 for lava). No face is shaded by direction. Faces are sorted far to
     /// near, alpha blended, culled from behind and write depth, drawn with the block entities
     /// before the level's translucent terrain. A stack of 0 draws nothing and is `Ok` without
     /// checking `bounds`; a refusal draws nothing.
@@ -546,9 +589,11 @@ pub trait WorldDrawContext {
     /// [`NameTagOptions::see_through`] it is drawn once, as a sneaking name: depth tested and
     /// translucent, the faded text on the backdrop, in [`NameTagOptions::light`] as given. With
     /// it, twice, as an unsneaking name: opaque in the world (sky and block light each at least
-    /// 2), and faded on the backdrop over everything, walls included, unlit. Labels draw with
-    /// the world's name tags, far to near, whatever the stage. Each glyph and backdrop quad, both copies counted, takes one of
-    /// the view's 4,096 quads shared with [`quads`](Self::quads) ([`usage`](Self::usage)).
+    /// 2, or exactly [`NameTagOptions::light`] with [`NameTagOptions::exact_light`]), and
+    /// faded on the backdrop over everything, walls included, unlit. Labels draw with the
+    /// world's name tags, far to near, whatever the stage. Each glyph and backdrop quad, both
+    /// copies counted, takes one of the view's 4,096 quads shared with
+    /// [`quads`](Self::quads) ([`usage`](Self::usage)).
     /// Refuses a non-finite `at` ([`DrawError::NonFinite`]), text deeper than 512 component
     /// nodes ([`DrawError::TextTooDeep`]) or otherwise refused ([`DrawError::TextRefused`]),
     /// and a label past the quads left ([`DrawError::CapacityExceeded`]); on `Err` nothing
@@ -570,17 +615,21 @@ pub trait WorldDrawContext {
     ///
     /// One batch per model. The engine uploads only the instance records on the opaque
     /// and cutout route, and bakes the same prepared geometry on the CPU when a shader
-    /// pack, a copy with an [`Overlay`], or another route cannot take instances. A
+    /// pack, a copy with an [`Overlay`], a [`ModelInstance::color`] other than white, a
+    /// [`ModelInstance::hidden_faces`] or another route cannot take instances. A
     /// `shaders/` pack shades those copies as block entities, with the program that shades
-    /// [`BlockEntityDrawContext::model`]. A model with a translucent face is refused with
-    /// [`InstanceError::Translucent`] and is never drawn as solid.
+    /// [`BlockEntityDrawContext::model`], except the translucent copies below and copies of a
+    /// block state model, which take the terrain model materials. A copy with a colour alpha below `0xFF`, or of a model
+    /// with a translucent face, is drawn in the sorted translucent material vanilla uses for a
+    /// translucent block outside the terrain (`translucent_moving_block`: alpha blended, depth
+    /// tested, depth written, back faces culled), their quads sorted far to near each frame as
+    /// vanilla's `sortOnUpload` does.
     /// Tint is `0xAARRGGBB` and light is [`LightCoords`]: both stay in
     /// vanilla's space, and the engine converts them to the frame. A tint's alpha
     /// multiplies only faces that have a tint index, the same as vanilla's model
-    /// renderer. The view budget is 16,384 copies. Pass at most that many: a longer
+    /// renderer; [`ModelInstance::color`] multiplies every face. The view budget is 16,384 copies. Pass at most that many: a longer
     /// list is refused with [`InstanceError::CapacityExceeded`] before any copy is
-    /// examined. On wasm the guest pays for the list it passes, because the runtime
-    /// lifts the slice before that check. Within the bound, copies outside the frustum
+    /// examined. Within the bound, copies outside the frustum
     /// are omitted and do not count. On `Err`, nothing from this call is drawn.
     fn draw_model_instances(
         &mut self,

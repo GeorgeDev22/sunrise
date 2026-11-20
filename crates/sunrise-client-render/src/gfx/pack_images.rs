@@ -547,17 +547,25 @@ impl Dump {
     }
 
     /// Reads last frame's copy, once its commands ran.
-    pub(super) fn read(&mut self, device: &wgpu::Device) {
+    pub(super) fn read(
+        &mut self,
+        device: &wgpu::Device,
+        lost: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), String> {
         let Some((buffer, texel, [w, h, d], row)) = self.pending.take() else {
-            return;
+            return Ok(());
         };
         buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
+        super::in_flight::poll_live(
+            device,
+            lost,
+            wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            },
+        )?;
         let Ok(data) = buffer.slice(..).get_mapped_range() else {
-            return;
+            return Ok(());
         };
         let (mut set, mut total) = (0usize, 0usize);
         for z in 0..d as usize {
@@ -576,6 +584,7 @@ impl Dump {
             "shader pack image {}: {set} of {total} texels set",
             self.name
         );
+        Ok(())
     }
 
     /// Copies the image for `read` every 60 frames.

@@ -123,7 +123,12 @@ mod tests {
                         serde_json::to_vec(&definition).unwrap(),
                     )
                     .unwrap();
-                    std::fs::write(definitions.join("unknown.json"), serde_json::to_vec(&serde_json::json!({"effects":{"minecraft:damage":[{"effect":{"type":"absent:damage"}}]}})).unwrap()).unwrap();
+                    std::fs::write(definitions.join("unknown.json"), serde_json::to_vec(&serde_json::json!({
+                        "description":"Unknown fixture", "supported_items":"minecraft:stick", "weight":1, "max_level":1,
+                        "min_cost":{"base":1,"per_level_above_first":0}, "max_cost":{"base":1,"per_level_above_first":0},
+                        "anvil_cost":1, "slots":["mainhand"],
+                        "effects":{"minecraft:damage":[{"effect":{"type":"absent:damage"}}]}
+                    })).unwrap()).unwrap();
                     game.world_root = root.clone();
                     let stack = game.reload_datapacks(false, &[]).unwrap();
                     let resources = game.options.resources.clone();

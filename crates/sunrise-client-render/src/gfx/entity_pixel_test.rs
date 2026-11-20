@@ -1130,7 +1130,9 @@ pub fn render_pack(
         [SIZE; 2],
         &[],
         &mut |_, _, _, _| {},
-    );
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
     let (color, read) = (screen.texture(), SIZE * 4);
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,

@@ -71,7 +71,7 @@ enum Asset {
 }
 
 /// Checks the references among `content`'s files; `Err` only when a file cannot be read.
-/// A mod with code (`native`, `wasm`) also declares ids in code, so the ids it declares in files
+/// A native mod also declares ids in code, so the ids it declares in files
 /// are not taken for all of them; a mod with `jar` layers may find assets and data there.
 pub fn check_references(content: &Content, manifest: &Manifest) -> Result<Findings, String> {
     let atlas = |name: &String| {
@@ -82,7 +82,7 @@ pub fn check_references(content: &Content, manifest: &Manifest) -> Result<Findin
         content,
         manifest,
         reader: content.reader()?,
-        code: manifest.native.is_some() || manifest.wasm.is_some(),
+        code: manifest.native.is_some(),
         jar: !manifest.jar.is_empty() || !manifest.dependencies.is_empty(),
         atlas: content.files.iter().any(atlas),
         recipe_filters: content.files.iter().any(|name| {

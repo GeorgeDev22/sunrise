@@ -154,7 +154,7 @@ pub struct Asset {
 pub enum Kind {
     /// `surface.json`: what an API-only mod can name.
     Surface,
-    /// `build-data.tar.xz`: `points.json`, `internals.json`, `loops.json`, `functions.json`.
+    /// `build-data.tar.xz`: `internals.json`, `loops.json`, `functions.json`.
     BuildData,
     /// The API crates with their generated code written out.
     ApiSource,
@@ -311,8 +311,7 @@ impl Inputs {
     }
 
     /// How to make `name` (as listed, without `.exe`) for the game program `program`: `PROFILE`
-    /// becomes the cargo flag of the profile `program` was built with (its folder's name) and
-    /// `PROGRAM_FOLDER` its folder, so the command makes the file where the check looks.
+    /// becomes the cargo flag of the profile `program` was built with (its folder's name).
     /// A program outside `target/<profile>/` (or `target/<triple>/<profile>/`) gets the command
     /// with no flag and the words "with the same profile as the game program".
     pub fn how(&self, name: &str, program: &Path) -> Option<String> {
@@ -323,14 +322,13 @@ impl Inputs {
         let in_target = named(folder.parent()) == Some("target")
             || named(folder.parent().and_then(Path::parent)) == Some("target");
         let how = self.how.get(name)?;
-        let how = match named(Some(folder)).filter(|_| in_target) {
+        Some(match named(Some(folder)).filter(|_| in_target) {
             _ if !how.contains("PROFILE") => how.clone(),
             Some("debug") => how.replace("PROFILE ", ""),
             Some("release") => how.replace("PROFILE", "--release"),
             Some(other) => how.replace("PROFILE", &format!("--profile {other}")),
             None => how.replace("PROFILE ", "") + ", with the same profile as the game program",
-        };
-        Some(how.replace("PROGRAM_FOLDER", &folder.display().to_string()))
+        })
     }
 
     /// Every file of `route` that is missing, beside `program` or in `checkout`, together with

@@ -351,7 +351,9 @@ fn render(
         window,
         &[],
         &mut |_, _, _, _| {},
-    );
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
     encoder.copy_texture_to_buffer(
         screen.texture().as_image_copy(),
         wgpu::TexelCopyBufferInfo {

@@ -240,7 +240,6 @@ class ReleaseTrainTests(unittest.TestCase):
         def api(*arguments):
             self.assertEqual(arguments[:2], ("api", "--paginate"))
             path = arguments[2]
-            self.assertNotIn("wasm-mods.yml", path, "the fixture runs in the daily run, not on main pushes")
             if "dyna-ci.yml/runs?" in path:
                 self.assertIn("branch=main&event=push", path)
                 return [{"workflow_runs": records[:3]}, {"workflow_runs": records[3:]}]

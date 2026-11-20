@@ -3,7 +3,7 @@
 //! tendril animations, the model and its emissive layers. Its brain
 //! (`WardenAi`) is in `warden_brain`.
 use super::{
-    Damage, DamageKind, Mob, MobEvent, MobWorld, Species, TargetChange, Who,
+    Damage, Mob, MobEvent, MobWorld, Species, TargetChange, Who,
     anim::{Poses, State},
     keyframes::Animation,
     path::PathType,
@@ -577,14 +577,7 @@ pub fn hurt(m: &mut Mob, source: &Damage) {
     if m.no_ai || digging_or_emerging(m) {
         return;
     }
-    let direct = !matches!(
-        source.kind,
-        DamageKind::Arrow
-            | DamageKind::Thrown
-            | DamageKind::Fireball
-            | DamageKind::WitherSkull
-            | DamageKind::WindCharge
-    );
+    let direct = !source.implies_projectile_source();
     if let Some(st) = m.extra.warden.as_mut() {
         st.hurt_by.push((source.attacker, direct));
     }

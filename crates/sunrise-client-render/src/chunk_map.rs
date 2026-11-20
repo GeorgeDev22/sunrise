@@ -314,8 +314,15 @@ impl crate::light::LightWorld for ChunkMap {
     fn section(&self, cx: i32, s: usize, cz: i32) -> Option<&Arc<crate::chunk::Section>> {
         self.columns.section(cx, s, cz)
     }
-    fn set_section_light(&mut self, cx: i32, s: usize, cz: i32, light: crate::chunk::Light) {
-        self.columns.set_section_light(cx, s, cz, light);
+    fn set_section_light(
+        &mut self,
+        cx: i32,
+        s: usize,
+        cz: i32,
+        light: crate::chunk::Light,
+        changed: &mut crate::light::LightChanges,
+    ) {
+        self.columns.set_section_light(cx, s, cz, light, changed);
     }
     fn layout(&self) -> crate::chunk::ColumnLayout {
         self.columns.layout()
@@ -407,6 +414,7 @@ mod tests {
             0,
             5,
             crate::chunk::Light::Uniform(0),
+            &mut crate::light::LightChanges::default(),
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert!(Arc::ptr_eq(&old, &index.lock().unwrap().snapshot(&key())));
@@ -583,6 +591,7 @@ mod tests {
             0,
             0,
             crate::chunk::Light::Uniform(0),
+            &mut crate::light::LightChanges::default(),
         );
         assert_eq!(inserted, map.membership_revision());
         map.remove(&(0, 0));

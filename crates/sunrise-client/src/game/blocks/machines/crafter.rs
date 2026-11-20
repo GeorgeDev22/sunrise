@@ -217,6 +217,8 @@ impl Game<'_> {
                     origin: me.position,
                     tool: None,
                     block_pos: None,
+                    target: None,
+                    interacting: None,
                 };
                 adv::conditions(&c["player"], &ctx, w) && recipe_matches(&c["recipes"], &id)
             });

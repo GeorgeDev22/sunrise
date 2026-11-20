@@ -431,6 +431,21 @@ impl Default for Pass {
     }
 }
 
+pub(in crate::game) enum ServerTickPhase {
+    Level(usize, Dim),
+    Connections,
+}
+
+/// `MinecraftServer.tickChildren`: finish the level phase before ticking connections.
+pub(in crate::game) fn server_tick_phases(levels: &[Dim]) -> impl Iterator<Item = ServerTickPhase> {
+    levels
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, dim)| ServerTickPhase::Level(index, dim))
+        .chain(std::iter::once(ServerTickPhase::Connections))
+}
+
 /// How long a server tick took and what it spent the time in.
 pub(super) struct TickTiming {
     pub wall_ms: f32,
@@ -726,7 +741,7 @@ impl Game<'_> {
             dim,
             self.level_shapes.get(dim.id()),
             seed,
-            &self.level.enabled_features,
+            &self.level,
             self.world_biomes
                 .as_ref()
                 .unwrap_or_else(|| self.res.biomes())
@@ -1181,9 +1196,9 @@ impl Game<'_> {
     /// players or forced chunks in turn (`tickChildren`), its chunks streamed
     /// and loaded and its world ticked. The first pass reads the network and runs the
     /// tick's shared parts (the clock, the weather, functions, the autosave);
-    /// the next ones only their level. While `paused`, only the connections
-    /// run. The native server tick hook brackets it (`ServerTickStart` before
-    /// the first level, `ServerTickEnd` after the last).
+    /// the next ones only their level. Connection player ticks follow all
+    /// levels. While `paused`, the network runs but player bodies do not.
+    /// `ServerTickStart` and `ServerTickEnd` bracket the whole tick.
     pub(super) fn tick_server(&mut self, paused: bool) -> Result<()> {
         self.with_residency_tick(|game| game.tick_server_body(paused))
     }
@@ -1230,11 +1245,28 @@ impl Game<'_> {
         }
         let observe_level =
             running.is_some() && (self.serving.is_some() || self.options.dedicated.is_some());
-        let dims = self.levels_to_tick();
-        let order = dims.clone();
-        let n = dims.len();
+        let order = self.levels_to_tick();
+        let n = order.len();
         let mut result = Ok(());
-        for (k, dim) in dims.into_iter().enumerate() {
+        for phase in server_tick_phases(&order) {
+            let ServerTickPhase::Level(k, dim) = phase else {
+                if running.is_some() && self.lan.is_some() {
+                    let holding = sunrise_client::lan::Holding::start();
+                    result = sunrise_client::spans::time("lan_guest_connections", || {
+                        self.tick_guest_connections(true)
+                    });
+                    if result.is_ok()
+                        && let Some(host) = self.lan.as_mut()
+                    {
+                        sunrise_client::spans::time("lan_end_tick", || host.hub.end_tick());
+                    }
+                    drop(holding);
+                    if let Some(host) = self.lan.as_ref() {
+                        sunrise_client::lan::flush_all(host.hub.guests.iter().map(|g| &g.sender));
+                    }
+                }
+                break;
+            };
             // Each level's share of the tick (the first one also reads the network and runs the
             // tick's shared parts): `sunrise-report`'s `level_*` spans.
             sunrise_threads::work::set_dim(match dim {
@@ -1273,7 +1305,11 @@ impl Game<'_> {
             let history = self
                 .collider_history(&colliders)
                 .map(sunrise_client_render::moving_colliders::HistoryScope::enter);
-            result = sunrise_client_render::moving_colliders::in_level(colliders.clone(), || {
+            result = {
+                let _scope = sunrise_client_render::moving_colliders::Scope::enter_level(
+                    self.collider_level(),
+                    colliders.clone(),
+                );
                 sunrise_client::block_contact::in_level(
                     self.tick,
                     (self.serving.is_some() || self.options.dedicated.is_some())
@@ -1292,7 +1328,7 @@ impl Game<'_> {
                         }
                     },
                 )
-            });
+            };
             drop(history);
             // Then the bodies standing on a collider that moved are carried with it.
             if result.is_ok() && !paused {

@@ -8,10 +8,24 @@
 //! maps are kept as found (structure search is not run); conditions that
 //! need an entity, tool or damage source fail when the context has none, as
 //! they do for containers.
+mod component_validation;
 mod fill;
 pub mod global_modifiers;
 pub mod number;
 pub mod query;
+use component_validation::retain_valid;
+pub use component_validation::{
+    validate_entity_predicate, validate_item_modifier, validate_item_predicate,
+    validate_loot_condition, validate_loot_table, validate_slot_source,
+};
+mod component_validation_nbt;
+pub use component_validation_nbt::{
+    validate_item_modifier_tag, validate_loot_condition_tag, validate_loot_table_tag,
+};
+mod number_validation;
+pub use number_validation::{
+    number as validate_number_provider, number_tag as validate_number_provider_tag,
+};
 #[path = "loot_query.rs"]
 mod query_context;
 mod root;
@@ -643,7 +657,8 @@ pub fn shared_tables(root: &Path, overlay: &PackOverlay) -> io::Result<Arc<LootT
     if let Some(tables) = held(&mut LOADED.lock().unwrap_or_else(|e| e.into_inner())) {
         return Ok(tables);
     }
-    let tables = load_resources::load_ordered_kind(root, overlay, "loot_table")?;
+    let mut tables = load_resources::load_ordered_kind(root, overlay, "loot_table")?;
+    tables.retain(|id, table| retain_valid("loot table", id, validate_loot_table(table)));
     let tables: LootTables = tables.into_iter().collect();
     let mut loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
     // Another thread may have loaded the same tables meanwhile: keep one.
@@ -702,6 +717,14 @@ impl LootData {
         let mut recipes = HashMap::new();
         load_kind(&root.join("data"), "recipe", &mut recipes)?;
         overlay_map(overlay, "recipe", &mut recipes);
+        recipes.retain(|id, value| {
+            value["type"] != "minecraft:smelting"
+                || retain_valid(
+                    "recipe",
+                    id,
+                    crate::item_defaults::validate_stack(&value["result"]),
+                )
+        });
         let mut ids: Vec<&String> = recipes.keys().collect();
         ids.sort();
         loaded.smelting = ids
@@ -749,8 +772,12 @@ impl LootData {
     ) -> io::Result<Self> {
         let all = root.join("data");
         let tables = shared_tables(root, overlay)?;
-        let modifiers = load_resources::load_ordered_kind(root, overlay, "item_modifier")?;
-        let predicates = load_predicates(root, overlay)?;
+        let mut modifiers = load_resources::load_ordered_kind(root, overlay, "item_modifier")?;
+        modifiers
+            .retain(|id, value| retain_valid("item modifier", id, validate_item_modifier(value)));
+        let mut predicates = load_predicates(root, overlay)?;
+        predicates
+            .retain(|id, value| retain_valid("predicate", id, validate_loot_condition(value)));
         let items = defaults
             .entries()
             .iter()

@@ -788,6 +788,7 @@ mod tests {
         assert!(
             with_test_world(&seen, |w, _| {
                 let indexed = MobWorld {
+                    side: sunrise_client::motion::dry_side(),
                     others_grid: Some(&grid),
                     ..w.clone()
                 };

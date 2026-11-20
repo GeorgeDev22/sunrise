@@ -115,6 +115,11 @@ impl DataPack {
         }
     }
 }
+/// Compare repository IDs as `PackRepository`'s TreeMap compares its keys.
+pub fn compare_ids(a: &str, b: &str) -> std::cmp::Ordering {
+    a.encode_utf16().cmp(b.encode_utf16())
+}
+
 /// The packs in `<world>/datapacks`, sorted by name.
 pub fn discover(world: &Path) -> Vec<DataPack> {
     discover_folder(&world.join("datapacks"))
@@ -168,7 +173,7 @@ pub(crate) fn discover_folder_with(
             });
         }
     }
-    packs.sort_by(|a, b| a.id.cmp(&b.id));
+    packs.sort_by(|a, b| compare_ids(&a.id, &b.id));
     packs
 }
 /// `Pack.readPackMetadata`: even its fallback codec requires a pack section
@@ -232,7 +237,7 @@ pub fn feature_packs(resources: &Path) -> Vec<DataPack> {
             packs.push(pack);
         }
     }
-    packs.sort_by(|a, b| a.id.cmp(&b.id));
+    packs.sort_by(|a, b| compare_ids(&a.id, &b.id));
     packs
 }
 /// The packs of `<world>/datapacks` plus the resources root's feature packs:
@@ -240,6 +245,7 @@ pub fn feature_packs(resources: &Path) -> Vec<DataPack> {
 pub fn discover_with_features(world_root: &Path, resources: &Path) -> Vec<DataPack> {
     let mut packs = discover(world_root);
     packs.extend(feature_packs(resources));
+    packs.sort_by(|a, b| compare_ids(&a.id, &b.id));
     packs
 }
 
@@ -947,6 +953,33 @@ impl DataStore {
                 }
             }
         }
+        s.predicates.retain(|id, value| {
+            match sunrise_world::loot::validate_loot_condition(value) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("predicate {id} rejected: {error}");
+                    false
+                }
+            }
+        });
+        s.item_modifiers.retain(|id, value| {
+            match sunrise_world::loot::validate_item_modifier(value) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("item modifier {id} rejected: {error}");
+                    false
+                }
+            }
+        });
+        s.slot_sources.retain(
+            |id, value| match sunrise_world::loot::validate_slot_source(value) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("slot source {id} rejected: {error}");
+                    false
+                }
+            },
+        );
         s
     }
     /// `ServerFunctionLibrary.getTag`: only valid function tags expand
@@ -2055,6 +2088,38 @@ mod tests {
         );
         assert!(store.function_tags["demo:unknown"].is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn newly_discovered_packs_follow_utf16_after_saved_selections() {
+        let world = temp_folder().unwrap();
+        for name in ["z-saved", "a-new", "\u{e000}", "\u{10000}"] {
+            let dir = world.join("datapacks").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("pack.mcmeta"),
+                r#"{"pack":{"description":"order"}}"#,
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            world.join("datapacks.json"),
+            r#"{"enabled":["file/z-saved"]}"#,
+        )
+        .unwrap();
+        let packs = discover(&world);
+        let selected = enabled_ids(&world, &packs, &[]);
+        std::fs::remove_dir_all(world).unwrap();
+        // Temurin 25.0.5 natural String order for the three newly added IDs.
+        assert_eq!(
+            selected,
+            [
+                "file/z-saved",
+                "file/a-new",
+                "file/\u{10000}",
+                "file/\u{e000}"
+            ]
+        );
     }
 
     #[test]

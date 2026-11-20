@@ -441,6 +441,7 @@ macro_rules! base_level_reads {
 
 impl mod_api::LevelHost for FireOddsLevel<'_> {
     base_level_reads! {
+        fn block_states() -> mod_api::BlockStates<'_>;
         fn container_size(at: mod_api::BlockSide) -> Option<usize>;
         fn container_stack(at: mod_api::BlockSide, slot: usize) -> Option<mod_api::ItemStack>;
         fn block_state_id(name: &str) -> Option<mod_api::BlockState>;
@@ -555,6 +556,9 @@ impl mod_api::LevelHost for FireOddsLevel<'_> {
 }
 
 impl mod_api::LevelHost for super::GameLevel<'_> {
+    fn block_states(&self) -> mod_api::BlockStates<'_> {
+        mod_api::BlockStates::of(&self.tables)
+    }
     fn block_face_sturdy(
         &self,
         pos: [i32; 3],
@@ -1013,6 +1017,9 @@ impl<
     T: std::ops::Deref<Target = Ticks>,
 > mod_api::LevelHost for LevelTicks<'b, L, T>
 {
+    fn block_states(&self) -> mod_api::BlockStates<'_> {
+        mod_api::LevelHost::block_states(&*self.level)
+    }
     fn block_face_sturdy(
         &self,
         pos: [i32; 3],

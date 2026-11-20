@@ -48,7 +48,7 @@ impl ModBlockEntityFields {
     /// The retained `Items` rows are their own ownership record. A modeled
     /// stack taking a slot drops its pending saved row from the same snapshot.
     fn claim_modeled_item_rows(&mut self) {
-        if let Some(Tag::List(rows)) = self.nbt.get_mut(&*ITEMS) {
+        if let Some(Tag::List(rows)) = self.nbt.get_mut(&ITEMS) {
             rows.retain(|row| {
                 saved_item_slot(row)
                     .is_none_or(|slot| self.items.get(slot).is_none_or(Option::is_none))
@@ -86,7 +86,7 @@ impl ModBlockEntity {
     }
 
     pub fn has_opaque_item_slot(&self, slot: usize) -> bool {
-        matches!(self.nbt.get(&*ITEMS), Some(Tag::List(rows)) if
+        matches!(self.nbt.get(&ITEMS), Some(Tag::List(rows)) if
             rows.iter().any(|row| saved_item_slot(row) == Some(slot)))
     }
 
@@ -95,7 +95,7 @@ impl ModBlockEntity {
         if slot >= self.items.len() {
             return None;
         }
-        if let Some(Tag::List(rows)) = self.fields.nbt.get_mut(&*ITEMS) {
+        if let Some(Tag::List(rows)) = self.fields.nbt.get_mut(&ITEMS) {
             rows.retain(|row| saved_item_slot(row) != Some(slot));
         }
         self.items.get_mut(slot)

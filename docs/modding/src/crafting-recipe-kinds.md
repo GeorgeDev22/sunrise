@@ -23,7 +23,7 @@ r.register_crafting_recipe_serializer("my_mod:diagonal", Diagonal);
 
 Implement `CraftingRecipeKind`. Its mod-owned `Value` must supply
 `Some(CraftingRecipeCodec::wire())` from `codec` and implement `Wire`; a missing
-codec refuses startup on native and wasm alike. `decode` reads the recipe JSON
+codec refuses startup. `decode` reads the recipe JSON
 object with `type` removed. `write` writes an equivalent JSON object for Sunrise
 client synchronization. Known serializers that refuse malformed data skip that
 recipe alone, with the file and serializer in the diagnostic.

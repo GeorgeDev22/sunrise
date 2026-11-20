@@ -11,7 +11,7 @@ mod tests {
     };
     use sunrise_client::{chunk::Chunk, containers::BlockEntity};
     type Log = Arc<Mutex<Vec<(&'static str, i32)>>>;
-    type Payloads = Arc<Mutex<Vec<(BlockEntityRef, i32)>>>;
+    type Payloads = Arc<Mutex<Vec<(BlockEntityRef, i32, [i32; 3], LevelRef)>>>;
     struct Listener {
         air: BlockKey,
         replacement: BlockKey,
@@ -95,7 +95,10 @@ mod tests {
             let Some(Tag::Int(count)) = event.tag.get(&"count".into()) else {
                 panic!("the second Part did not read the applied payload");
             };
-            self.0.lock().unwrap().push((event.entity, *count));
+            self.0
+                .lock()
+                .unwrap()
+                .push((event.entity, *count, event.pos, event.level));
         }
     }
 
@@ -306,7 +309,7 @@ mod tests {
                     Ok(true)
                 );
                 assert_eq!(*log.lock().unwrap(), [("load", 7), ("payload", 19)]);
-                assert_eq!(*payloads.lock().unwrap(), [(entity, 19)]);
+                assert_eq!(*payloads.lock().unwrap(), [(entity, 19, [1, 64, 1], level)]);
 
                 let stone = game
                     .pack
@@ -318,7 +321,13 @@ mod tests {
                 assert!(game.run_command("clone 1 64 1 1 64 1 2 64 1"));
                 let clone = game.block_entity(level, [2, 64, 1]).unwrap();
                 assert_ne!(clone, entity);
-                assert_eq!(*payloads.lock().unwrap(), [(entity, 19), (clone, 29)]);
+                assert_eq!(
+                    *payloads.lock().unwrap(),
+                    [
+                        (entity, 19, [1, 64, 1], level),
+                        (clone, 29, [2, 64, 1], level)
+                    ]
+                );
                 game.fire_pending_block_entity_loads();
                 assert_eq!(
                     *log.lock().unwrap(),

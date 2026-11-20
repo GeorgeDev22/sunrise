@@ -1299,6 +1299,7 @@ mod gpu_span_tests {
             super::super::TERRAIN_MODEL_SOLID_OVERLAY,
             super::super::TERRAIN_MODEL_CUTOUT_OVERLAY,
             super::super::TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY,
+            super::super::TERRAIN_MODEL_TRANSLUCENT_OVERLAY,
         ] {
             let mut mixed = vec![
                 Vertex {

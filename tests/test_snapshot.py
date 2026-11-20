@@ -108,7 +108,7 @@ class NightlyBuildSnapshotTests(unittest.TestCase):
                     if eval(condition.replace("||", "or").replace("&&", "and"), {"__builtins__": {}}):
                         optional.add(row["name"])
                 macs = {"macos", "macos-x64"} if repo == "sunrise-org/sunrise" else ({"macos-x64"} if kind == "snapshot" else set())
-                self.assertEqual(optional, {"windows-arm64", "linux-musl"} | macs)
+                self.assertEqual(optional, {"windows-arm64"} | macs)
         self.assertEqual(game["jobs"]["linux-smoke"]["needs"], "legs")
         # A reusable workflow that ends failed or cancelled (an optional leg) passes back no outputs: signing and
         # publishing follow the legs job's build-complete marker, read by an ordinary job.
@@ -145,8 +145,9 @@ class NightlyBuildSnapshotTests(unittest.TestCase):
             subprocess.run(["bash", "-e", "-o", "pipefail", "-c", notes], cwd=root, check=True)
             body = (root / "dist/nightly-notes.md").read_text()
             self.assertIn("Built: `sunrise-macos-arm64.zip`", body)
-            for missing in ("sunrise-macos-x64.zip", "sunrise-windows-arm64.zip", "sunrise-linux-musl-x86_64.tar.gz"):
+            for missing in ("sunrise-macos-x64.zip", "sunrise-windows-arm64.zip"):
                 self.assertIn(f"Failed or unavailable; not published: `{missing}`", body)
+            self.assertNotIn("musl", body)  # The platform table is for archives published before attachment.
 
     def test_snapshots_never_replace_a_waiting_nightly(self):
         group = self.workflow["concurrency"]["group"]

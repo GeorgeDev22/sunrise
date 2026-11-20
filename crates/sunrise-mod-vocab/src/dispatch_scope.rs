@@ -15,7 +15,6 @@ static BACKEND: OnceLock<Option<Backend>> = OnceLock::new();
 // no wire: process-local scope ownership or callbacks cannot cross a mod boundary.
 pub struct Backend {
     pub registration: &'static crate::__private::RegistrationAccess,
-    pub validate_attachment_use: fn(&str, &str, bool) -> Result<(), crate::AttachmentError>,
     pub diagnostics: &'static Diagnostics,
     pub unresolved_fluids: crate::__private::UnresolvedFluidAccess,
     pub enter: fn(ModGuardFactory, ModCall) -> ModGuard,

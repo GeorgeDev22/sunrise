@@ -312,6 +312,7 @@ mod tests {
                 [(false, true), (true, true), (false, false), (true, false)]
             {
                 let w = MobWorld {
+                    side: sunrise_client::motion::dry_side(),
                     goal_host: None,
                     asks_baby_spawn: ask_mods,
                     mob_drops,

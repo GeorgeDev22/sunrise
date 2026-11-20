@@ -22,19 +22,15 @@ my_mod.smod
 ├── data/my_mod/
 ├── runtime/                # code mods only, optional
 ├── Cargo.toml              # code mods only
-├── src/lib.rs              # code mods only
-└── mod.wasm                # wasm mods only
+└── src/lib.rs              # code mods only
 ```
 
 - **Content only:** no `Cargo.toml` or `[native]`. Nothing compiles.
 - **Native code:** root `Cargo.toml` and `src/`, with `[native]` in the same manifest. The launcher builds it
   against the pinned prebuilt game; mixins compile into a separate function-replacement patch library. The game itself does not compile. Its resources load through the same content reader as a content mod's.
-- **Wasm code:** `mod.wasm` at the top, declared by `[wasm]`, with the `Cargo.toml` and `src/` it was built from
-  (a converted mod records `built_with` instead and carries no source). The game runs it with no rebuild.
-- **Runtime files:** a native or wasm package may carry a `runtime/` folder of data its code opens beside
+- **Runtime files:** a native package may carry a `runtime/` folder of data its code opens beside
   itself, listed in a top-level `[runtime]` table (below). A content mod has none.
-- Inconsistent code declarations and files refuse the package. `mod.wasm` anywhere else, undeclared, or
-  declared but missing, refuses it; so does any other executable file.
+- Inconsistent code declarations or executable files in the archive refuse the package.
 
 There is no mod-id directory level inside the archive. `sunrise-mod.toml` is the only manifest and the only
 source of the mod's id and version; Cargo's package name and version are not mod identity. IDs are plain
@@ -61,39 +57,17 @@ manifest, naming the nearest valid key when one is close. Native mods may declar
 | `mixins` | string, optional | a horizon-mixins commit, 40 lowercase hex characters; when mixins are used it must match the pinned SDK. If omitted, `build` writes the SDK's revision into the package. See [The pin](sdk/03-in-a-project.md#the-pin). |
 | `module` | array of tables | optional support modules, written as `[[native.module]]` |
 
-API points use top-level declarations.
-API function listeners use top-level `[[inject]]`: `id`, `at`, lowercase `kind`, `with`, and optional `hash`,
-with optional `priority` (default 0). `head`, `return` and `replace` are supported.
-The `access` key is refused by name. Use `[[native.mixin]]` for game internals.
-Unknown fields are refused by the schema. API function declarations use only `[[inject]]`.
-See [Injections](../concepts/injections.md) for the fields and point injections, and
-[Named hook points](../how-to/entities/named-hook-points.md) for the named hook contracts.
-
-A module has a unique, nonempty `id` (one id space with the injections), a `file` naming the game source
+A module has a unique, nonempty `id` (shared across `[[native.*]]` rows), a `file` naming the game source
 file that receives it, a `name` that is a Rust module identifier, and a `source` payload file under
 `src/`, holding the module's items without an outer wrapper. An optional `visibility` is exactly
 `"pub"` or `"pub(crate)"`, the default. See [Support modules](../concepts/native-route/5-support-modules.md).
 
-`[[inject]]` only fills compiled slots and never compiles game code. Native source edits
-use `[[native.mixin]]` with `id`, `target`, uppercase `kind`, `helper` and the other
-horizon-mixins options ([Mixins](../concepts/native-route/2-mixins.md)). This package reads only `id`, `target`, `kind` and `helper` of a row (and refuses `hook` and `hook_version`) and forwards every other key to the tool as written; the tool then refuses a key it does not know, so an unknown key on a mixin row fails at build time, not when the manifest is read. The same holds for the keys of `[[native.bridge]]` and `[[native.state]]` rows. An `OVERWRITE` row must carry the tool's `fingerprint`. `[[native.loop]]`, `[[native.bridge]]` and `[[native.module]]` complete the route; `[[native.state]]` is refused. See [The native route](../concepts/native-route.md) for every table, its fields and its refusals.
-
-A wasm mod adds `[wasm]` instead, written by `cargo sunrise-mod build --wasm`
-([Building to `mod.wasm`](../how-to/wasm-mods.md)):
-
-| Field | Type | Rule |
-| --- | --- | --- |
-| `sha512` | string | `mod.wasm`'s SHA-512, 128 lowercase hex characters |
-| `toolchain` | string | not empty, the Rust toolchain it was built with |
-| `linked` | table | optional, dependency id → the SHA-512 of the `mod.wasm` it was linked against |
-| `built_with` | string | optional, not empty: the converter that made it, for a package with no source |
-
-At load `mod.wasm` must start with `\0asm`, be at most 64 MiB and match `sha512`; each failure refuses the
-package with its reason.
+Native source edits use `[[native.mixin]]` with `id`, `target`, uppercase `kind`, `helper` and the
+other horizon-mixins options ([Mixins](../concepts/native-route/2-mixins.md)). This package reads only `id`, `target`, `kind` and `helper` of a row (and refuses `hook` and `hook_version`) and forwards every other key to the tool as written; the tool then refuses a key it does not know, so an unknown key on a mixin row fails at build time, not when the manifest is read. The same holds for the keys of `[[native.bridge]]` and `[[native.state]]` rows. An `OVERWRITE` row must carry the tool's `fingerprint`. `[[native.loop]]`, `[[native.bridge]]` and `[[native.module]]` complete the route; `[[native.state]]` is refused. See [The native route](../concepts/native-route.md) for every table, its fields and its refusals.
 
 ### `[runtime]`: data files beside the code
 
-A native or a wasm mod whose code runs a large precompiled artefact (a script bundle, an interpreter image,
+A native mod whose code runs a large precompiled artefact (a script bundle, an interpreter image,
 a baked lookup table) puts the bytes in a `runtime/` folder and lists each file with its SHA-512:
 
 ```toml
@@ -120,13 +94,6 @@ The hashes are checked once, when the package opens: at install, at a dedicated 
 (also for a folder edited by hand), and by `native-build` and `cargo sunrise-mod` packing. The package is
 refused by name; nothing else is skipped.
 
-A wasm mod or library may declare the memory it expects its dependency group to have, as top-level
-`wasm_memory_mib`: an integer from 1 to 4096 (wasm32's 4 GiB), in MiB. The group gets the largest value any
-member declares; with none declared it gets 1024 (1 GiB). The instance's cap (`wasm.memory_cap_mib` in
-`sunrise-mods.txt`, 4096 unless the player lowers it) bounds it: a declaration above the cap refuses the whole
-group at load, naming the group and both numbers. Native mods are not wasm groups: they share the game's memory,
-and the key means nothing to them. See [Memory](../how-to/wasm-mods.md#memory).
-
 Top-level `[dependencies]` declares other mods by ID: a semver requirement string, or a table:
 
 ```toml
@@ -143,23 +110,22 @@ key or alternate optional spelling.
 
 Side is the **installation**, not the logical side executing a hook: an integrated server
 belongs to the client installation, a dedicated server to the server installation.
-Inactive declarations are excluded before missing/version/order checks and code dependency
-selection. A missing required dependency, incompatible installed version or dispatch cycle
-refuses loading; an absent optional dependency is ignored. Content, native and wasm manifests
-share the installed-set rule resolver, including mixed content/code relationships.
+Inactive declarations are excluded from code dependency selection at build time and from logical
+missing/version/order checks at startup. A missing required dependency, incompatible installed
+version or dispatch cycle refuses loading; an absent optional dependency is allowed. Content and
+native manifests share the installed-set rule resolver.
 
-**Sunrise addition: physical linking is separate from dispatch policy.** A code package's
-`[dependencies]` also declares real API library requirements. `before`, `none`, and instance
-overrides do not remove Cargo/wasm imports, reverse compiler staging, bypass ABI/hash/toolchain
-checks, or manufacture a missing library. Physical libraries still resolve dependency-first
-or refuse by name. Content constraints do not require an API package.
+**Physical linking is separate from dispatch policy.** Native builds wire only supplied code
+packages; a content-only target has no Cargo alias. At startup, the loader and compiled package
+inventory enforce physical requirements. Dispatch order, side filters and instance overrides cannot
+remove those requirements or bypass ABI and build identity checks.
 See [Dependencies between mods](../concepts/dependencies.md).
 
 Top-level `[properties]` holds free-form values other mods read: strings, integers, floats and booleans only,
 at most 64 keys and 8 KiB (keys and strings by length, 8 bytes per number, 1 per boolean); a table, an array
 or a larger table refuses the package. A mod reads any loaded package's manifest through
 `context.mods().get(id)`: `PackageInfo` gives `name`, `description`, `authors`, `license`, `homepage`,
-`issues`, `icon_path`, `runtime` (`Native`, `Wasm`, or `None` for content), `dependencies` and
+`issues`, `icon_path`, `runtime` (`Native` or `None` for content), `dependencies` and
 `property(key)`. Each readonly `PackageDependency` exposes `id()`, `version()`, `kind()`,
 `order()`, `side()`, `reason()` and `url()`. `DependencyKind` is `Required`, `Optional`,
 `Incompatible`, `Discouraged` or `LoadBefore`; `DependencyOrder` is `After`, `Before` or `None`.

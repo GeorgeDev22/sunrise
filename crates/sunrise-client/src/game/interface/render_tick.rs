@@ -1003,22 +1003,49 @@ impl Game<'_> {
 /// The packs' expression uniforms on core shaders (`shader_modifiers`, wiki "Shaders").
 impl Game<'_> {
     /// Whether an installed pack core shader reads expression uniforms this frame. Fullbright
-    /// excludes the lightmap only. The frame's expression context is made only when needed.
+    /// excludes the lightmap only, and a frame where no world runs the text
+    /// ([`Self::world_runs`]). The frame's expression context is made only when needed.
     pub(in crate::game) fn reads_pack_expressions(&mut self) -> bool {
-        self.renderer
-            .as_mut()
-            .is_some_and(|r| r.reads_pack_expressions())
+        let world = self.world_runs();
+        (self.renderer.as_mut()).is_some_and(|r| r.reads_pack_expressions(world))
+    }
+
+    /// Whether an installed pack core shader reads Polytone's `PolyGlobals` this frame (the
+    /// text's only where a world runs).
+    pub(in crate::game) fn reads_poly_globals(&mut self) -> bool {
+        let world = self.world_runs();
+        (self.renderer.as_mut()).is_some_and(|r| r.reads_poly_globals(world))
+    }
+
+    /// The frame's `PolyGlobals` for the pack core shaders that read them; none leaves them 0.
+    pub(in crate::game) fn give_poly_globals(
+        &mut self,
+        globals: Option<&sunrise_client::polytone_post::PolyGlobals>,
+    ) {
+        let world = self.world_runs();
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_poly_globals(globals.map(|g| g.bytes()).as_ref(), world);
+        }
     }
 
     /// Evaluate the installed pack pipelines' expression uniforms from `frame`, skipping the
-    /// lightmap under fullbright. Values are uploaded when each pipeline prepares its draw.
+    /// lightmap under fullbright, and the text's where no world runs
+    /// ([`Self::world_runs`]). Values are uploaded when each pipeline prepares its draw.
     pub(in crate::game) fn evaluate_pack_expressions(
         &mut self,
         frame: Option<&sunrise_client::environment::Frame>,
     ) {
+        let world = self.world_runs();
         if let (Some(frame), Some(renderer)) = (frame, self.renderer.as_mut()) {
-            renderer.evaluate_pack_expressions(frame);
+            renderer.evaluate_pack_expressions(frame, world);
         }
+    }
+
+    /// Whether the text's Polytone blocks are given this frame: only where a world runs. On a
+    /// title frame (the title screen and its menus) the renderer writes them as 0, as it does on
+    /// the loading, file fixer and saving screens' frames.
+    fn world_runs(&self) -> bool {
+        !self.shows_panorama()
     }
 }
 

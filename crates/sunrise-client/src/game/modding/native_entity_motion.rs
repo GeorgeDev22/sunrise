@@ -215,6 +215,9 @@ impl Game<'_> {
     /// corner. Displays and markers have zero-sized physical boxes; interactions use
     /// their saved dimensions. End crystals have their 2 x 2 box. None for the dragon; a dragon part's is its own. API 379.
     pub(super) fn entity_bounding_box(&self, entity: EntityRef) -> Option<[[f64; 3]; 2]> {
+        if let Some(row) = self.native_client_general(entity) {
+            return Some(corners(row.bounds()));
+        }
         let t = self.native_entity_read_target(entity)?;
         if let Some(p) = self.native_client_player(t) {
             return Some(corners(p.bounds()));

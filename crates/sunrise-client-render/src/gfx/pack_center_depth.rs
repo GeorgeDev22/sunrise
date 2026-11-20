@@ -224,10 +224,7 @@ impl CenterDepth {
     /// Once the GPU has finished the frame (`screenshot-sequence`), the depth it copied, as
     /// the next frame reads it: an error unless exactly that one sample was read back, never
     /// an older one.
-    pub fn take_completed(&mut self, device: &wgpu::Device) -> Result<f32, String> {
-        device
-            .poll(wgpu::PollType::Poll)
-            .map_err(|e| e.to_string())?;
+    pub fn take_completed(&mut self) -> Result<f32, String> {
         let state = |s: &Slot| s.state.load(Ordering::Acquire);
         let mut mapped = self.slots.iter().filter(|s| state(s) == MAPPED);
         let (Some(slot), None) = (mapped.next(), mapped.next()) else {
@@ -257,8 +254,7 @@ impl CenterDepth {
     }
 
     /// The newest depth read back so far, `None` before the first arrives.
-    pub fn collect(&mut self, device: &wgpu::Device) -> Option<f32> {
-        let _ = device.poll(wgpu::PollType::Poll);
+    pub fn collect(&mut self) -> Option<f32> {
         for slot in &self.slots {
             if slot.state.load(Ordering::Acquire) != MAPPED {
                 continue;
@@ -332,7 +328,7 @@ mod tests {
                 assert!(queue.threaded(), "deferred submit unavailable");
             }
             let mut center = CenterDepth::new(&device);
-            assert!(center.take_completed(&device).is_err());
+            assert!(center.take_completed().is_err());
             for value in [0.125, 0.75, 0.25] {
                 let mut encoder = device.create_command_encoder(&Default::default());
                 clear(&mut encoder, &view, value);
@@ -343,6 +339,7 @@ mod tests {
                         encoder,
                         surface: None,
                         after: Some(Box::new(after)),
+                        lost: None,
                     };
                     assert!(queue.submit_later(job).is_ok());
                     queue.wait();
@@ -356,12 +353,9 @@ mod tests {
                         timeout: Some(std::time::Duration::from_secs(30)),
                     })
                     .unwrap();
-                assert_eq!(center.take_completed(&device).unwrap(), value);
-                assert_eq!(center.collect(&device), Some(value));
-                assert!(
-                    center.take_completed(&device).is_err(),
-                    "no stale latest fallback"
-                );
+                assert_eq!(center.take_completed().unwrap(), value);
+                assert_eq!(center.collect(), Some(value));
+                assert!(center.take_completed().is_err(), "no stale latest fallback");
             }
             // Several outstanding copies are ambiguous, even after they all map.
             let mut encoder = device.create_command_encoder(&Default::default());
@@ -371,7 +365,7 @@ mod tests {
             queue.submit([encoder.finish()]);
             center.submitted().unwrap()();
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            assert!(center.take_completed(&device).is_err());
+            assert!(center.take_completed().is_err());
         }
     }
 
@@ -416,11 +410,12 @@ mod tests {
                 encoder,
                 surface: None,
                 after,
+                lost: None,
             };
             assert!(queue.submit_later(job).is_ok());
             queue.wait();
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
-            latest = center.collect(&device);
+            latest = center.collect();
             assert_eq!(latest, Some(value), "frame {frame}");
         }
         assert_eq!(latest, Some(0.75));
@@ -450,7 +445,7 @@ mod tests {
         });
         let view = depth.create_view(&Default::default());
         let mut center = CenterDepth::new(&device);
-        assert_eq!(center.collect(&device), None);
+        assert_eq!(center.collect(), None);
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -467,7 +462,7 @@ mod tests {
         queue.submit([encoder.finish()]);
         center.submitted().expect("a copy to read back")();
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        assert_eq!(center.collect(&device), Some(0.375));
+        assert_eq!(center.collect(), Some(0.375));
         // Its slot is free again: every slot can be used once more.
         for _ in 0..SLOTS {
             let mut encoder = device.create_command_encoder(&Default::default());
@@ -476,6 +471,6 @@ mod tests {
             center.submitted().expect("a free slot")();
         }
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        assert_eq!(center.collect(&device), Some(0.375));
+        assert_eq!(center.collect(), Some(0.375));
     }
 }

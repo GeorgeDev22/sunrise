@@ -240,14 +240,6 @@ impl super::super::mods::ModsState {
                     kind: match package.kind() {
                         mod_api::PackageKind::Content => ModKind::Content,
                         mod_api::PackageKind::Code if native => ModKind::Native,
-                        mod_api::PackageKind::Code
-                            if self.selected.iter().any(|selected| {
-                                selected.package.manifest.id == package.id()
-                                    && selected.package.manifest.wasm.is_some()
-                            }) =>
-                        {
-                            ModKind::Wasm
-                        }
                         _ => ModKind::Unspecified,
                     } as i32,
                     // AdjacentManifest does not expose a compiled crate name.
@@ -711,7 +703,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hz-privacy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut perf = server_perf::ServerPerf::new(0.0, 250.0);
-        let sunrise = server_perf::sunrise_options(12, 0);
+        let sunrise = server_perf::sunrise_options(0);
         let plan = Plan {
             seconds: 2,
             samples: true,

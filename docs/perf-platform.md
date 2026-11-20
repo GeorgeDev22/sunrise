@@ -289,6 +289,7 @@ message Start {
   uint32 players = 14;
   uint64 world_fs_used_mb = 15;
   uint64 world_fs_total_mb = 16;
+  ClientSettings client_settings = 17;     // clients: render distance chosen and loaded, simulation distance, far terrain distance and on/off, graphics preset
 }
 
 message HealthSample {
@@ -383,11 +384,9 @@ message Stop {
 
 Notes on fields:
 
-- On this fork, `Start.mods` includes loaded content, native and wasm mods. `ModKind` adds the
-  protobuf value `MOD_KIND_WASM = 3`; existing values keep their numbers. Native membership comes
-  from the validated compiled inventory, wasm membership from selected wasm manifests. Unknown
-  code provenance remains unspecified, not guessed to be native or wasm. A crate name is recorded
-  only when canonical metadata supplies one.
+- `Start.mods` includes loaded content and native mods. Native membership comes from the validated
+  compiled inventory. Unknown code provenance remains unspecified. A crate name is recorded only
+  when canonical metadata supplies one.
 - `Stop.overhead`: `spans_ms_per_tick`, `spans_share`, `sampler_share_of_thread`, `writer_core_share`,
   `dropped_samples`, `dropped_messages`, `timeline_stopped_t`, `heap_samples`, `heap_sample_ns`.
 - `Start.settings`, `game_rules` and `sunrise_options` are typed allowlists, never a dump of a file or of the
@@ -469,7 +468,7 @@ Notes on fields:
     when a switch starts to matter for what a tick costs.
   - `TickDetail.spans` holds the tick's own spans only; the spans recorded between ticks (the chunk pump) are left out
     of `span_blocks`, `spans` and a slow tick's `top`, so span sums stay consistent with the tick's wall time.
-  - `SunriseOptions.max_view_distance` is 0 when the far ring was not created, even if `server.toml` sets a distance.
+  - `SunriseOptions.max_view_distance` is always 0: the far ring it recorded was removed. Older captures still carry its distance.
   - `Overhead.mob_timing_ms_per_tick` and `mob_timing_share` price the mob tick sampling next to `spans_*`.
   - `memory` snapshots are `sunrise-ctl memory` flattened (`game/memory.rs`, described in `docs/memory.md`), at the start, every 10 s and at the stop. A dedicated server names its columns `columns` (single player keeps `client_columns` and `server_columns`) and adds `entities`, `players`, `chunk_send`, `light_queue`, `generation_queue` and `allocator`. Every side has `named_mb` and `unattributed_mb`: `unattributed_mb = process.resident_mb - named_mb`, where `named_mb` adds the byte totals of the columns (a section the window and its server thread both hold once), `server_generation`, `entities`, `players`, `chunk_send`, the two queues, `renderer.cpu` (client) and the far tiles' `kept_mb`. All are estimates from capacities, so a negative `unattributed_mb` means overlap.
 - `sunrise-perf query` rounds numbers to 3 decimals. `spans --slow` averages over the slow ticks; `ticks` and `tick`

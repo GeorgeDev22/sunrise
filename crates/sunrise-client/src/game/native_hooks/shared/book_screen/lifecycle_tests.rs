@@ -124,6 +124,36 @@ fn entering_inventory_requests_catalogue_for_preinstalled_bound_screen() {
         });
     });
 }
+
+#[test]
+#[ignore = "daily"]
+fn a_registered_recipe_book_screen_opens_for_a_blockless_menu() {
+    let mods: mod_api::Mods = vec![mod_api::ModEntry::new("bound", Box::new(BoundBookMod))].into();
+    mod_platform::testing::with_mods(mods, || {
+        crate::game::native_entity_refs::tests::with_client_game(|game| {
+            mod_api::__private::resolve_menus(["bound:menu"]).unwrap();
+            game.open_native_screen(
+                (i32::MIN, 0, 0),
+                None,
+                7,
+                "bound:menu",
+                Some(sunrise_protocol::menu_extra::Message {
+                    window: 7,
+                    pos: None,
+                    data: Vec::new(),
+                }),
+            );
+            assert_eq!(
+                game.mod_screen
+                    .as_ref()
+                    .and_then(|screen| screen.block.as_deref()),
+                Some("bound:menu")
+            );
+            assert_eq!(game.native_hidden_slots("bound:menu", None, 3), vec![2]);
+        });
+    });
+}
+
 const STONE: &str = "minecraft:stone";
 const MENU: &str = "minecraft:generic_9x1";
 fn geometry(game: &Game<'_>) -> ((f32, f32), Vec<(usize, [f32; 4])>) {

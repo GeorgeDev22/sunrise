@@ -1,6 +1,6 @@
 //! Behavioural proofs of the broadcast events around scoped interaction Parts.
-#[path = "interaction_event_wasm_tests.rs"]
-mod interaction_event_wasm_tests;
+#[path = "interaction_matrix_tests.rs"]
+mod interaction_matrix_tests;
 #[path = "item_fallthrough_tests.rs"]
 mod item_fallthrough_tests;
 #[path = "item_used_on_block_tests.rs"]

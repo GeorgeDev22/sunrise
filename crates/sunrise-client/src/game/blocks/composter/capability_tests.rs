@@ -492,3 +492,72 @@ fn a_client_copy_never_answers_composter_items() {
         }
     });
 }
+
+/// `ComposterBlock.addLayer` builds `BLOCK_INTERACT`: the clicking player is
+/// `interacting_entity`, a hopper has none, and nothing is `this`. A data pack
+/// item whose `layers` provider tests each of those drives the click producer
+/// (`use_composter`), not the provider evaluator.
+#[test]
+#[ignore = "daily"]
+fn a_composter_click_supplies_its_interacting_player_and_no_this() {
+    let mut resources = None;
+    let (_published, mut game) =
+        crate::game::game_tests::tests::isolated_server_game(&mut resources);
+    let provider = |who: &str| {
+        serde_json::json!({
+            "type": "minecraft:conditional",
+            "condition": {"condition": "minecraft:entity_properties", "entity": who,
+                "predicate": {"minecraft:entity_type": "minecraft:player"}},
+            "on_true": 1, "on_false": 0
+        })
+    };
+    let mut items = game.items().clone();
+    items
+        .items
+        .get_mut("minecraft:wheat_seeds")
+        .unwrap()
+        .compostable = Some(provider("interacting_entity"));
+    items
+        .items
+        .get_mut("minecraft:beetroot_seeds")
+        .unwrap()
+        .compostable = Some(provider("this"));
+    game.server_items = Some(Arc::new(items));
+    game.build_registries();
+    // The clicking player, beside the composter.
+    game.player = Some(
+        sunrise_client::motion::PlayerMotion::new(
+            game.motion,
+            sunrise_core::geometry::Vec3::new(4.5, 64.0, 2.5),
+        )
+        .unwrap(),
+    );
+    for (x, z) in (-1..=1).flat_map(|x| (-1..=1).map(move |z| (x, z))) {
+        game.world
+            .chunks
+            .insert((x, z), Arc::new(Chunk::empty(x, z)));
+    }
+    game.block_ticks
+        .add_empty_chunk(ChunkPos::new(0, 0))
+        .unwrap();
+    let click = |game: &mut Game<'_>, item: &str| {
+        composter(game, 0);
+        let stack = ItemStack::new(item, 8);
+        *game.held_mut() = Some(stack.clone());
+        assert!(game.use_composter(POS, Some(&stack)));
+        game.composter_level(POS).unwrap()
+    };
+    assert_eq!(
+        click(&mut game, "minecraft:wheat_seeds"),
+        1,
+        "the clicking player is the interacting entity"
+    );
+    assert_eq!(
+        click(&mut game, "minecraft:beetroot_seeds"),
+        0,
+        "a block interaction has no `this`, not even the player"
+    );
+    // A hopper's insert (`InputContainer`) has no interacting entity either.
+    let layers = game.composter_transactional_layers(POS, &provider("interacting_entity"));
+    assert_eq!(layers, 0);
+}

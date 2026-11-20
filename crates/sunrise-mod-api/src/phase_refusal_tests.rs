@@ -133,6 +133,15 @@ crate::impl_host_areas!(NoHost);
 impl ServerHost for NoHost {}
 crate::impl_server_host_areas!(NoHost);
 
+#[test]
+fn a_persistence_write_without_a_backend_returns_unavailable() {
+    let entity = EntityRef::new(WorldEpoch::new(1), 1);
+    assert_eq!(
+        entity.set_persistent(&mut NoHost, false),
+        Err(LevelWriteError::Unavailable)
+    );
+}
+
 fn brew(phase: ModPhase, listeners: Vec<Probe>) -> ([Option<ItemStack>; 5], bool) {
     crate::__private::initialize().unwrap();
     crate::__private::install_parts(&[], &crate::__private::part_tests::rule_schema(), |_| false)

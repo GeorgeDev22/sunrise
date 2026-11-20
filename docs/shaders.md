@@ -54,6 +54,13 @@ fails, with its problems in the chat. While it runs, the game looks at the pack 
 and the pack is checked and rebuilt in place ("Shader pack ... reloaded"); if the new version fails, the chat says
 where and the last good version keeps drawing. All three stages run.
 
+The Extras page has a Shader pack key for the same pick: press it and the picked pack turns off, press it again
+and the same pack runs again. It is bound on the Extras page (click the row, then press a key; Escape unbinds it),
+`K` out of the box, and it is not a vanilla key binding, so rebinding it never turns into another mapping's key
+(Replay Studio keeps physical `K` for its camera keyframe). Turning off remembers the pick in the Extras settings,
+so the pack stays off across restarts until the key is pressed again; the menu's second click on the picked pack
+does the same. A pack whose owning mod is off can't run: the key says so instead of claiming it turned on.
+
 A picked pack's options are pages of the same screen, under the pack's name in its page list: its screens, with the
 names the pack gives them, its profiles, and Reset. The main screen and those it links to are in the list (when
 there are more than it has room for, they collapse into one `‹ Name ›` row that the arrows and a controller's

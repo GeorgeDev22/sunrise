@@ -1,11 +1,11 @@
 //! The surface export: `surface.json` ([`mod_surface::Surface`]) from what the build parses. Hooks
 //! come from the catalog, with their arguments from the generated event types; trait roles,
-//! sides and "Not on wasm" from the wire index; everything else from a walk of the public items
+//! sides from the native trait roles; everything else from a walk of the public items
 //! of `sunrise-mod-api` and the vocabulary it re-exports. The optional engine audit uses the
-//! same point, loop and internal collectors as SDK source staging.
+//! same loop and internal collectors as SDK source staging.
 pub mod behaviours;
-pub(crate) mod calls;
 mod engine;
+pub use engine::collect as engine_catalogs;
 mod expand;
 pub mod extension_tags;
 pub mod notes;
@@ -38,41 +38,122 @@ const API_CRATES: &[&str] = &[
     "sunrise_mod_runtime",
 ];
 
-/// What the wire index says about the traits that cross the boundary, by trait path as the
-/// index writes it below `mod_api` (`Hooks`, `item::menu::SlotView`,
-/// `ResourceHandler<ItemResource>`); [`build`] resolves each to its trait.
+/// The native trait roles, detected by their publicly exported names.
 #[derive(Default)]
 pub(crate) struct Boundary {
     roles: Vec<(String, Role)>,
     sides: Vec<(String, Side)>,
-    /// (trait, method, why it cannot cross).
-    unbound: Vec<(String, String, String)>,
-    /// (union trait, area trait that is part of it).
     unions: Vec<(String, String)>,
 }
 
+const HOST_AREAS: &[(&str, &str, &str)] = &[
+    ("ConfigFiles", "", ""),
+    ("Commands", "server_host_mut", "Ok(h.commands())"),
+    ("Levels", "server_host", "Ok(h.levels())"),
+    ("Messages", "server_host", "Ok(h.messages())"),
+    ("Players", "server_host", "Ok(h.players())"),
+    ("RuntimeLevels", "server_host_mut", "Ok(h.runtime_levels())"),
+    ("ClientSession", "client_host", "Ok(h.client_session())"),
+    ("RenderAssets", "client_host", "Ok(h.render_assets())"),
+    ("InstanceGroups", "client_host", "Ok(h.instance_groups())"),
+    // Type metadata belongs to load, so retained snapshots need no live world host.
+    (
+        "AttachmentDeclarations",
+        "",
+        "Ok(crate::__private::attachment_declarations())",
+    ),
+    // A level hook's host first: inside a level write it is the one the call hands over.
+    (
+        "AttachmentStore",
+        "",
+        "level_random_host_mut().map(|h| h.attachments()).or_else(|_| host_mut().map(|h| h.attachments()))",
+    ),
+    (
+        "CapabilityProviders",
+        "host",
+        "Ok(h.capability_providers())",
+    ),
+    (
+        "ServerReloadResources",
+        "server_host",
+        "Ok(h.reload_resources())",
+    ),
+    (
+        "Backend",
+        "host",
+        "h.backend().map(crate::BackendRef::open).ok_or_else(|| missing(\"game backend\"))",
+    ),
+    (
+        "BackendMut",
+        "server_host_mut",
+        "crate::backend_mut_of(h).ok_or_else(|| missing(\"game backend\"))",
+    ),
+    (
+        "ClientBackendMut",
+        "client_host_mut",
+        "crate::client_backend_mut_of(h).ok_or_else(|| missing(\"client game backend\"))",
+    ),
+];
+
 impl Boundary {
-    fn from_wire(surface: &crate::wire::Surface<'_>) -> Self {
+    fn read(root: &Path, index: &mut Index<'_>) -> Result<Self, String> {
+        let directory = root.join("crates/sunrise-mod-vocab/src/trait_roles");
         let mut boundary = Self::default();
-        for owner in crate::wire::imports() {
-            boundary.roles.push(((*owner).to_owned(), Role::Call));
+        for path in std::fs::read_dir(&directory)
+            .map_err(|error| format!("{}: {error}", directory.display()))?
+        {
+            let path = path.map_err(|error| error.to_string())?.path();
+            let role = match path.extension().and_then(|extension| extension.to_str()) {
+                Some("call") => Role::Call,
+                Some("implement") => Role::Implement,
+                _ => continue,
+            };
+            if let Some(name) = path.file_stem().and_then(|name| name.to_str()) {
+                boundary.roles.push((name.to_owned(), role));
+            }
         }
-        for owner in crate::wire::exports() {
-            boundary.roles.push(((*owner).to_owned(), Role::Implement));
+        for shape in crate::capability_providers::key_shapes(index)? {
+            for owner in [shape.handler.clone(), shape.provider()] {
+                if !boundary.roles.iter().any(|(name, _)| name == &owner) {
+                    boundary.roles.push((owner, Role::Implement));
+                }
+            }
         }
-        for (owner, area) in &surface.parts {
-            boundary.unions.push(((*owner).to_owned(), area.clone()));
+        boundary.roles.sort_by(|left, right| left.0.cmp(&right.0));
+        let api = index.module("mod_api", &[])?;
+        for (owner, _) in &boundary.roles {
+            let path = owner.split('<').next().unwrap_or(owner);
+            let segments = path.split("::").map(str::to_owned).collect::<Vec<_>>();
+            let Ok(Found::Item(id)) = index.resolve_path(api, &segments) else {
+                continue;
+            };
+            let Item::Trait(item) = index.item(id) else {
+                continue;
+            };
+            for bound in &item.supertraits {
+                let syn::TypeParamBound::Trait(bound) = bound else {
+                    continue;
+                };
+                let segments = bound
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>();
+                if (segments.len() == 4 && segments[..2] == ["crate", "host"])
+                    || (segments.len() == 3 && segments[..2] == ["crate", "parts"])
+                {
+                    boundary
+                        .unions
+                        .push((owner.clone(), segments[1..].join("::")));
+                }
+            }
         }
-        for unbound in &surface.unbound {
-            boundary.unbound.push((
-                unbound.owner.to_owned(),
-                unbound.name.clone(),
-                unbound.why.clone(),
-            ));
-        }
-        boundary.sides.push(("ServerHost".into(), Side::Server));
-        boundary.sides.push(("ClientHost".into(), Side::Client));
-        for (owner, accessor, _) in crate::wire::REACHED {
+        boundary.sides.extend([
+            ("ServerHost".into(), Side::Server),
+            ("ClientHost".into(), Side::Client),
+        ]);
+        for (owner, accessor, _) in HOST_AREAS {
             let side = if accessor.starts_with("server_host") {
                 Side::Server
             } else if accessor.starts_with("client_host") {
@@ -82,7 +163,7 @@ impl Boundary {
             };
             boundary.sides.push(((*owner).to_owned(), side));
         }
-        boundary
+        Ok(boundary)
     }
 }
 
@@ -91,7 +172,6 @@ impl Boundary {
 struct Roles {
     role: HashMap<ItemId, Role>,
     side: HashMap<ItemId, Side>,
-    unbound: HashMap<(ItemId, String), String>,
     /// An area trait → the union trait it is part of.
     union_of: HashMap<ItemId, ItemId>,
 }
@@ -130,11 +210,6 @@ impl Roles {
                 roles.union_of.insert(area, owner);
             }
         }
-        for (owner, method, why) in &boundary.unbound {
-            if let Some(id) = find(owner, notes) {
-                roles.unbound.insert((id, method.clone()), why.clone());
-            }
-        }
         roles
     }
 
@@ -149,13 +224,6 @@ impl Roles {
 
     fn side(&self, id: ItemId) -> Side {
         self.find(&self.side, id).copied().unwrap_or(Side::Both)
-    }
-
-    fn unbound(&self, id: ItemId, method: &str) -> Option<&String> {
-        self.unbound.get(&(id, method.to_owned())).or_else(|| {
-            let union = self.union_of.get(&id)?;
-            self.unbound.get(&(*union, method.to_owned()))
-        })
     }
 }
 
@@ -218,10 +286,8 @@ impl Export {
 /// Optional work for the source-tree export.
 #[derive(Default)]
 pub struct ExportOptions {
-    /// Omit `call` names on the old side of a comparison, which may predate their declarations.
-    pub without_calls: bool,
-    /// Collect injection points and published loops in addition to the stable API.
-    pub with_points_and_loops: bool,
+    /// Collect published loops in addition to the stable API.
+    pub with_loops: bool,
     /// Audit the full engine catalogs, including listed internals.
     pub with_internals: bool,
 }
@@ -255,55 +321,18 @@ fn export_here(root: &Path, options: ExportOptions) -> Result<Export, String> {
     let providers = crate::capability_providers::generate(root, &included)?.0;
     let mut with_providers = included.to_vec();
     with_providers.push(("capability_providers_generated.rs", providers.as_str()));
-    // A listed boundary trait an older tree lacks is noted by `Roles::resolve`, not refused.
-    let mut wire = crate::wire::surface_reading(root, &with_providers, Some(&mut Vec::new()))?;
-    let boundary = Boundary::from_wire(&wire);
-    let engine = if options.with_points_and_loops || options.with_internals {
-        // Resolve the point types before the call export changes the index, as staging does.
-        let point_types = crate::wire::point_types(&mut wire)?;
-        Some(crate::source::with_walk_cache(|| {
-            engine::collect(root, &point_types, options.with_internals)
-        })?)
+    let mut index = crate::index::game(root, &with_providers);
+    let boundary = Boundary::read(root, &mut index)?;
+    let engine = if options.with_loops || options.with_internals {
+        Some(engine_catalogs(root, options.with_internals)?)
     } else {
         None
     };
-    let calls = if options.without_calls {
-        None
-    } else {
-        Some(crate::wire::exported_calls(&mut wire, &catalog.hooks)?)
-    };
-    let mut index = wire.types.index;
     let mut export = build(root, &mut index, &catalog.hooks, &boundary)?;
     if let Some(engine) = engine {
         export.surface = export.surface.with_engine_items(engine);
     }
-    if let Some(calls) = &calls {
-        name_calls(&mut export.surface, calls);
-    }
     Ok(export)
-}
-
-/// Writes each record's `call`: a hook's, and a trait method's when its trait has one name for
-/// it (a generic trait's instances are separate calls and carry none).
-fn name_calls(surface: &mut Surface, calls: &BTreeMap<(String, String), String>) {
-    for hook in &mut surface.hooks {
-        let name = hook.id.strip_prefix("hook:").unwrap_or(&hook.id);
-        hook.call = calls.get(&("Hooks".to_owned(), name.to_owned())).cloned();
-    }
-    for item in &mut surface.traits {
-        let path = item.id.strip_prefix("trait:").unwrap_or(&item.id);
-        let owner = path.rsplit("::").next().unwrap_or(path);
-        for method in &mut item.methods {
-            let name = method.id.rsplit("::").next().unwrap_or(&method.id);
-            let mut found = calls.iter().filter(|((o, m), _)| {
-                m == name && (o == owner || o.split('<').next() == Some(owner) && o.contains('<'))
-            });
-            method.call = match (found.next(), found.next()) {
-                (Some((_, call)), None) => Some(call.clone()),
-                _ => None,
-            };
-        }
-    }
 }
 
 /// The `///` text of `attrs`, one line each, a leading space dropped.
@@ -328,17 +357,6 @@ fn doc(attrs: &[syn::Attribute]) -> String {
         .join("\n")
         .trim()
         .to_owned()
-}
-
-/// A doc's `Not on wasm: <why>`, to the end of its paragraph.
-fn not_on_wasm(attrs: &[syn::Attribute]) -> Option<String> {
-    let text = doc(attrs);
-    let mut lines = text.lines().map(str::trim);
-    let first = lines.find_map(|line| line.strip_prefix("Not on wasm: "))?;
-    let why: Vec<&str> = std::iter::once(first)
-        .chain(lines.take_while(|line| !line.is_empty()))
-        .collect();
-    Some(why.join(" ").trim().to_owned()).filter(|why| why.len() > 1)
 }
 
 fn has_attr(attrs: &[syn::Attribute], name: &str) -> bool {
@@ -742,11 +760,9 @@ pub(crate) fn build(
                     FunctionContract {
                         signature,
                         impl_generics: String::new(),
-                        wasm: not_on_wasm(&function.attrs).is_none(),
                         refs,
                     },
                 );
-                record.wasm_reason = not_on_wasm(&function.attrs);
                 record.paths = paths;
                 functions.push(record);
             }
@@ -789,17 +805,15 @@ pub(crate) fn build(
             merge(&mut refs, generic_refs);
             merge(&mut refs, vec![owner.clone()]);
             named.extend(refs.iter().cloned());
-            let mut record = Function::new(
+            let record = Function::new(
                 handle_id.clone(),
                 doc(attrs),
                 FunctionContract {
                     signature,
                     impl_generics,
-                    wasm: not_on_wasm(attrs).is_none(),
                     refs,
                 },
             );
-            record.wasm_reason = not_on_wasm(attrs);
             handles.insert(handle_id, record);
         }
         for reference in named {
@@ -970,11 +984,6 @@ fn trait_record(
         let method_name = method.sig.ident.to_string();
         let (signature, mut method_refs) = writer.signature(module, &params, &method.sig);
         merge(&mut method_refs, vec![owner.clone()]);
-        let reason = match not_on_wasm(&method.attrs) {
-            Some(why) => Some(why),
-            None if role != Role::None => roles.unbound(id, &method_name).cloned(),
-            None => None,
-        };
         let is_required = method.default.is_none();
         if is_required && role != Role::Call {
             required.push(Required {
@@ -982,17 +991,15 @@ fn trait_record(
                 signature: signature.clone(),
             });
         }
-        let mut record = Method::new(
+        let record = Method::new(
             format!("method:{path}::{method_name}"),
             doc(&method.attrs),
             MethodContract {
                 signature,
                 required: is_required,
-                wasm: reason.is_none(),
                 refs: method_refs,
             },
         );
-        record.wasm_reason = reason;
         methods.push(record);
     }
     Trait::new(

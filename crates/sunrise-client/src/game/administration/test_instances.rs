@@ -17,6 +17,7 @@ use sunrise_client::{
     test_instance_block::{Data, Status, TestInstanceBlock},
     text::{self, Text},
 };
+use sunrise_client_render::block_entity_reach::Reach;
 use sunrise_core::{position::BlockPos, ticks::TickArea};
 use sunrise_protocol::packets::play::{self, Clientbound as C};
 use {
@@ -327,14 +328,12 @@ impl Game<'_> {
             .iter()
             .map(|(&pos, (text, _))| ([pos.0, pos.1, pos.2], text.clone(), HIGHLIGHT_FILL))
             .collect();
+        let render_distance = self.effective_render_distance();
         for (pos, entity) in &self.world.block_entities {
             let BlockEntity::TestInstanceBlock(b) = entity else {
                 continue;
             };
-            // BeaconRenderer.getViewDistance: 256, by the horizontal distance.
-            let dx = f64::from(pos.0) + 0.5 - camera.x;
-            let dz = f64::from(pos.2) + 0.5 - camera.z;
-            if dx * dx + dz * dz >= 256.0 * 256.0 {
+            if !Reach::TestInstance.should_render([pos.0, pos.1, pos.2], camera, render_distance) {
                 continue;
             }
             for marker in &b.error_markers {

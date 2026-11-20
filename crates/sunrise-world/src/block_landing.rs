@@ -82,6 +82,26 @@ pub enum LandingEvent {
     BlockDestroy,
 }
 
+/// A successful trample check, before either the lift or `Block.fallOn`.
+#[derive(Clone, Copy, Debug)]
+pub struct FarmlandTrample {
+    pub position: BlockPos,
+    pub state: BlockStateId,
+    pub base: BlockStateId,
+    pub distance: f64,
+    damage_distance: f64,
+}
+
+impl FarmlandTrample {
+    /// `super.fallOn` always follows the trample decision, even on refusal or cancellation.
+    pub fn finish_fall<W: BlockLandingWorld>(
+        self,
+        world: &mut W,
+    ) -> Result<(), LandingError<W::Error>> {
+        ordinary_fall(world, self.damage_distance)
+    }
+}
+
 pub trait BlockLandingWorld: BlockPushWorld {
     type DamageSource: Copy;
     type Sound: Copy;
@@ -92,14 +112,6 @@ pub trait BlockLandingWorld: BlockPushWorld {
     fn under_spawn_protection(&mut self, position: BlockPos) -> Result<bool, Self::Error>;
     fn mob_griefing(&mut self) -> Result<bool, Self::Error>;
     fn entity_dimensions(&self) -> (f32, f32);
-    fn cancel_farmland_trample(
-        &mut self,
-        _position: BlockPos,
-        _state: BlockStateId,
-        _distance: f64,
-    ) -> bool {
-        false
-    }
     fn suppressing_bounce(&mut self) -> Result<bool, Self::Error>;
     fn damage_source(
         &mut self,
@@ -342,6 +354,21 @@ impl BlockLandingRegistry {
         entity: LandingEntityKind,
         distance: f64,
     ) -> Result<(), LandingError<W::Error>> {
+        self.fall_on_until_trample(world, state, position, entity, distance, false)
+            .map(|_| ())
+    }
+
+    /// Run `fallOn`, stopping before the trample or fall damage if the owner
+    /// must provide the authoritative host and the farmland checks pass.
+    pub fn fall_on_until_trample<W: BlockLandingWorld>(
+        &self,
+        world: &mut W,
+        state: BlockStateId,
+        position: BlockPos,
+        entity: LandingEntityKind,
+        distance: f64,
+        pause: bool,
+    ) -> Result<Option<FarmlandTrample>, LandingError<W::Error>> {
         let data = self.state(state)?;
         match data.rule {
             Rule::Default => {}
@@ -353,7 +380,7 @@ impl BlockLandingRegistry {
                     distance,
                     0.2,
                 )?;
-                return Ok(());
+                return Ok(None);
             }
             Rule::Honey { volume, pitch } => {
                 let sound = world.known_sound(LandingSound::HoneySlide);
@@ -377,7 +404,7 @@ impl BlockLandingRegistry {
                         .entity_sound(sound, volume * 0.5, pitch * 0.75)
                         .map_err(LandingError::World)?;
                 }
-                return Ok(());
+                return Ok(None);
             }
             Rule::Slime => {
                 if !world.suppressing_bounce().map_err(LandingError::World)? {
@@ -389,7 +416,7 @@ impl BlockLandingRegistry {
                         0.0,
                     )?;
                 }
-                return Ok(());
+                return Ok(None);
             }
             Rule::PowderSnow => {
                 if (distance >= 4.0 || distance.is_nan()) && entity.living() {
@@ -400,7 +427,7 @@ impl BlockLandingRegistry {
                         .entity_sound(sound, 1.0, 1.0)
                         .map_err(LandingError::World)?;
                 }
-                return Ok(());
+                return Ok(None);
             }
             Rule::DripstoneTip => {
                 cause(
@@ -410,7 +437,7 @@ impl BlockLandingRegistry {
                     distance + 2.5,
                     2.0,
                 )?;
-                return Ok(());
+                return Ok(None);
             }
             Rule::Farmland { base } => {
                 if world.is_server_level()
@@ -427,9 +454,16 @@ impl BlockLandingRegistry {
                     };
                     if allowed {
                         let (width, height) = world.entity_dimensions();
-                        if width * width * height > 0.512f32
-                            && !world.cancel_farmland_trample(position, state, distance)
-                        {
+                        if width * width * height > 0.512f32 {
+                            if pause {
+                                return Ok(Some(FarmlandTrample {
+                                    position,
+                                    state,
+                                    base,
+                                    distance,
+                                    damage_distance: distance * f64::from(1.0f32 - data.reduction),
+                                }));
+                            }
                             let next = push_entities_up(world, state, base, position)
                                 .map_err(LandingError::Push)?;
                             world
@@ -448,16 +482,25 @@ impl BlockLandingRegistry {
                 }
             }
         }
-        cause(
-            world,
-            DamageSourceOwner::Entity,
-            LandingDamage::Fall,
-            distance * f64::from(1.0f32 - data.reduction),
-            1.0,
-        )?;
-        Ok(())
+        ordinary_fall(world, distance * f64::from(1.0f32 - data.reduction))?;
+        Ok(None)
     }
 }
+
+fn ordinary_fall<W: BlockLandingWorld>(
+    world: &mut W,
+    distance: f64,
+) -> Result<(), LandingError<W::Error>> {
+    cause(
+        world,
+        DamageSourceOwner::Entity,
+        LandingDamage::Fall,
+        distance,
+        1.0,
+    )?;
+    Ok(())
+}
+
 fn cause<W: BlockLandingWorld>(
     world: &mut W,
     owner: DamageSourceOwner,

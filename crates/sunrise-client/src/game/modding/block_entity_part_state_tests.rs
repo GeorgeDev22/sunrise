@@ -499,7 +499,7 @@ fn one_position_replaced_twice_in_an_aborted_transaction_gets_its_original_back(
     });
 }
 
-#[path = "../../../../sunrise-mod-wasm/tests/fixture/src/part_state.rs"]
+#[path = "block_entity_part_state_tests/fixture.rs"]
 mod fixture;
 
 struct NativeFixture;
@@ -513,11 +513,10 @@ impl Hooks for NativeFixture {
     }
 }
 
-/// The fixture's `wasm_fixture:<name>` value at `pos`, from its saved form: the host's view of
-/// a wasm value.
+/// The fixture's value at `pos`, read from its saved form.
 fn saved_value(game: &Game<'_>, pos: (i32, i32, i32), name: &str) -> Option<i32> {
     let saved = game.world.block_entities.attachments(pos)?.to_nbt();
-    let Some(Tag::Compound(names)) = saved.get(&"wasm_fixture".into()) else {
+    let Some(Tag::Compound(names)) = saved.get(&"part_state_fixture".into()) else {
         return None;
     };
     let Some(Tag::Compound(entry)) = names.get(&name.into()) else {
@@ -543,35 +542,25 @@ fn tick_in(game: &mut Game<'_>, pos: (i32, i32, i32), mode: i32) {
     assert!(game.transactions.is_empty());
 }
 
-/// The fixture's Part runs natively and compiled to wasm alike against real `Game` storage:
-/// - it counts its ticks after an aborted edit and a refused recursive one;
-/// - the guest refuses a state type holding a resource handle;
-/// - its chunk unloads through `update_world` and loads back from the region file, and the
-///   guest goes on from the saved count under the fresh handle;
-/// - an undecodable saved value is refused before the closure runs and keeps its bytes;
-/// - a closure that traps (wasm) leaves the stored value and no open transaction.
+/// The Part counts ticks across an aborted edit, a refused recursive edit and a chunk
+/// unload/reload. An undecodable value refuses the edit without changing its saved bytes.
 #[test]
-#[ignore = "needs prepared resources and compiled SUNRISE_WASM_FIXTURE/SUNRISE_WASM_STD"]
-fn native_and_compiled_wasm_part_state_count_ticks() {
+#[ignore = "daily"]
+fn part_state_counts_ticks_across_chunk_reload() {
     const NAME: &str =
-        "game::block_entity_part_state_tests::native_and_compiled_wasm_part_state_count_ticks";
+        "game::block_entity_part_state_tests::part_state_counts_ticks_across_chunk_reload";
     if super::native_entity_refs::tests::run_fresh_cases(
         NAME,
-        "PART_STATE_TARGET",
-        &["native", "wasm"],
+        "SUNRISE_PART_STATE_CHILD",
+        &["game"],
     ) {
         return;
     }
     sunrise_guest_stack::run_on_guest_stack(|| {
-        let wasm = std::env::var("PART_STATE_TARGET").unwrap() == "wasm";
-        let mods: mod_api::Mods = if wasm {
-            super::block_entity_tick_reply_tests::wasm_mods()
-        } else {
-            vec![mod_api::ModEntry::new(
-                "wasm_fixture",
-                Box::new(NativeFixture),
-            )]
-        }
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+            "part_state_fixture",
+            Box::new(NativeFixture),
+        )]
         .into();
         mod_platform::testing::with_mods(mods.clone(), || {
             crate::game::api_values::install_parts(&mods).unwrap();
@@ -592,11 +581,11 @@ fn native_and_compiled_wasm_part_state_count_ticks() {
                     .pack
                     .assets
                     .registry
-                    .default_state("wasm_fixture:part_state")
+                    .default_state("part_state_fixture:part_state")
                     .unwrap();
                 game.world.set(pos.0, pos.1, pos.2, block).unwrap();
                 let entity = ModBlockEntity::new(
-                    "wasm_fixture:part_state".into(),
+                    "part_state_fixture:part_state".into(),
                     sunrise_client::containers::ModBlockEntityFields {
                         data: vec![0],
                         ..Default::default()
@@ -609,9 +598,6 @@ fn native_and_compiled_wasm_part_state_count_ticks() {
                     tick_in(game, pos, 0);
                 }
                 assert_eq!(saved_value(game, pos, "part_state_count"), Some(3));
-
-                tick_in(game, pos, 3);
-                assert_eq!(saved_value(game, pos, "part_state_mark"), Some(3));
 
                 // Unloaded by the owner, then loaded back from the region file.
                 assert!(game.streaming.set_forced(key.0, key.1, false));
@@ -634,9 +620,9 @@ fn native_and_compiled_wasm_part_state_count_ticks() {
                     "reloaded"
                 );
 
-                // An undecodable saved count: refused, bytes kept, and the guest went on.
+                // An undecodable saved count: refused, bytes kept, and the Part continues.
                 let mut raw = game.world.block_entities.attachments(pos).unwrap().to_nbt();
-                let Some(Tag::Compound(names)) = raw.get_mut(&"wasm_fixture".into()) else {
+                let Some(Tag::Compound(names)) = raw.get_mut(&"part_state_fixture".into()) else {
                     unreachable!()
                 };
                 let Some(Tag::Compound(count)) = names.get_mut(&"part_state_count".into()) else {
@@ -651,10 +637,10 @@ fn native_and_compiled_wasm_part_state_count_ticks() {
                     .restore_attachments(pos, Attachments::from_nbt(raw.clone()));
                 tick_in(game, pos, 1);
                 let after = game.world.block_entities.attachments(pos).unwrap().to_nbt();
-                let Some(Tag::Compound(names)) = after.get(&"wasm_fixture".into()) else {
+                let Some(Tag::Compound(names)) = after.get(&"part_state_fixture".into()) else {
                     unreachable!()
                 };
-                let Some(Tag::Compound(before)) = raw.get(&"wasm_fixture".into()) else {
+                let Some(Tag::Compound(before)) = raw.get(&"part_state_fixture".into()) else {
                     unreachable!()
                 };
                 assert_eq!(
@@ -663,27 +649,6 @@ fn native_and_compiled_wasm_part_state_count_ticks() {
                     "its bytes are kept"
                 );
                 assert_eq!(saved_value(game, pos, "part_state_mark"), Some(1));
-
-                // Last, as a trap poisons the guest's link group: a fault may leave retained
-                // guest state, so the runtime calls it no more (`runtime.rs`). The stored value
-                // and the transactions are as before the call, and the game goes on. Natively
-                // the panic unwinds out of the tick instead: that side is the unwinding edit in
-                // the test above, where the next edit works.
-                if wasm {
-                    game.world
-                        .block_entities
-                        .restore_attachments(pos, Attachments::default());
-                    tick_in(game, pos, 0);
-                    assert_eq!(saved_value(game, pos, "part_state_count"), Some(1));
-                    tick_in(game, pos, 2);
-                    assert_eq!(saved_value(game, pos, "part_state_count"), Some(1), "kept");
-                    tick_in(game, pos, 0);
-                    assert_eq!(
-                        saved_value(game, pos, "part_state_count"),
-                        Some(1),
-                        "poisoned"
-                    );
-                }
             });
         });
     });

@@ -489,8 +489,6 @@ pub struct OptionsFile {
     values: Vec<V>,
     /// `fullscreenResolution`, kept verbatim.
     pub fullscreen_resolution: Option<String>,
-    /// Startup-only wasm compile setting, preserved verbatim, validated by the mod host.
-    pub wasm_compile_timeout_secs: Option<String>,
 }
 
 impl Default for OptionsFile {
@@ -498,7 +496,6 @@ impl Default for OptionsFile {
         Self {
             values: TABLE.iter().map(|d| d.default.clone()).collect(),
             fullscreen_resolution: None,
-            wasm_compile_timeout_secs: None,
         }
     }
 }
@@ -599,7 +596,6 @@ impl OptionsFile {
                 raw.insert(k.to_owned(), v.to_owned());
             }
         }
-        file.wasm_compile_timeout_secs = raw.get("wasm.compile_timeout_secs").cloned();
         let version = raw
             .get("version")
             .and_then(|v| crate::options_fixes::java_parse_int(v))
@@ -665,11 +661,6 @@ impl OptionsFile {
     /// `Options.save`.
     pub fn serialize(&self) -> String {
         let mut out = format!("version:{}\n", sunrise_world::DATA_VERSION);
-        if let Some(value) = &self.wasm_compile_timeout_secs {
-            out.push_str("wasm.compile_timeout_secs:");
-            out.push_str(value);
-            out.push('\n');
-        }
         for (d, v) in TABLE.iter().zip(&self.values) {
             let rendered = match (d.kind, v) {
                 (Kind::Option(spec), v) => match spec.encode(v) {
@@ -899,24 +890,6 @@ mod control_tests {
             f.set_text("nope", "1")
                 .unwrap_err()
                 .contains("unknown option")
-        );
-    }
-    #[test]
-    fn preserves_startup_compile_setting_without_adding_an_unset_value() {
-        for value in ["120", "0", "not-numeric"] {
-            let input = format!("wasm.compile_timeout_secs:{value}\n");
-            let saved = OptionsFile::parse(&input).serialize();
-            assert_eq!(
-                OptionsFile::parse(&saved)
-                    .wasm_compile_timeout_secs
-                    .as_deref(),
-                Some(value)
-            );
-        }
-        assert!(
-            OptionsFile::parse(&OptionsFile::default().serialize())
-                .wasm_compile_timeout_secs
-                .is_none()
         );
     }
 }

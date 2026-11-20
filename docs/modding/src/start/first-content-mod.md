@@ -58,6 +58,7 @@ the file you share.
 
 ## 4. Play it
 
+<!-- quickstart-test: skip, needs the reader's game and prepared resources -->
 ```sh
 cargo sunrise-mod run --game <path to sunrise-client> -- --resources <resources folder> \
   --game-dir target/sunrise-mod/game --home target/sunrise-mod/run/home

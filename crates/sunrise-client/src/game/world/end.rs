@@ -374,8 +374,17 @@ impl EyeOfEnder {
 
 impl Game<'_> {
     /// The environment attributes the frame draws: the packs' Polytone layers over the
-    /// current dimension's, when a pack has some. Gameplay keeps `dim_environment`.
+    /// current dimension's, when a pack has some. Gameplay keeps `dim_environment`. A client of a
+    /// server draws the type its server sent, with the packs' layers over it where they have a
+    /// stack of that type.
     pub(super) fn view_environment(&self) -> &Environment {
+        if let Some(own) = self.remote.as_ref().and_then(|r| {
+            r.level_pack_environment
+                .as_deref()
+                .or(r.level_environment.as_deref())
+        }) {
+            return own;
+        }
         match (&self.pack.environments, self.dim) {
             (Some(e), Dim::Overworld) => &e[0],
             (Some(e), Dim::Nether) => &e[1],
@@ -386,11 +395,11 @@ impl Game<'_> {
 
     /// The environment attributes of the current dimension.
     pub(super) fn dim_environment(&self) -> &Environment {
-        // A client of a server draws a level of a mod or a pack with the type the server sent.
+        // A client of a server takes the type the server sent, built-in levels included.
         if let Some(own) = self
             .remote
             .as_ref()
-            .and_then(|r| r.level_environment.as_ref())
+            .and_then(|r| r.level_environment.as_deref())
         {
             return own;
         }
@@ -683,12 +692,14 @@ impl Game<'_> {
         (portal, gateway)
     }
 
-    /// EndPortalBlock.getPortalDestination for the pending enter_dimension.
-    pub(super) fn end_destination(&self, target: Dim) -> Option<Vec3> {
+    /// EndPortalBlock.getPortalDestination for the pending enter_dimension: into
+    /// the End when `entering`, else out of it to `target`, the respawn point's
+    /// level or the world spawn's (which may be the End itself).
+    pub(super) fn end_destination(&self, entering: bool, target: Dim) -> Option<Vec3> {
         if !self.end_portal_travel {
             return None;
         }
-        if target == Dim::End {
+        if entering {
             // Vec3.atBottomCenterOf(END_SPAWN_POINT), one block lower for players.
             return Some(Vec3::new(
                 f64::from(END_SPAWN[0]) + 0.5,
@@ -709,16 +720,19 @@ impl Game<'_> {
     }
 
     /// Where an End portal's traveller lands once `target` has loaded, and
-    /// the yaw it faces there: the platform below the End's spawn point,
-    /// facing west, or the top of the Overworld's spawn column.
+    /// the yaw and pitch it faces there (None keeps its own): entering, the
+    /// platform below the End's spawn point, facing west; leaving, the bed or
+    /// anchor facing it, else the world spawn's column in its level, facing
+    /// the world spawn's angle (`TeleportTransition.createDefault`).
     /// None while a candidate of the world spawn's search loads (`finder`
     /// keeps it, see `search_spawn`).
     pub(super) fn end_arrival(
         &mut self,
+        entering: bool,
         target: Vec3,
         finder: &mut Option<PlayerSpawnFinder>,
-    ) -> Result<Option<(Vec3, Option<f32>)>> {
-        if self.dim == Dim::End {
+    ) -> Result<Option<(Vec3, [Option<f32>; 2])>> {
+        if entering {
             // EndPlatformFeature.createEndPlatform below the spawn point.
             let origin = [END_SPAWN[0], END_SPAWN[1] - 1, END_SPAWN[2]];
             for dz in -2..=2 {
@@ -746,25 +760,31 @@ impl Game<'_> {
                 }
             }
             self.native_portal_create("minecraft:the_end", origin);
-            // Direction.WEST.toYRot().
-            return Ok(Some((target, Some(90.0))));
+            // Direction.WEST.toYRot(); the pitch is relative (Relative.X_ROT).
+            return Ok(Some((target, [Some(90.0), None])));
         }
         // ServerPlayer.findRespawnPositionAndUseSpawnBlock: where the bed or
         // anchor puts the player, facing it; else onto the spawn column.
         let mut target = target;
         if let Some(c) = self.respawn_config.filter(|c| c.dim == self.dim) {
-            // This existing owner transition adapter carries yaw only; its pitch path remains open.
-            if let Some((at, yaw, _pitch)) = self.find_respawn_and_use(c, false)? {
-                return Ok(Some((at, Some(yaw))));
+            if let Some((at, yaw, pitch)) = self.find_respawn_and_use(c, false)? {
+                return Ok(Some((at, [Some(yaw), Some(pitch)])));
             }
             target = fallback_spawn(self.spawn, self.level.world_spawn);
         }
+        // TeleportTransition.createDefault: the world spawn's yaw and pitch; a bed of
+        // the player's own (`spawn`) keeps the way it faced.
+        let [yaw, pitch] = self.level.world_spawn_angle;
+        let facing = if self.spawn.is_some() {
+            [None, None]
+        } else {
+            [Some(yaw), Some(pitch)]
+        };
         let (x, z) = (target.x.floor() as i32, target.z.floor() as i32);
-        // TeleportTransition.missingRespawnBlock: PlayerSpawnFinder around
-        // the world spawn.
+        // findAdjustedSharedSpawnPos: PlayerSpawnFinder around the world spawn.
         if let Some(world) = self.level.world_spawn.filter(|w| w[0] == x && w[2] == z) {
             return Ok(match self.search_spawn(world, finder) {
-                Ok(at) => Some((at, None)),
+                Ok(at) => Some((at, facing)),
                 Err(chunk) => {
                     self.spawn_wait.push(chunk);
                     None
@@ -772,7 +792,7 @@ impl Game<'_> {
             });
         }
         let y = self.land_column(x, z).map_or(target.y, f64::from);
-        Ok(Some((Vec3::new(target.x, y, target.z), None)))
+        Ok(Some((Vec3::new(target.x, y, target.z), facing)))
     }
 
     /// EnderDragonFight without a dragon: once the centre of the main island
@@ -1880,6 +1900,38 @@ mod tests {
             exit_target(exit, false, |e| [e[0], e[1] + 11, e[2]]),
             [8, 111, 0]
         );
+    }
+
+    /// `EndPortalBlock.getPortalDestination` out of the End when the world spawn is set in
+    /// the End itself: an exit, not an entry, so no platform is built and the player faces the
+    /// world spawn's angle (`TeleportTransition.createDefault`); the way in builds it and
+    /// turns the player west.
+    #[test]
+    #[ignore = "daily"]
+    fn leaving_the_end_for_a_world_spawn_there_builds_no_platform() {
+        use super::super::native_entity_refs::tests::with_game;
+        use std::sync::Arc;
+
+        with_game(|game| {
+            game.enter_level(Dim::End).unwrap();
+            let platform = [END_SPAWN[0], END_SPAWN[1] - 2, END_SPAWN[2]];
+            let chunk = (platform[0] >> 4, platform[2] >> 4);
+            game.world.chunks.insert(
+                chunk,
+                Arc::new(sunrise_client::chunk::Chunk::empty(chunk.0, chunk.1)),
+            );
+            game.respawn_config = None;
+            game.spawn = None;
+            game.level.world_spawn = None;
+            game.level.world_spawn_angle = [45.0, -10.0];
+            let target = Vec3::new(9.5, 70.0, -3.5);
+            let exit = game.end_arrival(false, target, &mut None).unwrap();
+            assert_eq!(exit, Some((target, [Some(45.0), Some(-10.0)])));
+            assert_eq!(&*game.block_name(platform), "minecraft:air");
+            let entry = game.end_arrival(true, target, &mut None).unwrap();
+            assert_eq!(entry, Some((target, [Some(90.0), None])));
+            assert_eq!(&*game.block_name(platform), "minecraft:obsidian");
+        });
     }
 
     #[test]

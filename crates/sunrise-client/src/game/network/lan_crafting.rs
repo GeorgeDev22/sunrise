@@ -4,7 +4,7 @@
 //! guest's inventory, with vanilla's packets: OpenScreen, container clicks
 //! and their corrections, and the grid back into the inventory when the menu
 //! closes (`AbstractContainerMenu.clearContainer`).
-use super::{Game, transactions::decision::MenuOwner};
+use super::{Game, lan_actions::RECIPE_CHECK_COST, transactions::decision::MenuOwner};
 use sunrise_client::lan::recipes;
 use sunrise_client::{
     containers::{BlockEntity, ModMenuType},
@@ -45,10 +45,6 @@ pub(super) struct GuestCrafting {
 
 /// The most containers `native_recipe_sources` adds to one placement.
 const MAX_RECIPE_SOURCES: usize = 64;
-/// `GuestPlay::recipe_checks`: what one viewer check adds, and from what the
-/// next goes unanswered: ten at once, then one a second.
-const RECIPE_CHECK_COST: u32 = 20;
-const RECIPE_CHECK_LIMIT: u32 = 200;
 /// The most containers `native_menu_links` links one menu's slots to.
 const MAX_MENU_LINKS: usize = 64;
 
@@ -910,8 +906,8 @@ impl Game<'_> {
     /// and placement `guest_recipe_transfer` makes, the mods' recipe sources
     /// counted, on a copy of the guest's menu (`lan_check_recipe`). Nothing is
     /// written back: no slot, block entity or `container_changed`, and no
-    /// packet but the reply. Ten at once, then one a second
-    /// (`GuestPlay::recipe_checks`); more go unanswered.
+    /// packet but the reply. Each guest can burst ten checks, then gains one
+    /// check per server tick (twenty per second at 20 TPS); more go unanswered.
     pub(super) fn guest_recipe_check(&mut self, conn: u32, data: &[u8]) {
         use sunrise_protocol::buf::{Reader, Writer};
         let Some(host) = self.lan.as_mut() else {
@@ -935,7 +931,7 @@ impl Game<'_> {
             return;
         }
         let play = host.play.entry(conn).or_default();
-        if play.recipe_checks >= RECIPE_CHECK_LIMIT {
+        if !play.recipe_check_available() {
             return;
         }
         play.recipe_checks += RECIPE_CHECK_COST;
@@ -1121,6 +1117,7 @@ impl Game<'_> {
         else {
             return false;
         };
+        let owner = play.crafting.table.stamp();
         // handleContainerClick: broadcastFullState only for a click on an old
         // state, else only what the client got wrong. The whole menu after every
         // click would undo the clicks it has predicted since.
@@ -1146,6 +1143,16 @@ impl Game<'_> {
                         .collect::<Vec<_>>()
                 })
             else {
+                // A refused click keeps its menu open. Don't put it back if the
+                // listener closed or replaced the owner while the table was lifted.
+                if let Some(play) = self.lan.as_mut().and_then(|host| host.menus.get_mut(&conn))
+                    && play.crafting.table.stamp() == owner
+                {
+                    play.crafting
+                        .table
+                        .restore(Some((window, state, menu, pos)));
+                    self.lan_send_table_content(conn);
+                }
                 return true;
             };
             let Some(guest) = self.lan.as_ref().map(|host| &host.hub.guests[gi]) else {
@@ -2101,6 +2108,7 @@ mod recipe_check_tests {
                 slots: 10,
                 data_slots: 0,
                 results: vec![],
+                inputs: Vec::new(),
                 links: None,
                 crafting: Some(ModCrafting {
                     grid: 1,
@@ -2199,7 +2207,7 @@ mod recipe_check_tests {
     }
 
     /// Ten checks at once are answered, the next is dropped, and one more
-    /// goes through once the throttle has drained.
+    /// goes through after one tick.
     #[test]
     #[ignore = "daily"]
     fn checks_past_the_limit_go_unanswered() {
@@ -2216,10 +2224,8 @@ mod recipe_check_tests {
             }
             let replies = sent(&rx);
             assert_eq!(replies.len(), 10);
-            for _ in 0..RECIPE_CHECK_COST {
-                let play = game.lan.as_mut().unwrap().play.entry(conn).or_default();
-                play.recipe_checks = play.recipe_checks.saturating_sub(1);
-            }
+            game.tick_guest_connections(false).unwrap();
+            drop(sent(&rx));
             game.guest_recipe_check(conn, &request(0, 11, "minecraft:stick"));
             assert_eq!(reply(&sent(&rx)).1, 11);
         });
@@ -2352,7 +2358,7 @@ mod empty_ingredient_placement_tests {
                         .tables;
                     game.build_registries();
                     {
-                        // The generated Host entrypoint serves native and wasm callers;
+                        // The generated Host entrypoint serves mod callers;
                         // roundtrip its real answer, not a hand-constructed ingredient.
                         use mod_api::wire::{Reader, Wire, Writer};
                         let host: &dyn mod_api::Host = game;

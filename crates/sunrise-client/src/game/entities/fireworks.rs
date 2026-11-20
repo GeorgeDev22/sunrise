@@ -1055,11 +1055,16 @@ impl Game<'_> {
     }
     /// `FireworkEntityRenderer.submit`: the item (GROUND) facing the camera,
     /// lit at the rocket's light probe.
-    pub(super) fn rocket_geometry(&self, camera: glam::DVec3, alpha: f64, out: &mut Vec<Vertex>) {
+    pub(super) fn rocket_geometry(
+        &self,
+        camera: glam::DVec3,
+        alpha: f64,
+        out: &mut Vec<Vertex>,
+        run: std::ops::Range<usize>,
+    ) {
         let orientation = glam::Mat4::from_quat(self.camera_orientation());
         // shouldRender: not while attached to an entity (`isAttachedToEntity`).
-        for r in self
-            .rockets
+        for r in self.rockets[run]
             .iter()
             .filter(|r| !r.attached && r.attached_to.is_none())
         {
@@ -1206,7 +1211,7 @@ mod tests {
         // a camera-only run (id 0) closes it so nothing drawn after takes its motion.
         game.entity_motion.borrow_mut().clear();
         let mut out = Vec::new();
-        game.rocket_geometry(camera, 1.0, &mut out);
+        game.rocket_geometry(camera, 1.0, &mut out, 0..game.rockets.len());
         let marks = game.entity_motion.borrow().clone();
         let at = marks
             .iter()

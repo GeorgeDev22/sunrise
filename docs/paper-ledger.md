@@ -49,7 +49,7 @@ Scope: the twenty `misc-add` hooks below.
 | `bonemeal` | **Gap:** none (nearest [`BlockFertilizeEvent`][paper-BlockFertilizeEvent]) | The event reports resulting fertilization block changes after any `StructureGrowEvent`, rather than Sunrise's pre-growth validity and success/cancel decision with the bone meal stack and player-or-dispenser-or-villager cause. No key. |
 | `can_continue_sleeping` | **Gap:** none | No Paper event covers the per-tick check that a sleeping player, villager or wandering trader may continue sleeping; the supplied block-build event is unrelated. No key. |
 | `can_player_sleep` | **Partial:** [`PlayerBedEnterEvent`][paper-PlayerBedEnterEvent] | `PlayerBedEnterEvent` fires as a player is about to enter a bed and exposes the bed and a vanilla result, but its `BedEnterResult` is read-only and only allow/deny can be set. Sunrise lets mods replace the specific problem, including `other_problem`. No key. |
-| `chunk_sent` | **Partial:** [`PlayerChunkLoadEvent`][paper-PlayerChunkLoadEvent] | The non-cancellable server packet notification identifies the player and chunk when the player receives that chunk, matching `run_chunk_watches` after the chunk packet was sent and its listen-only result; the Javadoc recommends this moment for sending client-related data such as fake entities. Key added. Not told for the far ring's columns (a Sunrise server option, off by default), which a server may still send to players, so a port that sends data per received chunk misses those. No key. |
+| `chunk_sent` | **Partial:** [`PlayerChunkLoadEvent`][paper-PlayerChunkLoadEvent] | The non-cancellable server packet notification identifies the player and chunk when the player receives that chunk, matching `run_chunk_watches` after the chunk packet was sent and its listen-only result; the Javadoc recommends this moment for sending client-related data such as fake entities. Key added. |
 
 [paper-PlayerResourcePackStatusEvent]: https://jd.papermc.io/paper/26.3/org/bukkit/event/player/PlayerResourcePackStatusEvent.html
 [paper-PrepareAnvilEvent]: https://jd.papermc.io/paper/26.3/org/bukkit/event/inventory/PrepareAnvilEvent.html
@@ -1064,7 +1064,6 @@ one of these moments has to move that logic into a client native mod.
 | `register_item_tint_sources.rs` | `register_item_tint_sources` |
 | `register_layer_definitions.rs` | `register_layer_definitions` |
 | `register_range_select_item_model_property.rs` | `register_range_select_item_model_property` |
-| `register_runtime_sprites.rs` | `register_runtime_sprites` |
 | `register_texture_atlases.rs` | `register_texture_atlases` |
 | `render_arm.rs` | `render_arm` |
 | `render_frame_post.rs` | `render_frame_post` |

@@ -981,7 +981,7 @@ fn slot(
     x: f32,
     y: f32,
 ) {
-    if let Some(rect) = atlas.sprites.get("gui/sprites/container/slot").copied() {
+    if let Some(rect) = atlas.sprites.get("container/slot").copied() {
         batch.rect_uv(x, y, 18.0, 18.0, rect, u32::MAX);
     } else {
         batch.fill(atlas, x, y, 18.0, 18.0, rgba(139, 139, 139, 255));

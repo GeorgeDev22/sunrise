@@ -54,10 +54,33 @@ pub trait EntityLifetimeBackendMut {
     /// removal (Oozing's slimes, Weaving's cobwebs, Wind Charged's burst),
     /// still with no death and no loot. False for a player, a dragon part (it
     /// leaves with its dragon), or a stale handle.
+    /// Removing a general entity dismounts its passengers without removing them.
     /// Dropped items share `entity_discard`'s block-entity tick staging;
     /// non-item removal is deliberately immediate.
     #[access(WorldOnly)]
     fn entity_remove(&mut self, entity: EntityRef, reason: RemovalReason) -> bool;
+    /// Side: server.
+    /// Sets whether this entity may be written as a root in future world saves,
+    /// including chunk unload and a player's saved vehicle. `false` skips the
+    /// whole passenger tree when set on its root; setting it on a rider does not
+    /// omit that rider from a saved vehicle. `true` restores normal save rules
+    /// (the default), not the ability to save types that never save.
+    ///
+    /// An accepted write establishes the entity's save UUID and returns `Ok(true)`,
+    /// even if the flag was already set to the same value. It does not change
+    /// existing snapshots, despawn the entity, or keep it loaded. The flag lives
+    /// only as long as the entity, including through live dimension travel.
+    ///
+    /// Returns `Ok(false)` for a player, a dragon part, a handle that does not
+    /// resolve in the current level, or a client-side call. Returns
+    /// `Err(LevelWriteError::Unavailable)` outside the world phase or without
+    /// a world backend.
+    #[access(WorldOnly)]
+    fn entity_set_persistent(
+        &mut self,
+        entity: EntityRef,
+        persistent: bool,
+    ) -> Result<bool, LevelWriteError>;
     /// Side: server.
     /// Sets the entity's portal cooldown (`Entity.setPortalCooldown`), the
     /// value `entity_portal_cooldown` reads, where that read keeps it: the

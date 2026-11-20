@@ -66,8 +66,7 @@ its container; acquire a new handle for the replacement.
 
 ## Skip unchanged tick write-back
 
-The existing `BlockEntityPart::block_entity_tick` event has the same reply on native
-and wasm. It defaults to `Changed`, retaining full checked payload write-back.
+The `BlockEntityPart::block_entity_tick` reply defaults to `Changed`, retaining full checked payload write-back.
 When no payload should be written back, set:
 
 ```rust,ignore
@@ -84,7 +83,7 @@ effects. The input snapshot is still sent; this is not batching or a validity ca
 
 To tell clients about something that happened once, such as a burst of particles, queue
 fields instead of writing them to the saved `nbt`. In `block_entity_tick`, or another
-event with a mutable entity, native and wasm mods alike call
+event with a mutable entity, call
 `event.entity.set_client_update_fields(fields)`, then `host.block_entity_sync(event.pos)`.
 A later call replaces the batch; an empty compound clears it.
 
@@ -246,8 +245,7 @@ does not resolve. It never opens a replacement through an old handle.
 To open a content mod menu type with no block (a backpack item's use, an entity, a command),
 call `player.open_mod_menu(host, menu, title, extra, pos, replace)` (NeoForge's
 `openMenu(provider, extraDataWriter)`). `menu` is the type's `MenuKey`. `extra`, at most
-32 KiB, is what the client's `host.screen_extra_data()` returns while the screen is open, on
-native and wasm alike. `pos`, when given, is what `screen_pos()` returns; otherwise it returns
+32 KiB, is what the client's `host.screen_extra_data()` returns while the screen is open. `pos`, when given, is what `screen_pos()` returns; otherwise it returns
 `None`. The type's container slots show empty, and their clicks reach `native_menu_clicked`,
 as `open_menu`'s do. It returns the window id, or `Ok(None)` when a mod cancelled the open.
 It refuses with an `OpenMenuError`: `NotModMenu`, `PlayerUnavailable` (stale, fake, or a
@@ -311,15 +309,12 @@ hears its four hooks: a mod menu type takes one part answering them, a vanilla t
 mod, and a second is refused at load. The server asks `screen` too, whatever opened the
 menu, so a slot it hides takes no shift-click there either.
 
-For a block's menu, the one `event.block` names, a button returned by `screen_click` reaches
-`menu_button`, a server-side `BlockEntityPart` method. That includes menus opened by using a
-block or by calling `player_open_mod_menu` at the block's position with the menu type its
-container opens. A registered recipe-book screen also opens for a block's menu. The mod that
-registered the layout owns its slot controls and can attach a part for drawing, clicks and
-tooltips; another mod's screen part is refused.
-
-Server buttons and registered recipe-book screens are not yet supported for blockless menus
-([sunrise-org/sunrise#2672](https://github.com/sunrise-org/sunrise/issues/2672)).
+For a menu type with a `MenuPart`, a button returned by `screen_click` reaches
+`menu_button` on the server. A block-backed menu also supplies its backing block entity;
+a menu opened without a block supplies `None` for both `event.entity` and `event.context.pos`.
+Registered recipe-book screens work for blockless menus when their recipe slots have native
+slot backing. The mod that registered the layout owns its slot controls and can attach a part
+for drawing, clicks and tooltips; another mod's screen part is refused.
 
 ## Laying a screen's slots out again
 

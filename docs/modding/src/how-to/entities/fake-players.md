@@ -11,6 +11,10 @@ The shared leave path broadcasts the leave line and fires `player_kicked` and `p
 even though a fake has no preceding `player_logged_in`. It still writes no player-data save.
 Silent `remove_fake` sends no kick, leave line or logout notification.
 
+To check whether a fake player's current tool can harvest a block without breaking it, use
+[`player.has_correct_tool_for_drops`](../world/harvest-queries.md#what-the-game-uses-for-a-player).
+It reads that fake player's selected hotbar slot and runs the same harvest hooks as a connected player.
+
 ## Actions
 
 `player.perform_action(host, action)` makes it act as a player does, through the game's own path for the action, as

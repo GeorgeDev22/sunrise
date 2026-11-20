@@ -7,7 +7,6 @@ fn function(id: &str, refs: &[&str]) -> Function {
         FunctionContract {
             signature: format!("fn {}()", leaf(id)),
             impl_generics: String::new(),
-            wasm: true,
             refs: refs.iter().map(|r| r.to_string()).collect(),
         },
     )
@@ -144,11 +143,11 @@ fn leaves_are_what_a_mod_writes() {
 #[test]
 fn the_reader_refuses_with_a_typed_error() {
     let text = sample().to_json();
-    let older = text.replacen("\"schema\": 2", "\"schema\": 1", 1);
-    assert_eq!(Surface::read(older.as_bytes()), Err(ReadError::Schema(1)));
+    let older = text.replacen("\"schema\": 3", "\"schema\": 2", 1);
+    assert_eq!(Surface::read(older.as_bytes()), Err(ReadError::Schema(2)));
     assert_eq!(
-        ReadError::Schema(1).to_string(),
-        "surface schema 1, this tool reads 2"
+        ReadError::Schema(2).to_string(),
+        "surface schema 2, this tool reads 3"
     );
     assert!(matches!(
         Surface::read(&text.as_bytes()[..text.len() / 2]),
@@ -159,7 +158,7 @@ fn the_reader_refuses_with_a_typed_error() {
         Err(ReadError::Json(_))
     ));
     assert!(matches!(Surface::read(b"{}"), Err(ReadError::Json(_))));
-    let wrong_type = text.replacen("\"wasm\": true", "\"wasm\": \"yes\"", 1);
+    let wrong_type = text.replacen("\"signature\":", "\"signature\": false, \"other\":", 1);
     assert!(matches!(
         Surface::read(wrong_type.as_bytes()),
         Err(ReadError::Json(_))
@@ -190,7 +189,6 @@ fn the_contract_hash_leaves_out_doc_and_info_fields() {
     let contract = FunctionContract {
         signature: "fn f(x: u8)".into(),
         impl_generics: String::new(),
-        wasm: false,
         refs: vec![],
     };
     let documented = Function::new("fn:f", "Does f.", contract.clone());
@@ -198,7 +196,7 @@ fn the_contract_hash_leaves_out_doc_and_info_fields() {
     assert_eq!(documented.hash, bare.hash);
     // Independent of the code: SHA-256 of the compact JSON, first 16 bytes.
     use sha2::{Digest, Sha256};
-    let expected: String = Sha256::digest(br#"{"signature":"fn f(x: u8)","wasm":false}"#)[..16]
+    let expected: String = Sha256::digest(br#"{"signature":"fn f(x: u8)"}"#)[..16]
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
@@ -244,7 +242,6 @@ fn api_trait(id: &str, role: Role, bounds: &[&str], methods: &[&str]) -> Trait {
                     MethodContract {
                         signature: format!("fn {name}(&self)"),
                         required: false,
-                        wasm: true,
                         refs: vec![id.to_owned()],
                     },
                 )

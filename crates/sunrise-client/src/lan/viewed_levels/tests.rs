@@ -161,6 +161,7 @@ fn in_ctx<R>(world: &mut World, f: impl FnOnce(&mut TickCtx) -> R) -> R {
         next_entity: &mut next_entity,
         spawn: [0.5, 64.0, 0.5],
         spawn_angle: [0.0; 2],
+        spawn_dimension: "minecraft:overworld",
         difficulty: 2,
         difficulty_locked: false,
         clock_rate: 1.0,
@@ -938,6 +939,8 @@ fn a_viewed_sound_reaches_a_viewer_holding_its_chunk_within_its_distance() {
             source: 5,
             entity: Some(40),
             except_entity: None,
+            seed: 0,
+            particles_before: 0,
         },
         None,
     );

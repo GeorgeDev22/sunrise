@@ -73,6 +73,14 @@ impl IPayloadContext for Context<'_, '_> {
     ) -> Result<(), mod_api::PayloadSendError> {
         unreachable!("the handler never sends")
     }
+    fn send_to(
+        &mut self,
+        _: &[mod_api::PlayerRef],
+        _: &mod_api::PayloadId,
+        _: mod_api::PayloadBytes,
+    ) -> Result<u32, mod_api::PayloadSendError> {
+        unreachable!()
+    }
     fn disconnect(&mut self, _: mod_api::Text) {
         unreachable!("the handler never disconnects")
     }

@@ -9,8 +9,7 @@
 //! They behave as vanilla's `Button` and `EditBox` do: the game draws them with its own sprites,
 //! label and caret (`DrawContext::widget_button`, `DrawContext::widget_text_field`), so they get
 //! its narration and controller support, and a text field edits with the same core as the
-//! game's own ([`TextEdit`](crate::TextEdit)). Everything else is plain Rust in the mod,
-//! the same in a native and a wasm build.
+//! game's own ([`TextEdit`](crate::TextEdit)). Everything else is plain Rust in the mod.
 //!
 //! ```
 //! use mod_api::client::widgets::{Button, Outcome, TextField, Widgets};

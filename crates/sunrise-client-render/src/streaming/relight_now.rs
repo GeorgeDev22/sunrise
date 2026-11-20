@@ -3,6 +3,7 @@ use super::Streaming;
 use crate::{
     chunk::Light,
     light::{LightChanges, apply_lighting, apply_relighting},
+    section_mask::SectionMask,
     world::World,
 };
 use std::sync::Arc;
@@ -28,6 +29,7 @@ impl Streaming {
             let mut changed = LightChanges::default();
             if first {
                 apply_lighting(chunk, sections);
+                self.light_tables.publish_section_status(chunk, world.shape);
             } else {
                 apply_relighting(chunk, sections, &mut changed);
             }
@@ -38,6 +40,7 @@ impl Streaming {
             }
             chunk.lit = true;
             if first {
+                world.publish_light_border((x, z), SectionMask::EMPTY);
                 for dz in -1..=1 {
                     for dx in -1..=1 {
                         for sy in 0..world.layout().sections() as i32 {

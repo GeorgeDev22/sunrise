@@ -44,7 +44,7 @@ pub enum StorageError {
         /// The mod whose handler answered, or "the game".
         owner: String,
     },
-    /// The handler could not answer: a wasm mod's that is stopped, busy or out of scope.
+    /// The handler could not answer.
     Unavailable {
         /// The mod whose handler was asked.
         owner: String,
@@ -70,8 +70,7 @@ impl From<crate::Overanswered> for StorageError {
 /// handler cannot hand back more than was asked. Reuse one page across calls: [`page`] clears it.
 ///
 /// [`page`]: ItemStorage::page
-// no wire: a manual codec (`wire/wire_types.rs`) re-checks the cap on decode, so a guest handler
-// cannot hand back more than the host's limit
+// no wire: a manual codec (`wire/wire_types.rs`) re-checks the entry limit on decode.
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct StoragePage {
     entries: Vec<(ItemResource, u64)>,

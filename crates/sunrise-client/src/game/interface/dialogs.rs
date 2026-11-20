@@ -5,7 +5,7 @@
 //! buttons send back.
 use super::Game;
 use super::remote_chat::Behind;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use sunrise_client::{
     Result,
     clipboard::EditShortcut,
@@ -20,11 +20,14 @@ use sunrise_client::{
     widgets::{self, ScreenInfo},
 };
 use sunrise_core::nbt::Tag;
+use sunrise_protocol::registry::Dynamic;
 use winit::keyboard::KeyCode;
 
 /// An open `DialogScreen`.
 struct Open {
     dialog: Dialog,
+    /// A configuration screen and the dialogs opened from it use the same snapshot.
+    configuration: Option<Arc<Dynamic>>,
     values: Vec<InputValue>,
     /// The box of each text input.
     fields: Vec<Option<Field>>,
@@ -174,47 +177,64 @@ impl Game<'_> {
             })
     }
 
+    pub(super) fn decode_dialog(&self, tag: &Tag, dynamic: Option<&Dynamic>) -> Option<Dialog> {
+        let items = self
+            .remote
+            .as_ref()
+            .and_then(|r| r.builtin.get("minecraft:item"));
+        Dialog::parse_in_registry(
+            tag,
+            &self.ui.registries,
+            &|id| {
+                items.map_or_else(
+                    || self.res.item_defaults().entries().contains_key(id),
+                    |items| items.id(id).is_some(),
+                )
+            },
+            dynamic,
+        )
+    }
+
+    pub(super) fn show_dialog(&mut self, tag: &Tag) {
+        self.show_dialog_in_phase(tag, None);
+    }
+
     /// `showDialog`: the dialog replaces an open one (and a waiting screen);
     /// under the warning screen, it is what Back returns to.
-    pub(super) fn show_dialog(&mut self, tag: &Tag) {
-        let Some(mut dialog) = Dialog::parse(tag) else {
+    pub(super) fn show_dialog_in_phase(&mut self, tag: &Tag, configuration: Option<Arc<Dynamic>>) {
+        let dynamic = configuration
+            .as_deref()
+            .or_else(|| self.remote.as_ref().map(|r| r.registries.as_ref()));
+        let Some(mut dialog) = self.decode_dialog(tag, dynamic) else {
             log::warn!("Sunrise: failed to show dialog for data {tag:?}");
             return;
         };
         if let Kind::DialogList { dialogs, .. } = &dialog.kind {
-            let entries = self.remote.as_ref().map(|r| {
-                let list = r.registries.registries.get("minecraft:dialog");
-                let by_id = |id: &str| {
-                    let name = if id.contains(':') {
-                        id.to_owned()
-                    } else {
-                        format!("minecraft:{id}")
-                    };
-                    list?.iter().find(|(n, _)| *n == name)?.1.clone()
+            let entries = dynamic.map(|registry| {
+                let by_id = |name: &str| {
+                    registry
+                        .data("minecraft:dialog", registry.id("minecraft:dialog", name)?)
+                        .cloned()
                 };
                 let by_tag = |name: &str| {
-                    let name = if name.contains(':') {
-                        name.to_owned()
-                    } else {
-                        format!("minecraft:{name}")
-                    };
-                    let ids = r
-                        .registries
-                        .tag("minecraft:dialog", &name)
+                    registry
+                        .tag("minecraft:dialog", name)
                         .into_iter()
-                        .flatten();
-                    ids.filter_map(|&i| list?.get(usize::try_from(i).ok()?)?.1.clone())
+                        .flatten()
+                        .filter_map(|&id| registry.data("minecraft:dialog", id).cloned())
                         .collect()
                 };
                 Dialog::list_entries(dialogs, &by_tag, &by_id)
             });
-            dialog.set_list(&entries.unwrap_or_default());
+            dialog.set_list(&entries.unwrap_or_default(), |tag| {
+                self.decode_dialog(tag, dynamic)
+            });
         }
-        self.open_dialog(dialog);
+        self.open_dialog(dialog, configuration);
     }
 
     /// The parsed dialog's screen, its inputs at their initial values.
-    fn open_dialog(&mut self, dialog: Dialog) {
+    fn open_dialog(&mut self, dialog: Dialog, configuration: Option<Arc<Dynamic>>) {
         let values = dialog.inputs.iter().map(|i| i.control.initial()).collect();
         let font = &self.gui.atlas.font;
         let fields = dialog
@@ -225,18 +245,11 @@ impl Game<'_> {
                     width,
                     initial,
                     max_length,
-                    multiline: Some((max_lines, _)),
+                    multiline: Some((max_lines, height)),
                     ..
                 } => {
-                    // TextInputHandler: the `MultiLineEditBox` with its limits.
-                    let height = text_height(Some((*max_lines, None)));
-                    let height = match &i.control {
-                        Control::Text {
-                            multiline: Some((_, Some(h))),
-                            ..
-                        } => *h as f32,
-                        _ => height,
-                    };
+                    // TextInputHandler.addControl takes an explicit height before computing a default.
+                    let height = text_height(Some((*max_lines, *height)));
                     let mut edit = MultiLineEdit::new(font, 0.0, 0.0, *width as f32, height);
                     edit.set_character_limit((*max_length).max(0) as usize);
                     if let Some(lines) = max_lines {
@@ -263,6 +276,7 @@ impl Game<'_> {
         self.open_screen_overlay("dialog", |game| {
             game.dialogs.open = Some(Open {
                 dialog,
+                configuration,
                 values,
                 fields,
                 focus: None,
@@ -337,6 +351,14 @@ impl Game<'_> {
             }
             _ => None,
         };
+        let configuration = match click {
+            Some(Click::ShowDialog(_)) => self
+                .dialogs
+                .open
+                .as_ref()
+                .and_then(|o| o.configuration.clone()),
+            _ => None,
+        };
         match after {
             AfterAction::None => {}
             AfterAction::Close => self.dialogs.open = None,
@@ -366,7 +388,9 @@ impl Game<'_> {
                     );
                 }
             }
-            Some(Click::ShowDialog(dialog)) => self.show_dialog_ref(&dialog),
+            Some(Click::ShowDialog(dialog)) => {
+                self.show_dialog_ref_in_phase(&dialog, configuration)
+            }
             Some(Click::CopyToClipboard(value)) => {
                 use sunrise_client::clipboard::Clipboard;
                 self.clipboard.set(&value);
@@ -398,24 +422,28 @@ impl Game<'_> {
 
     /// A `show_dialog` click event's dialog: a registry id or the dialog itself.
     pub(super) fn show_dialog_ref(&mut self, dialog: &Tag) {
-        match dialog {
-            Tag::String(id) => {
-                let id = id.to_string_lossy();
-                let name = if id.contains(':') {
-                    id.clone()
-                } else {
-                    format!("minecraft:{id}")
-                };
-                let found = self.remote.as_ref().and_then(|r| {
-                    let entries = r.registries.registries.get("minecraft:dialog")?;
-                    entries.iter().find(|(n, _)| *n == name)?.1.clone()
-                });
-                match found {
-                    Some(tag) => self.show_dialog(&tag),
-                    None => log::warn!("Sunrise: unknown dialog {id}"),
-                }
+        self.show_dialog_ref_in_phase(dialog, None);
+    }
+
+    fn show_dialog_ref_in_phase(&mut self, dialog: &Tag, configuration: Option<Arc<Dynamic>>) {
+        if let Tag::String(id) = dialog {
+            let id = id.to_string_lossy();
+            let Ok(name) = sunrise_core::identifier::Identifier::parse(&id) else {
+                return;
+            };
+            let dynamic = configuration
+                .as_deref()
+                .or_else(|| self.remote.as_ref().map(|r| r.registries.as_ref()));
+            let found = dynamic.and_then(|registry| {
+                let id = registry.id("minecraft:dialog", &name.to_string())?;
+                registry.data("minecraft:dialog", id).cloned()
+            });
+            match found {
+                Some(tag) => self.show_dialog_in_phase(&tag, configuration),
+                None => log::warn!("Sunrise: unknown dialog {id}"),
             }
-            tag => self.show_dialog(tag),
+        } else {
+            self.show_dialog_in_phase(dialog, configuration);
         }
     }
 
@@ -634,10 +662,10 @@ impl Game<'_> {
                     let hover = in_area(cursor.1) && ui::hovered(cursor, x, y, cw, ch);
                     let on = open.values.get(input) == Some(&InputValue::Bool(true));
                     let sprite = match (on, hover) {
-                        (true, true) => "gui/sprites/widget/checkbox_selected_highlighted",
-                        (true, false) => "gui/sprites/widget/checkbox_selected",
-                        (false, true) => "gui/sprites/widget/checkbox_highlighted",
-                        (false, false) => "gui/sprites/widget/checkbox",
+                        (true, true) => "widget/checkbox_selected_highlighted",
+                        (true, false) => "widget/checkbox_selected",
+                        (false, true) => "widget/checkbox_highlighted",
+                        (false, false) => "widget/checkbox",
                     };
                     let Control::Boolean { label, .. } = &open.dialog.inputs[input].control else {
                         continue;
@@ -1304,11 +1332,16 @@ mod pause_tests {
 
     fn dialog(pause: bool) -> Dialog {
         let s = |value: &str| Tag::String(value.into());
-        Dialog::parse(&Tag::compound([
-            ("type", s("notice")),
-            ("title", s("Hi")),
-            ("pause", Tag::Byte(i8::from(pause))),
-        ]))
+        Dialog::parse(
+            &Tag::compound([
+                ("type", s("notice")),
+                ("title", s("Hi")),
+                ("pause", Tag::Byte(i8::from(pause))),
+            ]),
+            &Default::default(),
+            &|_| false,
+            &|_| false,
+        )
         .unwrap()
     }
 
@@ -1316,6 +1349,7 @@ mod pause_tests {
         DialogState {
             open: Some(Open {
                 dialog: dialog(pause),
+                configuration: None,
                 values: Vec::new(),
                 fields: Vec::new(),
                 focus: None,

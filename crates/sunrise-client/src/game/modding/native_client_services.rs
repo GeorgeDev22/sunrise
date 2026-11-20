@@ -115,10 +115,15 @@ impl Game<'_> {
         self.draw_item_decorations(batch, stack, at[0], at[1], text.map(str::to_owned));
     }
     /// Whether a specific key is currently held down.
-    /// `key` is the vanilla physical key name (`key.keyboard.left.shift`, for example).
-    /// Unknown names are not down. Modifier combinations use `ClientHost::modifiers`.
-    pub(super) fn is_key_down(&self, key: &str) -> bool {
-        sunrise_client::keybinds::key_code(key).is_some_and(|key| self.physical_keys.contains(&key))
+    /// `key` is the vanilla physical key or mouse button name (`key.keyboard.left.shift`,
+    /// `key.mouse.left`, for example). Unknown names are not down. Modifier combinations use
+    /// `ClientHost::modifiers`.
+    pub(in crate::game) fn is_key_down(&self, key: &str) -> bool {
+        match sunrise_client::keybinds::key_code(key) {
+            Some(key) => self.physical_keys.contains(&key),
+            None => sunrise_client::keybinds::mouse_button(key)
+                .is_some_and(|button| self.physical_buttons.contains(&button)),
+        }
     }
 }
 

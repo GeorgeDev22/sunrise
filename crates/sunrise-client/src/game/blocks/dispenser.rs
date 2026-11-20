@@ -965,18 +965,6 @@ impl Game<'_> {
         let mut source = source_slot.as_mut().map(|slot| {
             sunrise_client::mobs::equip::EquipDecision::new(stack as *const _ as usize as u64, slot)
         });
-        let kinds = if observed {
-            targets
-                .iter()
-                .map(|target| match target {
-                    Target::Mob(i) => self.mobs[*i].kind.id.as_str(),
-                    Target::Stand(_) => "minecraft:armor_stand",
-                    _ => "minecraft:player",
-                })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
         let entities = if observed {
             targets
                 .iter()
@@ -998,7 +986,7 @@ impl Game<'_> {
         let input = source.as_deref().map_or(&*stack, |source| source);
         let (tags, prepared) = (
             &self.stations().enchantments.entity_tags,
-            self.equip_stack(input, &kinds, &entities),
+            self.equip_stack(input, &entities),
         );
         let stamp = source.as_ref().and_then(|source| source.stamp());
         let allows = |entity: u32, id: &str| {
@@ -2748,20 +2736,12 @@ mod tests {
                 assert_eq!((done, worn, stand), (false, None, false));
                 assert_eq!(fits.asked().len(), 2);
                 // A missing entity is refused, and the part never hears of it.
-                let prepared = game.equip_stack(
-                    &helmet,
-                    &[
-                        "minecraft:player",
-                        "minecraft:zombie",
-                        "minecraft:armor_stand",
-                    ],
-                    &[],
-                );
+                let prepared = game.equip_stack(&helmet, &[]);
                 assert!(!game.can_equip(&prepared, "head", 9_999, "minecraft:zombie", true));
                 assert!(fits.asked().is_empty());
                 // With no part to ask, the component's answer stands for any entity.
                 let chestplate =
-                    game.equip_stack(&ItemStack::new("minecraft:iron_chestplate", 1), &[], &[]);
+                    game.equip_stack(&ItemStack::new("minecraft:iron_chestplate", 1), &[]);
                 assert!(game.can_equip(&chestplate, "chest", 9_999, "minecraft:zombie", true));
             });
         });

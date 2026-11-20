@@ -43,8 +43,7 @@ pub trait DatapackRegistriesRegistrar {
     /// Entries are JSON files in data packs: entry `addon:fire` of
     /// `example:spell` is `data/addon/example/spell/fire.json`
     /// ([`DatapackRegistryDeclaration::entry_file`]). The game decodes every
-    /// file against `fields`: no mod code runs while decoding, so native and
-    /// wasm mods get the same bounds. A key the schema does not
+    /// file against `fields` without running mod code. A key the schema does not
     /// declare, a missing required key or an out-of-range value fails the
     /// entry; a default never stands in for invalid data.
     ///

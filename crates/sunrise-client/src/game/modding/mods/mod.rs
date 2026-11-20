@@ -1,7 +1,7 @@
 // game-module-visibility: pub(crate)
 //! Mods in the game (`docs/modding/src/how-to/content-mods.md`): content mods' blocks, items, data and
 //! assets (`content_root`), and the Mods page's rows. Code mods are native (`native_hooks.rs`)
-//! or wasm (`sunrise-mod-wasm`, loaded at startup); any other executable file is refused.
+//! with content-only packages loaded separately.
 use super::{
     Game, execution_role::ExecutionRole, owner_link::OwnerRequest,
     registration_capability_coverage as coverage,
@@ -160,23 +160,18 @@ impl ModsState {
             .native
             .packages()
             .iter()
-            .map(|package| (&package.manifest, true));
-        let selected = self.selected.iter().map(|selected| {
-            (
-                &selected.package.manifest,
-                selected.package.manifest.wasm.is_some(),
-            )
-        });
-        sunrise_mod_package::enabled::EnabledMods::new(native.chain(selected).filter_map(
-            |(manifest, code)| {
-                let enabled = if code {
-                    self.code_owner_enabled(&manifest.id)
-                } else {
-                    accepted_content(&manifest.id)
-                };
-                enabled.then(|| (manifest.id.clone(), manifest.side))
-            },
-        ))
+            .map(|package| &package.manifest)
+            .filter(|manifest| self.code_owner_enabled(&manifest.id));
+        let content = self
+            .selected
+            .iter()
+            .map(|package| &package.package.manifest)
+            .filter(|manifest| accepted_content(&manifest.id));
+        sunrise_mod_package::enabled::EnabledMods::new(
+            native
+                .chain(content)
+                .map(|manifest| (manifest.id.clone(), manifest.side)),
+        )
     }
 
     pub(super) fn select(
@@ -188,9 +183,7 @@ impl ModsState {
             sunrise_mod_package::selection::content_packages(game_dir, enabled, &self.dev)
                 .filter(|selected| {
                     let id = &selected.package.manifest.id;
-                    // A refused wasm mod's content stays out with its code.
                     !self.native.built().iter().any(|built| built.id == *id)
-                        && !crate::entry::code_startup_refused(id)
                 })
                 .collect();
         self.refused = Default::default();
@@ -236,7 +229,7 @@ pub(super) fn install_registration_data(
     let directory = Game::game_dir();
     let directory = mod_api::InstanceDirectory::from_path(&directory)
         .expect("the host's paths have an encoding the mod API carries");
-    (sunrise_engine_slots::platform()?.install_registration_data)(
+    (mod_api::__private::platform::platform()?.install_registration_data)(
         mod_api::__private::RegistrationData::new(
             builtin_registry_names(root)?,
             sunrise_world::native_load_context::capture_settings(
@@ -793,7 +786,7 @@ pub(super) fn content_overlay(
                 .any(|missing| missing.owners.contains(&source.manifest.id))
         })
         .filter(|source| {
-            let code = source.manifest.native.is_some() || source.manifest.wasm.is_some();
+            let code = source.manifest.native.is_some();
             !code || seen.insert(source.manifest.id.as_str())
         })
         .collect();
@@ -911,6 +904,7 @@ pub(super) fn content_overlay(
             log::warn!("Sunrise: {e}");
         }
     }
+    validate_entity_type_families(&mods, super::general::general_type_catalog())?;
     // Content validation may refuse a package. Revalidate against what really
     // loaded so dependents cannot start with a missing required content mod.
     let loaded: Vec<_> = manifests
@@ -1034,9 +1028,6 @@ mod particle_registry_reload_tests {
 /// The content root with everything the mods declare registered against the
 /// process: block entities, mob effects, entity and menu types, fluid looks,
 /// and the protocol's local mod list, each set once.
-///
-/// `pub(in crate::game)`: the general entity tick's wasm tests
-/// (`game::entities::general::tick_tests`) build the fixture's game the same way.
 pub(in crate::game) fn content_root(
     root: &std::path::Path,
     sources: &ModsState,
@@ -1112,9 +1103,9 @@ pub(in crate::game) fn content_root(
     Ok(overlay.root)
 }
 
-/// Publish the built-in registry orders mods iterate. The report already
-/// includes the types and menus the content overlay registered, in registration
-/// order (`BuiltInRegistries` protocol ids).
+/// Publish the registry orders mods iterate. The report includes built-in
+/// and content names in protocol order; native general types come after them
+/// in the public entity-type registry, not in the protocol ID table.
 pub(in crate::game) fn register_iterated_registries(
     root: &std::path::Path,
 ) -> sunrise_client::Result<()> {
@@ -1122,8 +1113,13 @@ pub(in crate::game) fn register_iterated_registries(
     let path = Builtin::find(root).ok_or("registries.json not found")?;
     let builtin = Builtin::load(&path)?;
     if let Some(ids) = builtin.get("minecraft:entity_type") {
-        mod_api::__private::resolve_entity_types(ids.names.iter().map(String::as_str))
-            .map_err(|errors| errors.join("\n"))?;
+        mod_api::__private::resolve_entity_types(
+            ids.names
+                .iter()
+                .map(String::as_str)
+                .chain(super::general::general_type_catalog().keys()),
+        )
+        .map_err(|errors| errors.join("\n"))?;
     }
     if let Some(ids) = builtin.get("minecraft:game_event") {
         mod_api::__private::resolve_game_events(ids.names.iter().map(String::as_str))
@@ -1324,6 +1320,25 @@ fn register_mob_effects(mods: &[sunrise_client::mod_content::ContentMod]) {
     }
 }
 
+/// Content and general types share the entity-type key space even though their definitions
+/// enter through different paths. Refuse the collision before building the content root.
+fn validate_entity_type_families(
+    mods: &[sunrise_client::mod_content::ContentMod],
+    general: &super::general::GeneralTypeCatalog,
+) -> Result<(), String> {
+    for package in mods {
+        for entity in &package.content.entity_types {
+            if general.slot(&entity.id).is_some() {
+                return Err(format!(
+                    "mod {} declares entity type {} as both a content and a general entity type",
+                    package.id, entity.id,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// the mods' entity types' templates, which the tracker reads their settings
 /// from, and their thrown types, as their mob effects: set once, from the
 /// startup root. Living types are mobs, loaded with vanilla's from the
@@ -1364,6 +1379,7 @@ fn register_menu_types(
     menu_books::validate_registered(&menus)?;
     let set = containers::register_mod_menu_types(menus.iter().map(|m| {
         let results = m.results.iter().map(|&r| usize::from(r)).collect();
+        let inputs = m.inputs.iter().copied().map(usize::from).collect();
         let crafting = m.crafting.map(|c| containers::ModCrafting {
             grid: c.grid.into(),
             size: c.size.into(),
@@ -1378,6 +1394,7 @@ fn register_menu_types(
             m.slots.into(),
             m.data_slots.into(),
             results,
+            inputs,
             crafting,
             links,
         )
@@ -1461,7 +1478,7 @@ fn live_switch_of(
     content_ids: &mut std::collections::BTreeSet<String>,
     live_ids: &mut std::collections::BTreeSet<String>,
 ) {
-    if package.is_native() || package.manifest.wasm.is_some() {
+    if package.is_native() {
         return;
     }
     let id = &package.manifest.id;
@@ -1654,7 +1671,6 @@ impl Game<'_> {
                     }
                 };
                 let m = &package.manifest;
-                let refused = crate::entry::code_refusal(&m.id);
                 live_switch_of(
                     path,
                     &package,
@@ -1670,7 +1686,7 @@ impl Game<'_> {
                     id: m.id.clone(),
                     title: format!("{} {}", m.name, m.version),
                     description: m.description.clone(),
-                    problem: refused.map(|why| format!("Not loaded: {why}")),
+                    problem: None,
                     dev: self.mods.dev.contains(path),
                     native: None,
                 }
@@ -1813,7 +1829,7 @@ impl Game<'_> {
             at.elapsed().as_millis()
         );
     }
-    /// Apply the player's switches at the canonical native and wasm dispatch boundary.
+    /// Apply the player's switches at the canonical native dispatch boundary.
     pub(super) fn sync_native_switches(&self) {
         self.instance_groups
             .borrow_mut()
@@ -2180,6 +2196,44 @@ mod tests {
             .unwrap();
         std::fs::remove_dir_all(&cwd).unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn a_package_cannot_declare_one_type_in_both_entity_families() {
+        let general = crate::game::general::GeneralTypeCatalog::freeze(&[
+            mod_api::__private::GeneralEntityTypeDeclaration {
+                mod_id: "ruby".into(),
+                id: "ruby:robot".into(),
+                category: mod_api::GeneralEntityCategory::Misc,
+                width: 0.5,
+                height: 1.0,
+                passenger_attachment: None,
+                save_policy: mod_api::GeneralSavePolicy::Save,
+                summonable: true,
+                pickable: false,
+                tracking_chunks: 8,
+                update_interval: 3,
+                payload_version: 1,
+                required_features: Vec::new(),
+            },
+        ])
+        .unwrap();
+        let mut content = sunrise_mod_package::content::Content::declared("ruby");
+        let mut entity: sunrise_mod_package::content::EntityType =
+            serde_json::from_str(r#"{"template":"minecraft:zombie"}"#).unwrap();
+        entity.id = "ruby:robot".into();
+        content.entity_types.push(entity);
+        let mut package = sunrise_client::mod_content::ContentMod {
+            id: "ruby".into(),
+            content,
+            jars: Vec::new(),
+        };
+        assert_eq!(
+            validate_entity_type_families(std::slice::from_ref(&package), &general),
+            Err("mod ruby declares entity type ruby:robot as both a content and a general entity type".into()),
+        );
+        package.content.entity_types[0].id = "ruby:zombie".into();
+        assert_eq!(validate_entity_type_families(&[package], &general), Ok(()));
     }
 
     /// A content mod's living type is a mob of its template's species under

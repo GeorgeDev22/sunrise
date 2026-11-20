@@ -1,4 +1,4 @@
-/// Client humanoid pose registrations, shared by native and wasm mods.
+/// Client humanoid pose registrations.
 pub trait ArmPosesRegistrar {
     /// Register a pose once in `Hooks::register`, keeping the returned token for
     /// `get_arm_pose`. `name` must be namespaced in the registering mod's namespace.

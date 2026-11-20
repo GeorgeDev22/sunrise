@@ -55,8 +55,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust.outputs.version }}
-          # The API source is checked for wasm32 too (tools/sdk_api_source.py build).
-          targets: wasm32-unknown-unknown
       # As the legs' caches: main's runs save it, every branch restores it.
       - uses: Swatinem/rust-cache@v2
         with:
@@ -86,11 +84,21 @@ jobs:
         run: |
           set -euo pipefail
           previous=$(python3 tools/ci/nightly.py sdk-previous "$COMMIT" previous-surface.json)
-          echo "build=$previous" >> "$GITHUB_OUTPUT"
           if [ -z "$previous" ]; then
             echo "### No SDK was published before $COMMIT on its history: sdk.json has no comparison" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # Start the schema-3 SDK baseline once. There is no comparable previous SDK until
+          # one has been published with this schema; don't publish an empty or invented diff.
+          # Remove this branch and the reset audit after the first complete schema-3 SDK publishes.
+          if [ -f tools/ci/surface-schema-3-reset.json ] &&
+             jq -e '.schema == 2' previous-surface.json >/dev/null &&
+             jq -e '.schema == 3' dist/surface.json >/dev/null; then
+            echo "### SDK surface baseline reset (schema 2 → 3)" >> "$GITHUB_STEP_SUMMARY"
+            echo "The previous SDK ($previous) has schema 2. This SDK starts the new baseline without a previous diff. The transition comparison is in tools/ci/surface-schema-3-reset.json." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "build=$previous" >> "$GITHUB_OUTPUT"
           # The change notes added since that build: those its tree did not have.
           mkdir -p base
           if git cat-file -e "$previous:crates/sunrise-mod-vocab/changes" 2> /dev/null; then

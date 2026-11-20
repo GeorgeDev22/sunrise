@@ -216,15 +216,9 @@ impl Menu {
                     return Err(OUT_OF_BOUNDS);
                 }
                 let s = slot_index as usize;
-                if !self.may_pickup(env, s) {
-                    return Ok(());
-                }
-                let mut clicked = self.quick_move(env, s);
+                let mut clicked = self.quick_move_step(env, s, None);
                 while let Some(c) = &clicked {
-                    if !self.slot(s).is_some_and(|now| same_item(now, c)) {
-                        break;
-                    }
-                    clicked = self.quick_move(env, s);
+                    clicked = self.quick_move_step(env, s, Some(c));
                 }
             } else {
                 if slot_index < 0 {
@@ -267,19 +261,10 @@ impl Menu {
             } else {
                 self.slot(s).map_or(0, |c| c.count)
             };
-            let mut taken = self.safe_take(env, s, amount, u32::MAX);
-            if let Some(t) = &taken {
-                self.drop_stack(t, env.items);
-            }
+            let mut taken = self.throw_step(env, s, amount, None);
             if button == 1 {
                 while let Some(t) = &taken {
-                    if !self.slot(s).is_some_and(|now| same_item(now, t)) {
-                        break;
-                    }
-                    taken = self.safe_take(env, s, amount, u32::MAX);
-                    if let Some(t) = &taken {
-                        self.drop_stack(t, env.items);
-                    }
+                    taken = self.throw_step(env, s, amount, Some(t));
                 }
             }
         } else if input == Input::PickupAll && slot_index >= 0 {
@@ -299,6 +284,40 @@ impl Menu {
         if let Some(outcome) = env.stacked {
             (canceled, handled) = (outcome.canceled, outcome.handled);
             if canceled && handled {
+                // The replacement goes through the clicked slot's rules: a result slot's or
+                // filled potion slot's `onTake` would not run; `mayPickup` and `mayPlace` still
+                // answer, and the stack fits
+                // `Slot.getMaxStackSize`. A replacement they refuse changes nothing.
+                if let Some(clicked) = &outcome.clicked
+                    && clicked.as_ref() != self.slot(s)
+                {
+                    let held = self.slot(s).is_some();
+                    let result = matches!(
+                        self.state.slots[s].role,
+                        Role::Output
+                            | Role::CraftResult
+                            | Role::Inert
+                            | Role::LoomResult
+                            | Role::MerchantResult
+                            | Role::StoneResult
+                            | Role::GrindResult
+                            | Role::CombineResult
+                            | Role::CartoResult
+                            | Role::ModResult
+                    );
+                    if result
+                        || (held
+                            && (self.state.slots[s].role == Role::Potion
+                                || !self.may_pickup(env, s)))
+                        || clicked.as_ref().is_some_and(|stack| {
+                            !self.may_place(env, s, stack)
+                                || stack.count > self.slot_max(env, s, stack)
+                        })
+                    {
+                        outcome.refused.set(true);
+                        return;
+                    }
+                }
                 if let Some(carried) = outcome.carried.clone() {
                     self.state.carried = carried;
                 }
@@ -464,6 +483,73 @@ impl Menu {
                 }
             }
             (None, None) => {}
+        }
+    }
+
+    fn quick_move_step(
+        &mut self,
+        env: &Env,
+        slot: usize,
+        previous: Option<&ItemStack>,
+    ) -> Option<ItemStack> {
+        let allowed = match previous {
+            None => self.may_pickup(env, slot),
+            Some(previous) => self.slot(slot).is_some_and(|now| same_item(now, previous)),
+        };
+        allowed.then(|| self.quick_move(env, slot)).flatten()
+    }
+
+    fn throw_step(
+        &mut self,
+        env: &Env,
+        slot: usize,
+        amount: u32,
+        previous: Option<&ItemStack>,
+    ) -> Option<ItemStack> {
+        if previous
+            .is_some_and(|previous| !self.slot(slot).is_some_and(|now| same_item(now, previous)))
+        {
+            return None;
+        }
+        let taken = self.safe_take(env, slot, amount, u32::MAX)?;
+        self.drop_stack(&taken, env.items);
+        Some(taken)
+    }
+
+    /// One iteration of a merchant result click, so the authority can finish each actual
+    /// trade and publish its offer back to this menu before deciding the next iteration.
+    /// Only quick-move and throw-all may repeat; each continuation checks the result item.
+    pub fn merchant_result_step(
+        &mut self,
+        env: &Env,
+        button: i32,
+        input: Input,
+        previous: Option<&ItemStack>,
+        throw_amount: u32,
+    ) -> Option<ItemStack> {
+        if self.quick_crafting() {
+            self.reset_quick_craft();
+            return None;
+        }
+        match input {
+            Input::QuickMove if (0..=1).contains(&button) => {
+                self.planned(Asked::default(), |menu| {
+                    menu.quick_move_step(env, 2, previous)
+                })
+                .0
+            }
+            Input::Throw if self.carried.is_none() => {
+                let taken = self
+                    .planned(Asked::default(), |menu| {
+                        menu.throw_step(env, 2, throw_amount, previous)
+                    })
+                    .0;
+                taken.filter(|_| button == 1)
+            }
+            _ => {
+                let _ = self.click(env, 2, button, input);
+                None
+            }
         }
     }
 

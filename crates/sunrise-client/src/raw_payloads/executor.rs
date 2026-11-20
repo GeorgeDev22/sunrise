@@ -256,6 +256,22 @@ impl IPayloadContext for NetworkContext<'_> {
     fn check_payload_token(&self, token: &mod_api::PayloadToken) -> Result<(), PayloadSendError> {
         mod_api::__private::game::check_payload_token(token)
     }
+    /// Published at once, not staged with the handler's replies: a droppable frame is worthless
+    /// late, and a relay must not hold it until the handler returns.
+    fn send_to(
+        &mut self,
+        players: &[PlayerRef],
+        id: &PayloadId,
+        bytes: PayloadBytes,
+    ) -> Result<u32, PayloadSendError> {
+        if self.disconnect.is_some() || !self.incoming.epoch.active() {
+            return Err(PayloadSendError::Disconnected);
+        }
+        if self.endpoint.side() != Side::Server {
+            return Err(PayloadSendError::WrongDirection(id.clone()));
+        }
+        self.endpoint.transport().local.send_to(players, id, bytes)
+    }
     fn disconnect(&mut self, reason: Text) {
         self.disconnect = Some(reason);
     }

@@ -96,9 +96,10 @@ pub(super) fn build_renderer(
         .iter()
         .map(|(rect, animation)| (*rect, animation.clone(), (usize::MAX, 0, 0)))
         .collect();
-    renderer
-        .hud
-        .set_text_shader(&renderer.device, atlas.text_shaders.gui.as_deref());
+    renderer.hud.set_text_shader(&renderer.device, {
+        let text = &atlas.text_shaders;
+        (text.gui.as_deref()).map(|p| (p, &text.expressions.gui[..]))
+    });
     pack.item_renderer
         .prepare_glint_atlas(renderer.device.limits().max_texture_dimension_2d, filtering)?;
     renderer.set_lines_shader(
@@ -113,6 +114,7 @@ pub(super) fn build_renderer(
         atlas.lightmap_shader.as_deref(),
         &atlas.lightmap_expressions,
     );
+    renderer.set_clouds_shader(atlas.clouds_shader.as_deref());
     renderer.set_custom_sky(&*pack.custom_sky);
     renderer.set_shared_material_maps(&atlas.material_maps);
     let cit_glints = pack.item_renderer.cit.as_ref().map(|c| &c.glint_textures);

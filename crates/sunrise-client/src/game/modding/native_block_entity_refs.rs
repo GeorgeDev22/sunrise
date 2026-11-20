@@ -746,14 +746,25 @@ fn save_with_metadata(
     block: &str,
     items: &crate::items::Items,
 ) -> Option<Compound> {
-    let mut tag = save::block_entity_data(pos, entity, block, world.block_lock(pos), items);
-    Game::write_pending_loot(world, pos, &mut tag);
-    let Tag::Compound(mut data) = tag else {
+    let pending = world
+        .chunks
+        .get(&(pos.0 >> 4, pos.2 >> 4))
+        .and_then(|chunk| chunk.saved.as_ref())
+        .and_then(|saved| saved.pending_loot.get(&pos));
+    let Tag::Compound(data) = save::block_entity_encode::data(
+        pos,
+        entity,
+        block,
+        save::block_entity_encode::DataFields {
+            lock: world.block_lock(pos),
+            custom_name: world.block_names.get(&pos),
+            pending,
+            ..Default::default()
+        },
+        items,
+    ) else {
         return None;
     };
-    if let Some(name) = world.block_names.get(&pos) {
-        data.insert("CustomName".into(), name.clone());
-    }
     Some(data)
 }
 

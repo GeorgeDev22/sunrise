@@ -4,7 +4,6 @@
 //! in `lan_trading.rs`.
 use super::{Game, lan_crafting::input};
 use crate::game::stacked_on_other::plan_click;
-use std::rc::Rc;
 use sunrise_client::menu::{Env, Input, Menu, RuleAnswers, StoredRules};
 use sunrise_protocol::packets::play;
 
@@ -66,8 +65,8 @@ impl Game<'_> {
         if !Self::stacked_listened() {
             return plain(self, gi, menu, op, write_back);
         }
-        // Plan on a copy: what the click finds, and what the slot rules say to it.
-        let answers = Rc::new(RuleAnswers::default());
+        // Freeze what the click finds on a copy; the answer determines its slot rules.
+        let answers = RuleAnswers::default();
         let mut found = None;
         let mut copy = menu.clone();
         let planned = self.guest_menu_op(gi, &mut copy, |menu, env| {
@@ -75,9 +74,6 @@ impl Game<'_> {
                 prepare(menu, env);
             }
             found = menu.stacked_click(env, slot, button, mode);
-            if found.is_some() {
-                plan_click(menu, env, slot, button, &answers);
-            }
         });
         let (Some(frozen), Some(())) = (found, planned) else {
             return plain(self, gi, menu, op, write_back);
@@ -92,6 +88,16 @@ impl Game<'_> {
             move |game| {
                 let now = game.lan.as_ref()?.hub.guests.get(gi)?.carried.clone();
                 (now == carried).then(|| same.clone())
+            },
+            |game, answer| {
+                if game
+                    .guest_menu_op(gi, &mut copy, |menu, env| {
+                        plan_click(menu, env, slot, button, &answers, answer);
+                    })
+                    .is_none()
+                {
+                    answer.refused.set(true);
+                }
             },
             |game, answer| {
                 game.journal_guest_click(conn);
