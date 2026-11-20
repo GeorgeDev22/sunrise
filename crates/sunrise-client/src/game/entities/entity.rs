@@ -276,6 +276,12 @@ pub(super) trait Entity: EntityRules {
     fn sweeps_portals(&self) -> bool {
         self.portal_size().is_some()
     }
+    /// `Entity.makeBoundingBox` at `at` for a portal sweep: the
+    /// [`Self::portal_size`] box standing on `at`.
+    fn portal_bounds(&self, at: Vec3) -> Option<Aabb> {
+        let (width, height) = self.portal_size()?;
+        Some(super::nether_portal::feet_box(at, width, height))
+    }
     /// `Entity.canUsePortal(false)` for a kind in `portal_size`. A kind that
     /// cannot stays tracked, so its cooldown and process run out.
     fn can_use_portal(&self, _game: &Game<'_>) -> bool {
@@ -1792,6 +1798,12 @@ impl Entity for Mob {
     }
     fn sweeps_portals(&self) -> bool {
         true
+    }
+    /// A mob's own box (`Mob::bounds_at`): a shulker's grows toward its open
+    /// lid (`Shulker.makeBoundingBox`), so a shell beside or under a portal
+    /// peeks into it.
+    fn portal_bounds(&self, at: Vec3) -> Option<Aabb> {
+        Some(self.bounds_at(at))
     }
     fn can_use_portal(&self, game: &Game<'_>) -> bool {
         game.mob_portal_eligible(self)
