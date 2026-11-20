@@ -1157,22 +1157,6 @@ impl Hub {
         ])
     }
 
-    /// SayCommand from a source without a player: a disguised chat of type
-    /// say_command named after the source.
-    pub fn say(&self, source: &str, text: &str) {
-        let chat_type = self
-            .sync
-            .id("minecraft:chat_type", "minecraft:say_command")
-            .unwrap_or(self.chat_type);
-        self.broadcast(&C::DisguisedChat(play::DisguisedChat {
-            message: literal(text),
-            chat_type: play::ChatTypeBound {
-                chat_type,
-                name: literal(source),
-                target: None,
-            },
-        }));
-    }
     /// Disconnect a guest with a reason (ServerGamePacketListenerImpl.disconnect), once
     /// ([`Guest::begin_disconnect`]): a guest already on the way out keeps its first reason.
     pub fn kick(&mut self, conn: u32, reason: Tag) {
@@ -6095,6 +6079,7 @@ mod tests {
                 slots: 27,
                 data_slots: 0,
                 results: vec![],
+                inputs: Vec::new(),
                 links: None,
                 crafting: None,
             }));

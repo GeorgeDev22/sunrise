@@ -36,6 +36,8 @@ pub struct ModMenuType {
     pub slots: usize,
     pub data_slots: usize,
     pub results: Vec<usize>,
+    /// Validated container indices marked as machine inputs in the client layout.
+    pub inputs: Vec<usize>,
     /// its crafting grid, if it has one (`crafting`).
     pub crafting: Option<ModCrafting>,
     /// its linked slots, if it has any (`links`).
@@ -78,11 +80,12 @@ impl ModCrafting {
 static MOD_MENU_TYPES: std::sync::OnceLock<Vec<ModMenuType>> = std::sync::OnceLock::new();
 
 /// One menu type as [`register_mod_menu_types`] takes it: `(id, slots, data
-/// slots, results, crafting, links)`.
+/// slots, results, inputs, crafting, links)`.
 pub type ModMenuTypeEntry = (
     String,
     usize,
     usize,
+    Vec<usize>,
     Vec<usize>,
     Option<ModCrafting>,
     Option<ModLinks>,
@@ -92,11 +95,12 @@ fn menu_types(menus: impl IntoIterator<Item = ModMenuTypeEntry>) -> Vec<ModMenuT
     menus
         .into_iter()
         .map(
-            |(id, slots, data_slots, results, crafting, links)| ModMenuType {
+            |(id, slots, data_slots, results, inputs, crafting, links)| ModMenuType {
                 id: Box::leak(id.into_boxed_str()),
                 slots,
                 data_slots,
                 results,
+                inputs,
                 crafting,
                 links,
             },

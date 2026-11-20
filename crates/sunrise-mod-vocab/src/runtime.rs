@@ -149,11 +149,22 @@ pub(crate) fn install(mods: Mods) -> &'static Installed {
     }
 }
 
+/// Checkpoint for an owning action around isolated dispatch. A trapped listener
+/// resets its outputs, but the owner must also abort any tentative Host writes.
+/// Unrelated threads do not affect the checkpoint.
+// hidden: the game's own decide/fire/apply actions read it; it is not a mod-facing call.
+#[doc(hidden)]
+pub fn isolated_failures() -> u64 {
+    LISTENER_SERIAL.get().1
+}
+
 /// Mark `id`'s listener of `hook` poisoned for the session (#2414 ruling):
 /// it is skipped by that one hook alone — its other hooks and Parts are
 /// untouched, unlike a whole-mod disable. Called only from a listener's
 /// `catch_unwind` handler, so an installation is always in place.
 pub(crate) fn poison(hook: generated::HookId, id: &'static str) {
+    let (entered, trapped) = LISTENER_SERIAL.get();
+    LISTENER_SERIAL.set((entered, trapped.wrapping_add(1)));
     let installed = installed().expect("a poison lands inside a dispatch");
     let mut poisons = installed.poisons.lock().unwrap();
     let sets =
@@ -567,17 +578,18 @@ impl ListenerScope {
 }
 
 thread_local! {
-    /// Every listener entered on this thread, including listeners of different nested hooks.
-    static LISTENER_SERIAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Listener entries (including nested hooks) and poisoned traps on this thread.
+    static LISTENER_SERIAL: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 #[inline]
 fn bump_listener_serial() {
-    LISTENER_SERIAL.with(|serial| serial.set(serial.get().wrapping_add(1)));
+    let (entered, trapped) = LISTENER_SERIAL.get();
+    LISTENER_SERIAL.set((entered.wrapping_add(1), trapped));
 }
 
 pub(crate) fn listener_serial() -> u64 {
-    LISTENER_SERIAL.with(std::cell::Cell::get)
+    LISTENER_SERIAL.get().0
 }
 
 #[cfg(test)]

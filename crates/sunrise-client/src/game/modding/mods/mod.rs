@@ -1379,6 +1379,7 @@ fn register_menu_types(
     menu_books::validate_registered(&menus)?;
     let set = containers::register_mod_menu_types(menus.iter().map(|m| {
         let results = m.results.iter().map(|&r| usize::from(r)).collect();
+        let inputs = m.inputs.iter().copied().map(usize::from).collect();
         let crafting = m.crafting.map(|c| containers::ModCrafting {
             grid: c.grid.into(),
             size: c.size.into(),
@@ -1393,6 +1394,7 @@ fn register_menu_types(
             m.slots.into(),
             m.data_slots.into(),
             results,
+            inputs,
             crafting,
             links,
         )

@@ -151,8 +151,10 @@ main-hand weapon (`DamageSource.getEntity().getWeaponItem()`): an off-hand cross
 name the saved crossbow in `weapon` and the shooter's main-hand sword in `causing_weapon`.
 An absent, unknown or non-living cause has no `causing_weapon`.
 
-The event is a generated struct named after the catalog hook, in CamelCase plus `Event`, with
-the hook point's arguments as public fields: values as values and borrowed ones as references (`event.kind`). A
+The event is a generated struct named after the catalog hook, in CamelCase plus `Event`.
+The game constructs it and passes it to the listener. It is `#[non_exhaustive]`: a mod cannot build it
+with a struct literal, and a destructuring pattern must include `..`. Listeners still read and write
+the public fields as the hook allows. The hook point's arguments are values or references (`event.kind`). A
 number or `bool` a mod may change is a plain field, written back once every mod has run, even after a `Cancel`;
 anything else a mod may change, a game struct or a list, is a `&mut` field. A cancellation or replacement is
 the return value; a collection hook's list is a field (`event.lines`). One event goes through every mod, so each

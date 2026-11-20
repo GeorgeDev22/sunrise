@@ -37,7 +37,7 @@ impl<'g, 'a> JournalLevelWrite<'g, 'a> {
         }
     }
 
-    fn write_block(&mut self, pos: [i32; 3], state: BlockStateId, flags: i32) -> bool {
+    pub(super) fn write_block(&mut self, pos: [i32; 3], state: BlockStateId, flags: i32) -> bool {
         let [x, y, z] = pos;
         if self.game.world_debug
             || !(-30_000_000..30_000_000).contains(&x)

@@ -2064,6 +2064,7 @@ pub(crate) mod tests {
             slots: 5,
             data_slots: 0,
             results: vec![],
+            inputs: Vec::new(),
             links: None,
             crafting: Some(ModCrafting {
                 grid: 1,
@@ -2192,6 +2193,7 @@ pub(crate) mod tests {
             slots: 6,
             data_slots: 0,
             results: vec![],
+            inputs: Vec::new(),
             crafting: None,
             links: Some(ModLinks { from: 2, count: 4 }),
         }));

@@ -19,7 +19,12 @@ impl Mod {
             _scratch: scratch,
         };
         let made = this.tool(&parent, &["new", "greeter", "--template", "native"]);
-        assert!(made.status.success(), "{made:?}");
+        assert!(
+            made.status.success(),
+            "`new` failed:\n{}{}",
+            String::from_utf8_lossy(&made.stdout),
+            String::from_utf8_lossy(&made.stderr)
+        );
         let manifest = this.project.join("Cargo.toml");
         let text = std::fs::read_to_string(&manifest).unwrap();
         std::fs::write(&manifest, format!("{text}{extra}")).unwrap();
@@ -71,7 +76,7 @@ fn type_error(source: &str) -> String {
 /// A starter native mod with a type error, built by the tool on the direct route: the error
 /// names the mod's own file, not the copy the build compiles in its cache.
 #[test]
-#[ignore = "daily"]
+#[ignore = "book-quickstart.yml: the run's own SDK"]
 fn a_failed_native_build_names_the_authors_file_and_not_the_cache_copy() {
     let project = Mod::new("");
     let built = project.build(type_error);
@@ -81,7 +86,7 @@ fn a_failed_native_build_names_the_authors_file_and_not_the_cache_copy() {
 /// The same on the registry route (a crates.io dependency, built by Cargo): it builds when the
 /// source is right, and its error names the mod's own file when it is not.
 #[test]
-#[ignore = "daily"]
+#[ignore = "book-quickstart.yml: the run's own SDK"]
 fn a_failed_registry_build_names_the_authors_file_and_a_good_one_still_builds() {
     let project = Mod::new("itoa = \"1\"\n");
     let built = project.build(|source| {

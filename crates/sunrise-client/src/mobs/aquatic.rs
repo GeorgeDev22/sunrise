@@ -18,7 +18,6 @@ use crate::particles::ParticleType;
 use std::f32::consts::PI;
 use sunrise_core::geometry::trig::Mth;
 use sunrise_core::{geometry::Vec3, random::RandomSource};
-use sunrise_world::move_gate::MoveGate;
 
 // Squid animation slots in AnimState.v.
 const TENTACLE_MOVEMENT: usize = 0;
@@ -599,26 +598,28 @@ fn squid_step(m: &mut Mob, client: bool) {
     }
 }
 /// Species travel overrides. Returns true when handled.
-pub fn travel(
+pub(super) fn travel(
     m: &mut Mob,
     w: &MobWorld,
     level: &mut DamageLevel<'_>,
     input: Vec3,
     events: &mut Vec<MobEvent>,
-) -> bool {
+    pause: bool,
+) -> Result<bool, super::living::TravelTrample> {
     use Species as S;
     match m.species() {
         // Squid.travel: move by the current velocity only.
         S::Squid | S::GlowSquid => {
-            m.do_move(w, level, events, &mut MoveGate::new());
-            true
+            m.travel_move(w, level, events, pause, |_, _, _, _| {})?;
+            Ok(true)
         }
         // Axolotl.travelInWater: no fish sinking or generic water gravity.
         S::Axolotl if m.fluids.in_water => {
             m.move_relative(m.ai.speed, input);
-            m.do_move(w, level, events, &mut MoveGate::new());
-            m.velocity = Vec3::new(m.velocity.x * 0.9, m.velocity.y * 0.9, m.velocity.z * 0.9);
-            true
+            m.travel_move(w, level, events, pause, |m, _, _, _| {
+                m.velocity = Vec3::new(m.velocity.x * 0.9, m.velocity.y * 0.9, m.velocity.z * 0.9);
+            })?;
+            Ok(true)
         }
         // AbstractFish.travelInWater / Dolphin.travelInWater.
         S::Cod | S::Salmon | S::TropicalFish | S::Pufferfish | S::Tadpole | S::Dolphin
@@ -630,16 +631,17 @@ pub fn travel(
                 0.01
             };
             m.move_relative(speed, input);
-            m.do_move(w, level, events, &mut MoveGate::new());
-            m.velocity = Vec3::new(m.velocity.x * 0.9, m.velocity.y * 0.9, m.velocity.z * 0.9);
-            if m.ai.target.is_none() {
-                // `Vec3.add(0.0, -0.005, 0.0)`: adding 0.0 turns a -0.0 into 0.0.
-                m.velocity =
-                    Vec3::new(m.velocity.x + 0.0, m.velocity.y - 0.005, m.velocity.z + 0.0);
-            }
-            true
+            m.travel_move(w, level, events, pause, |m, _, _, _| {
+                m.velocity = Vec3::new(m.velocity.x * 0.9, m.velocity.y * 0.9, m.velocity.z * 0.9);
+                if m.ai.target.is_none() {
+                    // `Vec3.add(0.0, -0.005, 0.0)`: adding 0.0 turns a -0.0 into 0.0.
+                    m.velocity =
+                        Vec3::new(m.velocity.x + 0.0, m.velocity.y - 0.005, m.velocity.z + 0.0);
+                }
+            })?;
+            Ok(true)
         }
-        _ => false,
+        _ => Ok(false),
     }
 }
 /// FishMoveControl.tick (fish use it instead of the default move control).

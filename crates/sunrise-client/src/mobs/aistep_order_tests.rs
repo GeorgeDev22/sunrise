@@ -89,6 +89,7 @@ fn a_crammed_frozen_enderman_is_hurt_by_the_freeze_first() {
                             &mut crate::health::TestLevel::new(0).level(),
                             false,
                             &mut Vec::new(),
+                            None,
                         );
                         let at = format!("no_ai {no_ai}, seed {seed}");
                         assert_eq!(m.position, expected.position, "{at}");
@@ -136,6 +137,7 @@ fn a_wet_frozen_enderman_is_hurt_by_the_freeze_first() {
                             &mut crate::health::TestLevel::new(0).level(),
                             false,
                             &mut Vec::new(),
+                            None,
                         );
                         let at = format!("no_ai {no_ai}, seed {seed}");
                         assert_eq!(

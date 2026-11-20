@@ -646,7 +646,7 @@ fn depot_container(game: &mut crate::game::Game<'_>) {
 #[test]
 #[ignore = "daily"]
 fn a_code_opened_menus_button_reaches_a_blocks_menu_button_only_for_its_menu_type() {
-    let depot_menu = [(DEPOT_MENU.into(), 9, 0, Vec::new(), None, None)];
+    let depot_menu = [(DEPOT_MENU.into(), 9, 0, Vec::new(), Vec::new(), None, None)];
     sunrise_client::containers::with_mod_menu_types(depot_menu, || {
         with_mod(|| {
             with_guests(|game| {

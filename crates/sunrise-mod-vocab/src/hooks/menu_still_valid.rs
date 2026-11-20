@@ -38,7 +38,6 @@ when the menu opens: a menu with none does no work for this hook."##]
         key = "menu",
         context = "loop",
         version = 2,
-        non_exhaustive = true,
         target = "sunrise_client_lib::lan::menu::native_menu_still_valid",
         neoforge = "none (vanilla AbstractContainerMenu.stillValid, which each menu overrides)"
     )]

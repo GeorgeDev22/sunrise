@@ -23,14 +23,19 @@
 //! changed by the transaction has its result made again at the root commit.
 //! `LivingRef::set_health` keeps the player's synced float storage and unpublished update
 //! events, or the mob's health and sync dirtiness. This does not journal other health,
-//! damage, death or attribute operations.
+//! damage, death or attribute operations. Mob effect writes keep their effect lists, dirty bit,
+//! health and absorption, and the attribute modifier rows the effects own.
 //! An entity added inside one goes at an abort, one removed is only marked until the root
 //! commit, and mods hear of joins and leaves at the root commit (`transactions/entities.rs`).
 use super::{BlockEntity, BlockStateId, Game, machines::HopperState, maps::MapData};
 use mod_api::{Transaction, TransactionLifecycle, TransactionSeal};
 use std::collections::{BTreeMap, HashMap};
 use sunrise_client::{
-    items::ItemStack, living_attributes::ModifierChanges, world::BlockEntityExtras,
+    effects::EffectInstance,
+    items::ItemStack,
+    living_attributes::ModifierChanges,
+    mobs::{Mob, StoredEffect, finalize::EffectModifierUndo},
+    world::BlockEntityExtras,
 };
 use sunrise_core::position::BlockPos;
 use sunrise_mod_runtime::attachments::{Attachments, Holder};
@@ -85,6 +90,13 @@ impl OpenTransactions {
         for level in self.iter_mut() {
             if let Some(changes) = level.modifier_changes.get_mut(&mob) {
                 changes.keep_explicit_write(attribute, id);
+            }
+            for (_, kept) in level
+                .effect_modifiers
+                .iter_mut()
+                .filter(|(owner, _)| *owner == mob)
+            {
+                kept.keep_explicit_write(attribute, id);
             }
         }
     }
@@ -188,6 +200,10 @@ pub(super) struct Level {
     player_health: HashMap<u128, KeptPlayerHealth>,
     /// Mob health and synchronization dirtiness before set_health.
     mob_health: HashMap<u32, KeptMobHealth>,
+    /// Active and hidden effects before the first write to the mob at this depth.
+    mob_effects: HashMap<u32, KeptMobEffects>,
+    /// Effect-owned modifier changes in write order, so rows can return to their positions.
+    effect_modifiers: Vec<(u32, EffectModifierUndo)>,
     /// Each entity's inventory (`entity_slots`) before this transaction first wrote it.
     entities: HashMap<u32, Vec<Option<ItemStack>>>,
     /// Each mob's or armor stand's equipment before this transaction first
@@ -223,8 +239,11 @@ pub(super) struct Level {
     pub(super) new_maps: BTreeMap<i32, MapData>,
     /// What the root commit does, in order.
     after: Vec<After>,
-    /// Internal decide/fire/apply state. No menu route uses this yet.
+    /// Internal decide/fire/apply state for menu actions.
     actions: decision::Journal,
+    /// Merchant takes keep their session, mob, statistics and criterion progress together.
+    pub(in crate::game) trades: super::lan_trade_decisions::Journal,
+    pub(in crate::game) packets: Option<sunrise_client::lan::conn::transaction_packets::Scope>,
     action: Option<decision::ActiveAction>,
     /// The scratch stacks (`ItemPlace::Scratch`), live: kept by the outermost transaction only.
     scratch: HashMap<u64, scratch::Scratch>,
@@ -307,6 +326,14 @@ struct KeptMobHealth {
     processed: bool,
 }
 
+struct KeptMobEffects {
+    active: Vec<StoredEffect>,
+    chains: Vec<EffectInstance>,
+    ambient: Vec<&'static str>,
+    hidden: Vec<&'static str>,
+    dirty: bool,
+}
+
 #[derive(Clone)]
 struct KeptPlayer {
     player_extra: Option<sunrise_core::nbt::Tag>,
@@ -358,10 +385,18 @@ pub(super) enum After {
     Block(Pos),
     /// A validated level write host effect; never published on abort.
     LevelWrite(Box<super::journal_level_write::PendingWrite>),
+    BlockGameEvent(
+        &'static str,
+        [i32; 3],
+        sunrise_client::mobs::Who,
+        BlockStateId,
+    ),
     /// Save, remesh and resend a changed biome column.
     Biome((i32, i32)),
     /// Deferred interaction effects, replayed in the same root-commit order.
     Effect(DeferredEffect),
+    /// Effects of a tentative merchant take, published only at the root.
+    Trade(Box<super::lan_trade_decisions::Effect>),
     /// `Block.popResource`.
     Drop([i32; 3], ItemStack),
     /// `Player.drop(stack, false)` by the player with this UUID: what no longer fits.
@@ -469,6 +504,7 @@ impl Game<'_> {
             token,
             close_token,
             dimension: Some(self.dim),
+            packets: sunrise_client::lan::conn::transaction_packets::Scope::nested(),
             lifetimes,
             ..Level::default()
         });
@@ -560,6 +596,21 @@ impl Game<'_> {
     }
     /// What closing `level` does, with the closing phase already set.
     fn close_level(&mut self, mut level: Level, commit: bool) {
+        let commit = commit
+            && !(level.packets.is_some()
+                && sunrise_client::lan::conn::transaction_packets::Scope::refused());
+        if let Some(scope) = level.packets.take()
+            && commit
+            && let Some(packets) = scope.finish()
+        {
+            level.after.push(After::Trade(Box::new(
+                super::lan_trade_decisions::Effect::Packets(packets),
+            )));
+        }
+        let mut merchant_corrections = std::mem::take(&mut level.trades.refused_clicks);
+        if !commit {
+            merchant_corrections.append(&mut level.trades.correct_on_abort);
+        }
         let departed = std::mem::take(&mut level.departed);
         if let Some(scope) = &mut self.block_entity_tick_items {
             scope.close_transaction(commit);
@@ -576,6 +627,7 @@ impl Game<'_> {
         match (commit, self.transactions.last_mut()) {
             (true, Some(outer)) => {
                 outer.actions.merge(level.actions);
+                outer.trades.merge(level.trades);
                 // Slots before whole entities: a slot the outer transaction already kept the
                 // whole entity of is older there, but one kept whole only by this child is not,
                 // so the child's slot entries go up beside its capture.
@@ -622,6 +674,10 @@ impl Game<'_> {
                 for (id, kept) in level.mob_health {
                     outer.mob_health.entry(id).or_insert(kept);
                 }
+                for (id, kept) in level.mob_effects {
+                    outer.mob_effects.entry(id).or_insert(kept);
+                }
+                outer.effect_modifiers.extend(level.effect_modifiers);
                 for (id, kept) in level.entities {
                     outer.entities.entry(id).or_insert(kept);
                 }
@@ -697,6 +753,15 @@ impl Game<'_> {
             }
         }
         self.close_departures(departed);
+        // Rejected client predictions need the final restored menu, whether the enclosing
+        // transaction commits or aborts. Do not stage a correction using tentative state.
+        if let Some(outer) = self.transactions.last_mut() {
+            outer.trades.refused_clicks.extend(merchant_corrections);
+        } else {
+            for (conn, window) in merchant_corrections {
+                self.resend_merchant_take(conn, window);
+            }
+        }
     }
     /// Closes every transaction left open, as aborted. Run before each tick, as a backstop:
     /// `host.transaction` is the only way in, and its drop guard closes each one it opens, so
@@ -968,6 +1033,55 @@ impl Game<'_> {
             });
         }
     }
+    /// Writes one mob effect, or any active effect when `effect` is `None`. In a transaction,
+    /// keep the effect lists and use the same health journal as `set_health` and `set_absorption`.
+    pub(super) fn mutate_mob_effects<R>(
+        &mut self,
+        id: u32,
+        effect: Option<&'static str>,
+        mutate: impl FnOnce(&mut Mob) -> R,
+    ) -> Option<R> {
+        self.journal_mob_health(id);
+        let mob = self
+            .mobs
+            .iter_mut()
+            .find(|mob| mob.id == id && !mob.removed)?;
+        let invalidation = if !self.transactions.is_empty() {
+            self.transactions.writes = self.transactions.writes.wrapping_add(1);
+            let level = self.transactions.last_mut().expect("open transaction");
+            level
+                .mob_effects
+                .entry(id)
+                .or_insert_with(|| KeptMobEffects {
+                    active: mob.extra.effects.clone(),
+                    chains: mob.extra.effect_chains.clone(),
+                    ambient: mob.extra.ambient_effects.clone(),
+                    hidden: mob.extra.hidden_effects.clone(),
+                    dirty: mob.effects_dirty,
+                });
+            let modifiers = match effect {
+                Some(effect) => mob.effect_modifier_undo(std::iter::once(effect)),
+                None => mob.effect_modifier_undo(mob.extra.effects.iter().map(|effect| effect.id)),
+            };
+            if let Some(modifiers) = modifiers {
+                level.effect_modifiers.push((id, modifiers));
+                super::living_attributes::modifier_invalidation_undo(&self.motion.attributes, mob)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let result = mutate(mob);
+        // The ordered effect journal owns the seed; only the discarded live
+        // equipment rows and detection state go to the general modifier journal.
+        if let Some(changes) = invalidation
+            && mob.extra.live.is_invalidated()
+        {
+            self.transactions.journal_modifier_changes(id, changes);
+        }
+        Some(result)
+    }
     /// Keeps `player`'s menu storage as it is, if a transaction is open and hasn't yet.
     pub(super) fn journal_menus(&mut self, player: mod_api::PlayerRef) {
         self.transactions.player_writes = self.transactions.player_writes.wrapping_add(1);
@@ -1161,6 +1275,7 @@ impl Game<'_> {
     }
     fn run_after(&mut self, after: After) {
         match after {
+            After::Trade(effect) => self.commit_merchant_effect(*effect),
             After::Payload(payload) => payload.publish(),
             After::Packet(packet, body) => self.publish_mod_held(packet, body),
             After::Cauldron(effects) => self.commit_cauldron_effects(effects),
@@ -1168,6 +1283,9 @@ impl Game<'_> {
             After::FluidWrite(written) => self.commit_fluid_write(*written),
             After::FluidEffects(effects) => self.commit_fluid_effects(*effects),
             After::LevelWrite(write) => self.commit_level_write(*write),
+            After::BlockGameEvent(id, pos, who, state) => {
+                self.post_block_game_event(id, pos, Some(who), Some(state));
+            }
             After::Changed(pos) => self.container_changed(pos),
             After::Capabilities(pos) => self.world.capability_generations.invalidate(pos),
 
@@ -1409,6 +1527,20 @@ impl Game<'_> {
             }
         }
 
+        for (id, kept) in level.mob_effects {
+            if let Some(mob) = self.mobs.iter_mut().find(|mob| mob.id == id) {
+                mob.extra.effects = kept.active;
+                mob.extra.effect_chains = kept.chains;
+                mob.extra.ambient_effects = kept.ambient;
+                mob.extra.hidden_effects = kept.hidden;
+                mob.effects_dirty = kept.dirty;
+            }
+        }
+        for (id, kept) in level.effect_modifiers.into_iter().rev() {
+            if let Some(mob) = self.mobs.iter_mut().find(|mob| mob.id == id) {
+                kept.restore(mob);
+            }
+        }
         for (id, changes) in std::mem::take(&mut level.modifier_changes) {
             if let Some(mob) = self.mobs.iter_mut().find(|m| m.id == id && !m.removed) {
                 super::living_attributes::undo_mob_modifiers(&self.motion.attributes, mob, changes);
@@ -1629,6 +1761,7 @@ impl Game<'_> {
             }
         }
         level.actions.rollback_in(self);
+        level.trades.rollback(self);
         if let Some(saved) = level.board {
             self.score.board.restore(saved);
             self.sync_score_registries();

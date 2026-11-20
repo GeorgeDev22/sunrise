@@ -846,6 +846,15 @@ fn the_real_tree_exports() {
         );
     }
     assert!(read.traits.iter().any(|t| t.id == "trait:Hooks"));
+    for event in read.types.iter().filter(|ty| {
+        ty.id.ends_with("Event")
+            && matches!(
+                ty.contract.kind,
+                TypeKind::Struct | TypeKind::UnitStruct | TypeKind::TupleStruct
+            )
+    }) {
+        assert!(!event.contract.constructible, "{}", event.id);
+    }
 }
 
 #[test]

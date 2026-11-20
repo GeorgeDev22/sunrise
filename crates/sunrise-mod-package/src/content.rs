@@ -983,6 +983,10 @@ pub struct MenuType {
     /// slots a player takes from but never puts into, each below `slots`.
     #[serde(default)]
     pub results: Vec<u16>,
+    /// Zero-based machine input slots, disjoint from results and crafting slots.
+    /// This is a client layout role, not an item acceptance or transfer rule.
+    #[serde(default)]
+    pub inputs: Vec<u16>,
     /// a crafting grid over some of the slots, which crafts as vanilla's
     /// crafting table does (`CraftingMenu`).
     #[serde(default)]
@@ -1649,6 +1653,19 @@ impl Content {
                     return Err(format!("{name}: result {r} is listed twice"));
                 }
             }
+            for &input in &file.inputs {
+                if input >= file.slots {
+                    return Err(format!(
+                        "{name}: input {input} is past the last slot, {}",
+                        file.slots - 1
+                    ));
+                }
+                if !seen.insert(input) {
+                    return Err(format!(
+                        "{name}: input {input} is listed twice or is a result"
+                    ));
+                }
+            }
             if let Some(c) = file.crafting {
                 let end = u32::from(c.grid) + u32::from(c.size) * u32::from(c.size);
                 if !matches!(c.size, 2 | 3) {
@@ -1663,14 +1680,15 @@ impl Content {
                 if (u32::from(c.grid)..end).contains(&u32::from(c.result)) {
                     return Err(format!("{name}: the crafting result is in its grid"));
                 }
-                if file
-                    .results
-                    .iter()
-                    .any(|&r| r == c.result || (u32::from(c.grid)..end).contains(&u32::from(r)))
-                {
+                let is_crafting_slot =
+                    |&s: &u16| s == c.result || (u32::from(c.grid)..end).contains(&u32::from(s));
+                if file.results.iter().any(is_crafting_slot) {
                     return Err(format!(
                         "{name}: results lists a crafting slot (the result is take-only already)"
                     ));
+                }
+                if file.inputs.iter().any(is_crafting_slot) {
+                    return Err(format!("{name}: inputs lists a crafting slot"));
                 }
             }
             if let Some(l) = file.links {
@@ -2644,30 +2662,38 @@ capabilities = ["registries"]
     }
 
     #[test]
-    fn menu_types_take_slots_data_slots_and_results() {
+    fn menu_types_take_slots_data_slots_and_roles() {
         let files: &[(&str, &[u8])] = &[
             (
                 "data/ruby/sunrise/menu/press.json",
-                br#"{"slots": 9, "data_slots": 2, "results": [7, 8]}"#,
+                br#"{"slots": 9, "data_slots": 2, "results": [7, 8], "inputs": [0, 6]}"#,
             ),
             ("data/ruby/sunrise/menu/bag.json", br#"{"slots": 4}"#),
             (
                 "data/ruby/sunrise/menu/station.json",
-                br#"{"slots": 16, "results": [11], "crafting": {"grid": 1, "result": 0}, "links": {"from": 12, "count": 4}}"#,
+                br#"{"slots": 16, "results": [11], "inputs": [15], "crafting": {"grid": 1, "result": 0}, "links": {"from": 12, "count": 4}}"#,
             ),
         ];
         let content = smod("menus", MANIFEST_TEXT, files).unwrap();
         let menus: Vec<_> = content
             .menu_types
             .iter()
-            .map(|m| (m.id.as_str(), m.slots, m.data_slots, m.results.clone()))
+            .map(|m| {
+                (
+                    m.id.as_str(),
+                    m.slots,
+                    m.data_slots,
+                    m.results.as_slice(),
+                    m.inputs.as_slice(),
+                )
+            })
             .collect();
         assert_eq!(
             menus,
             [
-                ("ruby:bag", 4, 0, vec![]),
-                ("ruby:press", 9, 2, vec![7, 8]),
-                ("ruby:station", 16, 0, vec![11])
+                ("ruby:bag", 4, 0, &[][..], &[][..]),
+                ("ruby:press", 9, 2, &[7, 8][..], &[0, 6][..]),
+                ("ruby:station", 16, 0, &[11][..], &[15][..])
             ]
         );
         let links: Vec<_> = content.menu_types.iter().map(|m| m.links).collect();
@@ -2767,6 +2793,29 @@ capabilities = ["registries"]
             let files: &[(&str, &[u8])] = &[("data/ruby/sunrise/menu/a.json", file.as_bytes())];
             let e = smod(case, MANIFEST_TEXT, files).unwrap_err();
             assert!(e.contains(why), "{case}: {e}");
+        }
+    }
+
+    #[test]
+    fn menu_types_reject_invalid_inputs() {
+        for (case, file) in [
+            ("input-past", r#"{"slots": 3, "inputs": [3]}"#),
+            ("input-twice", r#"{"slots": 3, "inputs": [1, 1]}"#),
+            (
+                "input-result",
+                r#"{"slots": 3, "inputs": [1], "results": [1]}"#,
+            ),
+            (
+                "input-grid",
+                r#"{"slots": 6, "inputs": [2], "crafting": {"grid": 1, "size": 2, "result": 0}}"#,
+            ),
+            (
+                "input-craft-result",
+                r#"{"slots": 6, "inputs": [0], "crafting": {"grid": 1, "size": 2, "result": 0}}"#,
+            ),
+        ] {
+            let files: &[(&str, &[u8])] = &[("data/ruby/sunrise/menu/a.json", file.as_bytes())];
+            assert!(smod(case, MANIFEST_TEXT, files).is_err(), "{case}");
         }
     }
 

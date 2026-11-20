@@ -209,8 +209,7 @@ pub fn generate_render(root: &Path, out_dir: &Path) -> Result<(), String> {
         };
         let start = record
             .attrs
-            .iter()
-            .find(|attr| !attr.path().is_ident("doc"))
+            .first()
             .map_or_else(|| record.vis.span().start(), |attr| attr.span().start());
         records.push_str(&source[offset(start)..offset(record.span().end())]);
         records.push('\n');

@@ -11,6 +11,7 @@ fn kind() -> Kind {
         slots: 10,
         data_slots: 0,
         results: vec![8, 9],
+        inputs: Vec::new(),
         crafting: None,
         links: None,
     })))

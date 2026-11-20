@@ -2108,6 +2108,7 @@ mod recipe_check_tests {
                 slots: 10,
                 data_slots: 0,
                 results: vec![],
+                inputs: Vec::new(),
                 links: None,
                 crafting: Some(ModCrafting {
                     grid: 1,
