@@ -156,11 +156,12 @@ impl Game<'_> {
                 .remote
                 .as_ref()
                 .is_some_and(|r| r.level_players.contains_key(&id));
-            if !player && self.remote_mob_takes(i, hand) {
+            if !player && let Some(answer) = self.remote_mob_takes(i, hand) {
                 self.remote_feed_particles(i, hand);
                 // As for the objects above, only SUCCESS swings the hand: a
-                // CONSUME ends the click without one.
-                if self.remote_mob_swings(i, hand) {
+                // CONSUME ends the click without one. The swing is the answer's
+                // that took the click: the mob's own, or the stack's equip.
+                if self.remote_mob_swings(i, hand, answer) {
                     self.with_hand(hand, Game::swing_arm);
                 }
                 return true;
@@ -449,10 +450,16 @@ impl Game<'_> {
                 // links the compass), this hand swings and the click ends.
                 self.with_hand(hand, Game::swing_arm);
                 return true;
-            } else if item_used && held.as_ref().is_some_and(|s| s.item.ends_with("minecart")) {
-                // MinecartItem.useOn: SUCCESS on a rail (the server spawns the
-                // cart), this hand swings; FAIL elsewhere, no swing. Either ends
-                // the click, so no UseItem and no other hand.
+            } else if item_used
+                && held.as_ref().is_some_and(|s| {
+                    crate::game::minecarts::CartKind::from_id(&s.item)
+                        .is_some_and(|kind| kind != crate::game::minecarts::CartKind::Spawner)
+                })
+            {
+                // MinecartItem.useOn, the six cart items (a spawner minecart has
+                // none): SUCCESS on a rail (the server spawns the cart), this hand
+                // swings; FAIL elsewhere, no swing. Either ends the click, so no
+                // UseItem and no other hand.
                 if self.block_is_rail(hit.pos) {
                     self.with_hand(hand, Game::swing_arm);
                 }

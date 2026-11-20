@@ -8842,9 +8842,10 @@ impl Game<'_> {
                 self.remote_use_instrument(held);
                 return true;
             }
-            // EnderEyeItem.use: startUsingItem unless an End portal frame is
-            // aimed at, with or without a stronghold to throw the eye at.
-            "minecraft:ender_eye" => !self.aims_at_end_portal_frame(),
+            // EnderEyeItem.use: startUsingItem, with or without a stronghold to
+            // throw the eye at (its own ray at a frame PASSed before, in
+            // remote_use_item).
+            "minecraft:ender_eye" => true,
             // Item.use: a kinetic weapon starts being used.
             id if sunrise_client::spear::Kinetic::of(id).is_some() => true,
             // ShieldItem.use: anything that blocks attacks, off cooldown.
