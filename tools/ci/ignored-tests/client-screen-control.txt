@@ -1,5 +1,4 @@
 # Client screen-control tests use prepared resources and a client connection.
-sunrise-client game::native_client_screens::client_screen_tests::closing_a_lectern_sends_its_menu_id lib daily resources
 sunrise-client game::native_client_screens::client_screen_tests::closing_a_chest_sends_its_menu_id_and_closes_the_client_menu lib daily resources
 sunrise-client game::native_client_screens::client_screen_tests::closing_the_inventory_sends_the_close_for_id_zero lib daily resources
 sunrise-client game::native_client_screens::client_screen_tests::closing_with_no_screen_reports_false_and_sends_nothing lib daily resources

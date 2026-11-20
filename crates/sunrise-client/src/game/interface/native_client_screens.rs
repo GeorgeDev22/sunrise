@@ -13,11 +13,17 @@ impl Game<'_> {
     /// menu's `ServerboundContainerClosePacket` first (a bare local close would
     /// leave the server's menu open), while a pause menu closes to the game.
     /// The sign editor and a book are overlays beside the screen: Escape on the sign editor
-    /// sends its `ServerboundSignUpdatePacket`, and on a lectern's book the menu's close. False when no
-    /// screen is open, and for the death screen, which Escape does not close.
+    /// sends its `ServerboundSignUpdatePacket`, and on a lectern's book the menu's close. A
+    /// confirmation, a server's pack prompt or a dialog opened over any of them is the
+    /// foreground screen, and only it closes. False when no screen is open, for the death
+    /// screen and the code of conduct, which Escape does not close, and for a dialog that
+    /// Escape cannot close.
     pub(in crate::game) fn close_screen(&mut self) -> bool {
         if self.player.is_none() {
             return false;
+        }
+        if let Some(closed) = self.close_foreground() {
+            return closed;
         }
         if self.sign_edit.is_some() {
             self.close_sign_editor();
@@ -37,6 +43,38 @@ impl Game<'_> {
         // (and the screen hooks' closing notices) are exactly the key's.
         let _ = self.key_pressed(KeyCode::Escape, KeyCode::Escape);
         self.screen != before
+    }
+    /// Escape on a screen opened in front of the others, in the order `window_event` gives
+    /// it the key: a command's or a link's `ConfirmScreen` answers no, `CodeOfConductScreen`
+    /// stays, `PackConfirmScreen` declines and a dialog runs its own Escape. The book, sign,
+    /// screen or lectern menu behind it is left as it is. Whether it closed, or None when no
+    /// such screen is open.
+    fn close_foreground(&mut self) -> Option<bool> {
+        if self.command_prompt.is_some() {
+            self.command_prompt_key(KeyCode::Escape);
+            return Some(self.command_prompt.is_none());
+        }
+        if self.link_prompt.is_some() {
+            self.answer_link_prompt(false);
+            return Some(true);
+        }
+        if self.code_of_conduct.is_some() {
+            return Some(false);
+        }
+        if self.server_packs.prompt.is_some() {
+            if let Err(e) = self.answer_pack_prompt(false) {
+                log::warn!("Sunrise: declining the server's resource pack: {e:#}");
+            }
+            return Some(true);
+        }
+        if self.dialog_open() {
+            let before = self.dialog_screen_key();
+            if let Err(e) = self.dialog_key(KeyCode::Escape, None, None) {
+                log::warn!("Sunrise: closing the dialog: {e:#}");
+            }
+            return Some(!self.dialog_open() || self.dialog_screen_key() != before);
+        }
+        None
     }
     /// `Minecraft.handleKeybinds` for `key.inventory`: the player's inventory
     /// opens locally and nothing is sent (the player menu is always open on the
@@ -73,10 +111,12 @@ impl Game<'_> {
 #[cfg(test)]
 mod client_screen_tests {
     use super::*;
+    use crate::game::books::BookScreen;
     use crate::game::native_entity_refs::tests::with_client_game;
     use crate::game::remote::tests::connect_menu_test;
     use sunrise_client::{
         containers::BlockEntity,
+        items::ItemStack,
         mobs::Mob,
         signs::{SignData, SignText},
     };
@@ -179,6 +219,93 @@ mod client_screen_tests {
                 panic!("the lectern's menu close goes out");
             };
             assert_eq!(close.container, 3);
+        });
+    }
+
+    /// A link's `ConfirmLinkScreen` over a lectern is the foreground screen: closing it answers
+    /// no and leaves the lectern's book and the server's menu open, with nothing sent. The next
+    /// close is the lectern's own.
+    #[test]
+    #[ignore = "daily"]
+    fn a_confirmation_over_a_lectern_closes_alone() {
+        with_client_game(|game| {
+            let mut reader = logged_in(game);
+            game.handle_packet(C::OpenScreen(play::OpenScreen {
+                container: 3,
+                menu: menu_id("minecraft:lectern"),
+                title: sunrise_core::nbt::Tag::String("Lectern".into()),
+            }))
+            .unwrap();
+            // Screen.clickUrlAction with Prompt on Links on, as a page's link opens it.
+            (game.settings.chat_links, game.settings.chat_links_prompt) = (true, true);
+            game.click_url("https://example.org".into());
+            assert!(
+                game.link_prompt.is_some(),
+                "the confirmation is over the book"
+            );
+            sent(&mut reader);
+            fn menu(game: &Game<'_>) -> Option<i32> {
+                game.remote.as_ref().unwrap().menu.as_ref().map(|m| m.0)
+            }
+
+            assert!(game.close_screen(), "the confirmation was open");
+            assert!(game.link_prompt.is_none());
+            assert!(
+                matches!(
+                    game.book,
+                    Some(BookScreen::View {
+                        lectern: Some(_),
+                        ..
+                    })
+                ),
+                "the lectern's book stays open"
+            );
+            assert_eq!(menu(game), Some(3), "the server's lectern menu stays open");
+            assert!(sent(&mut reader).is_empty(), "no menu close went out");
+
+            assert!(game.close_screen(), "the lectern is the screen now");
+            assert!(game.book.is_none());
+            assert_eq!(menu(game), None);
+            assert!(
+                sent(&mut reader)
+                    .iter()
+                    .any(|p| matches!(p, S::ContainerClose(c) if c.container == 3))
+            );
+        });
+    }
+
+    /// `BookViewScreen` and `BookEditScreen` close as `Screen.onClose`: the book goes and
+    /// nothing is sent, neither a menu close (no menu is open) nor the edited pages.
+    #[test]
+    #[ignore = "daily"]
+    fn closing_an_ordinary_book_sends_nothing() {
+        with_client_game(|game| {
+            let mut reader = logged_in(game);
+            game.open_book(BookScreen::View {
+                pages: Vec::new(),
+                page: 0,
+                lectern: None,
+            });
+            assert!(game.book.is_some());
+            sent(&mut reader);
+            assert!(game.close_screen(), "the written book was open");
+            assert!(game.book.is_none());
+            assert!(
+                sent(&mut reader).is_empty(),
+                "a written book's close sends nothing"
+            );
+
+            *game.held_mut() = Some(ItemStack::new("minecraft:writable_book", 1));
+            let stack = game.held().unwrap().clone();
+            assert!(game.remote_use_book(&stack), "the editor opened");
+            game.book_input(None, Some("unsaved"));
+            sent(&mut reader);
+            assert!(game.close_screen(), "the editor was open");
+            assert!(game.book.is_none());
+            assert!(
+                sent(&mut reader).is_empty(),
+                "Escape in the editor sends no edit and no menu close"
+            );
         });
     }
 
