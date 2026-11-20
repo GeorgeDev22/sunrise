@@ -1,0 +1,5 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client --all-targets -- -D warnings
+cargo test --locked -p sunrise-client --lib -- item_sync:: mobs::equip
+env SUNRISE_TEST_RESOURCES=/home/runner/work/sunrise/sunrise/.local/sunrise-client/26.3 cargo test --locked -p sunrise-client --lib -- click_ending_tests remote_mob_use dispenser::tests::a_dispenser_reads_the_stacks_own_equippable mob_looting --include-ignored
+python3 -m unittest tests.test_test_areas tests.test_daily_rows_coverage
