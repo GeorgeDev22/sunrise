@@ -59,6 +59,9 @@ pub fn check_path(name: &str) -> Result<(), String> {
     Err(error)
 }
 
+/// The single resource location NeoForge's `RecipePriorityManager` reads in pack order.
+pub const RECIPE_PRIORITIES_PATH: &str = "data/neoforge/recipe_priorities.json";
+
 /// The shared resource namespace fence for folders and native archives.
 pub(crate) fn check_namespace(name: &str, manifest: &Manifest) -> Result<(), String> {
     let mut parts = name.splitn(3, '/');
@@ -100,11 +103,14 @@ pub(crate) fn check_namespace(name: &str, manifest: &Manifest) -> Result<(), Str
             ));
         }
     }
-    let allowed =
-        owned || (top == "data" && shared && rest.starts_with("tags/")) || atlas || extension;
+    let allowed = owned
+        || (top == "data" && shared && rest.starts_with("tags/"))
+        || atlas
+        || extension
+        || name == RECIPE_PRIORITIES_PATH;
     if !allowed {
         return Err(format!(
-            "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces), to vanilla and convention (c) tags, or to vanilla's atlases"
+            "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces), to vanilla and convention (c) tags, to vanilla's atlases, or to declared shared resource paths"
         ));
     }
 
@@ -3817,6 +3823,30 @@ capabilities = ["registries"]
         );
         let e = tab(r#"{"title": "Gems", "icon": "ruby", "items": []}"#).unwrap_err();
         assert!(e.contains("item ids"), "{e}");
+    }
+
+    #[test]
+    fn two_packages_can_supply_the_merged_recipe_priorities_but_not_neighbouring_files() {
+        let other_manifest = MANIFEST_TEXT.replace("ruby", "sapphire");
+        for (name, manifest) in [("ruby", MANIFEST_TEXT), ("sapphire", &other_manifest)] {
+            let content = smod(name, manifest, &[(RECIPE_PRIORITIES_PATH, b"{}")]).unwrap();
+            assert!(
+                content
+                    .files
+                    .iter()
+                    .any(|path| path == RECIPE_PRIORITIES_PATH)
+            );
+        }
+        for path in [
+            "data/neoforge/recipe/unowned.json",
+            "data/neoforge/other.json",
+            "data/c/recipe_priorities.json",
+            "data/minecraft/recipe_priorities.json",
+        ] {
+            let error =
+                smod("nonshared-priority-path", MANIFEST_TEXT, &[(path, b"{}")]).unwrap_err();
+            assert!(error.contains(path), "{error}");
+        }
     }
 
     #[test]

@@ -2311,6 +2311,7 @@ impl Hub {
         // A caller that consumes raw events must resume the inbox before
         // running level/maintenance work. Game uses the split methods.
         if !self.packets_paused() {
+            self.sync_initial_health_data();
             for i in 0..self.guests.len() {
                 if self.here(&self.guests[i]) {
                     self.sync_progress(i);
@@ -3403,6 +3404,27 @@ impl Hub {
 
     // ---- per-player state ------------------------------------------------
 
+    /// `ServerEntity.sendDirtyEntityData`: the tracker sends the player's initial
+    /// health to its own connection before `ServerPlayer.tick` publishes progress.
+    pub fn sync_initial_health_data(&mut self) {
+        for i in 0..self.guests.len() {
+            let guest = &self.guests[i];
+            if !guest.sent_health_data && self.here(guest) {
+                self.send_initial_health_data(i);
+            }
+        }
+    }
+
+    fn send_initial_health_data(&mut self, i: usize) {
+        self.guests.update(i, |g| {
+            g.send(&C::SetEntityData(play::SetEntityData {
+                id: g.entity_id,
+                values: vec![(9, serializer::FLOAT, Value::Float(g.health))],
+            }));
+            g.sent_health_data = true;
+        });
+    }
+
     /// ServerPlayer.doTick: health, food, experience and the inventory menu.
     fn sync_player_state(&mut self, i: usize) {
         // LivingEntity.startSleeping / stopSleeping: the pose and the bed go
@@ -3425,15 +3447,11 @@ impl Hub {
                 }));
             }
         });
-        // ServerEntity.sendDirtyEntityData on the player's first tick: the
-        // health its creation set is still dirty, and goes to the player too.
         let first_tick = self.guests[i].sent_health.is_none();
-        if first_tick {
-            let g = &self.guests[i];
-            g.send(&C::SetEntityData(play::SetEntityData {
-                id: g.entity_id,
-                values: vec![(9, serializer::FLOAT, Value::Float(g.health))],
-            }));
+        // A respawn or level change in the connection phase can replace the
+        // player's body after the level ran its tracker.
+        if first_tick && !self.guests[i].sent_health_data {
+            self.send_initial_health_data(i);
         }
         // ServerEntity.sendDirtyEntityData: the player's changed attribute
         // instances go to the player too (its trackers get them from
@@ -4951,6 +4969,7 @@ impl Hub {
             // lastSentExp, lastSentHealth and lastSentFood; the client's new
             // player starts with the default air and no absorption.
             g.sent_health = None;
+            g.sent_health_data = false;
             g.sent_xp = None;
             g.sent_air = (300, 0.0);
             g.sent_frozen = 0;

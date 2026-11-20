@@ -711,10 +711,12 @@ impl Containers<'_> {
         if !self.accepts(view, slot, stack) {
             return 0;
         }
-        self.slot_stack_limit(view, slot, stack)
+        self.slot_stack_limit(view, slot, Some(stack))
     }
-    fn slot_stack_limit(&self, view: &View, slot: usize, stack: &ItemStack) -> u32 {
-        let capacity = view.slot_limit().min(self.max_stack(stack));
+    fn slot_stack_limit(&self, view: &View, slot: usize, stack: Option<&ItemStack>) -> u32 {
+        let capacity = stack.map_or(view.slot_limit(), |s| {
+            view.slot_limit().min(self.max_stack(s))
+        });
         view.locate(slot)
             .and_then(|(pos, _)| self.world.container_stack_limit(pos))
             .map_or(capacity, |limit| capacity.min(limit))
@@ -728,7 +730,7 @@ impl Containers<'_> {
     }
     fn insertion_room(&self, view: &View, slot: usize, stack: &ItemStack) -> u32 {
         room(
-            self.slot_stack_limit(view, slot, stack),
+            self.slot_stack_limit(view, slot, Some(stack)),
             self.get(view, slot),
             stack,
         )
@@ -1548,7 +1550,6 @@ impl Game<'_> {
     pub(super) fn put_into_part(
         &mut self,
         part: &Capability<dyn ResourceHandler<ItemResource>>,
-        at: [i32; 3],
         stack: &ItemStack,
         take: impl FnOnce(&mut Self, u32) -> Option<()>,
     ) -> u32 {
@@ -1559,11 +1560,13 @@ impl Game<'_> {
         let resource = ItemResource::of(&snapshot);
         mod_api::run_transaction(self, |game, tx| {
             let host: &mut dyn mod_api::ServerHost = game;
-            let went = part.insert_any(host, tx, &resource, stack.count);
-            match part.checked(went, stack.count, &at) {
-                Some(0) | None => Err(()),
-                Some(went) => take(game, went).map(|()| went).ok_or(()),
+            let went = part
+                .insert(host, tx, &resource, stack.count)
+                .map_err(|_| ())?;
+            if went == 0 {
+                return Err(());
             }
+            take(game, went).map(|()| went).ok_or(())
         })
         .unwrap_or(0)
     }
@@ -1582,11 +1585,7 @@ impl Game<'_> {
         part: &Capability<dyn ResourceHandler<ItemResource>>,
         at: [i32; 3],
     ) -> bool {
-        if (0..part.size(self)).all(|slot| {
-            part.resource(self, slot).is_some_and(|resource| {
-                part.amount(self, slot) >= part.capacity(self, slot, &resource)
-            })
-        }) {
+        if mod_api::resource_util::is_full(self, part) {
             return false;
         }
         let from = self.container_world_pos(hopper);
@@ -1610,14 +1609,12 @@ impl Game<'_> {
                 let Some(mut one) = game.take_one(hopper, slot) else {
                     continue;
                 };
-                let went = part.insert_any(game, tx, &resource, 1);
-                let accepted = part.checked(went, 1, &at);
-                if accepted == Some(1) {
+                let went = part.insert(game, tx, &resource, 1).map_err(|_| ())?;
+                if went == 1 {
                     return Ok(());
                 }
                 one.count = snapshot.count();
                 *game.slot_mut_at(hopper, slot).ok_or(())? = Some(one);
-                accepted.ok_or(())?;
             }
             Err(())
         })
@@ -1648,7 +1645,7 @@ impl Game<'_> {
             }
             let moved = mod_api::run_transaction(self, |game, tx| {
                 let host: &mut dyn mod_api::ServerHost = game;
-                let came = part.extract(host, tx, slot, &resource, 1);
+                let came = part.extract_at(host, tx, slot, &resource, 1);
                 if part.checked(came, 1, &at) != Some(1) {
                     return Err(());
                 }
@@ -2275,8 +2272,7 @@ impl Game<'_> {
                     ControlFlow::Continue(inserted)
                 }
                 ContainerTarget::Part(part) => {
-                    let at = [target.0, target.1, target.2];
-                    game.dropper_into_part(&part, &stack, at, &view, slot);
+                    game.dropper_into_part(&part, &stack, &view, slot);
                     ControlFlow::Break(())
                 }
             });
@@ -2420,7 +2416,7 @@ mod brewing_fuel_transfer_tests {
                 .unwrap();
                 let resource = mod_api::ItemResource::of(&stack);
                 host.transaction(|host, tx| {
-                    assert_eq!(items.insert(host, tx, 0, &resource, 1), 1);
+                    assert_eq!(items.insert_at(host, tx, 0, &resource, 1), 1);
                     Ok::<_, ()>(())
                 })
                 .unwrap();
@@ -3179,7 +3175,7 @@ mod hopper_cart_transfer_tests {
                 &game.options.resources.join("data"),
                 &PackOverlay {
                     files: &files,
-                    ..PackOverlay::NONE
+                    ..PackOverlay::default()
                 },
             ));
             game.adv.loaded = true;

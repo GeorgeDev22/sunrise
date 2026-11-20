@@ -157,7 +157,7 @@ impl Game<'_> {
             recipes: self.recipes(),
             brewing: &self.stations().brewing,
             banners: &self.stations().banners,
-            station_recipes: &self.stations().recipes,
+            station_recipes: self.station_recipes(),
             enchantments: &self.stations().enchantments,
             names: &self.pack.names,
             trade: None,
@@ -1623,34 +1623,50 @@ impl Game<'_> {
         true
     }
 
-    /// `Inventory.placeItemBackInInventory` of `stacks` for guest `gi`, what
-    /// doesn't fit dropped (`clearContainer`).
-    pub(super) fn lan_place_back(&mut self, gi: usize, stacks: Vec<ItemStack>) {
-        let mut menu = Menu::new(Kind::Inventory);
-        self.guest_menu_op(gi, &mut menu, |menu, env| {
-            place_back(menu, env.items, stacks)
-        });
-    }
-
-    /// `AbstractContainerMenu.removed`: return the closing player's cursor to their inventory
-    /// and send the emptied cursor. Only drop overflow after the player's own turn state is
-    /// restored: spawning it can call mods synchronously, before the Close and Open notices.
-    pub(super) fn guest_carried_back(&mut self, gi: usize) {
+    /// `AbstractContainerMenu.removed`: return the cursor, then any menu inputs, to
+    /// the closing player's inventory. Drop overflow after restoring the active turn,
+    /// since spawning an item can call mods synchronously.
+    pub(super) fn return_guest_menu_items(
+        &mut self,
+        gi: usize,
+        inputs: Vec<ItemStack>,
+        return_cursor: bool,
+    ) {
         let overflow = self.with_own_record(gi, |lan, items| {
-            let overflow = lan.hub.guests.update(gi, |guest| {
-                let carried = guest.carried.take()?;
+            let (overflow, cursor_cleared) = lan.hub.guests.update(gi, |guest| {
+                let carried = if return_cursor {
+                    guest.carried.take()
+                } else {
+                    None
+                };
+                let cursor_cleared = carried.is_some();
+                if !cursor_cleared && inputs.is_empty() {
+                    return None;
+                }
                 let mut menu = Menu::new(Kind::Inventory);
                 load_player(&mut menu, guest);
-                place_back(&mut menu, items, [carried]);
+                place_back(&mut menu, items, carried.into_iter().chain(inputs));
                 store_player(&mut menu, guest);
-                Some(std::mem::take(&mut menu.dropped))
+                Some((std::mem::take(&mut menu.dropped), cursor_cleared))
             })?;
-            lan.hub.send_inventory(gi);
+            if cursor_cleared {
+                lan.hub.send_inventory(gi);
+            }
             Some(overflow)
         });
         if let Some(overflow) = overflow.filter(|stacks| !stacks.is_empty()) {
             self.drop_guest_items(gi, overflow);
         }
+    }
+
+    /// `clearContainer`: return the inputs without taking the cursor.
+    pub(super) fn lan_place_back(&mut self, gi: usize, inputs: Vec<ItemStack>) {
+        self.return_guest_menu_items(gi, inputs, false);
+    }
+
+    /// Return the closing player's cursor when the menu holds no inputs.
+    pub(super) fn guest_carried_back(&mut self, gi: usize) {
+        self.return_guest_menu_items(gi, Vec::new(), true);
     }
 
     /// A guest left: what their crafting grids and workstation held goes back into their

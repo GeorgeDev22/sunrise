@@ -25,9 +25,18 @@ if let Some(sign) = host.sign_editor() {
 player's container close: the client sends `ServerboundContainerClosePacket` with the menu's id and then
 closes its copy of the menu. It never drops a container menu locally alone, which would leave the
 server's menu open. A pause menu closes to the game, another screen runs its own close, and the sign
-editor sends `ServerboundSignUpdatePacket` with the lines being edited, as Escape does. The death
-screen does not close this way. The screen hooks' closing notices fire as they do for Escape. It returns
-`false` when no screen is open.
+editor sends `ServerboundSignUpdatePacket` with the lines being edited, as Escape does. A written book
+or a book and quill closes and sends nothing: no menu close, and no `ServerboundEditBookPacket`, since
+Escape saves no pages (only the editor's Done button does). A lectern's book closes the lectern's menu,
+so the client sends `ServerboundContainerClosePacket` with that menu's id.
+
+When a screen opens over another, only the screen in front handles the close. A link's or a command's
+confirmation answers no, a server's resource pack prompt declines, and a dialog runs its own Escape.
+Declining a required pack disconnects instead of returning to the screen underneath. The death
+screen's exit confirmation answers no once its Escape delay has elapsed. The death screen itself,
+the code of conduct and a dialog that Escape cannot close do not close this way. The screen hooks'
+closing notices fire as they do for Escape. It returns `false` when no screen is open or the screen
+in front does not close.
 
 `ClientHost::open_inventory()` does what `key.inventory` does: it opens the player's inventory screen
 locally and sends nothing, because the player's menu is always open on the server. Riding a vehicle

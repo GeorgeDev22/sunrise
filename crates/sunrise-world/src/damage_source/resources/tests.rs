@@ -214,7 +214,7 @@ fn conditions_skip_winning_definitions_before_decode_but_not_tag_layers() {
         &f.0,
         &PackOverlay {
             files: &files,
-            ..PackOverlay::NONE
+            ..PackOverlay::default()
         },
     )
     .unwrap();
@@ -245,7 +245,7 @@ fn a_rejected_override_does_not_uncover_an_exported_definition() {
             &f.0,
             &PackOverlay {
                 files: &files,
-                ..PackOverlay::NONE
+                ..PackOverlay::default()
             },
         )
         .unwrap();

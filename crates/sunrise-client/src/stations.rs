@@ -815,10 +815,10 @@ impl ParsedStationRecipe {
         }
     }
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct StationRecipes {
     pub smithing: Vec<Smithing>,
-    /// Sorted by recipe id, the registry order vanilla lists them in.
+    /// Descending recipe priority, then vanilla's registration order.
     pub stonecutting: Vec<Stonecutting>,
     /// `trim_material` registry: id -> (asset name, description).
     pub trim_materials: Vec<(String, String)>,
@@ -828,6 +828,13 @@ pub struct StationRecipes {
     item_limits: std::collections::HashMap<Arc<str>, (u32, u32)>,
 }
 impl StationRecipes {
+    /// These tables with `stonecutting` in place of their own stonecutter list.
+    pub fn with_stonecutting(&self, stonecutting: Vec<Stonecutting>) -> Self {
+        Self {
+            stonecutting,
+            ..self.clone()
+        }
+    }
     /// Load station tables only after the complete recipe candidate validates.
     pub fn load(
         root: &Path,

@@ -87,6 +87,7 @@ impl Field {
 #[derive(Default)]
 pub(super) struct DialogState {
     open: Option<Open>,
+    revision: u64,
     /// `WaitingForResponseScreen`, since when.
     waiting: Option<Instant>,
     /// `DialogScreen.WarningScreen`, over the dialog.
@@ -137,12 +138,12 @@ impl Game<'_> {
     }
     /// What tells one dialog screen from another for a controller's focus: a new dialog is a
     /// new screen, and so are the warning and waiting screens.
-    pub(super) fn dialog_screen_key(&self) -> (bool, bool, Option<String>) {
+    pub(super) fn dialog_screen_key(&self) -> (bool, bool, Option<u64>) {
         let d = &self.dialogs;
         (
             d.warning,
             d.waiting.is_some(),
-            d.open.as_ref().map(|o| o.dialog.title.plain()),
+            d.open.as_ref().map(|_| d.revision),
         )
     }
     /// The warning icon in the dialog's corner, while the dialog itself shows.
@@ -274,6 +275,7 @@ impl Game<'_> {
             })
             .collect();
         self.open_screen_overlay("dialog", |game| {
+            game.dialogs.revision = game.dialogs.revision.wrapping_add(1);
             game.dialogs.open = Some(Open {
                 dialog,
                 configuration,
@@ -303,7 +305,10 @@ impl Game<'_> {
 
     /// Every dialog screen goes (a disconnect, or the level loading screen).
     pub(super) fn close_dialogs(&mut self) {
-        self.dialogs = DialogState::default();
+        self.dialogs = DialogState {
+            revision: self.dialogs.revision,
+            ..DialogState::default()
+        };
     }
 
     fn dialog_closed(&mut self) {
@@ -324,6 +329,7 @@ impl Game<'_> {
     /// The confirmation's no: the dialog again, with what was typed in it.
     pub(super) fn reopen_dialog(&mut self, dialog: ClosedDialog) {
         self.open_screen_overlay("dialog", |game| {
+            game.dialogs.revision = game.dialogs.revision.wrapping_add(1);
             game.dialogs.open = Some(*dialog.0);
             game.dialogs.waiting = None;
         });
@@ -1357,6 +1363,7 @@ mod pause_tests {
                 dragging: None,
                 selecting: None,
             }),
+            revision: 1,
             waiting: None,
             warning: false,
         }

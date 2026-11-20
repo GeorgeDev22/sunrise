@@ -111,7 +111,7 @@ impl BlockEntityPart for Part {
                 .expect("the second block's items");
             let tx = host.transaction_current().expect("inside the action");
             assert_eq!(
-                items.insert(host, &tx, 0, &ItemResource::of(&stone(1)), 4),
+                items.insert_at(host, &tx, 0, &ItemResource::of(&stone(1)), 4),
                 4
             );
             event.stack.as_mut().unwrap().set_count(6).unwrap();

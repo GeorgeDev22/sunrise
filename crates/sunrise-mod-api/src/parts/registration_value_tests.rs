@@ -108,7 +108,11 @@ fn client_menu_click_refuses_a_host_without_its_backend() {
 #[test]
 fn level_family_accepts_empty_doubles() {
     struct Empty;
-    impl LevelHost for Empty {}
+    impl LevelHost for Empty {
+        fn block_entity_data(&self, _: mod_api::BlockEntityRef) -> Option<mod_api::Compound> {
+            None
+        }
+    }
     impl LevelRandomHost for Empty {}
     impl LevelTicksHost for Empty {}
     impl LevelWriteHost for Empty {}

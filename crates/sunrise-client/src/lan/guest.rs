@@ -430,6 +430,8 @@ pub struct Guest {
     pub menu_state: i32,
     /// `lastSentHealth`, `lastSentFood` and `lastFoodSaturationZero`.
     pub sent_health: Option<(f32, i32, bool)>,
+    /// Whether the entity tracker has sent the initial health metadata to this player.
+    pub(super) sent_health_data: bool,
     pub sent_xp: Option<(f32, i32, i32)>,
     /// The air supply and absorption the player's client was last sent
     /// (Entity.DATA_AIR_SUPPLY_ID, Player.DATA_PLAYER_ABSORPTION_ID); their
@@ -813,6 +815,7 @@ impl Guest {
             menu_sent: vec![None; 46],
             menu_state: 0,
             sent_health: None,
+            sent_health_data: false,
             sent_xp: None,
             sent_air: (300, 0.0),
             sent_frozen: 0,

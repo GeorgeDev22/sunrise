@@ -404,8 +404,12 @@ pub struct AnvilUndo {
 pub struct Stonecutter {
     /// `recipesForInput`: indices into `StationRecipes.stonecutting`.
     pub recipes: Vec<usize>,
-    /// The item the list was made for (`input`; None for nothing).
-    pub input: Option<Arc<str>>,
+    /// The item the local or client list was made for (`input`; None for nothing).
+    input: Option<Arc<str>>,
+    /// The full stack checked by the projected server menu's ingredient predicates.
+    server_input: Option<ItemStack>,
+    /// The button map sent to the guest of this server menu, pinned until close.
+    pub server_buttons: Option<Arc<crate::lan::recipes::StonecutterButtons>>,
     /// `ResultContainer.recipeUsed`.
     pub used: Option<usize>,
 }
@@ -886,11 +890,13 @@ impl Menu {
             if self.state.data[0] == id {
                 return false;
             }
-            if id >= 0 && (id as usize) < self.state.stone.recipes.len() {
+            if let Some(recipe) = self.stone_recipe(env, id) {
                 self.state.data[0] = id;
-                self.stone_setup_result(env, id);
+                self.stone_setup_result(env, Some(recipe));
+                return true;
             }
-            return true;
+            // A projected-but-ineligible button is not a recipe selection.
+            return self.state.stone.server_buttons.is_none();
         }
         if self.state.kind != Kind::Loom || id < 0 || id as usize >= self.state.loom_patterns.len()
         {
@@ -1051,9 +1057,30 @@ impl Menu {
     /// (`setupRecipeList`), with none selected and no result.
     fn stone_changed(&mut self, env: &Env) {
         self.touch();
-        let input = self.state.containers[MAIN][0]
-            .as_ref()
-            .map(|s| s.item.clone());
+        let input = self.state.containers[MAIN][0].as_ref();
+        if self.state.stone.server_buttons.is_some() {
+            let before = self.state.stone.server_input.as_ref();
+            if input == before {
+                return;
+            }
+            // The selected recipe's index is valid until this server generation closes.
+            // A count change can refill it, but still has to pass the full predicate.
+            let recipe = input.zip(before).and_then(|(input, before)| {
+                self.state.stone.used.filter(|&index| {
+                    input.same_item_same_components(before)
+                        && env.station_recipes.stonecutting[index]
+                            .input
+                            .test_in(env.loop_context, input)
+                })
+            });
+            self.state.stone.server_input = input.cloned();
+            if recipe.is_none() {
+                self.state.data[0] = -1;
+            }
+            self.stone_setup_result(env, recipe);
+            return;
+        }
+        let input = input.map(|s| s.item.clone());
         if input == self.state.stone.input {
             return;
         }
@@ -1073,8 +1100,20 @@ impl Menu {
         };
     }
 
+    fn stone_recipe(&self, env: &Env, button: i32) -> Option<usize> {
+        let index = usize::try_from(button).ok()?;
+        if let Some(buttons) = &self.state.stone.server_buttons {
+            let stack = self.state.containers[MAIN][0].as_ref()?;
+            let id = buttons.recipe(&stack.item, index)?;
+            return env.station_recipes.stonecutting.iter().position(|recipe| {
+                recipe.id == id && recipe.input.test_in(env.loop_context, stack)
+            });
+        }
+        self.state.stone.recipes.get(index).copied()
+    }
+
     /// `StonecutterMenu.setupResultSlot`.
-    fn stone_setup_result(&mut self, env: &Env, index: i32) {
+    fn stone_setup_result(&mut self, env: &Env, recipe: Option<usize>) {
         self.touch();
         // A client's SelectableRecipe entries carry no recipe (`entry.recipe().recipe()` is empty off the
         // server): its result stays empty until the server's slot update, and a take refills nothing.
@@ -1083,9 +1122,6 @@ impl Menu {
             self.state.containers[RESULT][0] = None;
             return;
         }
-        let recipe = usize::try_from(index)
-            .ok()
-            .and_then(|i| self.state.stone.recipes.get(i).copied());
         self.state.stone.used = recipe;
         self.state.containers[RESULT][0] =
             recipe.map(|r| env.station_recipes.stonecutting[r].result.clone());
@@ -4830,6 +4866,7 @@ pub(crate) mod tests {
 
     mod crafted_stat_tests;
     mod mod_grid_tests;
+    mod server_stonecutter_tests;
 
     /// Extra sources (`native_recipe_sources`) count as more inventory: the
     /// grid fills as the table's does when the player holds what the sources

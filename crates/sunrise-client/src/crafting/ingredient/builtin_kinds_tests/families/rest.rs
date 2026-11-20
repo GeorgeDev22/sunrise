@@ -1735,7 +1735,7 @@ fn mob_visibility_component_recipe_codec_and_borrowed_matching() {
     )];
     let overlay = sunrise_world::loot::PackOverlay {
         files: &files,
-        ..sunrise_world::loot::PackOverlay::NONE
+        ..sunrise_world::loot::PackOverlay::default()
     };
     let active = Items::tags_only(root.path(), &overlay, &defaults).unwrap();
     let custom = ingredient(

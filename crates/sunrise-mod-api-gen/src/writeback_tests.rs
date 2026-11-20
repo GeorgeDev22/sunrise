@@ -55,18 +55,27 @@ fn untouched_writeback_runtime_and_mutants() {
         } else {
             ""
         };
-        let menu_bindings = if name == "menu_button" {
-            "let entity = Some(entity); let menu = \"test:menu\"; let block = None::<&str>;"
-        } else {
-            ""
+        let entity_binding = match name {
+            "menu_button" => {
+                "let entity = Some(entity); let menu = \"test:menu\"; let block = None::<&str>;"
+            }
+            "menu_quick_move" => "",
+            _ => "let entity = 0;",
         };
-        methods.push_str(&format!("fn {name}(&mut self, value: &mut Stack, entity: &mut Stack, carried: &mut Option<Stack>, stack: &mut Stack, cancel: &mut bool, handled: &mut bool) {{ let player = 0; let pos = [0; 3]; let context = &(); let container_slots = 1; let slot = 0; {bind_stack} {menu_bindings} {body} }}"));
+        let body = if matches!(name, "grindstone_place" | "grindstone_take") {
+            body.to_owned()
+        } else {
+            // Keep the adapter's early `return` inside its original unit-returning body.
+            format!("(|| {{ {body} }})(); Ok(())")
+        };
+        methods.push_str(&format!("fn {name}(&mut self, value: &mut Stack, entity: &mut Stack, carried: &mut Option<Stack>, stack: &mut Stack, cancel: &mut bool, handled: &mut bool) -> Result<(), InvalidReason> {{ let player = 0; let pos = [0; 3]; let context = &(); let container_slots = 1; let slot = 0; {bind_stack} {entity_binding} {body} }}"));
     }
     let fixture = r#"
 #![allow(unused)]
 extern crate self as log;
 #[macro_export] macro_rules! warn { ($($arg:tt)*) => { eprintln!($($arg)*); } }
 #[derive(Clone, Debug, PartialEq)] struct Stack(u32);
+type EngineStack = Stack;
 struct Game { change: bool }
 static VALIDATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[derive(Debug)] enum BlockEntitySnapshotError { InvalidStack }
@@ -82,8 +91,11 @@ mod game { pub mod api_values {
     pub trait TryIntoApi { type Api; fn try_into_api(&self) -> Result<Self::Api, ()>; }
     pub trait TryIntoEngine { type Engine; fn try_into_engine(&self, _: &()) -> Result<Self::Engine, crate::mod_api::StackWriteError>; }
     pub trait ItemBoundary { fn boundary_items(&self) -> Option<&()> { Some(&()) } }
-} }
-use game::api_values::*;
+}
+pub mod transactions { pub mod decision {
+    #[derive(Debug, PartialEq, Eq)] pub enum InvalidReason { Count }
+} } }
+use game::{api_values::*, transactions::decision::InvalidReason};
 impl TryIntoApi for Stack { type Api = Stack; fn try_into_api(&self) -> Result<Stack, ()> { Ok(self.clone()) } }
 impl TryIntoEngine for Stack { type Engine = Stack; fn try_into_engine(&self, _: &()) -> Result<Stack, mod_api::StackWriteError> { VALIDATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); if self.0 > 250 { Err(mod_api::StackWriteError::Unavailable) } else { Ok(self.clone()) } } }
 impl TryIntoApi for Option<Stack> { type Api = Self; fn try_into_api(&self) -> Result<Self, ()> { Ok(self.clone()) } }
@@ -94,9 +106,9 @@ impl ItemBoundary for Game {}
 impl Game {
     fn items(&self) -> &() { &() }
     fn native_generated(&mut self, stack: &mut Stack, handled: &mut bool) { if self.change { stack.0 = 252; } *handled = true; }
-    fn native_anvil_update(&mut self, _: u128, _: &mut Stack, _: [i32; 3], stack: &mut Stack, _: &mut bool) { if self.change { stack.0 = 252; } }
-    fn native_grindstone_place(&mut self, a: u128, b: &mut Stack, c: [i32; 3], d: &mut Stack, e: &mut bool) { self.native_anvil_update(a,b,c,d,e); }
-    fn native_grindstone_take(&mut self, a: u128, b: &mut Stack, c: [i32; 3], d: &mut Stack, e: &mut bool) { self.native_anvil_update(a,b,c,d,e); }
+    fn native_anvil_update(&mut self, _: u128, _: i32, _: [i32; 3], stack: &mut Stack, _: &mut bool) { if self.change { stack.0 = 252; } }
+    fn native_grindstone_place(&mut self, a: u128, b: i32, c: [i32; 3], d: &mut Stack, e: &mut bool) { self.native_anvil_update(a,b,c,d,e); }
+    fn native_grindstone_take(&mut self, a: u128, b: i32, c: [i32; 3], d: &mut Stack, e: &mut bool) { self.native_anvil_update(a,b,c,d,e); }
     fn native_menu_button(&mut self, _: &str, _: Option<&str>, _: &(), _: Option<&mut Stack>, stack: &mut Option<Stack>) { if self.change { *stack = Some(Stack(252)); } }
     fn native_menu_quick_move(&mut self, _: [i32; 3], _: &mut Stack, _: usize, _: usize, stack: &mut Option<Stack>, handled: &mut bool) { if self.change { *stack = Some(Stack(252)); } *handled = true; }
     METHODS
@@ -114,14 +126,19 @@ fn main() {
             let mut carried = Some(Stack(251)); let mut cancel = false;
             let mut handled = false;
             VALIDATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
-            fire(&mut game, &mut value, &mut entity, &mut carried, &mut stack, &mut cancel, &mut handled);
+            let result = fire(&mut game, &mut value, &mut entity, &mut carried, &mut stack, &mut cancel, &mut handled);
             assert_eq!(VALIDATIONS.load(std::sync::atomic::Ordering::Relaxed), usize::from(change));
             assert_eq!(value, Stack(251)); assert_eq!(stack, Stack(251)); assert_eq!(carried, Some(Stack(251)));
-            if index < 3 { assert_eq!(cancel, change); }
+            if matches!(index, 1 | 2) && change {
+                assert_eq!(result, Err(InvalidReason::Count));
+            } else {
+                assert_eq!(result, Ok(()));
+            }
+            assert_eq!(cancel, index == 0 && change);
             if index == 4 { assert_eq!(handled, !change); }
         }
         let mut cancel = false;
-        game.anvil_update(&mut Stack(251), &mut Stack(0), &mut None, &mut Stack(251), &mut cancel, &mut false);
+        game.anvil_update(&mut Stack(251), &mut Stack(0), &mut None, &mut Stack(251), &mut cancel, &mut false).unwrap();
         assert_eq!(cancel, change);
     }
 }
@@ -175,7 +192,7 @@ fn main() {
             .unwrap();
         assert!(
             output.status.success(),
-            "{}",
+            "rustc could not compile the writeback fixture\n{}\nvariant: {name}",
             String::from_utf8_lossy(&output.stderr)
         );
         let output = std::process::Command::new(binary).output().unwrap();

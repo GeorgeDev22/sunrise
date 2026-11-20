@@ -3724,10 +3724,14 @@ pub fn resolved_resources(
             assets_base = ResourceSource::indexed(files);
         }
     }
-    let mod_layers = loaded
+    let data_layers: std::sync::Arc<[(String, ResourceSource)]> = loaded
         .iter()
         .flat_map(|group| &group.layers)
-        .map(|layer| layer.data.source().clone())
+        .map(|layer| (layer.data.id.clone(), layer.data.source().clone()))
+        .collect();
+    let mod_layers = data_layers
+        .iter()
+        .map(|(_, source)| source.clone())
         .collect();
     let layers = loaded
         .into_iter()
@@ -3753,7 +3757,7 @@ pub fn resolved_resources(
     Ok(ResourceRoot::new(prepared, cache, assets)
         .with_data(
             ResourceSource::indexed(data),
-            ResourceSource::indexed(changes),
+            ResourceSource::indexed_with_sources(changes, data_layers),
         )
         .with_mod_layers(mod_layers))
 }

@@ -742,6 +742,7 @@ mod tests {
             let overlay = PackOverlay {
                 conditions: &conditions,
                 files: &files,
+                ..PackOverlay::default()
             };
             let packed = super::super::SyncData::stage_registry_definitions(
                 root.path(),
