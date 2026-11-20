@@ -103,3 +103,30 @@ fn a_spectator_sees_the_invisible_body() {
         "the translucent body blends"
     );
 }
+
+/// `SulfurCubeInnerLayer` has no `isInvisible` check for a swallowed block: an invisible
+/// sulfur cube hides its cube, and the block inside still draws as it does on a visible one.
+#[test]
+#[ignore = "daily"]
+fn an_invisible_sulfur_cube_still_shows_its_block() {
+    let mut resources = None;
+    let mut game = game(&mut resources);
+    let types = MobTypes::load(&root()).unwrap();
+    let kind = Arc::new(types.types["minecraft:sulfur_cube"].clone());
+    let mut cube = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
+    cube.extra.set_body(Some("minecraft:stone".into()));
+    game.mobs.push(cube);
+    let camera = glam::DVec3::new(6.5, 65.0, 6.5);
+
+    let mut seen = Vec::new();
+    game.mob_geometry(camera, 0.0, &mut seen);
+    game.mobs[0].invisible = true;
+    let mut hidden = Vec::new();
+    game.mob_geometry(camera, 0.0, &mut hidden);
+
+    assert!(!hidden.is_empty(), "the swallowed block draws");
+    assert!(hidden.len() < seen.len(), "the cube around it does not");
+    // The block draws first, before the cube: the invisible cube draws exactly that part.
+    let bytes = bytemuck::cast_slice::<_, u8>;
+    assert_eq!(bytes(&hidden), bytes(&seen[..hidden.len()]));
+}

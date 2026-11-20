@@ -70,8 +70,8 @@ impl Game<'_> {
         // Entity.DATA_SHARED_FLAGS_ID invisible (the flag the invisibility
         // effect sets): only the name tag draws (and the outline of a
         // glowing mob, LivingEntityRenderer.getRenderType). A player keeps
-        // its armour, elytra and held items (`LivingEntityRenderer.submit`
-        // skips only the body).
+        // its armour, elytra and held items, a sulfur cube its swallowed
+        // block (`LivingEntityRenderer.submit` skips only the body).
         let invisible = mob.is_invisible();
         // Entity.isInvisibleTo(viewer): a spectator sees it anyway, the
         // body forced translucent (`LivingEntityRenderer.submit`).
@@ -82,7 +82,12 @@ impl Game<'_> {
                 self.spectator(),
                 true,
             );
-        let layers_only = invisible && outline.is_none() && is_player && !seen_invisible;
+        // `SulfurCubeInnerLayer` has no `isInvisible` check for a swallowed block: it
+        // draws over the hidden cube as an avatar's layers do over its hidden body.
+        let swallowed = mob.species() == Species::SulfurCube
+            && sunrise_client::mobs::sulfur_cube::has_body(mob);
+        let layers_only =
+            invisible && outline.is_none() && (is_player || swallowed) && !seen_invisible;
         if invisible && outline.is_none() && !layers_only && !seen_invisible {
             return;
         }
@@ -123,7 +128,8 @@ impl Game<'_> {
         // model and vanilla layers; the mods' layers and post hooks still follow.
         let modded =
             self.mod_living_renderer_geometry(mob, alpha as f32, camera, packed, true, out);
-        if mob.species() == Species::SulfurCube && !mob.is_invisible() && !modded {
+        let block_start = out.len();
+        if mob.species() == Species::SulfurCube && !modded {
             self.sulfur_cube_body_geometry(
                 mob,
                 alpha as f32,
@@ -132,6 +138,7 @@ impl Game<'_> {
                 out,
             );
         }
+        let block_end = out.len();
         // Other players on a server: PlayerRenderer's HumanoidArmorLayer.
         let armor = if is_player {
             self.worn_armor_layers(mob)
@@ -266,7 +273,9 @@ impl Game<'_> {
                 self.skin_frame.borrow_mut().outline_since(first, color);
             }
             if invisible && !seen_invisible {
-                out.truncate(entity_start);
+                // Only the outline stays, and a sulfur cube's swallowed block.
+                out.truncate(block_end);
+                out.drain(entity_start..block_start);
                 return;
             }
         }
