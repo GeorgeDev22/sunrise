@@ -1,0 +1,4 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client --lib --tests -- -D warnings
+python3 -m unittest tests.test_mace_parity
+python3 tools/parity.py --fresh --timeout 5400 mace dispenser item_blocking < /dev/null
