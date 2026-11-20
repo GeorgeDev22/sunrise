@@ -1,0 +1,2 @@
+# An invisible sulfur cube still shows its swallowed block (SulfurCubeInnerLayer).
+sunrise-client game::creatures::spectator_view_tests::an_invisible_sulfur_cube_still_shows_its_block lib daily resources
