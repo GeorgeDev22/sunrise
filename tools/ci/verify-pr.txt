@@ -1,0 +1,5 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client --all-targets -- -D warnings
+env SUNRISE_TEST_RESOURCES=/home/runner/work/sunrise/sunrise/.local/sunrise-client/26.3 cargo test --locked -p sunrise-client --lib -- native_client_screens book_escape_tests --include-ignored
+cargo test --locked -p sunrise-mod-vocab
+python3 -m unittest tests.test_test_areas tests.test_daily_rows_coverage
