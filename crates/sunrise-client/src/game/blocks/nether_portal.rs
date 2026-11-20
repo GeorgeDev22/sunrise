@@ -257,15 +257,20 @@ fn move_passengers(tag: &mut Tag, by: Vec3, turn: f32) {
 fn doubles(values: [f64; 3]) -> Tag {
     Tag::List(values.iter().map(|v| Tag::Double(v.to_bits())).collect())
 }
-/// Whether a `width` by `height` box moving from `from` to `to` meets the End
-/// portal at `pos`: `Entity.collidedWithShapeMovingFrom` against its
-/// entity-inside shape, y 6/16..12/16 of the block.
-fn touches_end_portal(from: Vec3, to: Vec3, width: f32, height: f32, pos: BlockPos) -> bool {
+/// A `width` by `height` entity box standing on `at`
+/// (`EntityDimensions.makeBoundingBox`).
+pub(in crate::game) fn feet_box(at: Vec3, width: f32, height: f32) -> Aabb {
     let half = f64::from(width) / 2.0;
-    let start = Aabb::new(
-        Vec3::new(from.x - half, from.y, from.z - half),
-        Vec3::new(from.x + half, from.y + f64::from(height), from.z + half),
-    );
+    Aabb::new(
+        Vec3::new(at.x - half, at.y, at.z - half),
+        Vec3::new(at.x + half, at.y + f64::from(height), at.z + half),
+    )
+}
+/// Whether an entity box moving from `from` to `to` (`at_to` at its end)
+/// meets the End portal at `pos`: `Entity.collidedWithShapeMovingFrom`
+/// against its entity-inside shape, y 6/16..12/16 of the block.
+fn touches_end_portal(from: Vec3, to: Vec3, at_to: Aabb, pos: BlockPos) -> bool {
+    let start = at_to.move_by(from.subtract(to));
     let (x, y, z) = (f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
     let shape = Aabb::new(
         Vec3::new(x, y + 0.375, z),
@@ -1232,10 +1237,10 @@ impl Game<'_> {
             let from = entity
                 .portal_from()
                 .unwrap_or_else(|| self.portals.before.get(&id).copied().unwrap_or(to));
-            let Some((width, height)) = entity.portal_size() else {
+            let Some(bounds) = entity.portal_bounds(to) else {
                 continue;
             };
-            if let Some(pos) = self.swept_portal(from, to, width, height, &mut portal_sections) {
+            if let Some(pos) = self.swept_portal(from, to, bounds, &mut portal_sections) {
                 inside.push((id, pos, self.dimension_changing_delay(id)));
             }
         });
@@ -1249,21 +1254,16 @@ impl Game<'_> {
         }
     }
     /// The first nether or End portal block an entity box swept through
-    /// (`Entity.checkInsideBlocks`, whose first portal sets the entry).
+    /// (`Entity.checkInsideBlocks`, whose first portal sets the entry):
+    /// `at_to` is its box at `to`, moved back to `from` for the sweep.
     fn swept_portal(
         &self,
         from: Vec3,
         to: Vec3,
-        width: f32,
-        height: f32,
+        at_to: Aabb,
         portal_sections: &mut sunrise_client::portal_sections::PortalSections,
     ) -> Option<BlockPos> {
-        let half = f64::from(width) / 2.0;
-        let bounds = sunrise_core::geometry::Aabb::new(
-            Vec3::new(to.x - half, to.y, to.z - half),
-            Vec3::new(to.x + half, to.y + f64::from(height), to.z + half),
-        )
-        .deflate(Vec3::new(
+        let bounds = at_to.deflate(Vec3::new(
             f64::from(1.0e-5_f32),
             f64::from(1.0e-5_f32),
             f64::from(1.0e-5_f32),
@@ -1284,7 +1284,7 @@ impl Game<'_> {
             |p, _| {
                 let state = self.world.block(p.x, p.y, p.z);
                 if self.res.behaviours().portal_axis(state).is_some()
-                    || (self.is_end_portal(state) && touches_end_portal(from, to, width, height, p))
+                    || (self.is_end_portal(state) && touches_end_portal(from, to, at_to, p))
                 {
                     found = Some(p);
                     return false;
@@ -1887,7 +1887,12 @@ impl Game<'_> {
             return None;
         }
         let mut sections = std::mem::take(&mut self.portals.sections);
-        let entry = self.swept_portal(f.previous, f.position, 0.98, 0.98, &mut sections);
+        let entry = self.swept_portal(
+            f.previous,
+            f.position,
+            feet_box(f.position, 0.98, 0.98),
+            &mut sections,
+        );
         self.portals.sections = sections;
         let delay = self.dimension_changing_delay(f.id);
         if let Some(entry) = entry {
@@ -2615,32 +2620,44 @@ mod tests {
         assert!(touches_end_portal(
             at(100.6),
             at(100.56),
-            0.25,
-            0.25,
+            feet_box(at(100.56), 0.25, 0.25),
             portal
         ));
         // One tick's fall across the whole slab, in it at neither end.
-        assert!(touches_end_portal(at(101.0), at(99.9), 0.25, 0.25, portal));
+        assert!(touches_end_portal(
+            at(101.0),
+            at(99.9),
+            feet_box(at(99.9), 0.25, 0.25),
+            portal
+        ));
         // Resting below the slab (on the floor) or above it.
         assert!(!touches_end_portal(
             at(100.0),
             at(100.0),
-            0.25,
-            0.25,
+            feet_box(at(100.0), 0.25, 0.25),
             portal
         ));
         assert!(!touches_end_portal(
             at(100.8),
             at(100.8),
-            0.25,
-            0.25,
+            feet_box(at(100.8), 0.25, 0.25),
             portal
         ));
         // A cow standing in the portal block.
-        assert!(touches_end_portal(at(100.0), at(100.0), 0.9, 1.4, portal));
+        assert!(touches_end_portal(
+            at(100.0),
+            at(100.0),
+            feet_box(at(100.0), 0.9, 1.4),
+            portal
+        ));
         // Beside it.
         let beside = Vec3::new(2.0, 100.0, 3.5);
-        assert!(!touches_end_portal(beside, beside, 0.9, 1.4, portal));
+        assert!(!touches_end_portal(
+            beside,
+            beside,
+            feet_box(beside, 0.9, 1.4),
+            portal
+        ));
     }
 
     #[test]
@@ -2860,3 +2877,7 @@ impl Game<'_> {
 #[cfg(test)]
 #[path = "tests/nether_portal_stand_tests.rs"]
 mod stand_tests;
+
+#[cfg(test)]
+#[path = "tests/shulker_portal_tests.rs"]
+mod shulker_portal_tests;

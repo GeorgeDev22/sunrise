@@ -1,0 +1,3 @@
+# A shulker's portal sweep follows its own box (Shulker.makeBoundingBox): boots a server game on the
+# prepared resources. Rows: PACKAGE TEST TARGET daily REASON, sorted (README.md).
+sunrise-client game::nether_portal::shulker_portal_tests::a_shulker_on_a_wall_goes_through_the_portal_its_lid_opens_into lib daily resources

@@ -1068,18 +1068,23 @@ impl Game<'_> {
             if m.removed || m.is_invisible() {
                 continue;
             }
-            let pos = [
+            let pos = Vec3::new(
                 lerp(m.previous.x, m.position.x),
                 lerp(m.previous.y, m.position.y),
                 lerp(m.previous.z, m.position.z),
-            ];
+            );
             let view = (
                 lerpf(m.previous_head_pitch, m.head_pitch),
                 lerpf(m.previous_head_yaw, m.head_yaw),
             );
-            g.hitbox(
-                pos,
-                (m.width(), m.height()),
+            // `getBoundingBox().move(lerped - position)`: the mob's own box, so a
+            // shulker's follows its lid (`Shulker.makeBoundingBox`).
+            let b = m.bounds_at(pos);
+            let (min, max) = (b.min_position(), b.max_position());
+            g.entity_box(
+                [min.x, min.y, min.z],
+                [max.x, max.y, max.z],
+                [pos.x, pos.y, pos.z],
                 m.eye_height() as f32,
                 true,
                 view,
