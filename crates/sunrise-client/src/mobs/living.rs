@@ -3469,6 +3469,63 @@ mod tests {
         );
     }
 
+    /// The hoglin, piglin, piglin brute and zoglin brains have no `Swim`
+    /// (`HoglinAi`, `PiglinAi`, `PiglinBruteAi` and `Zoglin.initCoreActivity`),
+    /// so nothing makes them jump in a fluid: deep in lava they sink every tick,
+    /// towards `travelInLava`'s -0.04 (half the speed, then a quarter of the
+    /// gravity), where a `FloatGoal` user rises. That sinking is what carries
+    /// a hoglin down the lava of a farm to its campfires.
+    #[test]
+    #[ignore = "daily"]
+    fn the_piglin_family_sinks_through_deep_lava() {
+        let build = |world: &mut crate::world::World,
+                     registry: &sunrise_world::registry::BlockRegistry| {
+            world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(crate::chunk::Chunk::empty(0, 0)),
+            );
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            let lava = registry.default_state("minecraft:lava").unwrap();
+            for x in 2..=10 {
+                for z in 2..=10 {
+                    world.set(x, 0, z, stone).unwrap();
+                    for y in 1..=12 {
+                        world.set(x, y, z, lava).unwrap();
+                    }
+                }
+            }
+        };
+        for id in [
+            "minecraft:hoglin",
+            "minecraft:piglin",
+            "minecraft:piglin_brute",
+            "minecraft:zoglin",
+        ] {
+            let ran = crate::mobs::world::with_built_test_world(&[], build, |w, types| {
+                let kind = std::sync::Arc::new(types.types[id].clone());
+                let start = 7.0;
+                let mut m = Mob::new(1, kind, Vec3::new(6.5, start, 6.5), 0.0);
+                let mut test_level = crate::health::TestLevel::new(0);
+                let mut events = Vec::new();
+                let mut y = start;
+                for tick in 0..20 {
+                    crate::mobs::ai::tick(&mut m, w, &mut test_level.level(), &mut events);
+                    assert!(
+                        m.position.y <= y,
+                        "{id} rose from {y} to {} at tick {tick}",
+                        m.position.y
+                    );
+                    y = m.position.y;
+                }
+                // The sum of -0.04 * (1 - 0.5^k) over the 20 moves is about 0.72.
+                assert!(start - y > 0.6, "{id} sank only {}", start - y);
+            });
+            if !ran {
+                return;
+            }
+        }
+    }
+
     /// `Entity.move`'s last step, `getBlockSpeedFactor`: a mob sliding on soul
     /// sand (0.4) or honey (0.4) keeps 40% of its horizontal speed each move,
     /// on stone it keeps all of it, and its vertical speed is untouched.
