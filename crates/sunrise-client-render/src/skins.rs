@@ -757,6 +757,9 @@ pub fn process_cape(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
 /// (`sunrise_optifine::capes::canvas`), that texture scaled to the slot's top
 /// half. A 92x44 HD cape keeps the 128x64 layout's coordinates, where
 /// [`process_cape`] would stretch it over the whole 64x32.
+///
+/// Nothing here is OptiFine's own: custom capes can reuse it, and the drawing after it,
+/// later.
 pub fn process_optifine_cape(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     let canvas = sunrise_optifine::capes::canvas(width, height);
     lay_cape(width, height, rgba, canvas)

@@ -144,6 +144,9 @@ it is built in, else a note saying to install it from the Mods page.
   own); it is read once.
 - Only in the official executable (`sunrise-official`), which registers it: sunrise-client's own executable asks
   no cape server.
+- The rendering isn't OptiFine's own, so custom capes can reuse it later: any cape picture laid out by
+  `skins::process_optifine_cape` (any 64·2^n by 32·2^n layout) and kept under a location `skins::is_cape_location`
+  names is drawn as these are, over the Mojang cape and on the elytra.
 
 ### Keep channels for UI sounds (`uiSoundReserve`, default off)
 - Positional sounds (a block breaking, a mob, an explosion) start only while at
