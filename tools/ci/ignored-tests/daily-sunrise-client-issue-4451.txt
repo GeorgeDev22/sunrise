@@ -2319,6 +2319,7 @@ sunrise-client game::remote::tests::client_epochs_tests::client_epochs_follow_le
 sunrise-client game::remote::tests::client_handles_tests::client_handle_reads_answer_from_the_clients_copy lib daily resources
 sunrise-client game::remote::tests::client_handles_tests::client_handles_reach_a_custom_level lib daily resources
 sunrise-client game::remote::tests::client_level_lifecycle_tests::a_reconfiguring_client_plays_menu_music_and_never_indexes_past_the_biomes lib daily resources
+sunrise-client game::remote::tests::client_look_at_tests::look_at_turns_to_any_tracked_entity_and_snaps_the_old_rotation lib daily resources
 sunrise-client game::remote::tests::client_menu_tests::client_menu_close_and_button_click_reach_the_server lib daily resources
 sunrise-client game::remote::tests::client_menu_tests::client_menu_reads_follow_packets_and_lifetimes lib daily resources
 sunrise-client game::remote::tests::client_player_reads_tests::client_player_reads_answer_from_the_local_players_copy lib daily resources
