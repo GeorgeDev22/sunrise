@@ -6113,33 +6113,61 @@ impl Game<'_> {
             .unwrap_or(p.target);
         let (yaw, pitch) = look_at_rotation(from, to);
         // Entity.lookAt: the head and `yRotO`/`xRotO` take the new angles
-        // too, so the turn is not interpolated.
+        // too, so neither the view nor the model eases into the turn.
         (self.yaw, self.pitch) = (yaw, pitch);
         self.rope_rot_old = (yaw, pitch);
         if let Some(player) = self.player.as_mut() {
             player.yaw = yaw;
             player.head_yaw = yaw;
         }
+        self.snap_player_model_pitch();
     }
 
     /// `ClientboundPlayerLookAtPacket.getPosition`'s entity half:
     /// `EntityAnchorArgument.Anchor.apply` on `ClientLevel.getEntity(id)`,
-    /// whatever family this client holds it in. None when it has no such entity.
+    /// where this client's copy of it is now. None when it has no such entity.
     fn look_at_anchor(&self, id: i32, eyes: bool) -> Option<[f64; 3]> {
         let remote = self.remote.as_ref()?;
-        if let Some(target) = self.client_level_entity(remote, id) {
-            let mut at = self.target_position(target)?;
-            if eyes {
-                at[1] += self.target_eye_height(target);
+        let family = self
+            .client_level_entity(remote, id)
+            .and_then(|t| Some((self.target_position(t)?, self.target_eye_height(t))));
+        let (mut at, eye_height) = match family {
+            Some(found) => found,
+            None => {
+                let (kind, row) = remote.tracked_entity(id)?;
+                let at = self.client_copy_position(id).unwrap_or(row);
+                (at, self.type_eye_height(kind))
             }
-            return Some(at);
-        }
-        // An entity the client keeps only as its tracked row (a display, a marker).
-        let (kind, mut at) = remote.tracked_entity(id)?;
+        };
         if eyes {
-            at[1] += self.type_eye_height(kind);
+            at[1] += eye_height;
         }
         Some(at)
+    }
+
+    /// Where this client's own copy of an entity that no `Target` names here
+    /// is now: a display still easing through a teleport, an interaction, a
+    /// fishing hook that moves between packets. None for one the client keeps
+    /// only as its tracked row, whose last packet position is then its pose.
+    fn client_copy_position(&self, id: i32) -> Option<[f64; 3]> {
+        if let Some(display) = self.text_displays.get(&id) {
+            return Some(display.position().to_array());
+        }
+        if let Some(interaction) = self.interactions.get(&id) {
+            let p = interaction.position;
+            return Some([p.x, p.y, p.z]);
+        }
+        let id = id as u32;
+        let p = self
+            .fishing_hook_by_id(id)
+            .map(|(hook, _)| hook.position)
+            .or_else(|| {
+                self.remote_hooks
+                    .iter()
+                    .find(|hook| hook.id() == id)
+                    .map(|hook| hook.position)
+            })?;
+        Some([p.x, p.y, p.z])
     }
 
     /// `ClientLevel.getEntity`: the local player, or an entity the server
