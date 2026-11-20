@@ -281,7 +281,7 @@ pub(super) fn run_loading(
         started,
         panorama_rotation: Default::default(),
         progress,
-        bar: 0.0,
+        bar: Default::default(),
         receiver,
         loaded: None,
         delivered: false,
