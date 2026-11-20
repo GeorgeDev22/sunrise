@@ -1,0 +1,5 @@
+cargo fmt --all -- --check
+cargo clippy --locked -p sunrise-client --all-targets -- -D warnings
+env SUNRISE_TEST_RESOURCES=/home/runner/work/sunrise/sunrise/.local/sunrise-client/26.3 cargo test --locked -p sunrise-client --lib -- tick_script books beacon trading control --include-ignored
+python3 -m unittest tests.test_wire_stream tests.test_client_packet_diff tests.test_test_areas tests.test_daily_rows_coverage
+python3 -m py_compile tools/wire_stream.py tools/wire_replay.py tools/test_wire_stream_parity.py tools/client_packet_diff.py
