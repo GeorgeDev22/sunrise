@@ -163,6 +163,10 @@ pub enum Event {
         /// The reason's translation key, when it had one.
         key: Option<String>,
         from_server: bool,
+        /// The error a configuration or play connection failed with
+        /// (`ClientCommonPacketListenerImpl.createDisconnectionInfo`'s cause):
+        /// the game writes its disconnect report.
+        fault: Option<String>,
     },
 }
 
@@ -254,7 +258,11 @@ impl Event {
                 reason,
                 key,
                 from_server: _,
-            } => reason.capacity().saturating_add(key.owned_heap_bytes()),
+                fault,
+            } => reason
+                .capacity()
+                .saturating_add(key.owned_heap_bytes())
+                .saturating_add(fault.owned_heap_bytes()),
         };
         owned.saturating_add(Self::INGRESS_RECORD_OVERHEAD)
     }
@@ -462,6 +470,7 @@ impl Session {
                 reason: format!("network thread: {error}"),
                 key: None,
                 from_server: false,
+                fault: None,
             });
         })
         .ok();
@@ -849,6 +858,9 @@ pub struct Reason {
     pub text: String,
     pub key: Option<String>,
     from_server: bool,
+    /// The error behind a configuration or play connection's
+    /// `disconnect.genericReason` ([`Reason::lost`]).
+    fault: Option<String>,
 }
 impl Reason {
     fn ended(self, from_server: bool) -> Event {
@@ -856,6 +868,7 @@ impl Reason {
             reason: self.text,
             key: self.key,
             from_server,
+            fault: self.fault,
         }
     }
     fn plain(text: impl Into<String>) -> Self {
@@ -863,6 +876,17 @@ impl Reason {
             text: text.into(),
             key: None,
             from_server: false,
+            fault: None,
+        }
+    }
+    /// A configuration or play connection that failed: `Connection.exceptionCaught` asks
+    /// `ClientCommonPacketListenerImpl.createDisconnectionInfo`, which keeps the cause for the
+    /// disconnect report. A timeout or a closed stream has none.
+    fn lost(e: sunrise_protocol::Error, lang: &Language) -> Self {
+        let fault = (!e.is_timed_out() && !e.is_end_of_stream()).then(|| e.to_string());
+        Self {
+            fault,
+            ..Self::plain(connection_lost(e, lang))
         }
     }
     /// A vanilla key's text in the session's language, with the key.
@@ -871,6 +895,7 @@ impl Reason {
             text: tr(lang, key),
             key: Some(key.to_owned()),
             from_server: false,
+            fault: None,
         }
     }
     /// A Sunrise key's text with a `%s` argument filled.
@@ -888,6 +913,7 @@ impl Reason {
                 text: json_text(&v, lang),
                 key: v["translate"].as_str().map(str::to_owned),
                 from_server: true,
+                fault: None,
             },
             Err(_) => Self::plain(reason_json),
         }
@@ -908,6 +934,7 @@ impl Reason {
             text: plain(tag, lang),
             key,
             from_server: true,
+            fault: None,
         }
     }
 }
@@ -1100,6 +1127,7 @@ fn run(
                                     ),
                                     key,
                                     from_server: false,
+                                    fault: None,
                                 }
                             })
                         });
@@ -1482,9 +1510,7 @@ fn receive_play(
     let mut io = new_listener();
     let mut bundle = PlayBundle::default();
     loop {
-        let (id, payload) = reader
-            .recv()
-            .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
+        let (id, payload) = reader.recv().map_err(|e| Reason::lost(e, lang))?;
         let packet = match play::Clientbound::decode_with_payload_codecs(
             id,
             &payload,
@@ -1567,7 +1593,7 @@ fn receive_play(
                 ready
                     .recv()
                     .map_err(|_| Reason::plain("Disconnected"))?
-                    .map_err(|error| Reason::plain(connection_lost(error, lang)))?;
+                    .map_err(|error| Reason::lost(error, lang))?;
                 let registries = configure(
                     reader,
                     shared_writer,
@@ -1679,7 +1705,7 @@ fn configure(
             Some(w) => p
                 .try_encode_with_payload_codecs(&payloads.local.codecs)
                 .and_then(|body| w.send(&body))
-                .map_err(|e| Reason::plain(connection_lost(e, lang))),
+                .map_err(|e| Reason::lost(e, lang)),
             None => Err(Reason::plain("Disconnected")),
         }
     };
@@ -1687,12 +1713,10 @@ fn configure(
     // named itself Sunrise by brand: a vanilla server is sent what vanilla's client sends,
     // whatever mods are installed.
     loop {
-        let (id, payload) = reader
-            .recv()
-            .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
+        let (id, payload) = reader.recv().map_err(|e| Reason::lost(e, lang))?;
         let packet =
             cfg::Clientbound::decode_with_payload_codecs(id, &payload, &payloads.local.codecs)
-                .map_err(|e| Reason::plain(connection_lost(e, lang)))?;
+                .map_err(|e| Reason::lost(e, lang))?;
         if !io.accepts_packets() {
             continue;
         }

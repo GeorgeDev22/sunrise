@@ -124,6 +124,26 @@ const COMMENTS: &[&str] = &[
     "Details below.",
 ];
 
+/// `ReportType`: the report's header line and the comments picked under it.
+pub struct Kind {
+    pub header: &'static str,
+    pub comments: &'static [&'static str],
+}
+/// `ReportType.CRASH`.
+pub const CRASH: Kind = Kind {
+    header: "Minecraft Crash Report",
+    comments: COMMENTS,
+};
+/// `ReportType.NETWORK_PROTOCOL_ERROR`: a disconnect report (`debug/disconnect-*-client.txt`).
+pub const NETWORK_PROTOCOL_ERROR: Kind = Kind {
+    header: "Minecraft Network Protocol Error Report",
+    comments: &[
+        "The connection dropped here.",
+        "The packets disagreed.",
+        "Details below.",
+    ],
+};
+
 /// One crash, ready to be written.
 pub struct Report {
     pub time: DateTime<Local>,
@@ -143,19 +163,34 @@ pub struct Report {
 
 /// `crash-2026-10-14_09.05.07-client.txt`
 pub fn file_name(time: &DateTime<Local>, side: &str) -> String {
-    format!("crash-{}-{side}.txt", time.format("%Y-%m-%d_%H.%M.%S"))
+    stamped_name("crash", time, side)
+}
+/// `<prefix>-<Util.getFilenameFormattedDateTime>-<side>.txt`: `disconnect-2026-10-14_09.05.07-client.txt`.
+pub fn stamped_name(prefix: &str, time: &DateTime<Local>, side: &str) -> String {
+    format!("{prefix}-{}-{side}.txt", time.format("%Y-%m-%d_%H.%M.%S"))
 }
 
 impl Report {
     /// The report's text.
     pub fn text(&self) -> String {
-        let comment = COMMENTS[self.time.timestamp().rem_euclid(COMMENTS.len() as i64) as usize];
+        self.text_as(&CRASH, &[])
+    }
+
+    /// The report's text as `kind` (`CrashReport.getFriendlyReport(reportType, extraComments)`):
+    /// each extra comment is a `// ` line under the picked one.
+    pub fn text_as(&self, kind: &Kind, extra_comments: &[String]) -> String {
+        let comments = kind.comments;
+        let comment = comments[self.time.timestamp().rem_euclid(comments.len() as i64) as usize];
         let mut out = String::new();
-        let _ = writeln!(out, "---- Minecraft Crash Report ----");
+        let _ = writeln!(out, "---- {} ----", kind.header);
         for header in &self.headers {
             let _ = writeln!(out, "{header}");
         }
-        let _ = writeln!(out, "// {comment}\n");
+        let _ = writeln!(out, "// {comment}");
+        for extra in extra_comments {
+            let _ = writeln!(out, "// {extra}");
+        }
+        let _ = writeln!(out);
         let _ = writeln!(out, "Time: {}", self.time.format("%Y-%m-%d %H:%M:%S"));
         let _ = writeln!(out, "Description: {}\n", self.description);
         let _ = writeln!(out, "{}", self.error);
@@ -179,6 +214,20 @@ impl Report {
             let _ = writeln!(out, "{line}");
         }
         out
+    }
+
+    /// `CrashReport.saveToFile(file, kind, extraComments)`: the report as `kind` at `file`,
+    /// its folder made first.
+    pub fn save_as(
+        &self,
+        file: &Path,
+        kind: &Kind,
+        extra_comments: &[String],
+    ) -> std::io::Result<()> {
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(file, self.text_as(kind, extra_comments))
     }
 
     /// Writes the report in `home/crash-reports` and returns its path.
@@ -819,6 +868,22 @@ impl std::fmt::Display for DebugCrash {
 
 impl std::error::Error for DebugCrash {}
 
+/// `CrashReport.forThrowable(cause, "Packet handling error")`, the report
+/// `ClientCommonPacketListenerImpl.storeDisconnectionReport` saves when a connection fails.
+pub fn packet_error_report(side: &'static str, error: String) -> Report {
+    Report {
+        time: Local::now(),
+        headers: mod_headers(),
+        description: "Packet handling error".into(),
+        error,
+        stack: String::new(),
+        thread: thread_name(side),
+        side,
+        details: system_details(side),
+        log: crate::logging::recent_lines(),
+    }
+}
+
 /// A report for an error `main` got back: the game ends with it.
 pub fn report_error(
     home: &Path,
@@ -1295,6 +1360,32 @@ mod tests {
         assert_eq!(
             file_name(&report().time, "client"),
             "crash-2026-10-14_09.05.07-client.txt"
+        );
+    }
+
+    #[test]
+    fn a_disconnect_report_reads_like_vanillas_network_protocol_error_report() {
+        // ReportType.appendHeader: its own header, the picked comment, then each extra
+        // comment, a blank line, and the time.
+        let text = report().text_as(
+            &NETWORK_PROTOCOL_ERROR,
+            &["Server bug reporting link: https://example.net/bugs".into()],
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[0],
+            "---- Minecraft Network Protocol Error Report ----"
+        );
+        assert!(lines[1].starts_with("// "));
+        assert_eq!(
+            lines[2],
+            "// Server bug reporting link: https://example.net/bugs"
+        );
+        assert_eq!(lines[3], "");
+        assert_eq!(lines[4], "Time: 2026-10-14 09:05:07");
+        assert_eq!(
+            stamped_name("disconnect", &report().time, "client"),
+            "disconnect-2026-10-14_09.05.07-client.txt"
         );
     }
 

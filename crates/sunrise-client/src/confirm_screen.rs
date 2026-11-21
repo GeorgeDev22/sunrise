@@ -230,6 +230,93 @@ impl Choice {
     }
 }
 
+/// A confirm screen's laid-out text (title, message, extra warning lines) and
+/// button corners; the whole column centred (ConfirmScreen.init).
+pub struct Layout {
+    pub lines: Vec<(Text, f32, f32)>,
+    pub buttons: Vec<(f32, f32)>,
+}
+/// `ConfirmScreen.init`: title, message wrapped to `width - 50` (15 rows at
+/// most), the extra lines, then a button row `spacing` 4 with `paddingTop` 16.
+pub fn layout(
+    font: &Font,
+    (w, h): (f32, f32),
+    title: &Text,
+    message: &Text,
+    extra: &[Text],
+    button_widths: &[f32],
+) -> Layout {
+    let message: Vec<Text> = font
+        .split_lines(message, w - 50.0)
+        .into_iter()
+        .take(15)
+        .map(|(line, _)| line)
+        .collect();
+    // LinearLayout vertical spacing 8; the button row's children pad 16 on top.
+    let extra_h = 17.0 * extra.len() as f32;
+    let mh = 9.0 * message.len() as f32;
+    let total = 9.0 + 8.0 + mh + extra_h + 8.0 + 16.0 + 20.0;
+    let mut y = ((h - total) / 2.0).trunc();
+    let mut lines = Vec::new();
+    let mut push = |line: &Text, at: f32| {
+        let lw = font.width_text(line);
+        lines.push((line.clone(), ((w - lw) / 2.0).trunc(), at));
+    };
+    push(title, y);
+    y += 17.0;
+    for line in &message {
+        push(line, y);
+        y += 9.0;
+    }
+    for line in extra {
+        y += 8.0;
+        push(line, y);
+        y += 9.0;
+    }
+    let row_w: f32 = button_widths.iter().sum::<f32>() + 4.0 * (button_widths.len() - 1) as f32;
+    let by = y + 8.0 + 16.0;
+    let mut bx = ((w - row_w) / 2.0).trunc();
+    let buttons = button_widths
+        .iter()
+        .map(|bw| {
+            let p = (bx, by);
+            bx += bw + 4.0;
+            p
+        })
+        .collect();
+    Layout { lines, buttons }
+}
+/// `ConfirmLinkScreen`: `chat.link.confirm` (`confirmTrusted` when trusted),
+/// the link as the message, and for an untrusted link `chat.link.warning`
+/// in its red (0xFFCCCC); yes, copy and no are 100 wide.
+pub fn link_layout(font: &Font, size: (f32, f32), url: &str, trusted: bool) -> Layout {
+    let warning = [Text::translate("chat.link.warning", &[]).with_color(0xFFCCCC)];
+    layout(
+        font,
+        size,
+        &Text::translate(
+            if trusted {
+                "chat.link.confirmTrusted"
+            } else {
+                "chat.link.confirm"
+            },
+            &[],
+        ),
+        &Text::literal(url.to_owned()),
+        if trusted { &[] } else { &warning },
+        &[100.0; 3],
+    )
+}
+/// `ConfirmLinkScreen`'s yes, copy and no labels: Open in Browser and Cancel
+/// when trusted.
+pub fn link_labels(trusted: bool) -> [&'static str; 3] {
+    if trusted {
+        ["chat.link.open", "gui.copy_link_to_clipboard", "gui.cancel"]
+    } else {
+        ["gui.yes", "gui.copy_link_to_clipboard", "gui.no"]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,5 +454,18 @@ mod tests {
         assert_eq!(choice.focus, Some(1));
         choice.arrow(true);
         assert_eq!(choice.focus, Some(0));
+    }
+
+    #[test]
+    fn a_trusted_link_asks_with_open_in_browser_and_cancel() {
+        // ConfirmLinkScreen: trusted swaps yes/no for chat.link.open / gui.cancel.
+        assert_eq!(
+            link_labels(true),
+            ["chat.link.open", "gui.copy_link_to_clipboard", "gui.cancel"]
+        );
+        assert_eq!(
+            link_labels(false),
+            ["gui.yes", "gui.copy_link_to_clipboard", "gui.no"]
+        );
     }
 }

@@ -2490,6 +2490,16 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                     lan,
                     realm: false,
                 },
+                // ConfirmLinkScreen's callback: the browser or the clipboard, then the screen
+                // that asked.
+                crate::multiplayer::Outcome::OpenUri(uri, back) => {
+                    self.open_multiplayer(*back);
+                    Action::OpenUri(uri)
+                }
+                crate::multiplayer::Outcome::Copy(text, back) => {
+                    self.open_multiplayer(*back);
+                    Action::CopyText(text)
+                }
                 crate::multiplayer::Outcome::None | crate::multiplayer::Outcome::Open(_) => {
                     Action::None
                 }

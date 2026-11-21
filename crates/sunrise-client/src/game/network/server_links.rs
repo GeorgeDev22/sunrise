@@ -6,7 +6,14 @@
 //! DialogScreen.WarningScreen ("Note about custom screens").
 //! https://mcsrc.dev/2/26.3/net/minecraft/client/gui/screens/dialog/ServerLinksDialogScreen
 use super::{Game, Screen, packs::open_uri};
-use sunrise_client::{Result, clipboard::Clipboard, hud::HudBatch, text::Text, ui};
+use sunrise_client::{
+    Result,
+    clipboard::Clipboard,
+    confirm_screen::{Layout as ConfirmLayout, layout as confirm_layout, link_labels, link_layout},
+    hud::HudBatch,
+    text::Text,
+    ui,
+};
 use sunrise_protocol::packets::configuration::{ServerLink, ServerLinkKind};
 
 /// HeaderAndFooterLayout's header and footer heights; the content wants to
@@ -68,29 +75,41 @@ pub(super) fn trusted(links: Vec<ServerLink>) -> Vec<ServerLink> {
         })
         .collect()
 }
+/// `ServerLinks.KnownLinkType` by id.
+const KNOWN_LINKS: [&str; 10] = [
+    "report_bug",
+    "community_guidelines",
+    "support",
+    "status",
+    "feedback",
+    "community",
+    "website",
+    "forums",
+    "news",
+    "announcements",
+];
+/// A known link type's name: ByIdMap.ZERO reads an id it doesn't know as `report_bug`.
+fn known_link(id: i32) -> &'static str {
+    usize::try_from(id)
+        .ok()
+        .and_then(|i| KNOWN_LINKS.get(i))
+        .copied()
+        .unwrap_or(KNOWN_LINKS[0])
+}
+/// `ServerLinks.findKnownType(KnownLinkType.BUG_REPORT)`: the first `report_bug` link.
+pub(super) fn bug_report_link(links: &[ServerLink]) -> Option<&str> {
+    links
+        .iter()
+        .find(|l| matches!(l.kind, ServerLinkKind::Known(id) if known_link(id) == KNOWN_LINKS[0]))
+        .map(|l| l.link.as_str())
+}
 /// `ServerLinks.Entry.displayName`: `known_server_link.<name>` for a known
 /// type (ByIdMap.ZERO reads unknown ids as `report_bug`), the component else.
 fn link_label(link: &ServerLink) -> Text {
-    const KNOWN: [&str; 10] = [
-        "report_bug",
-        "community_guidelines",
-        "support",
-        "status",
-        "feedback",
-        "community",
-        "website",
-        "forums",
-        "news",
-        "announcements",
-    ];
     match &link.kind {
-        ServerLinkKind::Known(id) => Text::translate(
-            &format!(
-                "known_server_link.{}",
-                KNOWN.get(*id as usize).copied().unwrap_or(KNOWN[0])
-            ),
-            &[],
-        ),
+        ServerLinkKind::Known(id) => {
+            Text::translate(&format!("known_server_link.{}", known_link(*id)), &[])
+        }
         ServerLinkKind::Custom(tag) => {
             sunrise_client::scoreboard::comp_text(&sunrise_client::scoreboard::tag_to_json(tag))
         }
@@ -343,11 +362,11 @@ impl Game<'_> {
                 &url,
             )
         });
-        let layout = confirm_link_layout(atlas, (w, h), &url, trusted);
+        let layout = link_layout(&atlas.font, (w, h), &url, trusted);
         for (line, x, y) in &layout.lines {
             batch.text_styled(atlas, line, *x, *y, u32::MAX, true);
         }
-        let labels = confirm_link_labels(self.links_ui.trusted);
+        let labels = link_labels(self.links_ui.trusted);
         // Its third button answers no, as Escape does.
         if let Some(&(x, y)) = layout.buttons.get(2) {
             sunrise_client::widgets::declare_action(
@@ -377,7 +396,7 @@ impl Game<'_> {
     pub(super) fn confirm_link_click(&mut self) {
         let (w, h) = self.gui_size();
         let url = self.links_ui.confirm.clone().unwrap_or_default();
-        let layout = confirm_link_layout(&self.gui.atlas, (w, h), &url, self.links_ui.trusted);
+        let layout = link_layout(&self.gui.atlas.font, (w, h), &url, self.links_ui.trusted);
         for (i, (x, y)) in layout.buttons.iter().enumerate() {
             if !ui::hovered(self.cursor, *x, *y, 100.0, 20.0) {
                 continue;
@@ -466,97 +485,6 @@ impl Game<'_> {
     }
 }
 
-/// A confirm screen's laid-out text (title, message, extra warning lines) and
-/// button corners; the whole column centred (ConfirmScreen.init).
-struct ConfirmLayout {
-    lines: Vec<(Text, f32, f32)>,
-    buttons: Vec<(f32, f32)>,
-}
-/// `ConfirmScreen.init`: title, message wrapped to `width - 50` (15 rows at
-/// most), the extra lines, then a button row `spacing` 4 with `paddingTop` 16.
-fn confirm_layout(
-    font: &sunrise_client::font::Font,
-    (w, h): (f32, f32),
-    title: &Text,
-    message: &Text,
-    extra: &[Text],
-    button_widths: &[f32],
-) -> ConfirmLayout {
-    let message: Vec<Text> = font
-        .split_lines(message, w - 50.0)
-        .into_iter()
-        .take(15)
-        .map(|(line, _)| line)
-        .collect();
-    // LinearLayout vertical spacing 8; the button row's children pad 16 on top.
-    let extra_h = 17.0 * extra.len() as f32;
-    let mh = 9.0 * message.len() as f32;
-    let total = 9.0 + 8.0 + mh + extra_h + 8.0 + 16.0 + 20.0;
-    let mut y = ((h - total) / 2.0).trunc();
-    let mut lines = Vec::new();
-    let mut push = |line: &Text, at: f32| {
-        let lw = font.width_text(line);
-        lines.push((line.clone(), ((w - lw) / 2.0).trunc(), at));
-    };
-    push(title, y);
-    y += 17.0;
-    for line in &message {
-        push(line, y);
-        y += 9.0;
-    }
-    for line in extra {
-        y += 8.0;
-        push(line, y);
-        y += 9.0;
-    }
-    let row_w: f32 = button_widths.iter().sum::<f32>() + 4.0 * (button_widths.len() - 1) as f32;
-    let by = y + 8.0 + 16.0;
-    let mut bx = ((w - row_w) / 2.0).trunc();
-    let buttons = button_widths
-        .iter()
-        .map(|bw| {
-            let p = (bx, by);
-            bx += bw + 4.0;
-            p
-        })
-        .collect();
-    ConfirmLayout { lines, buttons }
-}
-fn confirm_link_layout(
-    atlas: &sunrise_client::hud::HudAtlas,
-    size: (f32, f32),
-    url: &str,
-    trusted: bool,
-) -> ConfirmLayout {
-    // ConfirmLinkScreen: `chat.link.confirm` (`confirmTrusted` when trusted),
-    // the link as the message, and for an untrusted link `chat.link.warning`
-    // in its red (0xFFCCCC).
-    let warning = [Text::translate("chat.link.warning", &[]).with_color(0xFFCCCC)];
-    confirm_layout(
-        &atlas.font,
-        size,
-        &Text::translate(
-            if trusted {
-                "chat.link.confirmTrusted"
-            } else {
-                "chat.link.confirm"
-            },
-            &[],
-        ),
-        &Text::literal(url.to_owned()),
-        if trusted { &[] } else { &warning },
-        &[100.0; 3],
-    )
-}
-/// `ConfirmLinkScreen`'s yes, copy and no labels: Open in Browser and Cancel
-/// when trusted.
-fn confirm_link_labels(trusted: bool) -> [&'static str; 3] {
-    if trusted {
-        ["chat.link.open", "gui.copy_link_to_clipboard", "gui.cancel"]
-    } else {
-        ["gui.yes", "gui.copy_link_to_clipboard", "gui.no"]
-    }
-}
 fn dialog_warning_layout(atlas: &sunrise_client::hud::HudAtlas, size: (f32, f32)) -> ConfirmLayout {
     confirm_layout(
         &atlas.font,
@@ -573,16 +501,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_trusted_link_asks_with_open_in_browser_and_cancel() {
-        // ConfirmLinkScreen: trusted swaps yes/no for chat.link.open / gui.cancel.
-        assert_eq!(
-            confirm_link_labels(true),
-            ["chat.link.open", "gui.copy_link_to_clipboard", "gui.cancel"]
-        );
-        assert_eq!(
-            confirm_link_labels(false),
-            ["gui.yes", "gui.copy_link_to_clipboard", "gui.no"]
-        );
+    fn the_bug_report_link_is_the_first_report_bug_link() {
+        // ServerLinks.findKnownType(BUG_REPORT): a custom label never counts, and ByIdMap.ZERO
+        // reads an id outside KnownLinkType as report_bug.
+        let link = |kind, link: &str| ServerLink {
+            kind,
+            link: link.into(),
+        };
+        let links = [
+            link(ServerLinkKind::Known(2), "https://example.net/support"),
+            link(
+                ServerLinkKind::Custom(sunrise_core::nbt::Tag::String("Bugs".into())),
+                "https://example.net/custom",
+            ),
+            link(ServerLinkKind::Known(42), "https://example.net/unknown"),
+            link(ServerLinkKind::Known(0), "https://example.net/bugs"),
+        ];
+        assert_eq!(bug_report_link(&links), Some("https://example.net/unknown"));
+        assert_eq!(bug_report_link(&links[..2]), None);
     }
 
     #[test]
