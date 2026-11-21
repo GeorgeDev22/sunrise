@@ -196,17 +196,15 @@ pub(super) fn is_arrow(p: &sunrise_client::projectiles::Projectile) -> bool {
         sunrise_client::projectiles::ProjectileKind::Arrow { .. }
     )
 }
-/// The projectiles besides arrows that a portal sends on: the thrown items
-/// and fireballs a chunk saves. A pearl has its own rules (it keeps its owner's
-/// dimension) and a wind charge is not saved, so both stay.
+/// The projectiles besides arrows that a portal sends on: the thrown items,
+/// ender pearls included (`ThrowableProjectile.canUsePortal`), and fireballs a
+/// chunk saves. A wind charge is not saved, so it stays.
 pub(super) fn is_portal_projectile(p: &sunrise_client::projectiles::Projectile) -> bool {
     use sunrise_client::projectiles::ProjectileKind;
     !is_arrow(p)
         && !matches!(
             p.kind,
-            ProjectileKind::EnderPearl
-                | ProjectileKind::WindCharge
-                | ProjectileKind::BreezeWindCharge
+            ProjectileKind::WindCharge | ProjectileKind::BreezeWindCharge
         )
         && sunrise_client::entity_nbt::saved_with_chunk(p)
 }
@@ -504,12 +502,39 @@ impl Game<'_> {
     /// dimension, then the mods (`entity_travel_to_dimension`).
     fn may_travel_through(&mut self, id: u32, plan: &Plan) -> bool {
         self.may_enter(plan.dim)
+            && self.pearl_may_teleport(id, plan.dim)
             && self.entity_may_travel(
                 id,
                 plan.dim,
                 super::server_travel::TravelCause::of_plan(plan),
             )
             && !self.general_transfer_conflicts(id, plan.dim)
+    }
+    /// `ThrownEnderpearl.canTeleport`: a server player's pearl leaves the End
+    /// for the Overworld only once that player has seen the credits.
+    fn pearl_may_teleport(&self, id: u32, to: Dim) -> bool {
+        if self.dim != Dim::End || to != Dim::Overworld {
+            return true;
+        }
+        let Some(conn) = self
+            .creatures
+            .projectiles
+            .iter()
+            .find(|p| {
+                p.id == id
+                    && matches!(
+                        p.kind,
+                        sunrise_client::projectiles::ProjectileKind::EnderPearl
+                    )
+            })
+            .and_then(|p| p.guest)
+        else {
+            return true;
+        };
+        self.lan
+            .as_ref()
+            .and_then(|host| host.hub.guest(conn))
+            .is_none_or(|g| g.seen_credits)
     }
     /// The plan of an item or mob going through the portal block at `entry`:
     /// an End portal's fixed destination, else the Nether portal's.
