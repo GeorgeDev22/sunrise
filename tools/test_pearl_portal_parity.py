@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
-"""Ender pearls thrown into Nether and End portals on a dedicated server, against vanilla's, seen by a vanilla client.
+"""Ender pearls through Nether and End portals on a dedicated server, against vanilla's, seen by a vanilla client.
 
 A vanilla dedicated server and Sunrise's (`sunrise-client --dedicated --nogui`) each serve a copy of one flat world
 vanilla generated first, with Alice an operator in survival. LocatorBarClient (a player made of vanilla's protocol
-code) builds a Nether portal in the Overworld, its partner and two walls in a cleared, force-loaded room of the
-Nether, an End portal wall in the Overworld and one beside the End's spawn platform, then sends ender pearls of
-hers into them (summoned with a fixed motion, as a throw without its random spread):
+code) builds a Nether portal in the Overworld, its partner in a cleared, force-loaded room of the Nether, an End
+portal wall in the Overworld and one beside the End's spawn platform, then sends ender pearls of hers through them
+(summoned with a fixed motion: a throw without its random spread, so both servers fly the same pearl). Each lands
+on an open floor:
 
-- Overworld to Nether: the pearl goes through (ThrowableProjectile.canUsePortal), hits the Nether's wall, and takes
-  Alice into the Nether (ThrownEnderpearl.onHit, isAllowedToTeleportOwner across levels) with 5 damage.
-- Nether to Overworld: the same back, onto a wall behind the Overworld portal.
-- Riding a boat, Overworld to Nether onto a wall right behind the exit portal: the owner is taken although a
-  passenger (canUsePortal(true)), and given a portal cooldown when the pearl lands on its own (isOnPortalCooldown).
-- Overworld to the End through an End portal.
+- No portal: how far the pearl flies.
+- Overworld to Nether: the pearl changes level (ThrowableProjectile.canUsePortal) and takes Alice into the Nether
+  (ThrownEnderpearl.onHit, isAllowedToTeleportOwner across levels) with its 5 damage.
+- Nether to Overworld: the same back.
+- Riding a boat, Overworld to Nether: the owner is taken although a passenger (canUsePortal(true)).
+- Overworld to the End: the pearl leaves the End's spawn facing west, its motion turned with it
+  (Relative.ROTATE_DELTA).
 - End to Overworld before Alice has seen the credits: the pearl stays in the End (ThrownEnderpearl.canTeleport).
 - End to Overworld after the credits (an End portal walked through, the credits answered with PERFORM_RESPAWN).
 
-Alice's level changes, teleports, mounts and the replies to her `data get` of health, dimension and portal cooldown
-are compared exactly.
+Alice's level changes, teleports, mounts and the replies to her `data get` of dimension, position, health and
+portal cooldown in each throw and the read after it are compared exactly.
 """
 import sys
 
@@ -95,9 +97,6 @@ SCRIPT = [
     ('nether-to-overworld', [pearl((1.0, 65.52, 3.5), (0.0, 0.0, -1.5), 'the_nether')]),
     ('in-overworld', ASK),
     ('aim-boat-to-nether', [
-        # A wall right behind the Nether's exit: the pearl lands while still on its portal cooldown, and its
-        # owner stands in the exit portal.
-        build(f'{NETHER} fill -1 64 2 2 68 2 minecraft:obsidian'),
         build('execute in minecraft:overworld run tp @s 1.0 -60 0.5 0 0'),
         build('summon minecraft:oak_boat 1.0 -60 0.5'),
         build('ride @s mount @e[type=minecraft:oak_boat,limit=1,sort=nearest]'),
@@ -121,8 +120,8 @@ SCRIPT = [
     ('end-without-credits', [pearl((100.5, 50.52, 0.5), (0.0, 0.0, 1.5), 'the_end')]),
     ('stayed-in-end', ASK),
     # Into the End portal: the credits, answered as a client does.
-    ('credits', [build(f'{END} tp @s 100.5 50 4.5 0 0')]),
-    ('credits-seen', ['respawn Alice']),
+    ('aim-credits', [build(f'{END} tp @s 100.5 50 4.5 0 0')]),
+    ('aim-credits-seen', ['respawn Alice']),
     ('aim-end-with-credits', [build(f'{END} tp @s 100.5 49 0.5 0 0'), HEAL]),
     ('end-with-credits', [pearl((100.5, 50.52, 0.5), (0.0, 0.0, 1.5), 'the_end')]),
     ('back-in-overworld', ASK),

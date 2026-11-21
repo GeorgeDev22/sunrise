@@ -6338,8 +6338,10 @@ impl Game<'_> {
                         self.portals.player.cooldown = super::nether_portal::PLAYER_DELAY;
                     }
                     if elsewhere {
-                        // ServerPlayer.teleport into the pearl's level: the
-                        // damage and the sound follow there.
+                        // ServerPlayer.teleport into the pearl's level:
+                        // removeVehicle first; the damage and the sound
+                        // follow there.
+                        self.stop_riding();
                         let teleports = self.level_teleports.len();
                         self.teleport_across(
                             super::commands::Target::Player,
