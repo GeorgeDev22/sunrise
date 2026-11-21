@@ -1762,12 +1762,17 @@ impl Game<'_> {
             let [yaw, pitch] = sunrise_client::entity_nbt::rotation(&tag);
             let was_yaw = yaw;
             let (at, motion, [yaw, pitch]) = if plan.end {
-                // Relative.DELTA: the motion is kept.
                 let at = self.end_portal_exit(&plan);
                 // EndPortalBlock.getPortalDestination: PLACE_PORTAL_TICKET.
                 self.place_portal_ticket(Self::chunk_of(at));
                 let turn =
                     end_portal_rotation(!plan.from_end, [yaw, pitch], self.level.world_spawn_angle);
+                // Relative.DELTA keeps the motion and, with ROTATE_DELTA, turns it
+                // as the entity turned (`PositionMoveRotation.calculateAbsolute`).
+                let radians = |degrees: f32| f64::from(degrees).to_radians() as f32;
+                let motion = motion
+                    .rotate_x(radians(pitch - turn[1]))
+                    .rotate_y(radians(yaw - turn[0]));
                 (at, motion, turn)
             } else {
                 let exit =

@@ -79,6 +79,9 @@ SCRIPT = [
         # An End portal wall in the Overworld at z 4, at eye height.
         build('fill 10 -60 4 11 -58 4 minecraft:end_portal'),
         build(f'{END} forceload add 80 -20 120 40'),
+        # A floor west of the End's spawn platform, where a pearl through the Overworld's End portal lands (an
+        # owner left over the void is kicked for floating).
+        build(f'{END} fill 84 48 -6 97 48 6 minecraft:obsidian'),
         build('forceload add -32 -32 64 48'),
     ]),
     # A pearl that meets no portal: how far a throw flies, for the landings below.
@@ -107,6 +110,8 @@ SCRIPT = [
     ('overworld-to-end', [pearl((10.5, -58.48, 0.5), (0.0, 0.0, 1.5))]),
     ('in-end', ASK),
     ('aim-end-without-credits', [
+        # The dragon the first visit spawned would attack Alice at its own random moments.
+        build(f'{END} kill @e[type=minecraft:ender_dragon]'),
         # An End portal wall beside the spawn platform and a long floor past it.
         build(f'{END} fill 98 48 3 103 48 34 minecraft:obsidian'),
         build(f'{END} fill 100 49 4 101 51 4 minecraft:end_portal'),
