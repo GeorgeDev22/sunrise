@@ -1628,6 +1628,9 @@ struct Game<'a> {
     /// A rotation-only write (`/rotate`, `Entity.forceSetRotation`) to the player of this
     /// turn: `leave_guest` sends it as `ClientboundPlayerRotationPacket`, not a teleport.
     rotation_forced: bool,
+    /// `ServerPlayer.startRiding` in this turn: the vehicle the player got on and its
+    /// passengers then. `leave_guest` sends the seat as a teleport and this list at once.
+    mounted: Option<(u32, Vec<u32>)>,
     /// The mount the last `position_rider` put the player on, to tell the tick
     /// a seat is taken (`Entity.moveTo`, no camera sweep) from the ones that
     /// follow it (`positionRider`, interpolated as usual).
@@ -11282,6 +11285,7 @@ impl<'a> Game<'a> {
             riding_order: 0,
             started_riding: Vec::new(),
             rotation_forced: false,
+            mounted: None,
             posed_rider: None,
             pending_vehicle: None,
             ender_items: vec![None; 27],

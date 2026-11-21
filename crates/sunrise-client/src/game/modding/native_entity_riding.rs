@@ -534,6 +534,7 @@ impl Game<'_> {
                             return Err(StartRidingRefusal::UnsupportedVehicle);
                         };
                         self.board_seat(id, seat);
+                        self.tell_mounted_player(vehicle_id);
                         return self.native_seated(rider, vehicle_id);
                     }
                     _ => {}
@@ -541,6 +542,7 @@ impl Game<'_> {
                 self.riding = Some(vehicle_id);
                 self.seat_player(vehicle_id);
                 self.trigger_player("minecraft:started_riding");
+                self.tell_mounted_player(vehicle_id);
             }
             Target::Mob(id) => {
                 sunrise_client::mobs::riders::link(&mut self.mobs, id, vehicle_id);
