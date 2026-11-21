@@ -159,6 +159,9 @@ pub struct Report {
     pub side: &'static str,
     pub details: Vec<(String, String)>,
     pub log: Vec<String>,
+    /// `CrashReport.addCategory`'s sections between the head and the system details, each a
+    /// title and its details (a disconnect report's `Connection`).
+    pub categories: Vec<(String, Vec<(String, String)>)>,
 }
 
 /// `crash-2026-10-14_09.05.07-client.txt`
@@ -179,8 +182,13 @@ impl Report {
     /// The report's text as `kind` (`CrashReport.getFriendlyReport(reportType, extraComments)`):
     /// each extra comment is a `// ` line under the picked one.
     pub fn text_as(&self, kind: &Kind, extra_comments: &[String]) -> String {
+        // ReportType.getErrorComment, with its fallback when there is nothing to pick.
         let comments = kind.comments;
-        let comment = comments[self.time.timestamp().rem_euclid(comments.len() as i64) as usize];
+        let comment = usize::try_from(self.time.timestamp())
+            .ok()
+            .and_then(|t| comments.get(t % comments.len().max(1)))
+            .copied()
+            .unwrap_or("Witty comment unavailable :(");
         let mut out = String::new();
         let _ = writeln!(out, "---- {} ----", kind.header);
         for header in &self.headers {
@@ -204,14 +212,24 @@ impl Report {
         let _ = writeln!(out, "{}\n", "-".repeat(87));
         let _ = writeln!(out, "-- Head --");
         let _ = writeln!(out, "Thread: {}\n", self.thread);
+        for (title, details) in &self.categories {
+            let _ = writeln!(out, "-- {title} --");
+            let _ = writeln!(out, "Details:");
+            for (key, value) in details {
+                let _ = writeln!(out, "\t{key}: {value}");
+            }
+            let _ = writeln!(out);
+        }
         let _ = writeln!(out, "-- System Details --");
         let _ = writeln!(out, "Details:");
         for (key, value) in &self.details {
             let _ = writeln!(out, "\t{key}: {value}");
         }
-        let _ = writeln!(out, "\n-- Last {} log lines --", self.log.len());
-        for line in &self.log {
-            let _ = writeln!(out, "{line}");
+        if !self.log.is_empty() {
+            let _ = writeln!(out, "\n-- Last {} log lines --", self.log.len());
+            for line in &self.log {
+                let _ = writeln!(out, "{line}");
+            }
         }
         out
     }
@@ -385,6 +403,13 @@ fn memory() -> String {
 /// The report's details: Sunrise's and the machine's, then what the game set as it ran. A dedicated
 /// server renders nothing: it leaves out the render settings it read from options.txt.
 pub fn system_details(side: &str) -> Vec<(String, String)> {
+    let mut out = machine_details(side);
+    out.extend(mod_lines(false));
+    out
+}
+
+/// The machine and game details of [`system_details`], without the mods' crash sections.
+fn machine_details(side: &str) -> Vec<(String, String)> {
     let mut out = vec![
         ("Sunrise Version".to_owned(), version()),
         (
@@ -401,7 +426,6 @@ pub fn system_details(side: &str) -> Vec<(String, String)> {
             .filter(|(k, _)| side != "server" || *k != "Render Settings")
             .map(|(k, v)| (k.to_owned(), v)),
     );
-    out.extend(mod_lines(false));
     out
 }
 
@@ -660,6 +684,7 @@ pub fn report_watchdog(
             side,
             details,
             log: crate::logging::recent_lines(),
+            categories: Vec::new(),
         },
     )
 }
@@ -772,6 +797,7 @@ pub fn panic_report(info: &std::panic::PanicHookInfo, side: &'static str) -> Rep
         side,
         details: system_details(side),
         log: crate::logging::recent_lines(),
+        categories: Vec::new(),
     }
 }
 
@@ -868,19 +894,25 @@ impl std::fmt::Display for DebugCrash {
 
 impl std::error::Error for DebugCrash {}
 
-/// `CrashReport.forThrowable(cause, "Packet handling error")`, the report
-/// `ClientCommonPacketListenerImpl.storeDisconnectionReport` saves when a connection fails.
-pub fn packet_error_report(side: &'static str, error: String) -> Report {
+/// `CrashReport.forThrowable(cause, "Packet handling error")` with `PacketListener.fillCrashReport`'s
+/// `Connection` category: the report `ClientCommonPacketListenerImpl.storeDisconnectionReport` saves
+/// when a connection fails. Only the connection and the machine: no log lines and no mods' sections.
+pub fn packet_error_report(
+    side: &'static str,
+    error: String,
+    connection: Vec<(String, String)>,
+) -> Report {
     Report {
         time: Local::now(),
-        headers: mod_headers(),
+        headers: Vec::new(),
         description: "Packet handling error".into(),
         error,
         stack: String::new(),
         thread: thread_name(side),
         side,
-        details: system_details(side),
-        log: crate::logging::recent_lines(),
+        details: machine_details(side),
+        log: Vec::new(),
+        categories: vec![("Connection".into(), connection)],
     }
 }
 
@@ -903,6 +935,7 @@ pub fn report_error(
                 side,
                 details: system_details(side),
                 log: crate::logging::recent_lines(),
+                categories: Vec::new(),
             },
         );
     }
@@ -924,6 +957,7 @@ pub fn report_error(
             side,
             details: system_details(side),
             log: crate::logging::recent_lines(),
+            categories: Vec::new(),
         },
     )
 }
@@ -1352,6 +1386,7 @@ mod tests {
                 ("Graphics".into(), "Test GPU (Vulkan), driver 1.0".into()),
             ],
             log: vec!["[09:05:06] [Render thread/INFO]: load assets: 1.20s".into()],
+            categories: Vec::new(),
         }
     }
 

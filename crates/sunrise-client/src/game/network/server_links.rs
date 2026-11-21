@@ -43,31 +43,14 @@ pub(super) struct LinksUi {
     pub back: Option<Screen>,
 }
 
-/// `Util.parseAndValidateUntrustedUri`: an absolute `http`/`https` URI
-/// (java.net.URI's scheme then the allowlist; whitespace-free).
-pub(super) fn valid_untrusted_uri(uri: &str) -> bool {
-    let Some(colon) = uri.find(':') else {
-        return false;
-    };
-    let scheme = &uri[..colon];
-    let mut chars = scheme.chars();
-    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-        || !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-    {
-        return false;
-    }
-    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
-        return false;
-    }
-    !uri.chars().any(|c| c.is_control() || c == ' ')
-}
 /// `ClientCommonPacketListenerImpl.handleServerLinks`: keep only the links
 /// that validate, warning about the dropped ones.
 pub(super) fn trusted(links: Vec<ServerLink>) -> Vec<ServerLink> {
     links
         .into_iter()
         .filter(|l| {
-            let ok = valid_untrusted_uri(&l.link);
+            // Util.parseAndValidateUntrustedUri: java.net.URI syntax, http or https.
+            let ok = sunrise_client::component::untrusted_http_url(&l.link);
             if !ok {
                 log::warn!("Sunrise: server sent an invalid link: {}", l.link);
             }
@@ -522,24 +505,19 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_uris_are_http_or_https_with_a_scheme() {
-        for ok in [
-            "https://example.net/x",
-            "http://example.net",
-            "HTTPS://EXAMPLE.NET",
-        ] {
-            assert!(valid_untrusted_uri(ok), "{ok}");
-        }
-        for bad in [
-            "example.net/no-scheme",
-            "ftp://example.net",
-            "file:///etc/passwd",
-            "javascript:alert(1)",
-            "https://exa mple.net",
-            "://example.net",
-            "",
-        ] {
-            assert!(!valid_untrusted_uri(bad), "{bad}");
-        }
+    fn a_malformed_bug_link_is_dropped_before_the_valid_one_is_picked() {
+        // handleServerLinks validates each link (java.net.URI syntax, http or https) before
+        // findKnownType(BUG_REPORT) picks the first: a broken entry can't hide the good one.
+        let bug = |link: &str| ServerLink {
+            kind: ServerLinkKind::Known(0),
+            link: link.into(),
+        };
+        let links = trusted(vec![
+            bug("https://exa mple.net/bugs"),
+            bug("https://example.net/%zz"),
+            bug("ftp://example.net/bugs"),
+            bug("https://example.net/bugs"),
+        ]);
+        assert_eq!(bug_report_link(&links), Some("https://example.net/bugs"));
     }
 }

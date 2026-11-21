@@ -2857,6 +2857,7 @@ fn the_multiplayer_screens_have_their_own_ids() {
             lines: std::cell::Cell::new(1),
             report: None,
             bug_report_link: None,
+            to_title: false,
         }
         .id(),
         "disconnected"

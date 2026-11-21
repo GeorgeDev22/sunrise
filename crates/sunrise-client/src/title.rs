@@ -3677,11 +3677,16 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             return;
         }
         self.remember_direct_address();
-        if let Mode::Multiplayer(screen) = &self.mode
-            && let crate::multiplayer::Outcome::Open(next) = screen.escape(&self.saves)
-        {
-            self.set_mode(Mode::Multiplayer(*next));
-            return;
+        if let Mode::Multiplayer(screen) = &self.mode {
+            match screen.escape(&self.saves) {
+                crate::multiplayer::Outcome::Open(next) => {
+                    self.set_mode(Mode::Multiplayer(*next));
+                    return;
+                }
+                // `shouldCloseOnEsc` false: the screen stays.
+                crate::multiplayer::Outcome::None => return,
+                _ => {}
+            }
         }
         if let Mode::Realms(screen) = &mut self.mode
             && !screen.escape()
