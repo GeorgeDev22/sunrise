@@ -45,6 +45,9 @@ def build(command):
 
 # Full health before each throw: every landing is read from 20.
 HEAL = 'cmd Alice effect give @s minecraft:instant_health 1 9 true'
+# The slimes the flat world spawned while vanilla generated it, cleared before each throw once their chunks are in:
+# they attack Alice at their own random moments.
+CLEAR = 'cmd Alice execute in minecraft:overworld run kill @e[type=minecraft:slime]'
 # Alice's offline UUID (`OfflinePlayer:Alice`) as the pearls' Owner.
 ALICE = '[I;278005000,-707248403,-1814916367,-1817188393]'
 
@@ -62,8 +65,10 @@ def pearl(at, motion, level=None):
 SCRIPT = [
     ('setup', [
         'chat on',
-        # No regeneration between the landing and the health read, no endermite (its 5% draw still happens).
+        # No regeneration between the landing and the health read, no endermite (its 5% draw still happens) and
+        # no natural spawns (a flat world's slimes attack Alice at their own random moments).
         build('gamerule natural_health_regeneration false'), build('gamerule spawn_monsters false'),
+        build('gamerule spawn_mobs false'),
         build('give @s minecraft:ender_pearl 16'),
         # Every pearl lands on an open floor, never against a wall its owner would stand in (an owner taken to
         # a pearl's last position beside a wall suffocates). The world spawn, where a pearl out of the End
@@ -87,13 +92,13 @@ SCRIPT = [
         build('forceload add -32 -32 64 48'),
     ]),
     # A pearl that meets no portal: how far a throw flies, for the landings below.
-    ('aim-plain', [build('tp @s 20.5 -60 0.5 0 0'), HEAL]),
+    ('aim-plain', [build('tp @s 20.5 -60 0.5 0 0'), HEAL, CLEAR]),
     ('plain', [pearl((20.5, -58.48, 0.5), (0.0, 0.0, 1.5))]),
     ('landed-plain', ASK),
-    ('aim-overworld-to-nether', [build('tp @s 1.0 -60 0.5 0 0'), HEAL]),
+    ('aim-overworld-to-nether', [build('tp @s 1.0 -60 0.5 0 0'), HEAL, CLEAR]),
     ('overworld-to-nether', [pearl((1.0, -58.48, 0.5), (0.0, 0.0, 1.5))]),
     ('in-nether', ASK),
-    ('aim-nether-to-overworld', [build(f'{NETHER} tp @s 1.0 64 3.5 180 0'), HEAL]),
+    ('aim-nether-to-overworld', [build(f'{NETHER} tp @s 1.0 64 3.5 180 0'), HEAL, CLEAR]),
     ('nether-to-overworld', [pearl((1.0, 65.52, 3.5), (0.0, 0.0, -1.5), 'the_nether')]),
     ('in-overworld', ASK),
     ('aim-boat-to-nether', [
@@ -102,10 +107,11 @@ SCRIPT = [
         build('ride @s mount @e[type=minecraft:oak_boat,limit=1,sort=nearest]'),
         build('rotate @s 0 0'),
         HEAL,
+        CLEAR,
     ]),
     ('boat-to-nether', [pearl((1.0, -58.9, 0.5), (0.0, 0.0, 1.5))]),
     ('boat-in-nether', ASK),
-    ('aim-overworld-to-end', [build('execute in minecraft:overworld run tp @s 10.5 -60 0.5 0 0'), HEAL]),
+    ('aim-overworld-to-end', [build('execute in minecraft:overworld run tp @s 10.5 -60 0.5 0 0'), HEAL, CLEAR]),
     ('overworld-to-end', [pearl((10.5, -58.48, 0.5), (0.0, 0.0, 1.5))]),
     ('in-end', ASK),
     ('aim-end-without-credits', [
@@ -116,13 +122,14 @@ SCRIPT = [
         build(f'{END} fill 100 49 4 101 51 4 minecraft:end_portal'),
         build(f'{END} tp @s 100.5 49 0.5 0 0'),
         HEAL,
+        CLEAR,
     ]),
     ('end-without-credits', [pearl((100.5, 50.52, 0.5), (0.0, 0.0, 1.5), 'the_end')]),
     ('stayed-in-end', ASK),
     # Into the End portal: the credits, answered as a client does.
     ('aim-credits', [build(f'{END} tp @s 100.5 50 4.5 0 0')]),
     ('aim-credits-seen', ['respawn Alice']),
-    ('aim-end-with-credits', [build(f'{END} tp @s 100.5 49 0.5 0 0'), HEAL]),
+    ('aim-end-with-credits', [build(f'{END} tp @s 100.5 49 0.5 0 0'), HEAL, CLEAR]),
     ('end-with-credits', [pearl((100.5, 50.52, 0.5), (0.0, 0.0, 1.5), 'the_end')]),
     ('back-in-overworld', ASK),
 ]
