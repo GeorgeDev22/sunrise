@@ -143,6 +143,6 @@ impl World for LevelLocation<'_> {
         ))
     }
     fn in_tag(&self, registry: &str, tag: &str, id: &str) -> bool {
-        self.refs.tags.contains(registry, tag, id).unwrap_or(false)
+        self.refs.tags.contains(registry, tag, id)
     }
 }

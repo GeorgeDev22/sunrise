@@ -10,23 +10,19 @@ pub trait LevelTicketsBackend {
     /// Whether any watered-area ticket covers this block. Minimum bounds are inclusive and
     /// maximum bounds exclusive on all three axes. Reads active and parked levels, loads no
     /// chunks, and calls no mod predicates. False on clients or for a stale/unavailable level.
-    #[access(WorldOnly)]
     fn level_has_water_ticket(&self, level: LevelRef, pos: [i32; 3]) -> bool;
     /// Side: server.
     /// Whether `/forceload` holds the chunk (`ServerLevel.getForcedChunks`),
     /// loaded or not; a mod's own ticket on it does not count. None for a stale handle or on a client.
-    #[access(WorldOnly)]
     fn chunk_forced(&self, chunk: ChunkRef) -> Option<bool>;
     /// Side: server.
     /// The level's force-loaded chunks (`/forceload query`), sorted as
     /// the command lists them. None for a stale handle or on a client.
-    #[access(WorldOnly)]
     fn level_forced_chunks(&self, level: LevelRef) -> Option<Vec<[i32; 2]>>;
     /// Side: server.
     /// The chunk tickets `controller` holds in the level, as (owner, chunk
     /// position, natural_spawning), in order. None for a stale handle, on a
     /// client, outside a mod's hook and for another mod's controller.
-    #[access(WorldOnly)]
     fn level_mod_forced_chunks(
         &self,
         level: LevelRef,
@@ -47,7 +43,6 @@ pub trait LevelTicketsBackendMut {
     /// `level_load` or the block entity's load listener. Reads/writes reach parked server levels.
     /// None outside an enabled mod call, on clients, for stale/unavailable levels, empty or
     /// reversed bounds, or a box spanning more than 65,536 x/z chunks. Does not load chunks.
-    #[access(WorldOnly)]
     fn level_add_water_ticket(
         &mut self,
         level: LevelRef,
@@ -57,7 +52,6 @@ pub trait LevelTicketsBackendMut {
     /// Side: server.
     /// Remove this watered area, leaving overlapping tickets intact. Only the owning enabled
     /// mod can remove it. False if already removed, stale, unloaded, or called on a client.
-    #[access(WorldOnly)]
     fn water_ticket_remove(&mut self, water_ticket: WaterTicket) -> bool;
     /// Side: server.
     /// `/forceload add` or `remove` of one chunk (`ServerLevel.setChunkForced`):
@@ -70,7 +64,6 @@ pub trait LevelTicketsBackendMut {
     /// returning. If streaming is paused, the ticket is recorded and takes
     /// effect when its level starts streaming. False for a stale handle, on a
     /// client, outside the world, or when adding after generation has stopped.
-    #[access(WorldOnly)]
     fn chunk_set_forced(&mut self, chunk: ChunkRef, forced: bool) -> bool;
     /// Side: server.
     /// The chunk ticket of `controller` for `owner` on `chunk`
@@ -90,7 +83,6 @@ pub trait LevelTicketsBackendMut {
     /// discarded. False outside a mod's hook, for another mod's controller, on
     /// a client, for a chunk outside the world and for a level the server has
     /// not opened.
-    #[access(WorldOnly)]
     fn chunk_set_mod_forced(
         &mut self,
         chunk: ChunkRef,

@@ -57,6 +57,8 @@ pub struct StateFacts {
     pub random_ticks: bool,
     pub block_entity: bool,
     pub render_shape: RenderShape,
+    /// `BlockState.shouldSpawnTerrainParticles`: default hit and destroy debris.
+    pub spawn_terrain_particles: bool,
     /// Whether the breaking crack is drawn on the block (`false`: a content
     /// block declared `destroy_overlay: false`).
     pub destroy_overlay: bool,
@@ -554,6 +556,7 @@ impl BlockFacts {
                     Some("ENTITYBLOCK_ANIMATED") => RenderShape::Animated,
                     _ => RenderShape::Model,
                 },
+                spawn_terrain_particles: entry.spawn_terrain_particles.unwrap_or(true),
                 destroy_overlay: !entry.no_destroy_overlay,
                 full_collision: entry.full_collision,
                 friction: entry.friction as f32,
@@ -701,6 +704,7 @@ mod pane_tests {
             random_ticks: false,
             block_entity: false,
             render_shape: RenderShape::Model,
+            spawn_terrain_particles: true,
             destroy_overlay: true,
             full_collision: false,
             friction: 0.6,

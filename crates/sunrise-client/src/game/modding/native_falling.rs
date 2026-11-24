@@ -75,18 +75,20 @@ impl Game<'_> {
         let at = Vec3::new(pos[0], pos[1], pos[2]);
         self.next_entity += 1;
         self.falling.push(FallingBlock {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             rotation: [0.0, 0.0],
             join: Default::default(),
             id: self.next_entity,
             state,
+            blocks_building: true,
             start_pos: cell,
             position: at,
             previous: at,
             velocity,
             age: 0,
             no_gravity: false,
-            on_ground: false,
+            ground: Default::default(),
             fire_ticks: 0,
             sync_velocity: false,
             drop_item: falling.drop_item,
@@ -290,7 +292,8 @@ mod tests {
                 .unwrap();
             let at = Vec3::new(0.5, 70.0, 0.5);
             game.falling.push(FallingBlock {
-                on_ground: false,
+                size_answer: None,
+                ground: Default::default(),
                 fire_ticks: 0,
                 sync_velocity: false,
                 attachment_lifetime: Default::default(),
@@ -298,6 +301,7 @@ mod tests {
                 join: Default::default(),
                 id: 71,
                 state,
+                blocks_building: true,
                 start_pos: BlockPos::new(0, 70, 0),
                 position: at,
                 previous: at,

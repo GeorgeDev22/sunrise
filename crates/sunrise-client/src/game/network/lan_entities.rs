@@ -8,7 +8,7 @@ use sunrise_client::lan::{
     entity::{EntityState, Riding, States},
     playerdata::ints_uuid,
 };
-use sunrise_protocol::entity_data::{Value, serializer};
+use sunrise_protocol::entity_data::{PaintingHolder, PaintingVariant, Value, serializer};
 use {sunrise_core::nbt::Tag, sunrise_world::registry::BlockStateId};
 
 /// Allocate once: a native summon may need its id before the tracking tick.
@@ -265,6 +265,17 @@ impl Game<'_> {
                 mixed.insert(vehicle);
             }
         }
+        for b in &self.bolts {
+            if let Some(vehicle) = b.mount
+                && !self
+                    .persist
+                    .removals
+                    .contains(&super::commands::Target::Bolt(b.id))
+            {
+                riding.add(vehicle as i32, b.id as i32);
+                mixed.insert(vehicle);
+            }
+        }
         for vehicle in mixed {
             let seats = self.seated_passengers(vehicle);
             if let Some(passengers) = riding.passengers.get_mut(&(vehicle as i32)) {
@@ -303,7 +314,7 @@ impl Game<'_> {
                 &b.entity_type(),
                 [p.x, p.y, p.z],
                 b.yaw,
-                b.on_ground,
+                b.ground.on_ground,
             );
             // Leashable.setLeashedTo / dropLeash: who holds the boat's lead.
             e.leash = leash;
@@ -378,8 +389,6 @@ impl Game<'_> {
                     let empty = Tag::String("".into());
                     e.defaults
                         .push((13, serializer::STRING, Value::String(String::new())));
-                    e.defaults
-                        .push((14, serializer::COMPONENT, Value::Text(empty)));
                     if !c.synced_command.is_empty() {
                         e.meta.push((
                             13,
@@ -387,27 +396,27 @@ impl Game<'_> {
                             Value::String(c.synced_command.clone()),
                         ));
                     }
-                    if !c.synced_output.is_empty() {
-                        e.meta.push((
-                            14,
-                            serializer::COMPONENT,
-                            Value::Text(Tag::String(c.synced_output.as_str().into())),
-                        ));
+                    if let Some(output) = &c.synced_output
+                        && *output != empty
+                    {
+                        e.meta
+                            .push((14, serializer::COMPONENT, Value::Text(output.clone())));
                     }
+                    e.defaults
+                        .push((14, serializer::COMPONENT, Value::Text(empty)));
                 }
                 _ => {}
             }
         });
         for a in self.armor_stands.iter().filter(|a| a.id > after) {
             let p = a.position;
-            let attributes = self.stand_attributes(&a.live);
             let e = add_state(
                 out,
                 a.id,
                 "minecraft:armor_stand",
                 [p.x, p.y, p.z],
                 a.yaw,
-                a.on_ground,
+                a.ground.on_ground,
             );
             e.head_yaw = a.yaw;
             e.velocity = [a.velocity.x, a.velocity.y, a.velocity.z];
@@ -471,7 +480,7 @@ impl Game<'_> {
                     e.equipment.push((slot as u8, host.hub.stack(item)));
                 }
             }
-            e.attributes = attributes;
+            self.stand_attributes(&a.live, &mut e.attributes);
         }
         for f in self.item_frames.iter().filter(|f| f.id > after) {
             // ItemFrame.getAddEntityPacket: the block it hangs in and its direction.
@@ -552,8 +561,32 @@ impl Game<'_> {
                 .registry_id("minecraft:painting_variant", &p.variant)
                 && id != 0
             {
-                e.meta
-                    .push((9, serializer::PAINTING_VARIANT, Value::Id(id + 1)));
+                let asset_id = p
+                    .asset
+                    .as_deref()
+                    .map(|a| {
+                        if a.contains(':') {
+                            a.to_owned()
+                        } else {
+                            format!("minecraft:{a}")
+                        }
+                    })
+                    .unwrap_or_else(|| p.variant.to_string());
+                e.meta.push((
+                    9,
+                    serializer::PAINTING_VARIANT,
+                    Value::PaintingVariant(PaintingHolder::Reference {
+                        id,
+                        name: p.variant.to_string(),
+                        variant: PaintingVariant {
+                            width: p.width,
+                            height: p.height,
+                            asset_id,
+                            title: None,
+                            author: None,
+                        },
+                    }),
+                ));
             }
         }
         for c in self.cushions.iter().filter(|c| c.id > after) {
@@ -582,6 +615,9 @@ impl Game<'_> {
                 0.0,
                 false,
             );
+            if o.synced_fire {
+                e.meta.push((0, serializer::BYTE, Value::Byte(1)));
+            }
             e.meta.push((
                 8,
                 serializer::ITEM_STACK,
@@ -598,6 +634,9 @@ impl Game<'_> {
             let e = add_state(out, o.id, &o.kind, [p.x, p.y, p.z], o.yaw, false);
             e.pitch = o.pitch;
             e.head_yaw = o.yaw;
+            if o.eye.as_ref().is_some_and(|eye| eye.synced_fire) {
+                e.meta.push((0, serializer::BYTE, Value::Byte(1)));
+            }
             if let Some(tag) = self.persist.raw.get(&o.id)
                 && let Some(item) = self.lan_display_data_kept(o.id, tag, e)
                 && let Some((_, _, Value::Item(stack))) =
@@ -763,6 +802,9 @@ impl Game<'_> {
         // A bare state is never paired: its UUID is never read.
         for e in states.as_mut_slice().iter_mut().filter(|e| !e.bare) {
             e.uuid = ints_uuid(self.uuid_for(e.id as u32));
+            if !self.persist.sync_body_position.is_empty() {
+                e.sync_position |= self.persist.sync_body_position.contains(&(e.id as u32));
+            }
             if let Some(bits) = self.persist.forced_meta.get(&(e.id as u32)) {
                 e.forced_meta = *bits;
             }
@@ -773,6 +815,7 @@ impl Game<'_> {
     /// SteppedInterpolationTracker.updateTracking clears syncPosition: once the states for the
     /// tracking pass are taken.
     pub(super) fn lan_syncs_looked(&mut self) {
+        self.persist.sync_body_position.clear();
         for m in &mut self.mobs {
             m.needs_sync = false;
             m.sync_position = false;
@@ -808,9 +851,7 @@ impl Game<'_> {
         assign_resident_ids!(self.tridents, t, next, None);
         assign_resident_ids!(self.rockets, r, next, None);
         assign_resident_ids!(self.crystals, c, next, None);
-        self.bolts.iter_mut().for_each(|b| {
-            assign_entity_id(next, &mut b.id);
-        });
+        assign_resident_ids!(self.bolts, b, next, Some(&b.attachment_lifetime));
         assign_resident_ids!(self.ominous_spawners, o, next, None);
         self.potions.thrown_ids().for_each(|id| {
             assign_entity_id(next, id);
@@ -841,7 +882,7 @@ impl Game<'_> {
             e.velocity = [v.x, v.y, v.z];
             [e.yaw, e.pitch] = row.rotation;
             e.head_yaw = row.rotation[0];
-            e.general = true;
+            e.general = Some(catalog.tracking(row.type_slot));
         }
     }
 
@@ -858,21 +899,79 @@ impl Game<'_> {
         };
         let at = |p: sunrise_core::geometry::Vec3| [p.x, p.y, p.z];
         for f in self.fangs.list.iter().filter(|f| f.id > after) {
-            add_state(out, f.id, "minecraft:evoker_fangs", f.pos, f.yaw, false);
+            let e = add_state(out, f.id, "minecraft:evoker_fangs", f.pos, f.yaw, false);
+            if f.synced_fire {
+                e.meta.push((0, serializer::BYTE, Value::Byte(1)));
+            }
         }
-        // LightningBolt: each client draws and flashes its own.
+        // LightningBolt: each client draws and flashes its own; sync inherited Entity data.
         for b in self.bolts.iter().filter(|b| b.id > after) {
-            add_state(out, b.id, "minecraft:lightning_bolt", b.at, 0.0, false);
+            let e = add_state(
+                out,
+                b.id,
+                "minecraft:lightning_bolt",
+                b.at,
+                b.rotation[0],
+                b.on_ground,
+            );
+            e.pitch = b.rotation[1];
+            e.velocity = at(b.velocity);
+            let flags =
+                i8::from(b.fire_ticks > 0 || b.has_visual_fire) | (i8::from(b.glowing) << 6);
+            if flags != 0 {
+                e.meta.push((0, serializer::BYTE, Value::Byte(flags)));
+            }
+            if b.air != 300 {
+                e.meta.push((1, serializer::INT, Value::Int(b.air)));
+            }
+            if let Some(name) = &b.custom_name {
+                e.meta.push((
+                    2,
+                    serializer::OPTIONAL_COMPONENT,
+                    Value::OptText(Some(name.clone())),
+                ));
+            }
+            if b.custom_name_visible {
+                e.meta.push((3, serializer::BOOLEAN, Value::Bool(true)));
+            }
+            if b.silent {
+                e.meta.push((4, serializer::BOOLEAN, Value::Bool(true)));
+            }
+            if b.no_gravity {
+                e.meta.push((5, serializer::BOOLEAN, Value::Bool(true)));
+            }
+            if b.ticks_frozen != 0 {
+                e.meta
+                    .push((7, serializer::INT, Value::Int(b.ticks_frozen)));
+            }
+            e.defaults.push((0, serializer::BYTE, Value::Byte(0)));
+            e.defaults.push((1, serializer::INT, Value::Int(300)));
+            e.defaults
+                .push((2, serializer::OPTIONAL_COMPONENT, Value::OptText(None)));
+            e.defaults
+                .push((3, serializer::BOOLEAN, Value::Bool(false)));
+            e.defaults
+                .push((4, serializer::BOOLEAN, Value::Bool(false)));
+            e.defaults
+                .push((5, serializer::BOOLEAN, Value::Bool(false)));
+            e.defaults.push((7, serializer::INT, Value::Int(0)));
         }
         for t in self.tnts.iter().filter(|t| t.id > after) {
-            let e = add_state(out, t.id, "minecraft:tnt", at(t.position), 0.0, t.on_ground);
+            let e = add_state(
+                out,
+                t.id,
+                "minecraft:tnt",
+                at(t.position),
+                0.0,
+                t.ground.on_ground,
+            );
             e.velocity = at(t.velocity);
             // PrimedTnt.DATA_FUSE_ID, 80 by default; requiresPrecisePosition
             // while it touches a block.
             if t.fuse != 80 {
                 e.meta.push((8, serializer::INT, Value::Int(t.fuse)));
             }
-            e.precise = t.on_ground;
+            e.precise = t.ground.on_ground;
         }
         for f in self.falling.iter().filter(|f| f.id > after) {
             let e = add_state(
@@ -881,7 +980,7 @@ impl Game<'_> {
                 "minecraft:falling_block",
                 at(f.position),
                 0.0,
-                f.on_ground,
+                f.ground.on_ground,
             );
             e.velocity = at(f.velocity);
             e.sync_velocity = f.sync_velocity;
@@ -903,7 +1002,7 @@ impl Game<'_> {
                 Some(g) => g.entity_id,
                 None => owner(p.owner),
             };
-            let e = add_state(out, p.id, kind, at(p.position), p.yaw, p.on_ground);
+            let e = add_state(out, p.id, kind, at(p.position), p.yaw, p.ground.on_ground);
             e.pitch = p.pitch;
             e.velocity = at(p.velocity);
             e.needs_sync = p.needs_sync;
@@ -1050,7 +1149,7 @@ impl Game<'_> {
                 "minecraft:trident",
                 at(t.position),
                 t.yaw,
-                t.on_ground,
+                t.ground.on_ground,
             );
             e.pitch = t.pitch;
             e.velocity = at(t.velocity);
@@ -1076,7 +1175,7 @@ impl Game<'_> {
             let plain = &*r.item.item == "minecraft:firework_rocket"
                 && r.item.count == 1
                 && r.item.extra.is_none();
-            let item = (!plain).then(|| hub.stack(&Some(r.item.clone())));
+            let item = (!plain).then(|| hub.stack(&Some(r.item.as_ref().clone())));
             let boosted = match r.guest {
                 Some(conn) => hub
                     .guests
@@ -1091,7 +1190,7 @@ impl Game<'_> {
                 "minecraft:firework_rocket",
                 at(r.position),
                 0.0,
-                r.on_ground,
+                r.ground.on_ground,
             );
             e.velocity = at(r.velocity);
             // DATA_ID_FIREWORKS_ITEM once set from a stack, DATA_ATTACHED_TO_TARGET,

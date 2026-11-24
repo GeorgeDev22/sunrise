@@ -1034,10 +1034,9 @@ mod pitch_preservation_controls {
         assert!(!c.forced);
     }
 
-    /// Added source/model controls; these do not add a connected bed/anchor runtime claim.
     #[test]
     #[ignore = "daily"]
-    fn bed_anchor_facing_and_invalid_personal_fallback_ignore_stored_pitch() {
+    fn bed_and_anchor_facing_ignore_stored_pitch() {
         let mut resources = None;
         let mut game = crate::game::game_tests::tests::server_game(&mut resources);
         let stone = game
@@ -1120,22 +1119,5 @@ mod pitch_preservation_controls {
             anchor,
             "existing forced-charge behavior"
         );
-
-        game.dim = Dim::Overworld;
-        game.level.world_spawn = Some([4, 100, 4]);
-        game.level.world_spawn_angle = [-30.0, -5.0];
-        game.world.set(12, 100, 12, stone).unwrap();
-        let invalid = RespawnConfig {
-            dim: Dim::Overworld,
-            pos: [12, 100, 12],
-            yaw: 45.0,
-            pitch: 10.0,
-            forced: true,
-        };
-        game.respawn_config = Some(invalid);
-        assert!(game.resolve_server_respawn(invalid, true).is_none());
-        assert!(game.respawn_config.is_none());
-        assert_eq!(game.level.world_spawn, Some([4, 100, 4]));
-        assert_eq!(game.level.world_spawn_angle, [-30.0, -5.0]);
     }
 }

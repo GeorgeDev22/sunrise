@@ -10,7 +10,6 @@ pub trait LevelWorldBorderBackend {
     /// The level's world border as [min_x, min_z, max_x, max_z], using the
     /// previous size while it moves. Sunrise currently shares one border
     /// across its dimensions. None for a stale handle or a closed level.
-    #[access(WorldOnly)]
     fn level_world_border(&self, level: LevelRef) -> Option<[f64; 4]>;
 }
 /// The handles' writes of the `level_world_border` area, implemented by the game and reached through [`BackendMut`].
@@ -25,7 +24,6 @@ pub trait LevelWorldBorderBackendMut {
     /// heard. False for a centre that isn't finite or lies past 2.9999984E7 on x or z, a call
     /// from inside `world_border_center_changed`, a stale handle, a level the server has not
     /// opened or a client.
-    #[access(WorldOnly)]
     fn level_set_world_border_center(&mut self, level: LevelRef, center: [f64; 2]) -> bool;
     /// Side: server.
     /// Sets the world border's size, as `/worldborder set`: at once when `ticks` is 0
@@ -35,14 +33,12 @@ pub trait LevelWorldBorderBackendMut {
     /// outside 1 to 5.9999968E7, a negative `ticks`, a call from inside
     /// `world_border_bounds_changed`, a stale handle, a level the server has not opened or a
     /// client.
-    #[access(WorldOnly)]
     fn level_set_world_border_size(&mut self, level: LevelRef, size: f64, ticks: i64) -> bool;
     /// Side: server.
     /// The world border's damage (`setDamagePerBlock`, `setSafeZone`), as `/worldborder
     /// damage amount` and `buffer`: a player outside the border and past `safe_zone` blocks
     /// takes `per_block` damage for each block beyond it. False for a value that is
     /// negative or not finite, a stale handle, a level the server has not opened or a client.
-    #[access(WorldOnly)]
     fn level_set_world_border_damage(
         &mut self,
         level: LevelRef,
@@ -55,7 +51,6 @@ pub trait LevelWorldBorderBackendMut {
     /// the border, or when a shrinking border will reach them within `ticks` game ticks.
     /// False for a negative value, a stale handle, a level the server has not opened or a
     /// client.
-    #[access(WorldOnly)]
     fn level_set_world_border_warning(
         &mut self,
         level: LevelRef,

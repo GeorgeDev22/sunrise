@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "یک خط چت جدید به جای اینکه کامل نشان داده شود، از سمت چپ وارد می شود و در حالی که محو می شود.",
   "sunrise.extras.chat_indicator": "نشانگر پیام",
   "sunrise.extras.chat_indicator.tooltip": "نوار رنگی در سمت چپ یک خط چت.",
-  "sunrise.extras.discord_presence": "Discord Rich Presence",
-  "sunrise.extras.discord_presence.tooltip": "در حالی که Discord اجرا می شود، Playing Sunrise را در نمایه Discord شما نشان می دهد: منوها، تک نفره یا چند نفره، ابعاد و زمان بازی. هرگز نام یک جهان یا آدرس سرور.",
   "sunrise.extras.dynamic_lights": "چراغ های دینامیک",
   "sunrise.extras.dynamic_lights.tooltip": "مشعل ها و دیگر منابع نوری که نگه داشته، افتاده اند یا آتش می گیرند بلوک های اطراف خود را روشن می کنند.",
   "sunrise.extras.fullbright": "فول برایت",

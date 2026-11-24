@@ -1,7 +1,7 @@
 //! Server commands and players for native mods (docs/modding/src/how-to/native-mods.md,
 //! "Server commands and players"): the commands mods add to the
 //! server's command tree (`native_register_commands`), a player's command
-//! reaching them (`native_run_mod_command`), and the helpers a server mod
+//! reaching its bound executor, and the helpers a server mod
 //! answers with: the players online, a line to one of them or to all, the
 //! command's feedback and the world's folder; and the acting
 //! player's plain items: count, take, give. They act on the server's own
@@ -10,6 +10,12 @@
 #[path = "native_server/argument_kinds.rs"]
 mod argument_kinds;
 #[cfg(test)]
+#[path = "native_server/command_failure_tests.rs"]
+mod command_failure_tests;
+#[cfg(test)]
+#[path = "native_server/command_shape_tests.rs"]
+mod command_shape_tests;
+#[cfg(test)]
 #[path = "native_server/provider_tests.rs"]
 mod provider_tests;
 #[path = "native_server/registered_commands.rs"]
@@ -17,14 +23,17 @@ mod registered_commands;
 #[cfg(test)]
 #[path = "native_server/selector_tests.rs"]
 mod selector_tests;
+#[cfg(test)]
+#[path = "native_server/sidebar_tests.rs"]
+mod sidebar_tests;
 
 use super::api_values::{TryIntoApi, TryIntoEngine};
 use super::{Dim, Game, commands::execute, respawn_anchor::RespawnConfig};
 use crate::game::level_control_hooks::LevelControl;
 pub(super) use argument_kinds::{CommandArguments, command_arguments};
 use argument_kinds::{
-    UNCENTERED, argument_type, custom_value, dimension_value, nbt_value, parsed_type, parser,
-    positional_value, resource_parser,
+    UNCENTERED, argument_type, bounded_parser, custom_parser, custom_value, dimension_value,
+    nbt_value, parsed_type, parser, positional_value, resource_parser,
 };
 use mod_api::__private::game::*;
 pub(super) use registered_commands::NativeCommandState;
@@ -32,37 +41,26 @@ pub(super) use registered_commands::NativeCommandState;
 use mod_api::LevelRef;
 use mod_api::{
     ActionOutcome, ActionRefused, FakeEffect, GameMode, GlobalPos, Identifier, PlayerAction,
-    PlayerActionSetup, PlayerFood, PlayerRef, PlayerRespawnConfig, ScopedActionResult,
+    PlayerActionSetup, PlayerFood, PlayerRef, PlayerRespawnConfig, ScopedActionResult, Sidebar,
+    TextFormError, VirtualHost,
 };
 use serde_json::{Map, Value, json};
 use std::sync::{
-    Mutex, PoisonError,
+    LazyLock, Mutex, PoisonError,
     atomic::{AtomicBool, Ordering},
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use sunrise_client::{
     command::{Arg, ArgType, Context, Dispatcher},
     items::ItemStack,
-    lan::{abilities::PlayerAbilities, data::component_nbt, guest::Guest},
+    lan::{
+        abilities::PlayerAbilities, data::component_nbt, guest::Guest, scoreboard::SidebarContents,
+    },
     motion::PlayerMotion,
     text::Text,
 };
 use sunrise_core::position::BlockPos;
 use sunrise_protocol::packets::play::{self, Clientbound as C};
-
-/// A sidebar a server mod shows one player (`native_sidebar`): its title and
-/// up to 15 lines, top first, each a text on the left and, where the score's
-/// number would be, an optional text on the right.
-#[allow(dead_code)]
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct NativeSidebar {
-    pub(crate) title: Text,
-    pub(crate) lines: Vec<(Text, Option<Text>)>,
-}
-
-/// The objective a mod's sidebar is sent as: the player's client only; the
-/// server's scoreboard never holds it.
-const SIDEBAR_OBJECTIVE: &str = "sunrise:native_sidebar";
 
 /// The report's name of an operator level (`commands.json`'s
 /// `permissions`).
@@ -106,8 +104,12 @@ fn usage_nodes(
             .strip_prefix("resource:")
             .map(|registry| resource_parser(registry).map_err(|e| format!("`{usage}`: {e}")))
             .transpose()?;
-        let builtin =
-            resource.or_else(|| parser(kind).map(|(parser, properties, _)| (parser, properties)));
+        let bounded = bounded_parser(kind)
+            .transpose()
+            .map_err(|e| format!("`{usage}`: {e}"))?;
+        let builtin = resource
+            .or(bounded)
+            .or_else(|| parser(kind).map(|(parser, properties, _)| (parser, properties)));
         let (parser, properties, greedy, custom) = match builtin {
             Some((parser, properties)) => (parser, properties, kind == "text", None),
             None => {
@@ -123,20 +125,16 @@ fn usage_nodes(
                          only a server command can offer; a client command completes without one"
                     ));
                 }
-                let (properties, greedy) = match std::panic::catch_unwind(
-                    std::panic::AssertUnwindSafe(|| argument.kind()),
-                )
-                .map_err(|_| format!("`{usage}`: argument type `{kind}` panicked"))?
-                {
-                    mod_api::CommandArgumentKind::Word => (json!({"type": "word"}), false),
-                    mod_api::CommandArgumentKind::Greedy => (json!({"type": "greedy"}), true),
-                    _ => {
-                        return Err(format!(
-                            "`{usage}`: argument type `{kind}` uses a kind this build cannot read"
-                        ));
-                    }
+                let declared =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| argument.kind()))
+                        .map_err(|_| format!("`{usage}`: argument type `{kind}` panicked"))?;
+                let Some((parser, properties)) = custom_parser(declared) else {
+                    return Err(format!(
+                        "`{usage}`: argument type `{kind}` uses a kind this build cannot read"
+                    ));
                 };
-                ("brigadier:string", properties, greedy, Some(kind))
+                let greedy = properties["type"] == "greedy";
+                (parser, properties, greedy, Some(kind))
             }
         };
         optional_seen |= optional;
@@ -148,8 +146,9 @@ fn usage_nodes(
         if kind == "vec3_uncentered" {
             node[UNCENTERED] = true.into();
         }
-        // A registered type goes out as a Brigadier string an unmodded client can read; it and
-        // the free `id`, which has no list of its own, ask the server (the mods' `tab_complete`).
+        // A registered type goes out as the Brigadier type its kind names, which an unmodded
+        // client can read; it and the free `id`, which has no list of its own, ask the server
+        // (the mods' `tab_complete`).
         if custom.is_some() || kind == "id" {
             if let Some(id) = custom {
                 node["custom_argument"] = id.into();
@@ -164,29 +163,93 @@ fn usage_nodes(
     Ok(out)
 }
 
-/// Native mods' commands as a root in the commands report's format
-/// (`lan::commands`, which sends each player what their level allows), and
-/// each command's traversal level: the lowest of its usages. A node is runnable where
-/// only optional arguments follow it, at the lowest level of those executable usages.
-/// A command vanilla has (`vanilla`
-/// answers) or a usage that doesn't parse is left out, with why.
-pub(super) fn command_tree(
-    commands: &[mod_api::Command],
-    vanilla: impl Fn(&str) -> bool,
-    custom: &CommandArguments,
-) -> (Value, HashMap<String, u8>, Vec<String>) {
-    command_tree_for(commands, vanilla, custom, false)
+/// The tree a mod's usages meet at their root word.
+#[derive(Clone, Copy)]
+enum BaseTree<'a> {
+    /// The client's own chat tree: a client command whose root it has (`has` answers) is left
+    /// out, so it never hides a server command.
+    Reserved(&'a dyn Fn(&str) -> bool),
+    /// The server's vanilla tree. A usage whose root vanilla registers merges into that root, as
+    /// NeoForge's `RegisterCommandsEvent` registers into vanilla's `CommandDispatcher`, whose
+    /// `register` adds the literal with Brigadier's `CommandNode.addChild`: vanilla's usages
+    /// stay, the mod's children are added beside them, and vanilla's nodes keep their
+    /// permissions. Sunrise's own tools (`/modprofile`, `/pregen`) are not merged into.
+    Merged(&'a Dispatcher),
 }
 
-/// [`command_tree`] for the client's own commands: an argument type that declares a suggestion
-/// provider is refused by name, because that provider answers on the server alone and a client
-/// tree has no server behind it. Every other argument kind builds exactly as on the server.
+/// Native mods' commands as a root in the commands report's format
+/// (`lan::commands`, which sends each player what their level allows), and
+/// the traversal level of each command a mod owns: the lowest of its usages. A node is runnable
+/// where only optional arguments follow it; like Brigadier's `CommandNode.addChild`, each
+/// later accepted runnable registration overwrites the node's executor and execution level,
+/// a vanilla node's executor too. A root merged into vanilla's keeps vanilla's level, so it has
+/// none here. A usage that doesn't parse, meets a vanilla node it cannot share or names a root
+/// `base` keeps is left out, with why.
+#[cfg(test)]
+pub(super) fn command_tree(
+    commands: &[mod_api::Command],
+    vanilla: &Dispatcher,
+    custom: &CommandArguments,
+) -> (Value, HashMap<String, u8>, Vec<String>) {
+    command_tree_for(commands, BaseTree::Merged(vanilla), custom, false, None)
+}
+
+/// Build the display tree for the client's own commands. An argument type that declares a
+/// suggestion provider is refused by name because a client command has no server to answer it.
+/// A root the chat tree already has (`vanilla` answers) is left out. Every other argument kind
+/// builds exactly as on the server.
 pub(super) fn client_command_tree(
     commands: &[mod_api::Command],
     vanilla: impl Fn(&str) -> bool,
     custom: &CommandArguments,
 ) -> (Value, HashMap<String, u8>, Vec<String>) {
-    command_tree_for(commands, vanilla, custom, true)
+    command_tree_for(commands, BaseTree::Reserved(&vanilla), custom, true, None)
+}
+
+/// Whether a usage merges into a vanilla root of `base`, or why it cannot go into the tree. Each
+/// word under a merged root that vanilla has at the same place must be a literal on a literal:
+/// Brigadier would keep vanilla's argument type for the mod's argument of the same name, and the
+/// mod's executor would read a value of another kind.
+fn base_root(
+    base: BaseTree<'_>,
+    usage: &str,
+    nodes: &[(String, Value, bool)],
+) -> Result<bool, String> {
+    let root = nodes[0].0.as_str();
+    let vanilla = match base {
+        BaseTree::Reserved(has) if has(root) => {
+            return Err(format!("`{usage}`: vanilla has /{root}"));
+        }
+        BaseTree::Reserved(_) => return Ok(false),
+        BaseTree::Merged(vanilla) => vanilla,
+    };
+    let Some(mut at) = vanilla.find(root) else {
+        return Ok(false);
+    };
+    if sunrise_client::command::vanilla::is_session_tool(root) {
+        return Err(format!("`{usage}`: /{root} is the game's own command"));
+    }
+    for (name, node, _) in &nodes[1..] {
+        let Some(child) = vanilla.nodes[at]
+            .children
+            .iter()
+            .copied()
+            .find(|&child| vanilla.nodes[child].name() == name)
+        else {
+            break;
+        };
+        let literal = matches!(
+            vanilla.nodes[child].kind,
+            sunrise_client::command::NodeKind::Literal(_)
+        );
+        if !literal || node["type"] != "literal" {
+            return Err(format!(
+                "`{usage}`: `{name}` is a node of vanilla's /{root} that a mod argument cannot share"
+            ));
+        }
+        at = child;
+    }
+    Ok(true)
 }
 
 /// Whether `argument` declares a suggestion provider, read once per tree. A panic is logged and
@@ -206,16 +269,20 @@ fn declares_provider(kind: &str, argument: &Arc<dyn mod_api::CommandArgumentType
     }
 }
 
+// Executable paths (including argument names) mapped to the input registration slot.
+type CommandExecutorSlots = HashMap<Vec<String>, usize>;
+
 fn command_tree_for(
     commands: &[mod_api::Command],
-    vanilla: impl Fn(&str) -> bool,
+    base: BaseTree<'_>,
     custom: &CommandArguments,
     client: bool,
+    mut executors: Option<&mut CommandExecutorSlots>,
 ) -> (Value, HashMap<String, u8>, Vec<String>) {
     let mut root: Map<String, Value> = Map::new();
     let mut levels: HashMap<String, u8> = HashMap::new();
     let mut problems = Vec::new();
-    for command in commands {
+    for (slot, command) in commands.iter().enumerate() {
         let nodes = match usage_nodes(&command.usage, custom, client) {
             Ok(n) => n,
             Err(e) => {
@@ -223,10 +290,13 @@ fn command_tree_for(
                 continue;
             }
         };
-        if vanilla(&nodes[0].0) {
-            problems.push(format!("`{}`: vanilla has /{}", command.usage, nodes[0].0));
-            continue;
-        }
+        let merged = match base_root(base, &command.usage, &nodes) {
+            Ok(merged) => merged,
+            Err(e) => {
+                problems.push(e);
+                continue;
+            }
+        };
         // A rejected usage must not open an earlier executable prefix or lower its level.
         let mut children = &root;
         let mut conflict = None;
@@ -256,6 +326,7 @@ fn command_tree_for(
             ));
             continue;
         }
+        let execution_level = u64::from(command.level.min(4));
         let mut children = &mut root;
         for (i, (name, node, _)) in nodes.iter().enumerate() {
             let runnable = nodes.get(i + 1).is_none_or(|n| n.2);
@@ -265,13 +336,18 @@ fn command_tree_for(
                 n["level"] = 4.into();
                 n
             });
+            // Like Brigadier's `CommandNode.addChild`, each later accepted runnable
+            // registration overwrites the node's executor and execution level.
             if runnable {
                 entry["executable"] = true.into();
-                let level = entry["execution_level"]
-                    .as_u64()
-                    .unwrap_or(4)
-                    .min(command.level.into());
-                entry["execution_level"] = level.into();
+                entry["execution_level"] = execution_level.into();
+                if let Some(executors) = executors.as_deref_mut() {
+                    let path = nodes[..=i]
+                        .iter()
+                        .map(|(name, _, _)| name.clone())
+                        .collect();
+                    executors.insert(path, slot);
+                }
             }
             let level = entry["level"]
                 .as_u64()
@@ -283,14 +359,16 @@ fn command_tree_for(
             }
             children = entry["children"].as_object_mut().expect("made above");
         }
-        let level = levels.entry(nodes[0].0.clone()).or_insert(4);
-        *level = (*level).min(command.level);
+        if !merged {
+            let level = levels.entry(nodes[0].0.clone()).or_insert(4);
+            *level = (*level).min(command.level);
+        }
     }
-    let mut root = Value::Object(root);
-    finish(&mut root);
-    let tree = if levels.is_empty() {
+    let tree = if root.is_empty() {
         Value::Null
     } else {
+        let mut root = Value::Object(root);
+        finish(&mut root);
         json!({"type": "root", "children": root})
     };
     (tree, levels, problems)
@@ -323,12 +401,24 @@ fn finish(children: &mut Value) {
     }
 }
 
-/// Add the already validated native report tree to the server's dispatcher.
+/// Add a validated native report for descriptor-only consumers.
 pub(super) fn register_dispatcher(
     dispatcher: &mut Dispatcher,
     tree: &Value,
     handler: &'static str,
     arguments: &CommandArguments,
+) {
+    register_command_nodes(dispatcher, tree, handler, arguments, None);
+}
+
+/// Add the report's nodes with the same grammar on both sides. The authoritative
+/// server also associates each runnable node ID with its registration path.
+fn register_command_nodes(
+    dispatcher: &mut Dispatcher,
+    tree: &Value,
+    handler: &'static str,
+    arguments: &CommandArguments,
+    executors: Option<&CommandExecutorSlots>,
 ) {
     fn add(
         dispatcher: &mut Dispatcher,
@@ -336,18 +426,26 @@ pub(super) fn register_dispatcher(
         children: &Map<String, Value>,
         handler: &'static str,
         arguments: &CommandArguments,
+        path: &mut Vec<String>,
+        on_executable: &mut impl FnMut(&[String], usize),
     ) {
         for (name, node) in children {
+            path.push(name.clone());
+            let before = dispatcher.nodes.len();
             let id = if node["type"] == "literal" {
                 dispatcher.literal(parent, name)
             } else {
                 dispatcher.argument(parent, name, argument_type(node, arguments))
             };
-            let level = node["permissions"]["permission"]["level"]
-                .as_str()
-                .and_then(|level| LEVELS.iter().position(|known| *known == level))
-                .unwrap_or(0) as u8;
-            dispatcher.requires(id, level);
+            // `CommandNode.addChild` merges into a node vanilla already has, which keeps its
+            // own requirement; a node the mod adds takes the usage's level.
+            if dispatcher.nodes.len() > before {
+                let level = node["permissions"]["permission"]["level"]
+                    .as_str()
+                    .and_then(|level| LEVELS.iter().position(|known| *known == level))
+                    .unwrap_or(0) as u8;
+                dispatcher.requires(id, level);
+            }
             if node["executable"] == true {
                 dispatcher.executes(id, handler);
                 dispatcher.requires_execution(
@@ -356,21 +454,48 @@ pub(super) fn register_dispatcher(
                         .as_u64()
                         .expect("runnable usage level") as u8,
                 );
+                on_executable(path, id);
             }
             if let Some(children) = node["children"].as_object() {
-                add(dispatcher, id, children, handler, arguments);
+                add(
+                    dispatcher,
+                    id,
+                    children,
+                    handler,
+                    arguments,
+                    path,
+                    on_executable,
+                );
             }
+            path.pop();
         }
     }
+    let mut bindings = HashMap::new();
     if let Some(children) = tree["children"].as_object() {
-        add(dispatcher, 0, children, handler, arguments);
+        add(
+            dispatcher,
+            0,
+            children,
+            handler,
+            arguments,
+            &mut Vec::new(),
+            &mut |path: &[String], id| {
+                if let Some(executors) = executors {
+                    bindings.insert(id, executors[path]);
+                }
+            },
+        );
+    }
+    if executors.is_some() {
+        dispatcher.replace_executor_bindings(bindings);
     }
 }
 
 /// The live player body, or a guest record outside a player swap.
 pub(super) enum PlayerRead<'a> {
     Acting {
-        mode: i32,
+        /// Server authoritative mode, or the local player's resolved `PlayerInfo` mode on a client.
+        mode: Option<i32>,
         body: Option<&'a PlayerMotion>,
         /// The player's stored abilities, when it is a server player's turn.
         abilities: Option<PlayerAbilities>,
@@ -389,15 +514,15 @@ impl PlayerRead<'_> {
         }
     }
 
-    fn mode(&self) -> i32 {
+    fn mode(&self) -> Option<i32> {
         match self {
             Self::Acting { mode, .. } => *mode,
-            Self::Guest(guest) => guest.game_mode,
+            Self::Guest(guest) => Some(guest.game_mode),
         }
     }
 
     fn creative(&self) -> bool {
-        self.mode() == 1
+        self.mode() == Some(1)
     }
 
     fn may_build(&self) -> bool {
@@ -406,7 +531,7 @@ impl PlayerRead<'_> {
                 abilities: Some(a), ..
             } => a.may_build,
             Self::Guest(guest) => guest.abilities.may_build,
-            Self::Acting { mode, .. } => *mode < 2,
+            Self::Acting { mode, .. } => mode.is_some_and(|m| m < 2),
         }
     }
 
@@ -443,7 +568,7 @@ impl PlayerRead<'_> {
                     flying_speed: body.flying_speed,
                     ..Default::default()
                 };
-                a.update_for_mode(*mode);
+                a.update_for_mode(mode.unwrap_or(0));
                 a.flying = body.flying;
                 a
             }
@@ -608,12 +733,15 @@ impl Game<'_> {
         host.hub.guests.update(gi, |guest| state.swap(guest));
         let play = host.play.insert(conn, Default::default());
         let menus = host.menus.insert(conn, Default::default());
-        // In a turn, so the setup's stack in hand gives the attack speed the charge is for.
-        let charged = !full_attack_charge
-            || self
-                .as_guest_at(gi, conn, Game::charge_attack_fully)
-                .is_ok();
-        let outcome = if charged {
+        // This body is created with the setup's equipment and never reaches a body tick.
+        // Install its modifiers before the first action or calculation of attack charge.
+        let initialized = self.as_guest_at(gi, conn, |game| {
+            game.put_equipment_modifiers();
+            if full_attack_charge {
+                game.charge_attack_fully();
+            }
+        });
+        let outcome = if initialized.is_ok() {
             self.perform_fake_action(gi, conn, action)
         } else {
             Err(ActionRefused::Busy)
@@ -731,7 +859,7 @@ impl Game<'_> {
                     point: hit.point,
                     inside: hit.inside,
                 };
-                self.guest_use_item_on(conn, gi, hit, hand)
+                self.guest_use_item_on(conn, gi, hit, hand, None)
             }
             PlayerAction::UseItem { hand } => self.guest_use_item(conn, gi, hand, None),
             PlayerAction::InteractOn {
@@ -884,16 +1012,11 @@ impl Game<'_> {
         }
     }
 
-    /// The entity id of player `uuid` where the shared resolver finds one.
-    pub(in crate::game) fn player_lookup_entity(&self, uuid: u128) -> Option<u32> {
-        self.player_lookup(uuid).map(|(_, entity)| entity)
-    }
-
     fn player_lookup(&self, uuid: u128) -> Option<(PlayerRead<'_>, u32)> {
         if self.lan_acting_uuid == Some(uuid) && !self.lan_acting_fake {
             return Some((
                 PlayerRead::Acting {
-                    mode: self.mode_id(),
+                    mode: Some(self.mode_id()),
                     body: self.player.as_ref(),
                     abilities: self.acting_abilities,
                     last_death: self.level.last_death.as_ref(),
@@ -901,12 +1024,13 @@ impl Game<'_> {
                 self.lan_acting_entity?,
             ));
         }
-        if let Some(guest) = self.lan.as_ref().and_then(|host| {
-            host.hub.guests.simulation_iter().find(|guest| {
-                guest.placed
-                    && guest.participates_online()
-                    && guest.uuid == uuid
-                    && !self.lan_guest_swaps.contains(&guest.conn)
+        if let Some(guest) = self.cloning_guest(uuid).or_else(|| {
+            self.lan.as_ref().and_then(|host| {
+                host.hub.guests.simulation_iter().find(|guest| {
+                    host.hub.online(guest)
+                        && guest.uuid == uuid
+                        && !self.lan_guest_swaps.contains(&guest.conn)
+                })
             })
         }) {
             return Some((PlayerRead::Guest(guest), guest.entity_id as u32));
@@ -922,7 +1046,7 @@ impl Game<'_> {
             let body = self.player.as_ref()?;
             return Some((
                 PlayerRead::Acting {
-                    mode: self.mode_id(),
+                    mode: Some(self.mode_id()),
                     body: Some(body),
                     abilities: self.acting_abilities,
                     last_death: self.level.last_death.as_ref(),
@@ -950,17 +1074,20 @@ impl Game<'_> {
 
     /// `player_handle_read` for the reads that work on both sides. On a
     /// client the local player (`Minecraft.player`) reads its own copy of
-    /// what the server sent (`LocalPlayer`): the game mode, food, abilities,
-    /// hotbar slot and experience. Any other player reads None there: the
-    /// client is not sent their state.
+    /// what the server sent (`LocalPlayer`): the entity's resolved `PlayerInfo`
+    /// game mode (`AbstractClientPlayer.gameMode`, None before `ADD_PLAYER`),
+    /// food, live `Abilities`, hotbar slot and experience. Any other player
+    /// reads None there: the client is not sent their state.
     pub(super) fn player_read_both(&self, player: PlayerRef) -> Option<PlayerRead<'_>> {
         if self.is_logical_server() {
             return self.player_handle_read(player);
         }
         (self.local_player()? == player).then(|| PlayerRead::Acting {
-            mode: self.mode_id(),
+            mode: self
+                .player_info_game_mode()
+                .map(sunrise_client::command::args::GameMode::id),
             body: self.player.as_ref(),
-            abilities: Some(self.client_abilities()),
+            abilities: self.client_abilities(),
             last_death: self.level.last_death.as_ref(),
         })
     }
@@ -994,22 +1121,14 @@ impl Game<'_> {
         }))
     }
 
-    /// The local player's `Abilities` on a client: what its game mode gives
-    /// (`GameType.updatePlayerAbilities`, `mayBuild` among them), then the
-    /// flags and speeds `ClientPacketListener.handlePlayerAbilities` took, except
-    /// flying, which follows the local body's prediction between packets.
-    fn client_abilities(&self) -> PlayerAbilities {
-        let mut a = PlayerAbilities::default();
-        a.update_for_mode(self.mode_id());
-        if let Some(p) = self.remote_abilities() {
-            a.invulnerable = p.flags & 1 != 0;
-            a.may_fly = p.flags & 4 != 0;
-            a.instabuild = p.flags & 8 != 0;
-            a.flying_speed = p.flying_speed;
-            a.walking_speed = p.walking_speed;
+    /// Reads live `Remote::abilities` with predicted `flying` and `flying_speed` from the body.
+    fn client_abilities(&self) -> Option<PlayerAbilities> {
+        let mut a = *self.remote_abilities()?;
+        if let Some(body) = self.player.as_ref() {
+            a.flying = body.flying;
+            a.flying_speed = body.flying_speed;
         }
-        a.flying = self.player.as_ref().is_some_and(|body| body.flying);
-        a
+        Some(a)
     }
 
     pub(super) fn player_handle_read(&self, player: PlayerRef) -> Option<PlayerRead<'_>> {
@@ -1019,7 +1138,7 @@ impl Game<'_> {
             && self.lan_acting_entity == Some(player.fields().entity.id())
         {
             return Some(PlayerRead::Acting {
-                mode: self.mode_id(),
+                mode: Some(self.mode_id()),
                 body: self.player.as_ref(),
                 abilities: self.acting_abilities,
                 last_death: self.level.last_death.as_ref(),
@@ -1065,13 +1184,14 @@ impl Game<'_> {
         }))
     }
 
-    /// `ServerPlayerGameMode.getGameModeForPlayer`; Paper `HumanEntity#getGameMode`.
-    /// None for stale, offline or unavailable players (including displaced outer players).
+    /// `ServerPlayerGameMode.getGameModeForPlayer` on a server; `AbstractClientPlayer.gameMode`
+    /// (resolved `PlayerInfo`) on a client. None for stale, offline or unavailable players
+    /// (including displaced outer players), and on a client before `ADD_PLAYER` resolves the
+    /// entity's `PlayerInfo`. Distinct from `player_abilities`, which reads `LocalPlayer.abilities`.
     pub(super) fn player_game_mode(&self, player: PlayerRef) -> Option<GameMode> {
-        match self.player_read_both(player)? {
-            PlayerRead::Acting { .. } => Some(self.mode),
-            PlayerRead::Guest(guest) => GameMode::from_id(guest.game_mode),
-        }
+        self.player_read_both(player)?
+            .mode()
+            .and_then(GameMode::from_id)
     }
 
     /// Changes a player's game mode as `ServerPlayer.setGameMode` and
@@ -1153,7 +1273,7 @@ impl Game<'_> {
             return false;
         }
         // The connection to tell: a parked guest's, or the acting guest's, whose state is in
-        // place for their turn (`leave_guest` stores the slot back but sends nothing). The host
+        // place for their turn (the put-back at the end of `guest_turn` stores the slot back but sends nothing). The host
         // has none.
         let conn = match self.player_handle_read(player) {
             Some(PlayerRead::Guest(guest)) => Some(guest.conn),
@@ -1222,9 +1342,10 @@ impl Game<'_> {
         (!(ran && dropped)).then_some(copy)
     }
 
-    /// `Player.isSpectator`; Paper `HumanEntity#getGameMode`.
+    /// `Player.isSpectator` (`gameMode() == GameType.SPECTATOR` on a client, authoritative
+    /// `ServerPlayerGameMode` on a server); Paper `HumanEntity#getGameMode`.
     pub(super) fn player_is_spectator(&self, player: PlayerRef) -> Option<bool> {
-        Some(self.player_read_both(player)?.mode() == 3)
+        Some(self.player_read_both(player)?.mode() == Some(3))
     }
 
     /// `Player.mayBuild`; Paper `HumanEntity#getGameMode`.
@@ -1282,23 +1403,32 @@ impl Game<'_> {
         ))
     }
 
-    /// A connected player's record, including one displaced by a nested turn.
+    /// A connected player's record, including a body removed for respawn or displaced by a turn.
     pub(super) fn online_player_record(&self, player: PlayerRef) -> Option<&Guest> {
         (self.native_lifecycle.epoch()? == player.entity().epoch()).then_some(())?;
-        self.lan
-            .as_ref()?
-            .hub
-            .online_players()
-            .find(|g| g.uuid == player.uuid() && g.entity_id as u32 == player.entity().id())
+        let guests = &self.lan.as_ref()?.hub.guests;
+        let guest = guests.get(guests.identity_index(player.uuid(), player.entity().id())?)?;
+        (guest.joined() && guest.participates_online()).then_some(guest)
+    }
+
+    pub(super) fn cloning_guest(&self, uuid: u128) -> Option<&Guest> {
+        let &(_, conn, _) = self
+            .player_state
+            .cloning_players
+            .iter()
+            .rev()
+            .find(|&&(player, _, _)| player == uuid)?;
+        self.command_guest(conn)
+            .filter(|_| !self.lan_guest_swaps.contains(&conn))
     }
 
     /// The stable name of a connected or acting player. None for a stale or
     /// unavailable player; displaced online players retain their identity.
-    pub(super) fn player_name(&self, player: PlayerRef) -> Option<String> {
+    pub(super) fn player_name(&self, player: PlayerRef) -> Option<&str> {
         if self.native_acting_player() == Some(player) {
-            return self.lan_acting_name.clone();
+            return self.lan_acting_name.as_deref();
         }
-        Some(self.online_player_record(player)?.name.clone())
+        Some(&self.online_player_record(player)?.name)
     }
 
     /// The dimension key of an online player (`ServerPlayer.level().dimension()`):
@@ -1356,30 +1486,38 @@ impl Game<'_> {
     /// The IP address the player connects from, without the port. Displaced connected
     /// players keep their address; an acting player with no known connection
     /// has an empty address. None for a stale or unavailable player.
-    pub(super) fn player_address(&self, player: PlayerRef) -> Option<String> {
+    pub(super) fn player_address(&self, player: PlayerRef) -> Option<&str> {
         if let Some(guest) = self.online_player_record(player) {
-            return Some(guest.address.ip().to_string());
+            return Some(guest.ip_address());
         }
-        (self.native_acting_player() == Some(player)).then(String::new)
+        (self.native_acting_player() == Some(player)).then_some("")
+    }
+
+    pub(super) fn player_virtual_host(&self, player: PlayerRef) -> Option<&VirtualHost> {
+        if !self.is_logical_server() {
+            return None;
+        }
+        self.online_player_record(player)?.sender.virtual_host()
     }
 
     /// The brand the player's client announced when it connected (`ServerPlayer.clientBrand`),
     /// empty when it sent none. Displaced connected players keep theirs; an acting player with
     /// no known connection has an empty one. None for a stale or unavailable player.
-    pub(super) fn player_client_brand(&self, player: PlayerRef) -> Option<String> {
+    pub(super) fn player_client_brand(&self, player: PlayerRef) -> Option<&str> {
         if let Some(guest) = self.online_player_record(player) {
-            return Some(guest.brand.clone());
+            return Some(&guest.brand);
         }
-        (self.native_acting_player() == Some(player)).then(String::new)
+        (self.native_acting_player() == Some(player)).then_some("")
     }
 
-    /// The plugin channels the player's client announced (`minecraft:register` less
-    /// `minecraft:unregister`), kept by its connection from configuration on.
-    pub(super) fn player_announced_channels(&self, player: PlayerRef) -> Option<Vec<String>> {
+    /// A snapshot of the plugin channels the player's client announced (`minecraft:register`
+    /// less `minecraft:unregister`), kept by its connection from configuration on.
+    pub(super) fn player_announced_channels(&self, player: PlayerRef) -> Option<Arc<[String]>> {
+        static EMPTY: LazyLock<Arc<[String]>> = LazyLock::new(Arc::default);
         if let Some(guest) = self.online_player_record(player) {
             return Some(guest.sender.announced.list());
         }
-        (self.native_acting_player() == Some(player)).then(Vec::new)
+        (self.native_acting_player() == Some(player)).then(|| Arc::clone(&EMPTY))
     }
 
     /// Validate identity without requiring a live body: sending to an online
@@ -1429,51 +1567,23 @@ impl Game<'_> {
         }
         true
     }
-    /// Shows `sidebar` on that player's screen, in place of the one shown
-    /// before, or takes it away (None). Only their client holds it: the
-    /// server's scoreboard, its `/scoreboard` and the other players don't
-    /// see it, and it is gone when they leave (a mod sends it again when
-    /// they come back). It takes the sidebar's place from an objective the
-    /// world shows there, for this player, until they rejoin. False when
-    /// they aren't on.
-    pub(super) fn native_sidebar(&mut self, uuid: u128, sidebar: Option<&NativeSidebar>) -> bool {
-        let objective = SIDEBAR_OBJECTIVE.to_owned();
-        // Removed first, so the new one's lines replace all the old ones.
-        let mut packets = vec![C::SetObjective(play::SetObjective {
-            name: objective.clone(),
-            method: 1,
-            display: None,
-        })];
-        if let Some(sidebar) = sidebar {
-            let title = component_nbt(&sidebar.title.component());
-            packets.push(C::SetObjective(play::SetObjective {
-                name: objective.clone(),
-                method: 0,
-                display: Some((title, 0, Some(play::NumberFormat::Blank))),
-            }));
-            // DisplaySlot.SIDEBAR.
-            packets.push(C::SetDisplayObjective(play::SetDisplayObjective {
-                slot: 1,
-                objective: objective.clone(),
-            }));
-            let lines = &sidebar.lines[..sidebar.lines.len().min(15)];
-            for (i, (left, right)) in lines.iter().enumerate() {
-                packets.push(C::SetScore(play::SetScore {
-                    // Highest first. The display name shows, not the owner;
-                    // an owner starting with '#' is hidden from the sidebar
-                    // (ScoreHolder's isHidden), and ':' is in no player's name.
-                    owner: format!("sunrise:line{i:02}"),
-                    objective: objective.clone(),
-                    score: (lines.len() - i) as i32,
-                    display: Some(component_nbt(&left.component())),
-                    number_format: Some(match right {
-                        Some(t) => play::NumberFormat::Fixed(component_nbt(&t.component())),
-                        None => play::NumberFormat::Blank,
-                    }),
-                }));
-            }
-        }
-        self.native_send_all(uuid, packets)
+    /// Resolve the physical recipient before converting any of the supplied text.
+    pub(super) fn player_set_sidebar(
+        &mut self,
+        player: PlayerRef,
+        sidebar: Option<Sidebar>,
+    ) -> Result<bool, TextFormError> {
+        let Some(conn) = self.online_player_record(player).map(|guest| guest.conn) else {
+            return Ok(false);
+        };
+        let contents = sidebar
+            .map(|sidebar| {
+                let items = self.res.item_defaults().entries();
+                SidebarContents::prepare(sidebar, &|item| items.contains_key(item)).map(Box::new)
+            })
+            .transpose()?;
+        self.after_commit(super::transactions::After::PersonalSidebar(conn, contents));
+        Ok(true)
     }
     /// The lines over and under that player's list of players (Tab):
     /// `ClientboundTabListPacket`, an empty text for none. False when they
@@ -1637,9 +1747,10 @@ impl Game<'_> {
         }))
     }
     /// `ServerPlayer.setRespawnPosition`, as `/spawnpoint` sets it (the
-    /// same `set_respawn_point`): `config`, or none for None. False for a
-    /// stale, unavailable or dead player, a dimension the game doesn't
-    /// have, a yaw that isn't finite and a change a mod canceled.
+    /// same `set_respawn_point`): `config`, or none for None. The removed
+    /// original is writable here during the respawn-position callback, even
+    /// after death. Otherwise dead players, stale handles, unknown levels,
+    /// non-finite yaw and canceled changes are refused.
     pub(super) fn player_set_respawn_config(
         &mut self,
         player: PlayerRef,
@@ -1661,8 +1772,24 @@ impl Game<'_> {
             }
             None => None,
         };
-        let mut set = false;
-        self.native_as_player_handle(player, |game| set = game.set_respawn_point(stored)) && set
+        // The cloning scope lends the removed original to PlayerRespawnPositionEvent.
+        // Allow this write without publishing the player or relaxing other dead-player writes.
+        match self.player_handle_read(player) {
+            Some(PlayerRead::Acting { .. }) => {
+                let mut set = false;
+                self.native_as_acting(|game| set = game.set_respawn_point(stored)) && set
+            }
+            Some(PlayerRead::Guest(guest))
+                if !guest.dead
+                    || self
+                        .cloning_guest(guest.uuid)
+                        .is_some_and(|original| original.conn == guest.conn) =>
+            {
+                let conn = guest.conn;
+                self.as_guest(conn, |game| game.set_respawn_point(stored)) == Some(true)
+            }
+            _ => false,
+        }
     }
     /// The ping the Tab list shows (`ServerCommonPacketListenerImpl.latency`, kept by the
     /// connection's keep-alives): 0 for a fake player and for an acting player with no known
@@ -1681,6 +1808,32 @@ impl Game<'_> {
         (self.native_acting_player() == Some(player) || self.player_handle_read(player).is_some())
             .then_some(0)
             .ok_or(Refusal::Stale)
+    }
+    pub(super) fn player_send_ping(
+        &mut self,
+        player: PlayerRef,
+        id: i32,
+    ) -> Result<(), mod_api::PlayerPingRefusal> {
+        use mod_api::PlayerPingRefusal as Refusal;
+        let Some(guest) = self.online_player_record(player) else {
+            return Err(
+                if self.native_acting_player() == Some(player)
+                    || self.player_handle_read(player).is_some()
+                {
+                    Refusal::NoConnection
+                } else {
+                    Refusal::Stale
+                },
+            );
+        };
+        if !guest.play_connection_open() {
+            return Err(Refusal::NoConnection);
+        }
+        guest
+            .sender
+            .try_send_play_ping(id)
+            .then_some(())
+            .ok_or(Refusal::SendFailed)
     }
     /// The permission level `player_hide` set, `None` when shown: kept by UUID, and read as
     /// stored before the world is opened to others (an unpublished single-player world runs a
@@ -1705,7 +1858,7 @@ impl Game<'_> {
     pub(super) fn player_nickname(
         &self,
         player: PlayerRef,
-    ) -> Result<Option<String>, mod_api::PlayerWorldRefusal> {
+    ) -> Result<Option<&str>, mod_api::PlayerWorldRefusal> {
         use mod_api::PlayerWorldRefusal as Refusal;
         if !self.is_logical_server() {
             return Err(Refusal::Client);
@@ -1715,7 +1868,7 @@ impl Game<'_> {
         if !hub.online_players().any(|g| g.uuid == uuid) {
             return Err(Refusal::Stale);
         }
-        Ok(hub.nicknames.get(&uuid).cloned())
+        Ok(hub.nicknames.get(&uuid).map(String::as_str))
     }
     /// Hides that player (a vanish) from the players below permission
     /// `level`, or shows them again (None): from the next tick those players
@@ -1797,23 +1950,33 @@ impl Game<'_> {
         super::dedicated::events::record("announce", name, uuid, json!({ "message": message }));
         true
     }
-    /// A command's success feedback, routed to its originating source using
-    /// vanilla's silence, send-command-feedback and block/cart track-output rules.
-    pub(super) fn native_feedback(&mut self, line: Text) {
+    /// A command's success feedback: `CommandSourceStack.sendSuccess(line,
+    /// broadcast_to_admins)` from the executor's source, the line to its
+    /// originating source and, with `broadcast_to_admins`, the other operators
+    /// and the log (`send_success`). The executing level is in place: the
+    /// entity's name is read there, the origin block or minecart in its own.
+    pub(super) fn native_feedback(&mut self, line: Text, broadcast_to_admins: bool) {
+        let source = self.command_source.unwrap_or_else(|| self.player_source());
+        self.with_source(source, |game| game.send_success(line, broadcast_to_admins));
+    }
+    /// `CommandSourceStack.sendFailure` for a mod's executor: the red line to the originating
+    /// source, using vanilla's silence and block/cart track-output rules. The command's result
+    /// is whatever the executor returns.
+    pub(super) fn native_failure(&mut self, line: Text) {
         let source = self.command_source.unwrap_or_else(|| self.player_source());
         self.with_source(
             super::commands::execute::Source {
                 dimension: source.origin_dimension,
                 ..source
             },
-            |game| game.feedback_unbroadcast(line),
+            |game| game.command_failure(line),
         );
     }
     /// The player whose action or command a hook hears, as their state is
-    /// swapped in (`native_run_mod_command`, `native_right_click_block`,
+    /// swapped in (command executors, `native_right_click_block`,
     /// `native_use_on`, `native_break_block`...): None outside such a
     /// hook.
-    pub(super) fn native_acting_player(&self) -> Option<PlayerRef> {
+    pub(in crate::game) fn native_acting_player(&self) -> Option<PlayerRef> {
         self.player.as_ref()?;
         self.lan_acting_name.as_ref()?;
         self.lan_acting_permission?;
@@ -2001,9 +2164,7 @@ impl Game<'_> {
         // With no guest's turn running, `native_acting_id` is the world's owner: on a server
         // thread that owner is a guest too, whose state is theirs, not the `Game`'s own.
         let conn = self
-            .lan
-            .as_ref()
-            .and_then(|host| host.hub.holder_guest(uuid, self.dim.id()))
+            .native_player_holder(uuid)
             .filter(|g| !g.dead)
             .map(|g| g.conn);
         match conn {
@@ -2013,13 +2174,48 @@ impl Game<'_> {
         }
     }
 
+    fn native_player_holder(&self, uuid: u128) -> Option<&Guest> {
+        self.cloning_guest(uuid)
+            .or_else(|| self.lan.as_ref()?.hub.holder_guest(uuid, self.dim.id()))
+    }
+
+    /// Resolve a UUID-based item place in the acting state or a parked guest's own record.
+    /// Unlike a write, a read never initializes a body or the level owner's UUID.
+    pub(super) fn native_item_place_player(&self, uuid: u128) -> Option<PlayerRead<'_>> {
+        if self.lan_acting_uuid != Some(uuid) {
+            if let Some(guest) = self.native_player_holder(uuid) {
+                return (!guest.dead && !self.lan_guest_swaps.contains(&guest.conn))
+                    .then_some(PlayerRead::Guest(guest));
+            }
+            if self.lan_acting_uuid.is_some()
+                || self
+                    .level
+                    .player_uuid
+                    .map(sunrise_client::lan::playerdata::ints_uuid)
+                    != Some(uuid)
+            {
+                return None;
+            }
+        }
+        Some(PlayerRead::Acting {
+            mode: Some(self.mode_id()),
+            body: Some(self.native_live_acting_body()?),
+            abilities: self.acting_abilities,
+            last_death: self.level.last_death.as_ref(),
+        })
+    }
+
+    pub(super) fn native_live_acting_body(&self) -> Option<&PlayerMotion> {
+        let body = self.player.as_ref()?;
+        if body.health.health() <= 0.0 {
+            return None;
+        }
+        Some(body)
+    }
+
     /// `f` for the acting player, whose state is in place: false when they are dead.
     fn native_as_acting(&mut self, f: impl FnOnce(&mut Self)) -> bool {
-        if self
-            .player
-            .as_ref()
-            .is_none_or(|p| p.health.health() <= 0.0)
-        {
+        if self.native_live_acting_body().is_none() {
             return false;
         }
         f(self);
@@ -2027,9 +2223,9 @@ impl Game<'_> {
     }
 
     /// Whether the acting player is in the level in place: a guest's own level is their hub
-    /// record's, also when a hook of another level borrows them into its turn. What lands
-    /// in the world at a player (a thrown stack, an overflow drop, a sound, a broken block) is
-    /// left out for a player in another level, whose inventory and data writes still hold.
+    /// record's, also when a hook of another level borrows them into its turn. A raw throw,
+    /// equip sound or block break requires that level in place; `/give`'s effects replay in
+    /// that level separately.
     pub(in crate::game) fn acting_in_level_in_place(&self) -> bool {
         let Some(conn) = self.lan_acting else {
             return true;
@@ -2157,24 +2353,71 @@ impl Game<'_> {
     /// The shared command-node executor, also reached by functions and `execute`.
     pub(super) fn run_native_command(&mut self, context: Context) -> super::commands::R<i32> {
         use super::commands::err;
+        use mod_api::__private::RetainedFailure;
+        // Argument resolution uses node IDs from the parse. Never use them against a
+        // replacement tree, even if the new tree has the same command at the same ID.
+        let executor = context
+            .executor
+            .filter(|&key| self.ui.dispatcher.0.owns_executor(key))
+            .and_then(|key| {
+                self.native_commands
+                    .registered
+                    .as_ref()?
+                    .executors
+                    .get(key.slot())
+            })
+            .filter(|executor| executor.callback.enabled())
+            .ok_or_else(|| err("command.unknown.command", &[]))?;
+        let callback = executor.callback.clone();
+        let call = Arc::clone(&executor.call);
         let command = self.resolve_native_command(context)?;
         let origin = self.native_command_origin(self.ui.registries.permission)?;
-        let mut ran = false;
-        self.native_run_mod_command(&origin, &command, &mut ran);
-        if ran {
-            Ok(1)
+        // Isolate journaled writes when the caller already has a transaction. An ordinary
+        // command is not implicitly transactional, and writes outside the journal stay put.
+        let result = if self.has_open_transaction() {
+            self.storage_transaction(|game, _| callback.call(|| call(game, &origin, &command)))
         } else {
-            Err(err("command.unknown.command", &[]))
+            callback.call(|| call(self, &origin, &command))
+        };
+        match result {
+            Ok(Ok(value)) => Ok(value),
+            // Failure text can reach a packet or a saved command block. An
+            // invalid component still reports an ordinary failed command.
+            Ok(Err(message)) => Err(sunrise_client_lib::api_text::to_serialized_engine(&message)
+                .map_or_else(
+                    |_| err("command.failed", &[]),
+                    sunrise_client::command::CommandError::new,
+                )),
+            Err(RetainedFailure::Disabled) => Err(err("command.unknown.command", &[])),
+            Err(RetainedFailure::Panicked) => {
+                Err(sunrise_client::command::CommandError::unexpected())
+            }
         }
     }
 
-    fn native_command_player_target(&self, target: super::commands::Target) -> Option<PlayerRef> {
+    pub(super) fn native_command_player_target(
+        &self,
+        target: super::commands::Target,
+    ) -> Option<PlayerRef> {
         use super::commands::Target;
         match target {
             Target::Player => self.native_acting_player(),
-            Target::Guest(conn) => self
-                .command_guest(conn)
-                .and_then(|guest| self.player(guest.uuid)),
+            Target::Guest(conn) if self.lan_acting == Some(conn) => self.native_acting_player(),
+            // The selected guest's own identity, a fake player's too (`execute on origin` of
+            // its projectile). `player_handle_read` keeps the checks: a real guest must be
+            // online, not displaced (or the one being cloned) and still that entity; a fake
+            // must be placed and not displaced.
+            Target::Guest(conn) => {
+                let guest = self.command_guest(conn)?;
+                let player = mod_api::__private::game::player_ref(
+                    mod_api::EntityRef::new(
+                        self.native_lifecycle.epoch()?,
+                        u32::try_from(guest.entity_id).ok()?,
+                    ),
+                    guest.uuid,
+                );
+                self.player_handle_read(player).map(|_| player)
+            }
             _ => None,
         }
     }
@@ -2206,6 +2449,7 @@ impl Game<'_> {
                 Arg::Str(text) if matches!(ty, Some(ArgType::Nbt)) => nbt_value(&text)?,
                 Arg::Str(value) => Value::String(value),
                 Arg::Int(value) => Value::Integer(value),
+                Arg::Long(value) => Value::Long(value),
                 Arg::Double(value) => Value::Number(value),
                 Arg::Bool(value) => Value::Boolean(value),
                 Arg::Entity(selector) => {
@@ -2295,26 +2539,28 @@ impl Game<'_> {
         Ok(self.native_invocation(context.literals, arguments))
     }
 
-    /// A guest's command for the mods, inside their swap
-    /// (`run_guest_command`): true when one ran it.
-    pub(super) fn perform_native_command(&mut self, conn: u32, permission: u8, line: &str) -> bool {
-        let Some(host) = &self.lan else {
-            return false;
-        };
-        if self
-            .native_commands
-            .level(line)
-            .is_none_or(|level| level > permission)
-        {
-            return false;
+    /// A guest's command for the mods, inside their swap (`run_guest_command`).
+    /// `None` leaves dispatch to the caller; `Some(false)` is a handled failure.
+    pub(super) fn perform_native_command(
+        &mut self,
+        conn: u32,
+        permission: u8,
+        line: &str,
+        quiet: bool,
+    ) -> Option<bool> {
+        let host = self.lan.as_ref()?;
+        if self.native_commands.level(line)? > permission {
+            return None;
         }
-        if host.hub.guest(conn).is_none() {
-            return false;
-        }
+        host.hub.guest(conn)?;
         let previous = std::mem::replace(&mut self.ui.registries.permission, permission);
-        self.run_command(line);
+        let ok = if quiet {
+            self.run_command_quietly(line)
+        } else {
+            self.run_command(line)
+        };
         self.ui.registries.permission = previous;
-        true
+        Some(ok)
     }
 }
 
@@ -2505,6 +2751,7 @@ mod tests {
         game.options.dedicated = Some(Vec::new());
         let at = sunrise_core::geometry::Vec3::new(1.0, 70.0, 1.0);
         game.orbs.push(sunrise_client::entities::ExperienceOrb {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
             rotation: [0.0, 0.0],
@@ -2515,7 +2762,7 @@ mod tests {
             velocity: sunrise_core::geometry::Vec3::ZERO,
             value: 3,
             age: 0,
-            on_ground: true,
+            ground: sunrise_world::ground_support::GroundState::from_ground_flag(true),
             count: 1,
             fire_ticks: 0,
             ticks: 0,
@@ -2569,7 +2816,7 @@ mod tests {
         }
     }
 
-    fn with_command_sources(test: impl FnOnce(&mut Game<'_>)) {
+    pub(super) fn with_command_sources(test: impl FnOnce(&mut Game<'_>)) {
         use sunrise_client::{
             chunk::Chunk, chunk::block_entity::BlockEntity, command_block::CommandBlock,
         };
@@ -2624,7 +2871,9 @@ mod tests {
                     block.track_output = track;
                     block.last_output = None;
                 }
-                game.with_source(source, |game| game.native_feedback(Text::literal("answer")));
+                game.with_source(source, |game| {
+                    game.native_feedback(Text::literal("answer"), false)
+                });
                 let Some(BlockEntity::CommandBlock(block)) =
                     game.world.block_entities.get(&(1, 64, 1))
                 else {
@@ -2639,7 +2888,7 @@ mod tests {
                     block: None,
                     ..source
                 },
-                |game| game.native_feedback(Text::literal("silent")),
+                |game| game.native_feedback(Text::literal("silent"), false),
             );
             assert!(game.chat_capture.take().unwrap().is_empty());
             assert!(game.command_source.is_none());
@@ -2779,7 +3028,7 @@ mod tests {
         let mut guest = player_guest();
         guest.abilities.flying_speed = 0.08;
         let read = PlayerRead::Guest(&guest);
-        assert_eq!(read.mode(), 0);
+        assert_eq!(read.mode(), Some(0));
         assert_eq!(
             read.food(),
             None,
@@ -2803,7 +3052,7 @@ mod tests {
         guest.abilities.update_for_mode(1);
         guest.abilities.flying = true;
         let read = PlayerRead::Guest(&guest);
-        assert_eq!(read.mode(), 1);
+        assert_eq!(read.mode(), Some(1));
         assert_eq!(
             read.abilities(),
             Some(mod_api::PlayerAbilities::from(
@@ -2825,7 +3074,7 @@ mod tests {
     }
 
     fn tree(commands: &[mod_api::Command]) -> (Value, HashMap<String, u8>, Vec<String>) {
-        command_tree(commands, |name| name == "give", &HashMap::new())
+        command_tree(commands, &Dispatcher::new(), &HashMap::new())
     }
 
     fn stack(item: &str, count: u32) -> Option<ItemStack> {
@@ -2888,6 +3137,106 @@ mod tests {
         assert!(inventory_add(&mut inv, &mut off, 0, 64, &mut apple));
         assert!(off.is_none(), "never into an empty off hand (getFreeSlot)");
         assert_eq!(apple.count, 3);
+    }
+
+    /// The game's `Inventory.add` (pickups, `/give`, a bucket's or a bottle's result) takes
+    /// its slots from `getSlotWithRemainingSpace` and `getFreeSlot`
+    /// (`sunrise_client::menu::{slot_with_remaining_space, free_slot}`): one dirt at a time
+    /// lands where they answer and nowhere else, in vanilla's order (the selected slot, the
+    /// off hand, the main slots, then the first empty one).
+    #[test]
+    fn every_added_item_lands_where_the_slot_pickers_answer() {
+        use super::super::inventory_add;
+        use sunrise_client::menu::{OFFHAND, free_slot, slot_with_remaining_space};
+        let mut inv = vec![stack("minecraft:stone", 64); 36];
+        for (slot, have) in [
+            (0, stack("minecraft:stone", 5)),
+            (1, None),
+            (2, None),
+            (3, stack("minecraft:dirt", 63)),
+            (7, stack("minecraft:dirt", 63)),
+            (20, None),
+        ] {
+            inv[slot] = have;
+        }
+        let mut off = stack("minecraft:dirt", 62);
+        let selected = 3;
+        let dirt = stack("minecraft:dirt", 1).unwrap();
+        let mut landed = Vec::new();
+        for _ in 0..6 {
+            let answer = slot_with_remaining_space(&inv, off.as_ref(), selected, &dirt, 64)
+                .or_else(|| free_slot(&inv))
+                .unwrap();
+            let (mut inv_after, mut off_after) = (inv.clone(), off.clone());
+            let cell = if answer == OFFHAND {
+                &mut off_after
+            } else {
+                &mut inv_after[answer]
+            };
+            match cell {
+                Some(have) => have.count += 1,
+                empty => *empty = Some(dirt.clone()),
+            }
+            let mut one = dirt.clone();
+            assert!(!inventory_add(&mut inv, &mut off, selected, 64, &mut one));
+            assert_eq!((&inv, &off), (&inv_after, &off_after), "into {answer}");
+            landed.push(answer);
+        }
+        assert_eq!(landed, [3, OFFHAND, OFFHAND, 7, 1, 1]);
+    }
+
+    /// A mod's rows that keep hotbar slots 6 to 8 free change the slot the game's
+    /// `Inventory.add` takes (replaced on this thread through `rule_replacements::ADD_SLOT`):
+    /// a dirt passes the stack in slot 6 with room and the selected slot 7 for slot 0.
+    #[test]
+    fn a_replaced_slot_choice_reaches_the_games_inventory_add() {
+        use super::super::inventory_add;
+        use super::super::rule_replacements::{ADD_SLOT, replaced};
+        use sunrise_client::menu::OFFHAND;
+        fn open(i: usize) -> bool {
+            !(6..=8).contains(&i)
+        }
+        fn locked(
+            items: &[Option<ItemStack>],
+            offhand: Option<&ItemStack>,
+            selected: usize,
+            stack: &ItemStack,
+            max: u32,
+        ) -> Option<usize> {
+            let has = |have: Option<&ItemStack>| {
+                have.is_some_and(|have| have.same_item_same_components(stack) && have.count < max)
+            };
+            if open(selected) && has(items[selected].as_ref()) {
+                Some(selected)
+            } else if has(offhand) {
+                Some(OFFHAND)
+            } else {
+                (0..items.len())
+                    .find(|&i| open(i) && has(items[i].as_ref()))
+                    .or_else(|| (0..items.len()).find(|&i| open(i) && items[i].is_none()))
+            }
+        }
+        let mut inv = vec![None; 36];
+        inv[6] = stack("minecraft:dirt", 10);
+        let mut vanilla = inv.clone();
+        let mut off = None;
+        let mut one = stack("minecraft:dirt", 1).unwrap();
+        let left = replaced(&ADD_SLOT, locked, || {
+            inventory_add(&mut inv, &mut off, 7, 64, &mut one)
+        });
+        assert!(!left);
+        assert_eq!(
+            (&inv[0], &inv[6], &inv[7]),
+            (
+                &stack("minecraft:dirt", 1),
+                &stack("minecraft:dirt", 10),
+                &None
+            )
+        );
+        // Without the rows, vanilla's slot: the stack in slot 6 with room.
+        let mut one = stack("minecraft:dirt", 1).unwrap();
+        assert!(!inventory_add(&mut vanilla, &mut off, 7, 64, &mut one));
+        assert_eq!(vanilla[6], stack("minecraft:dirt", 11));
     }
 
     #[test]
@@ -3147,7 +3496,7 @@ mod tests {
         )]);
         let (tree, _, problems) = super::command_tree(
             &[mod_api::Command::new("probe <value:test:hostile>")],
-            |_| false,
+            &sunrise_client::command::Dispatcher::new(),
             &arguments,
         );
         assert!(problems.is_empty());
@@ -3192,7 +3541,7 @@ mod tests {
         )]);
         let (_, _, problems) = super::command_tree(
             &[mod_api::Command::new("probe <value:test:panic>")],
-            |_| false,
+            &sunrise_client::command::Dispatcher::new(),
             &arguments,
         );
         assert_eq!(problems.len(), 1);
@@ -3220,7 +3569,7 @@ mod tests {
 
         let (tree, _, problems) = super::command_tree(
             &[mod_api::Command::new("machine use <machine:test:machine>")],
-            |_| false,
+            &sunrise_client::command::Dispatcher::new(),
             &arguments,
         );
         assert!(problems.is_empty(), "{problems:?}");
@@ -3341,7 +3690,7 @@ mod tests {
         )]);
         let (tree, _, problems) = super::command_tree(
             &[mod_api::Command::new("replace <pattern:test:pattern>")],
-            |_| false,
+            &sunrise_client::command::Dispatcher::new(),
             &arguments,
         );
         assert!(problems.is_empty(), "{problems:?}");
@@ -3403,7 +3752,7 @@ mod tests {
         )]);
         let (tree, _, problems) = super::command_tree(
             &[mod_api::Command::new("fill <blocks:test:mixed>")],
-            |_| false,
+            &sunrise_client::command::Dispatcher::new(),
             &arguments,
         );
         assert!(problems.is_empty(), "{problems:?}");
@@ -3439,7 +3788,7 @@ mod tests {
                 mod_api::Command::new("worse <kind:resource:a:b:c>"),
                 mod_api::Command::new("worst <kind:resource:a/b:c>"),
             ],
-            |_| false,
+            &sunrise_client::command::Dispatcher::new(),
             &arguments,
         );
         assert_eq!(problems.len(), 3, "{problems:?}");
@@ -3557,143 +3906,397 @@ mod tests {
 
     #[test]
     #[ignore = "daily"]
-    fn command_refresh_rebuilds_the_typed_dispatcher_only_on_request() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        struct ChangingCommands {
-            changed: Arc<AtomicBool>,
-            registrations: Arc<AtomicUsize>,
-        }
-        #[mod_api::__subscriptions]
-        impl mod_api::Hooks for ChangingCommands {
-            fn register_commands(
-                &self,
-                _: &mut dyn mod_api::ServerHost,
-                event: &mut mod_api::RegisterCommandsEvent<'_>,
-            ) {
-                self.registrations.fetch_add(1, Ordering::Relaxed);
-                event.commands.push(mod_api::Command::new(
-                    if self.changed.load(Ordering::Relaxed) {
-                        "after <n:integer>"
-                    } else {
-                        "before"
-                    },
-                ));
-            }
-            fn player_commands_sent(
-                &self,
-                _: &mut dyn mod_api::ServerHost,
-                event: &mut mod_api::PlayerCommandsSentEvent<'_>,
-            ) {
-                event.names.retain(|name| name != "before");
-            }
-        }
-        let changed = Arc::new(AtomicBool::new(false));
-        let registrations = Arc::new(AtomicUsize::new(0));
-        mod_platform::testing::with_mods(
-            vec![mod_api::ModEntry::new(
-                "refresh",
-                Box::new(ChangingCommands {
-                    changed: changed.clone(),
-                    registrations: registrations.clone(),
-                }),
-            )]
-            .into(),
+    fn panicking_command_executors_keep_other_usages_and_only_undo_journaled_writes() {
+        crate::game::in_own_process(
+            "game::native_server::tests::panicking_command_executors_keep_other_usages_and_only_undo_journaled_writes",
             || {
-                super::super::native_guest_turn_tests::with_guests(|game| {
-                    game.build_registries();
-                    game.register_native_commands();
-                    assert_eq!(registrations.load(Ordering::Relaxed), 1);
-                    changed.store(true, Ordering::Relaxed);
-                    game.register_native_commands();
-                    assert_eq!(registrations.load(Ordering::Relaxed), 1);
-                    let registered = game.native_commands.registered.as_ref().unwrap();
-                    assert!(registered.levels.contains_key("before"));
-                    mod_api::Commands::refresh_commands(game);
-                    mod_api::Commands::refresh_commands(game);
-                    assert_eq!(
-                        registrations.load(Ordering::Relaxed),
-                        1,
-                        "requests are deferred"
-                    );
-                    game.register_native_commands();
-                    assert!(!game.native_commands.refresh);
-                    assert_eq!(
-                        registrations.load(Ordering::Relaxed),
-                        2,
-                        "requests coalesce"
-                    );
-                    let commands = game.native_commands.registered.as_ref().unwrap();
-                    assert!(!commands.levels.contains_key("before"));
-                    assert!(commands.levels.contains_key("after"));
-                    let dispatcher = &game.ui.dispatcher.0;
-                    assert!(
-                        dispatcher
-                            .parse("after 7", &game.ui.registries)
-                            .executable()
-                            .is_ok()
-                    );
-                    assert!(
-                        dispatcher
-                            .parse("after nope", &game.ui.registries)
-                            .executable()
-                            .is_err()
-                    );
-                    assert!(
-                        dispatcher
-                            .parse("before", &game.ui.registries)
-                            .executable()
-                            .is_err()
-                    );
-                    game.register_native_commands();
-                    assert_eq!(registrations.load(Ordering::Relaxed), 2);
-                    mod_api::Commands::refresh_commands(game);
-                    game.register_native_commands();
-                    assert_eq!(registrations.load(Ordering::Relaxed), 3);
-                    assert!(game.native_commands.level("after").is_some());
-                    changed.store(false, Ordering::Relaxed);
-                    game.reload_datapacks(false, &game.level.enabled_features.clone())
-                        .unwrap();
-                    let (sent, received) = std::sync::mpsc::channel();
-                    game.lan
-                        .as_mut()
-                        .unwrap()
-                        .hub
-                        .update_guest(12, |guest| {
-                            guest.sender =
-                                sunrise_client::lan::PlayerSender::new(sent, Default::default());
-                        })
-                        .unwrap();
-                    game.register_native_commands();
-                    let packet = received
-                        .try_iter()
-                        .flat_map(|out| match out {
-                            sunrise_client::lan::Out::Packet(body) => vec![body],
-                            sunrise_client::lan::Out::Packets(bodies) => bodies,
-                            sunrise_client::lan::Out::Disconnect(_) => {
-                                panic!("reload disconnected guest")
+                use std::sync::atomic::AtomicUsize;
+                const JOURNALED: [i32; 3] = [2, 70, 2];
+                const UNJOURNALED: [i32; 3] = [3, 70, 2];
+                const ABANDONED: [i32; 3] = [4, 70, 2];
+                const REFUSED: [i32; 3] = [5, 70, 2];
+                struct Executors(Arc<AtomicUsize>);
+                #[mod_api::__subscriptions]
+                impl mod_api::Hooks for Executors {
+                    fn register_commands(
+                        &self,
+                        _: &mut dyn mod_api::ServerHost,
+                        event: &mut mod_api::RegisterCommandsEvent<'_>,
+                    ) {
+                        for (usage, pos, opens_root) in [
+                            ("journalboom", JOURNALED, false),
+                            ("plainboom", UNJOURNALED, false),
+                            ("rootboom", ABANDONED, true),
+                            ("ordinaryfailure", REFUSED, true),
+                        ] {
+                            let refuses = self.0.clone();
+                            event.commands.push(mod_api::Command::new(usage).executes(
+                                move |host, _, _| {
+                                    let mutate = |host: &mut dyn mod_api::ServerHost| {
+                                        let level = host.level("minecraft:overworld").unwrap();
+                                        let state = host.block_state_id("minecraft:stone").unwrap();
+                                        if level.set_block(
+                                            host,
+                                            pos,
+                                            state,
+                                            mod_api::BlockUpdateFlags::NONE,
+                                        ) != Ok(true)
+                                        {
+                                            return Err(
+                                                mod_api::Text::literal("block not placed").into()
+                                            );
+                                        }
+                                        if usage == "ordinaryfailure" {
+                                            refuses.fetch_add(1, Ordering::Relaxed);
+                                            return Err(
+                                                mod_api::Text::literal("ordinary failure").into()
+                                            );
+                                        }
+                                        panic!("executor regression panic");
+                                    };
+                                    if opens_root {
+                                        let res = mod_api::HostTransaction::transaction(
+                                            host,
+                                            |host, _| {
+                                                mod_api::HostTransaction::transaction(
+                                                    host,
+                                                    |host, _| mutate(host),
+                                                )
+                                                .map_err(|e| match e {
+                                                    mod_api::TransactionError::Aborted(msg) => msg,
+                                                    _ => mod_api::Text::literal("tx failed").into(),
+                                                })
+                                            },
+                                        );
+                                        match res {
+                                            Ok(()) => Ok(0),
+                                            Err(mod_api::TransactionError::Aborted(msg)) => {
+                                                Err(msg)
+                                            }
+                                            Err(_) => {
+                                                Err(mod_api::Text::literal("tx failed").into())
+                                            }
+                                        }
+                                    } else {
+                                        mutate(host).map(|()| 0)
+                                    }
+                                },
+                            ));
+                        }
+                        event
+                            .commands
+                            .push(mod_api::Command::new("worksagain").executes(|_, _, _| Ok(7)));
+                    }
+                }
+                let refuses = Arc::new(AtomicUsize::new(0));
+                mod_platform::testing::with_mods(
+                    vec![mod_api::ModEntry::new(
+                        "executor_owner",
+                        Box::new(Executors(refuses.clone())),
+                    )]
+                    .into(),
+                    || {
+                        super::super::native_entity_refs::tests::with_game(|game| {
+                            game.options.dedicated = Some(Vec::new());
+                            game.world.chunks.insert(
+                                (0, 0),
+                                Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)),
+                            );
+                            let air = game.world.block(JOURNALED[0], JOURNALED[1], JOURNALED[2]);
+                            let stone = game
+                                .pack
+                                .assets
+                                .registry
+                                .default_state("minecraft:stone")
+                                .unwrap();
+                            game.build_registries();
+                            game.build_native_commands(&[]);
+
+                            game.storage_transaction(|game, outer| {
+                                let (failure, outcome) = game.recording_command_outcome(|game| {
+                                    game.execute_line("journalboom", game.server_source())
+                                });
+                                assert_eq!(failure.unwrap_err().key, "command.failed");
+                                assert_eq!(outcome, None);
+                                assert_eq!(
+                                    game.world.block(JOURNALED[0], JOURNALED[1], JOURNALED[2]),
+                                    air
+                                );
+                                assert!(mod_api::ServerHost::transaction_matches(
+                                    game,
+                                    Some(outer)
+                                ));
+                                Ok::<_, ()>(())
+                            })
+                            .unwrap();
+                            let failure = game
+                                .execute_line("plainboom", game.server_source())
+                                .unwrap_err();
+                            assert!(failure.unexpected);
+                            assert_eq!(
+                                game.world
+                                    .block(UNJOURNALED[0], UNJOURNALED[1], UNJOURNALED[2]),
+                                stone
+                            );
+
+                            let failure = game
+                                .execute_line("rootboom", game.server_source())
+                                .unwrap_err();
+                            assert!(failure.unexpected);
+                            assert!(!game.has_open_transaction());
+                            assert_eq!(
+                                game.world.block(ABANDONED[0], ABANDONED[1], ABANDONED[2]),
+                                air
+                            );
+
+                            game.build_native_commands(&[]);
+                            for usage in ["journalboom", "rootboom"] {
+                                assert_eq!(
+                                    game.execute_line(usage, game.server_source())
+                                        .unwrap_err()
+                                        .key,
+                                    "command.unknown.command"
+                                );
                             }
-                        })
-                        .find_map(|body| {
-                            let mut reader = sunrise_protocol::buf::Reader::new(&body);
-                            let id = reader.varint().unwrap();
-                            match C::decode(id, &body[reader.position()..]).unwrap() {
-                                C::Commands(packet) => Some(packet),
-                                _ => None,
+                            assert_eq!(
+                                game.execute_line("worksagain", game.server_source()),
+                                Ok(7)
+                            );
+                            for _ in 0..2 {
+                                assert_eq!(
+                                    game.execute_line("ordinaryfailure", game.server_source())
+                                        .unwrap_err()
+                                        .message
+                                        .plain(),
+                                    "ordinary failure"
+                                );
+                                assert!(!game.has_open_transaction());
+                                assert_eq!(
+                                    game.world.block(REFUSED[0], REFUSED[1], REFUSED[2]),
+                                    air
+                                );
                             }
+                            assert_eq!(refuses.load(Ordering::Relaxed), 2);
+                            assert_eq!(
+                                mod_api::__private::take_hook_panics(),
+                                [mod_api::__private::HookPanicReport {
+                                    mod_id: "executor_owner",
+                                    hook: "command_executor",
+                                }; 3]
+                            );
                         })
-                        .expect("reload must deliver a command tree");
-                    let names: Vec<_> = packet.nodes[packet.root as usize]
-                        .children
-                        .iter()
-                        .map(|&i| packet.nodes[i as usize].name.as_str())
-                        .collect();
-                    assert!(!names.is_empty());
-                    assert!(
-                        !names.contains(&"before"),
-                        "new reload root must be filtered"
-                    );
-                    assert!(!names.contains(&"after"), "old root must be retired");
-                })
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn command_refresh_rebuilds_the_typed_dispatcher_only_on_request() {
+        crate::game::in_own_process(
+            "game::native_server::tests::command_refresh_rebuilds_the_typed_dispatcher_only_on_request",
+            || {
+                use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+                struct ChangingCommands {
+                    changed: Arc<AtomicBool>,
+                    registrations: Arc<AtomicUsize>,
+                    calls: Arc<Mutex<Vec<Option<&'static str>>>>,
+                    replacement: bool,
+                }
+                #[mod_api::__subscriptions]
+                impl mod_api::Hooks for ChangingCommands {
+                    fn register_commands(
+                        &self,
+                        _: &mut dyn mod_api::ServerHost,
+                        event: &mut mod_api::RegisterCommandsEvent<'_>,
+                    ) {
+                        let changed = self.changed.load(Ordering::Relaxed);
+                        if !self.replacement {
+                            self.registrations.fetch_add(1, Ordering::Relaxed);
+                            let usage = if changed {
+                                "after <n:integer>"
+                            } else {
+                                "before"
+                            };
+                            event
+                                .commands
+                                .push(mod_api::Command::new(usage).executes(|_, _, _| Ok(1)));
+                        }
+                        if changed == self.replacement {
+                            let calls = self.calls.clone();
+                            let result = if self.replacement { 37 } else { 0 };
+                            event
+                                .commands
+                                .push(mod_api::Command::new("retained").executes(
+                                    move |_, _, _| {
+                                        calls
+                                            .lock()
+                                            .unwrap()
+                                            .push(mod_api::content::crash::current_native_mod());
+                                        Ok(result)
+                                    },
+                                ));
+                        }
+                    }
+                    fn player_commands_sent(
+                        &self,
+                        _: &mut dyn mod_api::ServerHost,
+                        event: &mut mod_api::PlayerCommandsSentEvent<'_>,
+                    ) {
+                        event.names.retain(|name| name != "before");
+                    }
+                }
+                let changed = Arc::new(AtomicBool::new(false));
+                let registrations = Arc::new(AtomicUsize::new(0));
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                mod_platform::testing::with_mods(
+                    [("refresh", false), ("replacement", true)]
+                        .map(|(id, replacement)| {
+                            mod_api::ModEntry::new(
+                                id,
+                                Box::new(ChangingCommands {
+                                    changed: changed.clone(),
+                                    registrations: registrations.clone(),
+                                    calls: calls.clone(),
+                                    replacement,
+                                }),
+                            )
+                        })
+                        .into(),
+                    || {
+                        super::super::native_guest_turn_tests::with_guests(|game| {
+                            game.build_registries();
+                            game.register_native_commands();
+                            assert_eq!(registrations.load(Ordering::Relaxed), 1);
+                            let old_parse =
+                                game.ui.dispatcher.0.parse("retained", &game.ui.registries);
+                            let old_context = old_parse.executable().unwrap().0;
+                            let (result, outcome) = game.recording_command_outcome(|game| {
+                                game.execute_line("retained", game.server_source())
+                            });
+                            assert_eq!(result, Ok(0));
+                            assert_eq!(outcome, Some((true, 0)));
+                            assert_eq!(*calls.lock().unwrap(), [Some("refresh")]);
+                            changed.store(true, Ordering::Relaxed);
+                            game.register_native_commands();
+                            assert_eq!(registrations.load(Ordering::Relaxed), 1);
+                            let registered = game.native_commands.registered.as_ref().unwrap();
+                            assert!(registered.levels.contains_key("before"));
+                            mod_api::Commands::refresh_commands(game);
+                            mod_api::Commands::refresh_commands(game);
+                            assert_eq!(
+                                registrations.load(Ordering::Relaxed),
+                                1,
+                                "requests are deferred"
+                            );
+                            game.register_native_commands();
+                            assert!(!game.native_commands.refresh);
+                            assert_eq!(
+                                registrations.load(Ordering::Relaxed),
+                                2,
+                                "requests coalesce"
+                            );
+                            assert_eq!(
+                                game.run_native_command(old_context.clone())
+                                    .unwrap_err()
+                                    .key,
+                                "command.unknown.command"
+                            );
+                            assert_eq!(*calls.lock().unwrap(), [Some("refresh")]);
+                            assert_eq!(game.execute_line("retained", game.server_source()), Ok(37));
+                            assert_eq!(
+                                *calls.lock().unwrap(),
+                                [Some("refresh"), Some("replacement")]
+                            );
+                            assert!(mod_api::__private::set_mod_enabled("replacement", false));
+                            assert_eq!(
+                                game.execute_line("retained", game.server_source())
+                                    .unwrap_err()
+                                    .key,
+                                "command.unknown.command"
+                            );
+                            assert_eq!(
+                                *calls.lock().unwrap(),
+                                [Some("refresh"), Some("replacement")]
+                            );
+                            assert!(mod_api::__private::set_mod_enabled("replacement", true));
+                            let commands = game.native_commands.registered.as_ref().unwrap();
+                            assert!(!commands.levels.contains_key("before"));
+                            assert!(commands.levels.contains_key("after"));
+                            let dispatcher = &game.ui.dispatcher.0;
+                            assert!(
+                                dispatcher
+                                    .parse("after 7", &game.ui.registries)
+                                    .executable()
+                                    .is_ok()
+                            );
+                            assert!(
+                                dispatcher
+                                    .parse("after nope", &game.ui.registries)
+                                    .executable()
+                                    .is_err()
+                            );
+                            assert!(
+                                dispatcher
+                                    .parse("before", &game.ui.registries)
+                                    .executable()
+                                    .is_err()
+                            );
+                            game.register_native_commands();
+                            assert_eq!(registrations.load(Ordering::Relaxed), 2);
+                            mod_api::Commands::refresh_commands(game);
+                            game.register_native_commands();
+                            assert_eq!(registrations.load(Ordering::Relaxed), 3);
+                            assert!(game.native_commands.level("after").is_some());
+                            changed.store(false, Ordering::Relaxed);
+                            game.reload_datapacks(false, &game.level.enabled_features.clone())
+                                .unwrap();
+                            let (sent, received) = std::sync::mpsc::channel();
+                            game.lan
+                                .as_mut()
+                                .unwrap()
+                                .hub
+                                .update_guest(12, |guest| {
+                                    guest.sender = sunrise_client::lan::PlayerSender::new(
+                                        sent,
+                                        Default::default(),
+                                    );
+                                })
+                                .unwrap();
+                            game.register_native_commands();
+                            let packet = received
+                                .try_iter()
+                                .flat_map(|out| match out {
+                                    sunrise_client::lan::Out::Packet(body) => vec![body],
+                                    sunrise_client::lan::Out::Packets(bodies) => bodies,
+                                    sunrise_client::lan::Out::Disconnect(_) => {
+                                        panic!("reload disconnected guest")
+                                    }
+                                })
+                                .find_map(|body| {
+                                    let mut reader = sunrise_protocol::buf::Reader::new(&body);
+                                    let id = reader.varint().unwrap();
+                                    match C::decode(id, &body[reader.position()..]).unwrap() {
+                                        C::Commands(packet) => Some(packet),
+                                        _ => None,
+                                    }
+                                })
+                                .expect("reload must deliver a command tree");
+                            let names: Vec<_> = packet.nodes[packet.root as usize]
+                                .children
+                                .iter()
+                                .map(|&i| packet.nodes[i as usize].name.as_str())
+                                .collect();
+                            assert!(!names.is_empty());
+                            assert!(
+                                !names.contains(&"before"),
+                                "new reload root must be filtered"
+                            );
+                            assert!(!names.contains(&"after"), "old root must be retired");
+                        })
+                    },
+                );
             },
         );
     }
@@ -3701,224 +4304,228 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn native_typed_commands_reach_listeners_after_parse_and_source_resolution() {
-        use mod_api::{CommandArgumentValue as Value, CommandInvocation};
-        struct Commands(Arc<Mutex<Vec<(bool, CommandInvocation)>>>);
-        impl Commands {
-            fn record(&self, console: bool, command: &CommandInvocation) {
-                if command.literals == ["typed", "give"] {
-                    let Some(Value::Integer(amount)) = command.argument("amount") else {
-                        panic!("listener must receive an integer")
-                    };
-                    let Some(Value::Player(player)) = command.argument("who") else {
-                        panic!("listener must receive a resolved player")
-                    };
-                    assert_ne!(*amount, 0);
-                    assert_ne!(player.uuid(), 0);
-                }
-                self.0.lock().unwrap().push((console, command.clone()));
-            }
-        }
-        #[mod_api::__subscriptions]
-        impl mod_api::Hooks for Commands {
-            fn register_commands(
-                &self,
-                _: &mut dyn mod_api::ServerHost,
-                event: &mut mod_api::RegisterCommandsEvent<'_>,
-            ) {
-                event.commands.extend([
-                    mod_api::Command::new("typed give <who:player> <amount:integer> [message:text]"),
-                    mod_api::Command::new("typed data <word:word> <number:number> <enabled:boolean> <item:item> <pos:block_pos>"),
-                    mod_api::Command::new("typed opt [value:integer]"),
-                    mod_api::Command::new("/set <x:word>"),
-                    mod_api::Command::new("typed repeat <value:player> <value:integer>"),
-                    mod_api::Command::new("typed at <pos:vec3>"),
-                    mod_api::Command::op("protected <who:player>", 4),
-                ]);
-            }
-            fn run_mod_command(
-                &self,
-                _: &mut dyn mod_api::ServerHost,
-                event: &mut mod_api::RunModCommandEvent<'_>,
-            ) -> mod_api::Flow {
-                self.record(
-                    matches!(event.source, mod_api::CommandSource::Console { .. }),
-                    event.command,
-                );
-                mod_api::Flow::Cancel
-            }
-        }
-        let heard = Arc::new(Mutex::new(Vec::new()));
-        mod_platform::testing::with_mods(
-            vec![mod_api::ModEntry::new(
-                "typed_commands",
-                Box::new(Commands(heard.clone())),
-            )]
-            .into(),
+        crate::game::in_own_process(
+            "game::native_server::tests::native_typed_commands_reach_listeners_after_parse_and_source_resolution",
             || {
-                super::super::native_guest_turn_tests::with_guests(|game| {
-                    game.build_registries();
-                    game.register_native_commands();
-                    let other = game.player(13).unwrap();
-                    let acting = game.player(12).unwrap();
-                    game.as_guest(12, |game| {
-                        for line in [
-                            "typed give guest13 nope",
-                            "typed give guest13",
-                            "typed give missing 7",
-                            "typed give @a 7",
-                            "typed data word 1 maybe stone ~ ~ ~",
-                            "typed data word NaN true stone ~ ~ ~",
-                            "typed data word 1 true does_not_exist ~ ~ ~",
-                            "typed opt 1 extra",
-                        ] {
-                            assert!(game.perform_native_command(12, 4, line), "{line}");
-                        }
-                        let random = game.world.random.state();
-                        assert!(!game.perform_native_command(12, 0, "protected @r"));
-                        assert_eq!(game.world.random.state(), random, "denied selectors must not resolve");
-                        assert!(heard.lock().unwrap().is_empty(), "failed input must not reach listeners");
-                        for line in [
-                            "typed give guest13 37 hello typed world",
-                            "typed give @s -4",
-                            "typed opt",
-                            "typed opt 9",
-                            "typed data word -1.25 true stone[minecraft:custom_name='\"Rock\"'] ~1 ~2 ~-3",
-                            "typed data word 2 false dirt ^0 ^0 ^0",
-                        ] {
-                            assert!(game.perform_native_command(12, 4, line), "{line}");
-                        }
-                    }).unwrap();
-                    game.spawn = Some(sunrise_core::geometry::Vec3::new(10.5, 70.0, -2.5));
-                    game.yaw = 45.0;
-                    game.pitch = 30.0;
-                    for (line, key) in [
-                        ("typed give guest13 nope", "parsing.int.expected"),
-                        ("typed give missing 1", "argument.entity.notfound.player"),
-                    ] {
-                        game.chat_capture = Some(Vec::new());
-                        assert!(game.perform_native_console_command(line));
-                        let output = game.chat_capture.take().unwrap();
-                        assert_eq!(
-                            output[0].plain(),
-                            Text::translate(key, &[]).plain(),
-                            "{line}"
-                        );
+                use mod_api::{CommandArgumentValue as Value, CommandInvocation};
+                struct Commands(Arc<Mutex<Vec<(bool, CommandInvocation)>>>);
+                #[mod_api::__subscriptions]
+                impl mod_api::Hooks for Commands {
+                    fn register_commands(
+                        &self,
+                        _: &mut dyn mod_api::ServerHost,
+                        event: &mut mod_api::RegisterCommandsEvent<'_>,
+                    ) {
+                        let heard = self.0.clone();
+                        let record =
+                            move |_: &mut dyn mod_api::ServerHost,
+                                  source: &mod_api::CommandSource,
+                                  command: &CommandInvocation| {
+                                if command.literals == ["typed", "give"] {
+                                    let Some(Value::Integer(amount)) = command.argument("amount")
+                                    else {
+                                        panic!("executor must receive an integer")
+                                    };
+                                    let Some(Value::Player(player)) = command.argument("who")
+                                    else {
+                                        panic!("executor must receive a resolved player")
+                                    };
+                                    assert_ne!(*amount, 0);
+                                    assert_ne!(player.uuid(), 0);
+                                }
+                                let console =
+                                    matches!(source, mod_api::CommandSource::Console { .. });
+                                heard.lock().unwrap().push((console, command.clone()));
+                                Ok(1)
+                            };
+                        event.commands.extend([
+                            mod_api::Command::new("typed give <who:player> <amount:integer> [message:text]"),
+                            mod_api::Command::new("typed data <word:word> <number:number> <enabled:boolean> <item:item> <pos:block_pos>"),
+                            mod_api::Command::new("typed opt [value:integer]"),
+                            mod_api::Command::new("/set <x:word>"),
+                            mod_api::Command::new("typed repeat <value:player> <value:integer>"),
+                            mod_api::Command::new("typed at <pos:vec3>"),
+                            mod_api::Command::op("protected <who:player>", 4),
+                        ].map(|command| command.executes(record.clone())));
                     }
-                    assert!(game.perform_native_console_command("typed give @s 1"));
-                    assert_eq!(
-                        heard.lock().unwrap().len(),
-                        6,
-                        "console has no source player"
-                    );
-                    assert!(game.perform_native_console_command("typed give guest13 11"));
-                    assert!(
-                        game.perform_native_console_command(
-                            "typed data console 3 true dirt ~1 ~2 ~3"
-                        )
-                    );
-                    assert!(game.perform_native_console_command(
-                        "typed data console 3 true dirt ^0.5 ^0.5 ^0.5"
-                    ));
-                    assert!(game.perform_native_console_command("typed repeat guest13 3"));
-                    assert!(game.perform_native_console_command("typed at 1 64.25 ~1"));
-                    // A point is three numbers: two, or text, is a parse error and is not heard
-                    // (the count of 12 heard lines below holds neither).
-                    game.perform_native_console_command("typed at 1 64.25");
-                    game.perform_native_console_command("typed at 1 up 3");
-                    assert!(game.command_source.is_none(), "console source restored");
-                    game.as_guest(12, |game| {
-                        assert!(game.native_run_command("execute as guest13 run typed opt 13"))
-                    })
-                    .unwrap();
-                    let observations = heard.clone();
-                    let heard = heard.lock().unwrap();
-                    assert_eq!(heard.len(), 12);
-                    let first = &heard[0].1;
-                    assert_eq!(first.literals, ["typed", "give"]);
-                    assert_eq!(first.argument("who"), Some(&Value::Player(other)));
-                    assert_eq!(first.argument("amount"), Some(&Value::Integer(37)));
-                    assert_eq!(
-                        first.argument("message"),
-                        Some(&Value::String("hello typed world".into()))
-                    );
-                    assert_eq!(heard[1].1.argument("who"), Some(&Value::Player(acting)));
-                    assert_eq!(heard[1].1.argument("amount"), Some(&Value::Integer(-4)));
-                    assert!(heard[1].1.argument("message").is_none());
-                    assert!(heard[2].1.arguments.is_empty());
-                    assert_eq!(heard[3].1.argument("value"), Some(&Value::Integer(9)));
-                    let data = &heard[4].1;
-                    assert_eq!(data.argument("word"), Some(&Value::String("word".into())));
-                    assert_eq!(data.argument("number"), Some(&Value::Number(-1.25)));
-                    assert_eq!(data.argument("enabled"), Some(&Value::Boolean(true)));
-                    assert_eq!(data.argument("pos"), Some(&Value::BlockPos([4, 66, 2])));
-                    let Some(Value::Item(item)) = data.argument("item") else {
-                        panic!("typed item")
-                    };
-                    assert_eq!(
-                        mod_api::__private::item_key_id(item.item()),
-                        Some("minecraft:stone")
-                    );
-                    assert_eq!(item.count(), 1);
-                    assert!(item.components().is_some(), "command components retained");
-                    assert_eq!(heard[5].1.argument("enabled"), Some(&Value::Boolean(false)));
-                    assert_eq!(
-                        heard[5].1.argument("pos"),
-                        Some(&Value::BlockPos([3, 64, 5]))
-                    );
-                    assert!(heard[..6].iter().all(|(console, _)| !console));
-                    assert!(heard[6..].iter().all(|(console, _)| *console));
-                    assert_eq!(heard[6].1.argument("who"), Some(&Value::Player(other)));
-                    assert_eq!(heard[6].1.argument("amount"), Some(&Value::Integer(11)));
-                    assert_eq!(
-                        heard[7].1.argument("pos"),
-                        Some(&Value::BlockPos([11, 72, 0]))
-                    );
-                    assert_eq!(
-                        heard[8].1.argument("pos"),
-                        Some(&Value::BlockPos([10, 70, -3]))
-                    );
-                    assert_eq!(heard[9].1.arguments[0].value, Value::Player(other));
-                    assert_eq!(heard[9].1.argument("value"), Some(&Value::Integer(3)));
-                    // `1 64.25 ~1`: a whole x is a block centre (1.5), y is as typed, and `~1`
-                    // is one block from the console's z.
-                    assert_eq!(
-                        heard[10].1.argument("pos"),
-                        Some(&Value::Vec3([1.5, 64.25, -2.0]))
-                    );
-                    drop(heard);
-                    game.lan
-                        .as_mut()
-                        .unwrap()
-                        .hub
-                        .update_guest(12, |g| g.permission = 4)
-                        .unwrap();
-                    let inventory = game
-                        .lan
-                        .as_ref()
-                        .unwrap()
-                        .hub
-                        .guest(12)
-                        .unwrap()
-                        .inventory
-                        .clone();
-                    game.guest_command(12, "/set stone", None);
-                    game.guest_command(12, "typed opt 17", None);
-                    game.guest_command(12, "/give guest12 minecraft:stone 1", None);
-                    game.run_guest_commands();
-                    let heard = observations.lock().unwrap();
-                    assert_eq!(heard.len(), 14);
-                    assert_eq!(heard[12].1.literals, ["/set"]);
-                    assert_eq!(
-                        heard[12].1.argument("x"),
-                        Some(&Value::String("stone".into()))
-                    );
-                    assert_eq!(heard[13].1.literals, ["typed", "opt"]);
-                    assert_eq!(heard[13].1.argument("value"), Some(&Value::Integer(17)));
-                    assert_eq!(
-                        game.lan.as_ref().unwrap().hub.guest(12).unwrap().inventory,
-                        inventory
-                    );
-                });
+                }
+                let heard = Arc::new(Mutex::new(Vec::new()));
+                mod_platform::testing::with_mods(
+                    vec![mod_api::ModEntry::new(
+                        "typed_commands",
+                        Box::new(Commands(heard.clone())),
+                    )]
+                    .into(),
+                    || {
+                        super::super::native_guest_turn_tests::with_guests(|game| {
+                            game.build_registries();
+                            game.register_native_commands();
+                            let other = game.player(13).unwrap();
+                            let acting = game.player(12).unwrap();
+                            game.as_guest(12, |game| {
+                                for line in [
+                                    "typed give guest13 nope",
+                                    "typed give guest13",
+                                    "typed give missing 7",
+                                    "typed give @a 7",
+                                    "typed data word 1 maybe stone ~ ~ ~",
+                                    "typed data word NaN true stone ~ ~ ~",
+                                    "typed data word 1 true does_not_exist ~ ~ ~",
+                                    "typed opt 1 extra",
+                                ] {
+                                    assert_eq!(game.perform_native_command(12, 4, line, false), Some(false), "{line}");
+                                }
+                                let random = game.world.random.state();
+                                assert_eq!(game.perform_native_command(12, 0, "protected @r", false), None);
+                                assert_eq!(game.world.random.state(), random, "denied selectors must not resolve");
+                                assert!(heard.lock().unwrap().is_empty(), "failed input must not reach listeners");
+                                for line in [
+                                    "typed give guest13 37 hello typed world",
+                                    "typed give @s -4",
+                                    "typed opt",
+                                    "typed opt 9",
+                                    "typed data word -1.25 true stone[minecraft:custom_name='\"Rock\"'] ~1 ~2 ~-3",
+                                    "typed data word 2 false dirt ^0 ^0 ^0",
+                                ] {
+                                    assert_eq!(game.perform_native_command(12, 4, line, false), Some(true), "{line}");
+                                }
+                            }).unwrap();
+                            game.spawn = Some(sunrise_core::geometry::Vec3::new(10.5, 70.0, -2.5));
+                            game.yaw = 45.0;
+                            game.pitch = 30.0;
+                            for (line, key) in [
+                                ("typed give guest13 nope", "parsing.int.expected"),
+                                ("typed give missing 1", "argument.entity.notfound.player"),
+                            ] {
+                                game.chat_capture = Some(Vec::new());
+                                assert!(game.perform_native_console_command(line));
+                                let output = game.chat_capture.take().unwrap();
+                                assert_eq!(
+                                    output[0].plain(),
+                                    Text::translate(key, &[]).plain(),
+                                    "{line}"
+                                );
+                            }
+                            assert!(game.perform_native_console_command("typed give @s 1"));
+                            assert_eq!(
+                                heard.lock().unwrap().len(),
+                                6,
+                                "console has no source player"
+                            );
+                            assert!(game.perform_native_console_command("typed give guest13 11"));
+                            assert!(game.perform_native_console_command(
+                                "typed data console 3 true dirt ~1 ~2 ~3"
+                            ));
+                            assert!(game.perform_native_console_command(
+                                "typed data console 3 true dirt ^0.5 ^0.5 ^0.5"
+                            ));
+                            assert!(game.perform_native_console_command("typed repeat guest13 3"));
+                            assert!(game.perform_native_console_command("typed at 1 64.25 ~1"));
+                            // A point is three numbers: two, or text, is a parse error and is not heard
+                            // (the count of 12 heard lines below holds neither).
+                            game.perform_native_console_command("typed at 1 64.25");
+                            game.perform_native_console_command("typed at 1 up 3");
+                            assert!(game.command_source.is_none(), "console source restored");
+                            game.as_guest(12, |game| {
+                                assert!(
+                                    game.native_run_command("execute as guest13 run typed opt 13")
+                                )
+                            })
+                            .unwrap();
+                            let observations = heard.clone();
+                            let heard = heard.lock().unwrap();
+                            assert_eq!(heard.len(), 12);
+                            let first = &heard[0].1;
+                            assert_eq!(first.literals, ["typed", "give"]);
+                            assert_eq!(first.argument("who"), Some(&Value::Player(other)));
+                            assert_eq!(first.argument("amount"), Some(&Value::Integer(37)));
+                            assert_eq!(
+                                first.argument("message"),
+                                Some(&Value::String("hello typed world".into()))
+                            );
+                            assert_eq!(heard[1].1.argument("who"), Some(&Value::Player(acting)));
+                            assert_eq!(heard[1].1.argument("amount"), Some(&Value::Integer(-4)));
+                            assert!(heard[1].1.argument("message").is_none());
+                            assert!(heard[2].1.arguments.is_empty());
+                            assert_eq!(heard[3].1.argument("value"), Some(&Value::Integer(9)));
+                            let data = &heard[4].1;
+                            assert_eq!(data.argument("word"), Some(&Value::String("word".into())));
+                            assert_eq!(data.argument("number"), Some(&Value::Number(-1.25)));
+                            assert_eq!(data.argument("enabled"), Some(&Value::Boolean(true)));
+                            assert_eq!(data.argument("pos"), Some(&Value::BlockPos([4, 66, 2])));
+                            let Some(Value::Item(item)) = data.argument("item") else {
+                                panic!("typed item")
+                            };
+                            assert_eq!(
+                                mod_api::__private::item_key_id(item.item()),
+                                Some("minecraft:stone")
+                            );
+                            assert_eq!(item.count(), 1);
+                            assert!(item.components().is_some(), "command components retained");
+                            assert_eq!(
+                                heard[5].1.argument("enabled"),
+                                Some(&Value::Boolean(false))
+                            );
+                            assert_eq!(
+                                heard[5].1.argument("pos"),
+                                Some(&Value::BlockPos([3, 64, 5]))
+                            );
+                            assert!(heard[..6].iter().all(|(console, _)| !console));
+                            assert!(heard[6..].iter().all(|(console, _)| *console));
+                            assert_eq!(heard[6].1.argument("who"), Some(&Value::Player(other)));
+                            assert_eq!(heard[6].1.argument("amount"), Some(&Value::Integer(11)));
+                            assert_eq!(
+                                heard[7].1.argument("pos"),
+                                Some(&Value::BlockPos([11, 72, 0]))
+                            );
+                            assert_eq!(
+                                heard[8].1.argument("pos"),
+                                Some(&Value::BlockPos([10, 70, -3]))
+                            );
+                            assert_eq!(heard[9].1.arguments[0].value, Value::Player(other));
+                            assert_eq!(heard[9].1.argument("value"), Some(&Value::Integer(3)));
+                            // `1 64.25 ~1`: a whole x is a block centre (1.5), y is as typed, and `~1`
+                            // is one block from the console's z.
+                            assert_eq!(
+                                heard[10].1.argument("pos"),
+                                Some(&Value::Vec3([1.5, 64.25, -2.0]))
+                            );
+                            drop(heard);
+                            game.lan
+                                .as_mut()
+                                .unwrap()
+                                .hub
+                                .update_guest(12, |g| g.permission = 4)
+                                .unwrap();
+                            let inventory = game
+                                .lan
+                                .as_ref()
+                                .unwrap()
+                                .hub
+                                .guest(12)
+                                .unwrap()
+                                .inventory
+                                .clone();
+                            game.guest_command(12, "/set stone", None);
+                            game.guest_command(12, "typed opt 17", None);
+                            game.guest_command(12, "/give guest12 minecraft:stone 1", None);
+                            game.run_guest_commands();
+                            let heard = observations.lock().unwrap();
+                            assert_eq!(heard.len(), 14);
+                            assert_eq!(heard[12].1.literals, ["/set"]);
+                            assert_eq!(
+                                heard[12].1.argument("x"),
+                                Some(&Value::String("stone".into()))
+                            );
+                            assert_eq!(heard[13].1.literals, ["typed", "opt"]);
+                            assert_eq!(heard[13].1.argument("value"), Some(&Value::Integer(17)));
+                            assert_eq!(
+                                game.lan.as_ref().unwrap().hub.guest(12).unwrap().inventory,
+                                inventory
+                            );
+                        });
+                    },
+                );
             },
         );
     }
@@ -3926,107 +4533,113 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn native_commands_keep_function_block_and_cart_sources() {
-        use mod_api::{CommandSource, PermissionLevel as Permission};
-        use sunrise_client::{
-            chunk::block_entity::BlockEntity,
-            datapack::{Function, FunctionLine},
-        };
-        use sunrise_core::position::BlockPos;
-        struct Commands(Arc<Mutex<Vec<CommandSource>>>);
-        #[mod_api::__subscriptions]
-        impl mod_api::Hooks for Commands {
-            fn register_commands(
-                &self,
-                _: &mut dyn mod_api::ServerHost,
-                event: &mut mod_api::RegisterCommandsEvent<'_>,
-            ) {
-                event.commands.extend([
-                    mod_api::Command::new("origin"),
-                    mod_api::Command::op("denied", 4),
-                    mod_api::Command::new("unhandled"),
-                ]);
-            }
-            fn run_mod_command(
-                &self,
-                host: &mut dyn mod_api::ServerHost,
-                event: &mut mod_api::RunModCommandEvent<'_>,
-            ) -> mod_api::Flow {
-                if event.command.literals == ["unhandled"] {
-                    return mod_api::Flow::Continue;
-                }
-                self.0.lock().unwrap().push(event.source.clone());
-                host.commands()
-                    .feedback(mod_api::Text::literal("source answer"))
-                    .unwrap();
-                mod_api::Flow::Cancel
-            }
-        }
-        let heard = Arc::new(Mutex::new(Vec::new()));
-        mod_platform::testing::with_mods(
-            vec![mod_api::ModEntry::new(
-                "origins",
-                Box::new(Commands(heard.clone())),
-            )]
-            .into(),
+        crate::game::in_own_process(
+            "game::native_server::tests::native_commands_keep_function_block_and_cart_sources",
             || {
-                with_command_sources(|game| {
-                    game.command_block_tick(BlockPos::new(1, 64, 1));
-                    let Some(BlockEntity::CommandBlock(block)) =
-                        game.world.block_entities.get(&(1, 64, 1))
-                    else {
-                        panic!("block missing")
-                    };
-                    assert_eq!(block.success_count, 1);
-                    let source = heard.lock().unwrap()[0].clone();
-                    assert!(
-                        matches!(source, CommandSource::CommandBlock { position: [1, 64, 1], level, .. } if level == game.dim.key())
-                    );
-                    assert_eq!(source.permission(), Permission::Gamemasters);
-                    assert!(game.perform_cart_command(99));
-                    assert_eq!(game.carts[0].command.success_count, 1);
-                    assert!(game.carts[0].command.last_output.is_some());
-                    assert!(
-                        matches!(heard.lock().unwrap().last().unwrap(), CommandSource::CommandBlockMinecart { entity, .. } if entity.id() == 99)
-                    );
-                    game.chat_capture = Some(Vec::new());
-                    let mut function = Function {
-                        id: "test:inner".into(),
-                        lines: vec![
-                            FunctionLine::Command("execute positioned 2 64 3 run origin".into()),
-                            FunctionLine::Command("denied".into()),
-                        ],
-                        parameters: vec![],
-                    };
-                    game.ensure_datapacks();
-                    game.fns
-                        .store
-                        .functions
-                        .insert(function.id.clone(), function.clone());
-                    function.id = "test:outer".into();
-                    function.lines = vec![FunctionLine::Command("function test:inner".into())];
-                    let before = heard.lock().unwrap().len();
-                    game.run_function(&function, None, game.server_source())
-                        .unwrap();
-                    assert_eq!(heard.lock().unwrap().len(), before + 1);
-                    assert!(
-                        matches!(heard.lock().unwrap().last().unwrap(), CommandSource::Function { id, permission } if id.to_string() == "test:inner" && *permission == Permission::Gamemasters)
-                    );
-                    assert!(
-                        game.chat_capture.take().unwrap().is_empty(),
-                        "functions suppress both success and failure"
-                    );
-                    assert!(game.exec.functions.is_empty());
-                    game.ui.registries.permission = 4;
-                    assert!(!game.run_command("unhandled"));
-                    assert!(game.run_command(
-                        "execute store result storage test:result value int 1 run origin"
-                    ));
-                    assert!(
-                        game.run_command(
-                            "execute if data storage test:result {value:1} run origin"
-                        )
-                    );
-                });
+                use mod_api::{CommandSource, PermissionLevel as Permission};
+                use sunrise_client::{
+                    chunk::block_entity::BlockEntity,
+                    datapack::{Function, FunctionLine},
+                };
+                use sunrise_core::position::BlockPos;
+                struct Commands(Arc<Mutex<Vec<CommandSource>>>);
+                #[mod_api::__subscriptions]
+                impl mod_api::Hooks for Commands {
+                    fn register_commands(
+                        &self,
+                        _: &mut dyn mod_api::ServerHost,
+                        event: &mut mod_api::RegisterCommandsEvent<'_>,
+                    ) {
+                        let heard = self.0.clone();
+                        let execute =
+                            move |host: &mut dyn mod_api::ServerHost,
+                                  source: &CommandSource,
+                                  _: &mod_api::CommandInvocation| {
+                                heard.lock().unwrap().push(source.clone());
+                                host.commands()
+                                    .feedback(mod_api::Text::literal("source answer"), false)
+                                    .unwrap();
+                                Ok(1)
+                            };
+                        event.commands.extend([
+                            mod_api::Command::new("origin").executes(execute.clone()),
+                            mod_api::Command::op("denied", 4).executes(execute),
+                            // Replaced by the later accepted registration; failure must not fall back here.
+                            mod_api::Command::new("unhandled").executes(|_, _, _| Ok(99)),
+                            mod_api::Command::new("unhandled")
+                                .executes(|_, _, _| Err(mod_api::Text::literal("refused").into())),
+                        ]);
+                    }
+                }
+                let heard = Arc::new(Mutex::new(Vec::new()));
+                mod_platform::testing::with_mods(
+                    vec![mod_api::ModEntry::new(
+                        "origins",
+                        Box::new(Commands(heard.clone())),
+                    )]
+                    .into(),
+                    || {
+                        with_command_sources(|game| {
+                            game.command_block_tick(BlockPos::new(1, 64, 1));
+                            let Some(BlockEntity::CommandBlock(block)) =
+                                game.world.block_entities.get(&(1, 64, 1))
+                            else {
+                                panic!("block missing")
+                            };
+                            assert_eq!(block.success_count, 1);
+                            let source = heard.lock().unwrap()[0].clone();
+                            assert!(
+                                matches!(source, CommandSource::CommandBlock { position: [1, 64, 1], level, .. } if level == game.dim.key())
+                            );
+                            assert_eq!(source.permission(), Permission::Gamemasters);
+                            assert!(game.perform_cart_command(99));
+                            assert_eq!(game.carts[0].command.success_count, 1);
+                            assert!(game.carts[0].command.last_output.is_some());
+                            assert!(
+                                matches!(heard.lock().unwrap().last().unwrap(), CommandSource::CommandBlockMinecart { entity, .. } if entity.id() == 99)
+                            );
+                            game.chat_capture = Some(Vec::new());
+                            let mut function = Function {
+                                id: "test:inner".into(),
+                                lines: vec![
+                                    FunctionLine::Command(
+                                        "execute positioned 2 64 3 run origin".into(),
+                                    ),
+                                    FunctionLine::Command("denied".into()),
+                                ],
+                                parameters: vec![],
+                            };
+                            game.ensure_datapacks();
+                            game.fns
+                                .store
+                                .functions
+                                .insert(function.id.clone(), function.clone());
+                            function.id = "test:outer".into();
+                            function.lines =
+                                vec![FunctionLine::Command("function test:inner".into())];
+                            let before = heard.lock().unwrap().len();
+                            game.run_function(&function, None, game.server_source())
+                                .unwrap();
+                            assert_eq!(heard.lock().unwrap().len(), before + 1);
+                            assert!(
+                                matches!(heard.lock().unwrap().last().unwrap(), CommandSource::Function { id, permission } if id.to_string() == "test:inner" && *permission == Permission::Gamemasters)
+                            );
+                            assert!(
+                                game.chat_capture.take().unwrap().is_empty(),
+                                "functions suppress both success and failure"
+                            );
+                            assert!(game.exec.functions.is_empty());
+                            game.ui.registries.permission = 4;
+                            assert!(!game.run_command("unhandled"));
+                            assert!(game.run_command(
+                                "execute store result storage test:result value int 1 run origin"
+                            ));
+                            assert!(game.run_command(
+                                "execute if data storage test:result {value:1} run origin"
+                            ));
+                        });
+                    },
+                );
             },
         );
     }
@@ -4034,83 +4647,95 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn native_unauthorized_commands_never_reach_the_listener() {
-        struct Commands(Arc<Mutex<Vec<mod_api::CommandInvocation>>>);
-        #[mod_api::__subscriptions]
-        impl mod_api::Hooks for Commands {
-            fn register_commands(
-                &self,
-                _: &mut dyn mod_api::ServerHost,
-                event: &mut mod_api::RegisterCommandsEvent<'_>,
-            ) {
-                event.commands.extend([
-                    mod_api::Command::op("foo [value:integer]", 4),
-                    mod_api::Command::new("foo bar"),
-                    mod_api::Command::op("choice <a:integer>", 4),
-                    mod_api::Command::new("choice <a:integer> bar"),
-                    mod_api::Command::new("choice <b:word>"),
-                ]);
-            }
-            fn run_mod_command(
-                &self,
-                _: &mut dyn mod_api::ServerHost,
-                event: &mut mod_api::RunModCommandEvent<'_>,
-            ) -> mod_api::Flow {
-                self.0.lock().unwrap().push(event.command.clone());
-                mod_api::Flow::Cancel
-            }
-        }
-        let heard = Arc::new(Mutex::new(Vec::new()));
-        let mods = vec![mod_api::ModEntry::new(
-            "commands",
-            Box::new(Commands(heard.clone())),
-        )]
-        .into();
-        mod_platform::testing::with_mods(mods, || {
-            super::super::native_entity_refs::tests::with_game(|game| {
-                super::super::native_item_places::tests::open_to_lan(game);
-                game.register_native_commands();
-                game.lan.as_mut().unwrap().hub.guests.push(player_guest());
-                for line in ["foo", "foo 7", "foo nope"] {
-                    assert!(game.perform_native_command(1, 0, line));
+        crate::game::in_own_process(
+            "game::native_server::tests::native_unauthorized_commands_never_reach_the_listener",
+            || {
+                struct Commands(Arc<Mutex<Vec<mod_api::CommandInvocation>>>);
+                #[mod_api::__subscriptions]
+                impl mod_api::Hooks for Commands {
+                    fn register_commands(
+                        &self,
+                        _: &mut dyn mod_api::ServerHost,
+                        event: &mut mod_api::RegisterCommandsEvent<'_>,
+                    ) {
+                        event.commands.extend(
+                            [
+                                mod_api::Command::op("foo [value:integer]", 4),
+                                mod_api::Command::new("foo bar"),
+                                mod_api::Command::op("choice <a:integer>", 4),
+                                mod_api::Command::new("choice <a:integer> bar"),
+                                mod_api::Command::new("choice <b:word>"),
+                            ]
+                            .map(|command| {
+                                let heard = self.0.clone();
+                                command.executes(move |_, _, invocation| {
+                                    heard.lock().unwrap().push(invocation.clone());
+                                    Ok(1)
+                                })
+                            }),
+                        );
+                    }
                 }
-                assert!(
-                    heard.lock().unwrap().is_empty(),
-                    "denied usages must not call a mod"
-                );
-                assert!(game.perform_native_command(1, 0, "foo bar"));
-                assert!(game.perform_native_command(1, 4, "foo"));
-                assert!(game.perform_native_command(1, 4, "foo 7"));
-                for line in ["choice 7", "choice 7 bar", "choice text"] {
-                    assert!(game.perform_native_command(1, 0, line));
-                }
-                let heard = heard.lock().unwrap();
-                assert_eq!(heard.len(), 6);
-                assert_eq!(heard[0].literals, ["foo", "bar"]);
-                assert_eq!(heard[1].literals, ["foo"]);
-                assert!(heard[1].arguments.is_empty());
-                assert_eq!(heard[2].literals, ["foo"]);
-                assert_eq!(
-                    heard[2].argument("value"),
-                    Some(&mod_api::CommandArgumentValue::Integer(7))
-                );
-                assert_eq!(heard[3].literals, ["choice"]);
-                assert!(heard[3].argument("a").is_none());
-                assert_eq!(
-                    heard[3].argument("b"),
-                    Some(&mod_api::CommandArgumentValue::String("7".into()))
-                );
-                assert_eq!(heard[4].literals, ["choice", "bar"]);
-                assert_eq!(
-                    heard[4].argument("a"),
-                    Some(&mod_api::CommandArgumentValue::Integer(7))
-                );
-                assert_eq!(heard[5].literals, ["choice"]);
-                assert_eq!(
-                    heard[5].argument("b"),
-                    Some(&mod_api::CommandArgumentValue::String("text".into()))
-                );
-            });
-        });
+                let heard = Arc::new(Mutex::new(Vec::new()));
+                let mods = vec![mod_api::ModEntry::new(
+                    "commands",
+                    Box::new(Commands(heard.clone())),
+                )]
+                .into();
+                mod_platform::testing::with_mods(mods, || {
+                    super::super::native_entity_refs::tests::with_game(|game| {
+                        super::super::native_item_places::tests::open_to_lan(game);
+                        game.register_native_commands();
+                        game.lan.as_mut().unwrap().hub.guests.push(player_guest());
+                        for line in ["foo", "foo 7", "foo nope"] {
+                            assert_eq!(game.perform_native_command(1, 0, line, false), Some(false));
+                        }
+                        assert!(
+                            heard.lock().unwrap().is_empty(),
+                            "denied usages must not call a mod"
+                        );
+                        assert_eq!(
+                            game.perform_native_command(1, 0, "foo bar", false),
+                            Some(true)
+                        );
+                        assert_eq!(game.perform_native_command(1, 4, "foo", false), Some(true));
+                        assert_eq!(
+                            game.perform_native_command(1, 4, "foo 7", false),
+                            Some(true)
+                        );
+                        for line in ["choice 7", "choice 7 bar", "choice text"] {
+                            assert_eq!(game.perform_native_command(1, 0, line, false), Some(true));
+                        }
+                        let heard = heard.lock().unwrap();
+                        assert_eq!(heard.len(), 6);
+                        assert_eq!(heard[0].literals, ["foo", "bar"]);
+                        assert_eq!(heard[1].literals, ["foo"]);
+                        assert!(heard[1].arguments.is_empty());
+                        assert_eq!(heard[2].literals, ["foo"]);
+                        assert_eq!(
+                            heard[2].argument("value"),
+                            Some(&mod_api::CommandArgumentValue::Integer(7))
+                        );
+                        assert_eq!(heard[3].literals, ["choice"]);
+                        assert!(heard[3].argument("a").is_none());
+                        assert_eq!(
+                            heard[3].argument("b"),
+                            Some(&mod_api::CommandArgumentValue::String("7".into()))
+                        );
+                        assert_eq!(heard[4].literals, ["choice", "bar"]);
+                        assert_eq!(
+                            heard[4].argument("a"),
+                            Some(&mod_api::CommandArgumentValue::Integer(7))
+                        );
+                        assert_eq!(heard[5].literals, ["choice"]);
+                        assert_eq!(
+                            heard[5].argument("b"),
+                            Some(&mod_api::CommandArgumentValue::String("text".into()))
+                        );
+                    });
+                });
+            },
+        );
     }
 
     #[test]
@@ -4194,37 +4819,71 @@ mod tests {
     }
 
     #[test]
-    fn native_shared_executable_prefix_takes_its_lowest_usage_level() {
-        for reverse in [false, true] {
-            let mut commands = vec![
-                mod_api::Command::op("foo [value:integer]", 4),
-                mod_api::Command::op("foo", 2),
-            ];
-            if reverse {
-                commands.reverse();
-            }
-            let (tree, _, problems) = tree(&commands);
-            assert!(problems.is_empty(), "{problems:?}");
+    fn native_shared_executable_prefix_uses_last_accepted_registration() {
+        let cases = [
+            (
+                vec![
+                    mod_api::Command::op("foo [value:integer]", 4),
+                    mod_api::Command::op("foo", 2),
+                    mod_api::Command::op("foo", 2), // Later registration wins on ties.
+                    mod_api::Command::new("foo [value:word]"), // Rejected: parser conflict.
+                ],
+                (2, 2),
+                (4, 0),
+            ),
+            (
+                vec![
+                    mod_api::Command::op("foo", 2),
+                    mod_api::Command::op("foo [value:integer]", 4), // Later runnable overwrites earlier lower level.
+                    mod_api::Command::new("foo [value:word]"),      // Rejected: parser conflict.
+                ],
+                (4, 1),
+                (4, 1),
+            ),
+        ];
+        for (commands, (prefix_level, prefix_slot), (argument_level, argument_slot)) in cases {
+            let arguments = HashMap::new();
+            let mut executors = HashMap::new();
+            let (tree, _, problems) = command_tree_for(
+                &commands,
+                BaseTree::Merged(&Dispatcher::new()),
+                &arguments,
+                false,
+                Some(&mut executors),
+            );
+            assert_eq!(problems.len(), 1, "{problems:?}");
             let mut dispatcher = Dispatcher::new();
-            register_dispatcher(
+            register_command_nodes(
                 &mut dispatcher,
                 &tree,
                 "native_mod_command",
-                &HashMap::new(),
+                &arguments,
+                Some(&executors),
             );
             for permission in 0..=4 {
                 let registries = sunrise_client::command::Registries {
                     permission,
                     ..Default::default()
                 };
-                assert_eq!(
-                    dispatcher.parse("foo", &registries).executable().is_ok(),
-                    permission >= 2
-                );
-                assert_eq!(
-                    dispatcher.parse("foo 7", &registries).executable().is_ok(),
-                    permission == 4
-                );
+                for (input, level, slot) in [
+                    ("foo", prefix_level, prefix_slot),
+                    ("foo 7", argument_level, argument_slot),
+                ] {
+                    let parsed = dispatcher.parse(input, &registries);
+                    if permission >= level {
+                        let (context, _) = parsed.executable().unwrap();
+                        assert_eq!(
+                            context.executor.unwrap().slot(),
+                            slot,
+                            "{commands:?}, level {permission}, {input}"
+                        );
+                    } else {
+                        assert!(
+                            parsed.executable().is_err(),
+                            "{commands:?}, level {permission}, {input}"
+                        );
+                    }
+                }
             }
         }
     }
@@ -4275,9 +4934,8 @@ mod tests {
     }
 
     #[test]
-    fn bad_usages_and_vanilla_names_are_left_out() {
+    fn bad_usages_are_left_out() {
         let (t, levels, problems) = tree(&[
-            mod_api::Command::new("give <x:integer>"),
             mod_api::Command::new("a [x:integer] <y:integer>"),
             mod_api::Command::new("b <x:text> <y:word>"),
             mod_api::Command::new("c <x:colour>"),
@@ -4286,7 +4944,7 @@ mod tests {
             mod_api::Command::new("d <x:integer>"),
             mod_api::Command::new("d <x:word>"),
         ]);
-        assert_eq!(problems.len(), 7, "{problems:?}");
+        assert_eq!(problems.len(), 6, "{problems:?}");
         assert_eq!(levels.keys().collect::<Vec<_>>(), ["d"]);
         assert_eq!(
             t["children"]["d"]["children"]["x"]["parser"],
@@ -4294,6 +4952,328 @@ mod tests {
         );
         let (none, levels, _) = tree(&[]);
         assert!(none.is_null() && levels.is_empty());
+    }
+
+    /// `integer(min,max)` and `long(min,max)` go out as vanilla's `IntegerArgumentInfo` and
+    /// `LongArgumentInfo` write them (a bound at the type's extreme is left out), and the server
+    /// refuses a value out of range with Brigadier's message before any executor runs.
+    #[test]
+    fn bounded_numbers_keep_their_bounds_in_the_tree_and_the_dispatcher() {
+        let (t, _, problems) = tree(&[
+            mod_api::Command::new("pay <amount:integer(0,1000)>"),
+            mod_api::Command::new("bank <total:long(-5,9000000000)>"),
+            mod_api::Command::new("floor <level:integer(0,)>"),
+            mod_api::Command::new("whole <n:integer(-2147483648,2147483647)>"),
+            mod_api::Command::new("plain <n:long>"),
+            mod_api::Command::new("bad <n:integer(5,1)>"),
+            mod_api::Command::new("bad <n:integer(0,2147483648)>"),
+            mod_api::Command::new("bad <n:long(1)>"),
+            mod_api::Command::new("bad <n:integer(a,)>"),
+        ]);
+        assert_eq!(problems.len(), 4, "{problems:?}");
+        assert!(
+            problems.iter().all(|p| p.starts_with("`bad ")),
+            "{problems:?}"
+        );
+        let c = &t["children"];
+        let node = |root: &str, name: &str| c[root]["children"][name].clone();
+        assert_eq!(node("pay", "amount")["parser"], "brigadier:integer");
+        assert_eq!(
+            node("pay", "amount")["properties"],
+            json!({"min": 0, "max": 1000})
+        );
+        assert_eq!(node("bank", "total")["parser"], "brigadier:long");
+        assert_eq!(
+            node("bank", "total")["properties"],
+            json!({"min": -5, "max": 9_000_000_000_i64})
+        );
+        assert_eq!(node("floor", "level")["properties"], json!({"min": 0}));
+        assert!(node("whole", "n").get("properties").is_none());
+        assert_eq!(node("plain", "n")["parser"], "brigadier:long");
+        assert!(node("plain", "n").get("properties").is_none());
+
+        let mut dispatcher = Dispatcher::new();
+        register_dispatcher(&mut dispatcher, &t, "native_mod_command", &HashMap::new());
+        let registries = sunrise_client::command::Registries::default();
+        let value = |line: &str, name: &str| {
+            dispatcher
+                .parse(line, &registries)
+                .executable()
+                .unwrap()
+                .0
+                .get(name)
+                .cloned()
+        };
+        assert_eq!(value("pay 1000", "amount"), Some(Arg::Int(1000)));
+        assert_eq!(
+            value("bank 9000000000", "total"),
+            Some(Arg::Long(9_000_000_000))
+        );
+        assert_eq!(
+            value("plain -9223372036854775808", "n"),
+            Some(Arg::Long(i64::MIN))
+        );
+        for (line, expected) in [
+            (
+                "pay 1001",
+                Text::tr("argument.integer.big", &[&1000, &1001]),
+            ),
+            ("pay -1", Text::tr("argument.integer.low", &[&0, &-1])),
+            ("floor -1", Text::tr("argument.integer.low", &[&0, &-1])),
+            (
+                "bank 9000000001",
+                Text::tr(
+                    "argument.long.big",
+                    &[&9_000_000_000_i64, &9_000_000_001_i64],
+                ),
+            ),
+            ("bank -6", Text::tr("argument.long.low", &[&-5, &-6])),
+            ("bank 1.5", Text::tr("parsing.long.invalid", &[&"1.5"])),
+        ] {
+            let error = dispatcher
+                .parse(line, &registries)
+                .executable()
+                .unwrap_err();
+            assert_eq!(error.message, expected, "{line}");
+        }
+    }
+
+    /// A mod argument type that declares `CommandArgumentKind::Integer` goes out as vanilla's
+    /// bounded `brigadier:integer`, so a client refuses what the server refuses; the server checks
+    /// the bounds before the mod's parser.
+    #[test]
+    fn a_registered_integer_kind_goes_out_bounded() {
+        struct Stack;
+        impl mod_api::CommandArgumentType for Stack {
+            fn kind(&self) -> mod_api::CommandArgumentKind {
+                mod_api::CommandArgumentKind::Integer {
+                    min: Some(1),
+                    max: Some(64),
+                }
+            }
+            fn parse(&self, input: &str) -> Result<String, mod_api::CommandArgumentError> {
+                Ok(format!("{input} items"))
+            }
+            fn suggest(
+                &self,
+                _: Option<&mod_api::CommandSender>,
+                _: &str,
+            ) -> Vec<mod_api::CommandSuggestion> {
+                Vec::new()
+            }
+        }
+        let arguments: CommandArguments = HashMap::from([(
+            "test:stack".to_owned(),
+            Arc::new(Stack) as Arc<dyn mod_api::CommandArgumentType>,
+        )]);
+        let (t, _, problems) = command_tree(
+            &[mod_api::Command::new("stack <count:test:stack>")],
+            &Dispatcher::new(),
+            &arguments,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        let count = &t["children"]["stack"]["children"]["count"];
+        assert_eq!(count["parser"], "brigadier:integer");
+        assert_eq!(count["properties"], json!({"min": 1, "max": 64}));
+        assert_eq!(count["custom_argument"], "test:stack");
+        let mut dispatcher = Dispatcher::new();
+        register_dispatcher(&mut dispatcher, &t, "native_mod_command", &arguments);
+        let registries = sunrise_client::command::Registries::default();
+        let parsed = dispatcher.parse("stack 64", &registries);
+        assert_eq!(
+            parsed.executable().unwrap().0.get("count"),
+            Some(&Arg::Custom {
+                kind: "test:stack".into(),
+                value: "64 items".into(),
+            })
+        );
+        let error = dispatcher
+            .parse("stack 65", &registries)
+            .executable()
+            .unwrap_err();
+        assert_eq!(error.message, Text::tr("argument.integer.big", &[&64, &65]));
+    }
+
+    /// `<name:string>` and a type declaring `CommandArgumentKind::Quotable` read Brigadier's
+    /// `StringArgumentType.string()`: a word or a quoted phrase, decoded, with an argument after
+    /// it. Both go to clients as `brigadier:string` in its quotable mode; only the mod's type asks
+    /// the server for completions, as `word` and a `Word` type do.
+    #[test]
+    fn a_string_usage_and_a_quotable_type_read_a_quoted_phrase_before_the_next_argument() {
+        struct QuestObject;
+        impl mod_api::CommandArgumentType for QuestObject {
+            fn kind(&self) -> mod_api::CommandArgumentKind {
+                mod_api::CommandArgumentKind::Quotable
+            }
+            fn parse(&self, input: &str) -> Result<String, mod_api::CommandArgumentError> {
+                Ok(input.to_lowercase())
+            }
+            fn suggest(
+                &self,
+                _: Option<&mod_api::CommandSender>,
+                _: &str,
+            ) -> Vec<mod_api::CommandSuggestion> {
+                Vec::new()
+            }
+        }
+        let arguments: CommandArguments = HashMap::from([(
+            "test:quest_object".to_owned(),
+            Arc::new(QuestObject) as Arc<dyn mod_api::CommandArgumentType>,
+        )]);
+        let (t, _, problems) = command_tree(
+            &[
+                mod_api::Command::new("quests open <object:test:quest_object> <count:integer>"),
+                mod_api::Command::new("quests rename <title:string> <count:integer>"),
+            ],
+            &Dispatcher::new(),
+            &arguments,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        let quests = &t["children"]["quests"]["children"];
+        let object = &quests["open"]["children"]["object"];
+        assert_eq!(object["parser"], "brigadier:string");
+        assert_eq!(object["properties"], json!({"type": "phrase"}));
+        assert_eq!(object["custom_argument"], "test:quest_object");
+        assert_eq!(object["suggestions"], "minecraft:ask_server");
+        let title = &quests["rename"]["children"]["title"];
+        assert_eq!(title["parser"], "brigadier:string");
+        assert_eq!(title["properties"], json!({"type": "phrase"}));
+        assert_eq!(
+            title["suggestions"],
+            Value::Null,
+            "vanilla's string suggests nothing"
+        );
+
+        let mut dispatcher = Dispatcher::new();
+        register_dispatcher(&mut dispatcher, &t, "native_mod_command", &arguments);
+        let registries = sunrise_client::command::Registries::default();
+        for (line, value) in [
+            (r##"quests open "#Chapter_One" 3"##, "#chapter_one"),
+            ("quests open 1A2B3C4D5E6F7A8B 3", "1a2b3c4d5e6f7a8b"),
+            (r#"quests open "" 3"#, ""),
+        ] {
+            let parsed = dispatcher.parse(line, &registries);
+            let (context, _) = parsed
+                .executable()
+                .unwrap_or_else(|e| panic!("{line}: {e:?}"));
+            assert_eq!(
+                context.get("object"),
+                Some(&Arg::Custom {
+                    kind: "test:quest_object".into(),
+                    value: value.into(),
+                }),
+                "{line}"
+            );
+            assert_eq!(context.get("count"), Some(&Arg::Int(3)), "{line}");
+        }
+        for (line, value) in [
+            (
+                r#"quests rename "Getting \"Started\"" 2"#,
+                r#"Getting "Started""#,
+            ),
+            (r"quests rename 'back\\slash' 2", r"back\slash"),
+            ("quests rename '' 2", ""),
+            ("quests rename Plain 2", "Plain"),
+        ] {
+            let parsed = dispatcher.parse(line, &registries);
+            let (context, _) = parsed
+                .executable()
+                .unwrap_or_else(|e| panic!("{line}: {e:?}"));
+            assert_eq!(
+                context.get("title"),
+                Some(&Arg::Str(value.into())),
+                "{line}"
+            );
+            assert_eq!(context.get("count"), Some(&Arg::Int(2)), "{line}");
+        }
+        for line in [r#"quests rename "Getting 2"#, r#"quests open "Getting 2"#] {
+            let error = dispatcher
+                .parse(line, &registries)
+                .executable()
+                .unwrap_err();
+            assert_eq!(
+                error.message,
+                Text::tr("parsing.quote.expected.end", &[]),
+                "{line}"
+            );
+            assert_eq!(error.cursor, line.len(), "{line}");
+        }
+    }
+
+    /// NeoForge's `RegisterCommandsEvent` registers into vanilla's dispatcher, whose literal
+    /// merges by Brigadier's `CommandNode.addChild`: a mod usage under `/time` sits beside
+    /// vanilla's, which stay; vanilla's node keeps its permission; an executor at a vanilla node
+    /// replaces vanilla's, and a later one replaces that. A mod argument at a vanilla node's
+    /// place, a mod argument on a vanilla literal and Sunrise's own tools are refused.
+    #[test]
+    fn usages_under_a_vanilla_root_merge_beside_its_usages() {
+        let vanilla = sunrise_client::command::vanilla::session_dispatcher(
+            &sunrise_client::gamerules::RuleRegistry::vanilla(),
+            &[],
+        );
+        let commands = [
+            mod_api::Command::new("time season <name:word>"),
+            mod_api::Command::new("seed"),
+            mod_api::Command::op("seed", 3),
+            mod_api::Command::new("time set <time:integer>"),
+            mod_api::Command::new("time <set:word>"),
+            mod_api::Command::new("modprofile extra"),
+            mod_api::Command::new("raidplus go"),
+        ];
+        let arguments = HashMap::new();
+        let mut executors = HashMap::new();
+        let (t, levels, problems) = command_tree_for(
+            &commands,
+            BaseTree::Merged(&vanilla),
+            &arguments,
+            false,
+            Some(&mut executors),
+        );
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        for (problem, usage) in problems.iter().zip([
+            "time set <time:integer>",
+            "time <set:word>",
+            "modprofile extra",
+        ]) {
+            assert!(problem.starts_with(&format!("`{usage}`")), "{problem}");
+        }
+        // A merged root keeps vanilla's level: only the mod's own root routes as a mod command.
+        assert_eq!(levels.keys().collect::<Vec<_>>(), ["raidplus"]);
+        let mut dispatcher = vanilla.clone();
+        register_command_nodes(
+            &mut dispatcher,
+            &t,
+            "native_mod_command",
+            &arguments,
+            Some(&executors),
+        );
+        let at = |permission| sunrise_client::command::Registries {
+            permission,
+            ..Default::default()
+        };
+        let run = |line: &str, permission| {
+            dispatcher
+                .parse(line, &at(permission))
+                .executable()
+                .map(|(context, command)| (command, context.executor.map(|key| key.slot())))
+        };
+        let vanilla_time = vanilla
+            .parse("time set day", &at(2))
+            .executable()
+            .unwrap()
+            .1;
+        assert_eq!(run("time set day", 2), Ok((vanilla_time, None)));
+        assert_eq!(
+            run("time season spring", 2),
+            Ok(("native_mod_command", Some(0)))
+        );
+        assert!(
+            run("time season spring", 0).is_err(),
+            "vanilla's /time keeps its permission"
+        );
+        assert!(run("seed", 2).is_err(), "the later usage's level runs it");
+        assert_eq!(run("seed", 3), Ok(("native_mod_command", Some(2))));
+        assert_eq!(run("raidplus go", 0), Ok(("native_mod_command", Some(6))));
     }
 
     /// WorldEdit-style `//set`: the usage `/set <x:word>` (typed `//set` with the chat slash) is a
@@ -4932,14 +5912,21 @@ pub(super) mod fake_action_tests {
     #[test]
     #[ignore = "daily"]
     fn scoped_fake_attack_with_full_charge_deals_the_weapons_full_damage() {
+        use super::super::native_entity_refs::tests::{run_fresh_cases, with_game};
         use mod_api::PlayerActionSetup;
-        super::super::native_entity_refs::tests::with_game(|game| {
+        if run_fresh_cases(
+            "game::native_server::fake_action_tests::scoped_fake_attack_with_full_charge_deals_the_weapons_full_damage",
+            "SUNRISE_SCOPED_ATTACK_CASE",
+            &["attack"],
+        ) {
+            return;
+        }
+        with_game(|game| {
             let (player, conn, _) = fake(game, None, 0);
             game.as_guest(conn, |g| g.attack_ticks = 3).unwrap();
             let charged = zombie(game, 5000, [2.0, 64.0, 0.5]);
             // Out of a sweep's reach of the first.
             let uncharged = zombie(game, 5001, [-1.5, 64.0, 0.5]);
-            let full = health(game, 5000);
             let mut attack = |target, full_attack_charge| {
                 let mut setup = PlayerActionSetup::new(
                     Some(crate::game::api_values::test_snapshot(&ItemStack::new(
@@ -4964,11 +5951,19 @@ pub(super) mod fake_action_tests {
             };
             attack(charged, true);
             attack(uncharged, false);
-            // A diamond sword's 7, after a zombie's 2 armour (`getDamageAfterAbsorb`: the armour
-            // left is at least a fifth of it, 0.4).
-            let dealt = 7.0f32 * (1.0 - 0.4 / 25.0);
-            assert!((full - health(game, 5000) - dealt).abs() < 1e-4);
-            assert!(full - health(game, 5001) < dealt / 2.0);
+            // Diamond sword: 7 damage and 4 + (-2.4f32) attack speed. Player.attack samples
+            // the empty ticker at 0.5, then CombatRules applies the zombie's 2 armour.
+            let delay = (1.0 / (4.0 + f64::from(-2.4f32)) * 20.0) as f32;
+            let charge = 0.5f32 / delay;
+            let after_hit = |damage: f32| {
+                let armor = (2.0 - damage / 2.0).max(2.0 * 0.2);
+                20.0 - damage * (1.0 - armor / 25.0)
+            };
+            assert_eq!(health(game, 5000), after_hit(7.0));
+            assert_eq!(
+                health(game, 5001),
+                after_hit(7.0 * (0.2 + charge * charge * 0.8))
+            );
         });
     }
 
@@ -6017,7 +7012,7 @@ pub(super) mod fake_action_tests {
                 inside: false,
             };
             assert_eq!(
-                game.guest_use_item_on(real_conn, gi, hit, Hand::Main),
+                game.guest_use_item_on(real_conn, gi, hit, Hand::Main, None),
                 Ok(true)
             );
             assert_eq!(

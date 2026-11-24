@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "O nouă linie de chat glisează din stânga în timp ce dispare, în loc să pară întreg.",
   "sunrise.extras.chat_indicator": "Indicator de mesaj",
   "sunrise.extras.chat_indicator.tooltip": "Bara colorată din stânga unei linii de chat.",
-  "sunrise.extras.discord_presence": "Prezență bogată în discord",
-  "sunrise.extras.discord_presence.tooltip": "Afișează Playing Sunrise pe profilul tău Discord în timp ce Discord rulează: meniuri, single player sau multiplayer, dimensiunea și timpul jucat. Niciodată un nume de lume sau adresa unui server.",
   "sunrise.extras.dynamic_lights": "Lumini dinamice",
   "sunrise.extras.dynamic_lights.tooltip": "Torțele și alte surse de lumină ținute, aruncate sau pe foc iluminează blocurile din jurul lor.",
   "sunrise.extras.fullbright": "Luminos total",

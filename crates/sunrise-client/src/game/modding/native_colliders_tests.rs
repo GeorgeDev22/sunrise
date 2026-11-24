@@ -279,7 +279,6 @@ fn a_call_into_another_level_reads_that_levels_colliders_and_restores_the_caller
 /// A game that simulates its overworld, with the chunk the tests build on loaded.
 fn with_world(test: impl FnOnce(&mut Game<'_>)) {
     super::native_entity_refs::tests::with_game(|game| {
-        let _world = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
         game.options.dedicated = Some(Vec::new());
         game.native_level_opened(Dim::Overworld);
         game.world
@@ -792,49 +791,55 @@ fn a_carried_body_stops_at_a_wall_and_the_collider_goes_on() {
 #[test]
 #[ignore = "daily"]
 fn a_collider_on_a_collider_passes_the_displacement_on() {
-    with_world(|game| {
-        let (c1, c1_ref) = stand_with_id(game, [8.0, 70.0, 8.0]);
-        c1_ref.set_collider(game, Some(deck())).unwrap();
-        // The second collider's holder rests on the first deck, with a small deck above it.
-        let c2 = drop_item(game, [8.5, 70.0, 8.0]);
-        game.entity(c2)
-            .unwrap()
-            .set_collider(
-                game,
-                Some(Collider {
-                    boxes: vec![ColliderBox {
-                        min: [-0.5, 0.0, -0.5],
-                        max: [0.5, 0.2, 0.5],
-                    }],
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                }),
-            )
-            .unwrap();
-        // And a body on that.
-        let rider = drop_dirt(game, [8.5, 70.2, 8.0]);
-        settle(game);
-        let (from_c2, from) = (item_at(game, c2), item_at(game, rider));
-        assert!(
-            from.y > 70.1,
-            "the rider stands on the small deck: {from:?}"
-        );
-        for _ in 0..10 {
-            tick_level_moving(game, |g| shift_stand(g, c1, Vec3::new(0.1, 0.0, 0.0)));
-        }
-        let (to_c2, to) = (item_at(game, c2), item_at(game, rider));
-        assert!(
-            near(
-                to_c2,
-                Vec3::new(from_c2.x + 1.0, from_c2.y, from_c2.z),
-                0.05
-            ),
-            "{to_c2:?}"
-        );
-        assert!(
-            near(to, Vec3::new(from.x + 1.0, from.y, from.z), 0.05),
-            "{from:?} -> {to:?}"
-        );
-    });
+    crate::game::in_own_process(
+        "game::native_colliders_tests::a_collider_on_a_collider_passes_the_displacement_on",
+        || {
+            with_world(|game| {
+                let (c1, c1_ref) = stand_with_id(game, [8.0, 70.0, 8.0]);
+                c1_ref.set_collider(game, Some(deck())).unwrap();
+                // The second collider's holder rests on the first deck, with a small deck above it.
+                // Its descent clears the pig that holds the first deck, so this tests carry only.
+                let c2 = drop_item(game, [9.0, 70.0, 8.0]);
+                game.entity(c2)
+                    .unwrap()
+                    .set_collider(
+                        game,
+                        Some(Collider {
+                            boxes: vec![ColliderBox {
+                                min: [-0.5, 0.0, -0.5],
+                                max: [0.5, 0.2, 0.5],
+                            }],
+                            rotation: [0.0, 0.0, 0.0, 1.0],
+                        }),
+                    )
+                    .unwrap();
+                // And a body on that.
+                let rider = drop_dirt(game, [9.0, 70.2, 8.0]);
+                settle(game);
+                let (from_c2, from) = (item_at(game, c2), item_at(game, rider));
+                assert!(
+                    from.y > 70.1,
+                    "the rider stands on the small deck: {from:?}"
+                );
+                for _ in 0..10 {
+                    tick_level_moving(game, |g| shift_stand(g, c1, Vec3::new(0.1, 0.0, 0.0)));
+                }
+                let (to_c2, to) = (item_at(game, c2), item_at(game, rider));
+                assert!(
+                    near(
+                        to_c2,
+                        Vec3::new(from_c2.x + 1.0, from_c2.y, from_c2.z),
+                        0.05
+                    ),
+                    "{to_c2:?}"
+                );
+                assert!(
+                    near(to, Vec3::new(from.x + 1.0, from.y, from.z), 0.05),
+                    "{from:?} -> {to:?}"
+                );
+            })
+        },
+    );
 }
 
 /// A carry is an `entity_move` with the cause `Carried`: a listener hears it with the contact
@@ -921,7 +926,7 @@ fn a_carried_vehicle_takes_its_passengers_and_theirs_with_it() {
             let at = game.mobs.iter().position(|m| m.id == id).expect("a pig");
             game.mobs.update(at, |m| f(m));
         };
-        update(game, vehicle, &|m| m.on_ground = true);
+        update(game, vehicle, &|m| m.ground.on_ground = true);
         update(game, middle, &|m| m.extra.mount = Some(vehicle));
         update(game, top, &|m| m.extra.mount = Some(middle));
         game.position_riders();

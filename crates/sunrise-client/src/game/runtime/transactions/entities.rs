@@ -32,8 +32,7 @@ pub(super) struct EntityJournal {
     /// Below the join number of every entity added in the transaction (`JoinSeq::upcoming` as
     /// it opened).
     mark: JoinSeq,
-    /// How many bolts and thrown potions there were as it opened.
-    bolts: usize,
+    /// How many thrown potions there were as it opened.
     potions: usize,
     /// The travellers that arrived from another level, by the ids they arrived under.
     arrivals: HashSet<u32>,
@@ -131,6 +130,10 @@ fn committing_in(commits: &mut [Committing], dimension: Dim) -> Option<&mut Comm
         .find(|commit| commit.dimension == dimension)
 }
 
+pub(super) fn is_committing(commits: &[Committing], dimension: Dim) -> bool {
+    commits.iter().any(|commit| commit.dimension == dimension)
+}
+
 /// The innermost open transaction of `dimension`: it journals what happens in that level only,
 /// whatever other levels' transactions are open inside it (a command run `in` another level can
 /// open one). What happens in a level with none open (a command run `in` it from another
@@ -191,7 +194,6 @@ impl Game<'_> {
     pub(super) fn entity_journal_open(&self) -> EntityJournal {
         EntityJournal {
             mark: JoinSeq::upcoming(),
-            bolts: self.bolts.len(),
             potions: self.potions.thrown.len(),
             ..EntityJournal::default()
         }
@@ -338,9 +340,23 @@ impl Game<'_> {
         };
         Some((step, commit.removed.clone()))
     }
-    /// Tells the running commit's queue: every join first, as the queue grows with what the
-    /// listeners ask for, then each step in order, the joins already told skipped.
-    fn tell_commit(&mut self, frame: usize) {
+    /// Publish an item spawned by `preRemoveSideEffects` before returning to the block
+    /// write. At commit, tell the already-queued batches first, excluding pending removes.
+    pub(in crate::game) fn flush_removal_join(&mut self, watch: u32) -> bool {
+        let Some(frame) = self
+            .transactions
+            .committing
+            .iter()
+            .rposition(|commit| commit.dimension == self.dim)
+        else {
+            return self.native_joins_flush(false, watch);
+        };
+        self.tell_commit_joins(frame);
+        let removed = self.transactions.committing[frame].removed.clone();
+        self.flush_joins(false, watch, &removed, Some(JoinSeq::latest()))
+    }
+
+    fn tell_commit_joins(&mut self, frame: usize) -> usize {
         let mut next = 0;
         while let Some((step, removed)) = self.commit_step(frame, next, false) {
             next += 1;
@@ -352,7 +368,12 @@ impl Game<'_> {
                 self.flush_joins(loaded_from_disk, 0, &removed, Some(through));
             }
         }
-        let joined = next;
+        next
+    }
+
+    /// Tells every join first, as the queue grows, then the remaining steps in order.
+    fn tell_commit(&mut self, frame: usize) {
+        let joined = self.tell_commit_joins(frame);
         let mut next = 0;
         while let Some((step, removed)) = self.commit_step(frame, next, true) {
             match step {
@@ -414,7 +435,6 @@ impl Game<'_> {
                 mob.removed = was;
             }
         }
-        self.bolts.truncate(journal.bolts);
         self.potions.thrown.truncate(journal.potions);
         // One load when nothing joined anywhere since the transaction opened.
         if JoinSeq::latest() >= journal.mark {
@@ -457,6 +477,7 @@ impl Game<'_> {
             self.item_frames,
             self.others,
             self.breath_clouds,
+            self.bolts,
             self.fangs.list,
             self.ominous_spawners,
             self.resident_entities.knots,
@@ -505,6 +526,25 @@ impl Drop for Departure {
     }
 }
 
+fn remove_entity_attachment(
+    attachments: &mut HashMap<super::AttachmentKey, super::KeptAttachments>,
+    id: u32,
+) -> Option<super::KeptAttachments> {
+    let key = attachments
+        .keys()
+        .find(|key| {
+            matches!(
+                key,
+                super::AttachmentKey::Level(
+                    _,
+                    sunrise_mod_runtime::attachments::Holder::Entity(entity),
+                ) if *entity == id
+            )
+        })
+        .copied()?;
+    attachments.remove(&key)
+}
+
 impl Game<'_> {
     /// Entity `id` is leaving this level with `map` inside a transaction: its index rows stay
     /// until the root closes, so a snapshot inside the action sees no gap.
@@ -543,11 +583,10 @@ impl Game<'_> {
     /// slots on, so its own abort can put back what it kept, which is older.
     pub(super) fn roll_back_in_flight(&mut self, level: &mut Level) {
         for (id, slot) in std::mem::take(&mut level.in_flight) {
-            let holder = sunrise_mod_runtime::attachments::Holder::Entity(id);
             // 🤖 Agent: as in `journal_travel`, both are consumed and the travelled one, kept
             // before the entity arrived under `id`, is the older and the one put back.
             let travelled = level.travelled.remove(&id);
-            let kept = level.attachments.remove(&holder);
+            let kept = remove_entity_attachment(&mut level.attachments, id);
             if let Some(kept) = travelled.or(kept) {
                 *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(kept.contents);
             }
@@ -565,9 +604,7 @@ impl Game<'_> {
             // travelled to `source` was kept before anything kept it under `source`, so its
             // travelled entry is the older one, and the one an abort restores.
             let travelled = level.travelled.remove(&source);
-            let kept = level
-                .attachments
-                .remove(&sunrise_mod_runtime::attachments::Holder::Entity(source));
+            let kept = remove_entity_attachment(&mut level.attachments, source);
             if let Some(kept) = travelled.or(kept) {
                 level.travelled.entry(arrived).or_insert(kept);
             }

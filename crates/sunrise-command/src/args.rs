@@ -18,6 +18,17 @@ pub enum CustomArgumentKind {
     Word,
     /// The rest of the line, spaces included.
     Greedy,
+    /// Brigadier's `StringArgumentType.string()` (`QUOTABLE_PHRASE`), read by
+    /// [`Reader::read_string`]: one unquoted word, or one single- or double-quoted phrase, empty
+    /// included, in which only the active quote and `\` are escaped. The parser receives the
+    /// decoded text.
+    Quotable,
+    /// A Brigadier `integer` within its bounds (`IntegerArgumentType.integer(min, max)`):
+    /// refused below `min` or above `max` with `argument.integer.low` / `big`.
+    Integer { min: i32, max: i32 },
+    /// A Brigadier `long` within its bounds (`LongArgumentType.longArg(min, max)`): refused
+    /// below `min` or above `max` with `argument.long.low` / `big`.
+    Long { min: i64, max: i64 },
 }
 
 /// One completion a registered custom argument offers.
@@ -152,6 +163,11 @@ pub enum ArgType {
     Integer {
         min: i32,
         max: i32,
+    },
+    /// Brigadier's `LongArgumentType.longArg(min, max)`.
+    Long {
+        min: i64,
+        max: i64,
     },
     Float {
         min: f32,
@@ -544,6 +560,7 @@ pub struct ItemInput {
 pub enum Arg {
     Bool(bool),
     Int(i32),
+    Long(i64),
     Float(f32),
     Double(f64),
     Str(String),
@@ -559,6 +576,8 @@ pub enum Arg {
     ScoreHolder(ScoreHolderArg),
     IntRange(IntRange),
     DoubleRange(DoubleRange),
+    /// Options already decoded by a registered common particle type.
+    Particle(Box<mod_vocab::ParticleOptions>),
     /// A custom argument: the id of its registered type and its canonical value.
     Custom {
         kind: Arc<str>,
@@ -644,8 +663,24 @@ fn modified_utf8_len(text: &str) -> usize {
 /// match the typed text (at its start, or after each `.`, `_` or `/`) within the protocol's text
 /// bounds and the reply's count. A candidate past a bound is dropped by name in the diagnostics
 /// and the others stay; nothing here panics.
-fn add_provider_suggestions(builder: &mut SuggestionsBuilder, candidates: Vec<CustomSuggestion>) {
-    let (count, lower) = (candidates.len(), builder.remaining_lower());
+///
+/// For a [`CustomArgumentKind::Quotable`] argument the match compares phrase content: the typed
+/// text and each candidate without an opening quote, a closing one or their `\` escapes, so `Get`,
+/// `"Get` and `'Get` all keep `"Getting Started"`. The provider still sees the raw typed text, and
+/// each kept candidate is inserted as written over the same range.
+fn add_provider_suggestions(
+    builder: &mut SuggestionsBuilder,
+    candidates: Vec<CustomSuggestion>,
+    quotable: bool,
+) {
+    let content = |text: &str| match quotable {
+        true => phrase_content(text),
+        false => text.to_owned(),
+    };
+    let (count, lower) = (
+        candidates.len(),
+        content(builder.remaining()).to_lowercase(),
+    );
     // The cap counts what the reply keeps, not what the provider answered: a candidate that does
     // not match the typed text, equals it (the builder adds nothing for it), repeats an earlier
     // text and tooltip pair, or is past a bound, spends none of it, so a long list of those
@@ -658,7 +693,7 @@ fn add_provider_suggestions(builder: &mut SuggestionsBuilder, candidates: Vec<Cu
             break;
         }
         if candidate.text == typed
-            || !matches_sub_str(&lower, &candidate.text.to_lowercase())
+            || !matches_sub_str(&lower, &content(&candidate.text).to_lowercase())
             || !seen.insert((candidate.text.clone(), candidate.tooltip.clone()))
         {
             continue;
@@ -688,6 +723,30 @@ fn add_provider_suggestions(builder: &mut SuggestionsBuilder, candidates: Vec<Cu
              {MAX_PROVIDER_SUGGESTIONS} are kept"
         );
     }
+}
+/// The content of a quotable phrase as typed so far, or of a whole one: without its opening
+/// `"` or `'`, without the matching closing quote, and with `\"` / `\'` / `\\` decoded as
+/// `StringReader.readStringUntil` decodes them. A word, or a phrase still being typed (no closing
+/// quote, perhaps ending in a lone `\`), keeps what it has.
+fn phrase_content(text: &str) -> String {
+    let Some(quote) = text.chars().next().filter(|&c| c == '"' || c == '\'') else {
+        return text.to_owned();
+    };
+    let mut out = String::new();
+    let mut escaped = false;
+    for c in text[1..].chars() {
+        if escaped {
+            out.push(c);
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == quote {
+            break;
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 /// SharedSuggestionProvider.filterResources (no prefix).
 pub fn resource_matches(contents: &str, id: &str) -> bool {
@@ -1143,6 +1202,43 @@ fn particle_options(id: &str, t: &sunrise_core::nbt::Tag) -> Result<(), String> 
     }
     Ok(())
 }
+/// `IntegerArgumentType.parse`: an `int` within `min..=max`, or `argument.integer.low` / `big` with
+/// the cursor back at its start.
+fn read_integer(reader: &mut Reader, min: i32, max: i32) -> CmdResult<i32> {
+    let start = reader.cursor;
+    let v = reader.read_int()?;
+    bounded(reader, start, "integer", v, min, max)
+}
+/// `LongArgumentType.parse`: a `long` within `min..=max`, or `argument.long.low` / `big` with the
+/// cursor back at its start.
+fn read_long(reader: &mut Reader, min: i64, max: i64) -> CmdResult<i64> {
+    let start = reader.cursor;
+    let v = reader.read_long()?;
+    bounded(reader, start, "long", v, min, max)
+}
+/// Brigadier's `<kind>TooLow` / `<kind>TooBig`: the bound, then the value found.
+fn bounded<T: PartialOrd + fmt::Display>(
+    reader: &mut Reader,
+    start: usize,
+    kind: &str,
+    v: T,
+    min: T,
+    max: T,
+) -> CmdResult<T> {
+    let (key, bound) = if v < min {
+        ("low", &min)
+    } else if v > max {
+        ("big", &max)
+    } else {
+        return Ok(v);
+    };
+    reader.cursor = start;
+    Err(CommandError::tr_at(
+        &format!("argument.{kind}.{key}"),
+        &[bound, &v],
+        reader,
+    ))
+}
 /// TimeArgument units.
 fn time_unit(unit: &str) -> Option<i32> {
     match unit {
@@ -1158,26 +1254,8 @@ impl ArgType {
         let start = reader.cursor;
         Ok(match self {
             ArgType::Bool => Arg::Bool(reader.read_boolean()?),
-            ArgType::Integer { min, max } => {
-                let v = reader.read_int()?;
-                if v < *min {
-                    reader.cursor = start;
-                    return Err(CommandError::tr_at(
-                        "argument.integer.low",
-                        &[min, &v],
-                        reader,
-                    ));
-                }
-                if v > *max {
-                    reader.cursor = start;
-                    return Err(CommandError::tr_at(
-                        "argument.integer.big",
-                        &[max, &v],
-                        reader,
-                    ));
-                }
-                Arg::Int(v)
-            }
+            ArgType::Integer { min, max } => Arg::Int(read_integer(reader, *min, *max)?),
+            ArgType::Long { min, max } => Arg::Long(read_long(reader, *min, *max)?),
             ArgType::Float { min, max } => {
                 let v = reader.read_float()?;
                 if v < *min {
@@ -1727,10 +1805,19 @@ impl ArgType {
                 } else {
                     sunrise_core::nbt::Tag::Compound(Default::default())
                 };
-                if let Err(m) = particle_options(&id, &options) {
-                    return Err(CommandError::tr("particle.invalidOptions", &[&m]));
+                if let sunrise_core::nbt::Tag::Compound(fields) = &options
+                    && let Some(result) =
+                        reg.particle_options.and_then(|decode| decode(&id, fields))
+                {
+                    Arg::Particle(Box::new(
+                        result.map_err(|m| CommandError::tr("particle.invalidOptions", &[&m]))?,
+                    ))
+                } else {
+                    if let Err(m) = particle_options(&id, &options) {
+                        return Err(CommandError::tr("particle.invalidOptions", &[&m]));
+                    }
+                    Arg::Str(reader.string[start..reader.cursor].to_owned())
                 }
-                Arg::Str(reader.string[start..reader.cursor].to_owned())
             }
             ArgType::Enum(words) => {
                 let word = reader.read_unquoted_string();
@@ -1810,10 +1897,23 @@ impl ArgType {
             ArgType::Custom(custom) => {
                 let text = match custom.kind {
                     CustomArgumentKind::Word => reader.read_unquoted_string().to_owned(),
+                    // `StringArgumentType.parse` for `QUOTABLE_PHRASE`: the shared reader, with
+                    // its escape and unclosed-quote errors at their cursor.
+                    CustomArgumentKind::Quotable => reader.read_string()?,
                     CustomArgumentKind::Greedy => {
                         let text = reader.remaining().to_owned();
                         reader.cursor = reader.string.len();
                         text
+                    }
+                    // The number is checked as Brigadier's own type first; the mod's parser sees
+                    // the digits it accepted.
+                    CustomArgumentKind::Integer { min, max } => {
+                        read_integer(reader, min, max)?;
+                        reader.string[start..reader.cursor].to_owned()
+                    }
+                    CustomArgumentKind::Long { min, max } => {
+                        read_long(reader, min, max)?;
+                        reader.string[start..reader.cursor].to_owned()
                     }
                 };
                 match (custom.parse)(&text) {
@@ -2008,7 +2108,8 @@ impl ArgType {
                     let prefix = builder.remaining().to_owned();
                     let arguments = parsed_arguments(context, builder.input, builder.start);
                     let candidates = provider(reg, &prefix, &arguments);
-                    add_provider_suggestions(builder, candidates);
+                    let quotable = custom.kind == CustomArgumentKind::Quotable;
+                    add_provider_suggestions(builder, candidates, quotable);
                 }
                 None => {
                     let prefix = builder.remaining().to_owned();

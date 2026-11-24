@@ -14,7 +14,8 @@ pub struct ModMenuOpen {
     pub menu: MenuKey,
     /// The menu title sent to the client.
     pub title: Text,
-    /// Opening context for `screen_extra_data`, at most 32 KiB.
+    /// One-time opening bytes, at most 32 KiB. The client reads them through
+    /// [`crate::MenuScreenOpen::extra`] only while its factory builds the screen.
     pub extra: Vec<u8>,
     /// Exactly the menu type's declared number of live data values, in slot order.
     pub data: Vec<i32>,
@@ -122,12 +123,6 @@ pub enum MenuDataRefusal {
 
 impl crate::NoBackend for MenuDataRefusal {
     fn no_backend() -> Self {
-        Self::Unsupported
-    }
-}
-
-impl crate::AccessRefusal for MenuDataRefusal {
-    fn unavailable() -> Self {
         Self::Unsupported
     }
 }

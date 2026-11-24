@@ -7,7 +7,6 @@ rust-version.workspace = true
 description = "The client's world data, rendering and screens: chunks, meshing, light, streaming, the renderer, the HUD, menus and settings; no gameplay"
 
 [dependencies]
-sunrise-guest-stack = { path = "../sunrise-guest-stack" }
 # The settings stores of the crates above the engine (docs/layers.md, "Platform registries").
 sunrise-hooks = { path = "../sunrise-hooks" }
 sunrise-mod-runtime = { path = "../sunrise-mod-runtime" }
@@ -16,6 +15,7 @@ sunrise-mod-api-macros = { path = "../sunrise-mod-api-macros" }
 # The GUI atlas's pixels, kept compressed once uploaded (hud/atlas.rs `pack_pixels`).
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
 sunrise-assets = { path = "../sunrise-assets" }
+sunrise-audio-input = { path = "../sunrise-audio-input", optional = true }
 sunrise-client-core = { path = "../sunrise-client-core" }
 sunrise-client-input = { path = "../sunrise-client-input" }
 sunrise-command = { path = "../sunrise-command" }
@@ -59,6 +59,8 @@ png = "0.18"
 image-webp = { version = "0.2", default-features = false }
 zune-jpeg = { version = "0.4", default-features = false, features = ["std"] }
 pollster = "0.4"
+# Use the GLSL frontend's preprocessor to select active core-shader imports.
+pp-rs = "0.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 sha1 = "0.10"
@@ -74,6 +76,11 @@ zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", default-features = false, features = ["std", "time"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))'.dependencies]
+# CPAL 0.16's ALSA enumeration drops failed opens and hides the PCM addresses.
+alsa = { version = "0.9", optional = true }
+libc = { version = "0.2", optional = true }
+
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 
@@ -81,8 +88,8 @@ wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 
 [features]
-# Sound output: sunrise-client's `audio` feature.
-audio = ["dep:cpal"]
+# Sound output and input: sunrise-client's `audio` feature.
+audio = ["dep:cpal", "dep:alsa", "dep:libc", "dep:sunrise-audio-input"]
 # Helpers sunrise-client's tests build their fixtures with.
 test-support = []
 

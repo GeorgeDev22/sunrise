@@ -298,9 +298,11 @@ impl Game<'_> {
     }
 
     fn take_server_memory_snapshot(&self, state: &mut super::ServerState, label: &str) {
-        let rows = flatten_report(&self.memory_value());
-        let t = state.perf_epoch.elapsed().as_secs_f64();
-        state.perf.memory_snapshot(t, label, &rows);
+        if let Some(cost) = state.perf.memory_cost() {
+            let rows = cost.measure(|| flatten_report(&self.memory_value()));
+            let t = state.perf_epoch.elapsed().as_secs_f64();
+            state.perf.memory_snapshot(t, label, &rows);
+        }
     }
 
     /// A capture's memory snapshots: one as it starts, then every `MEMORY_EVERY_S`.

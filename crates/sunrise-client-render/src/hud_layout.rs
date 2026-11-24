@@ -5,7 +5,7 @@
 //! helpers the other layouts share (`hud_overlays`, `chat`). Computed without
 //! drawing so the parity fixture can compare them with the vanilla client.
 use crate::{font::Font, text::Text};
-pub use mod_api::client::hud_layout::{Blend, HealthInputs, HeartKind, PoseOp};
+pub use mod_api::client::hud_layout::{Blend, HeartKind, PoseOp};
 use std::borrow::Cow;
 use sunrise_core::random::{LegacyRandom, RandomSource};
 
@@ -87,6 +87,18 @@ pub enum GuiDraw {
         scale: [f32; 2],
         pivot: [f32; 2],
     },
+    /// `PlayerFaceExtractor.extractRenderState` of the player `uuid`'s skin: the face, then the
+    /// hat layer when `hat`, `size` pixels square, upside down when `flip`, tinted `color`. The
+    /// skin comes from the caller ([`GuiFaces`]).
+    PlayerFace {
+        uuid: u128,
+        x: i32,
+        y: i32,
+        size: i32,
+        hat: bool,
+        flip: bool,
+        color: u32,
+    },
     /// `pose().pushMatrix()` followed by `ops`.
     Push(Vec<PoseOp>),
     /// `pose().popMatrix()`.
@@ -140,23 +152,6 @@ pub fn pose_refused(ops: &[PoseOp]) -> Option<PoseOp> {
 }
 
 pub const WHITE: u32 = 0xFFFF_FFFF;
-
-/// The highest top, in GUI px, of the draws that sit on the view (`None` for none): where a row
-/// of the HUD begins.
-pub fn draws_top(draws: &[GuiDraw]) -> Option<i32> {
-    draws
-        .iter()
-        .filter_map(|d| match *d {
-            GuiDraw::Sprite { y, .. }
-            | GuiDraw::AtlasSprite { y, .. }
-            | GuiDraw::Blit { y, .. }
-            | GuiDraw::Text { y, .. }
-            | GuiDraw::Item { y, .. } => Some(y),
-            GuiDraw::Fill { y0, .. } | GuiDraw::FillGradient { y0, .. } => Some(y0),
-            GuiDraw::Push(_) | GuiDraw::Pop => None,
-        })
-        .min()
-}
 
 fn sprite(sprite: &'static str, x: i32, y: i32, w: i32, h: i32) -> GuiDraw {
     GuiDraw::Sprite {
@@ -280,11 +275,9 @@ pub struct HotbarInputs {
     /// that holds an item, then the off hand.
     pub slots: [Option<f32>; 9],
     pub offhand_pop: f32,
-    /// `getAttackStrengthScale(0)` when the attack indicator is in HOTBAR mode.
-    pub attack: Option<f32>,
 }
 
-/// `Hud.extractItemHotbar`.
+/// The backgrounds and items from `Hud.extractItemHotbar`.
 pub fn hotbar(w: i32, h: i32, i: &HotbarInputs) -> Vec<GuiDraw> {
     let mut out = Vec::new();
     let center = w / 2;
@@ -358,11 +351,21 @@ pub fn hotbar(w: i32, h: i32, i: &HotbarInputs) -> Vec<GuiDraw> {
         };
         slot(40, x, h - 16 - 3, seed, i.offhand_pop, &mut out);
     }
-    if let Some(scale) = i.attack
-        && scale < 1.0
-    {
+    out
+}
+
+/// Append the Hotbar-mode attack indicator from `Hud.extractItemHotbar`, after the items.
+pub fn hotbar_attack_indicator(
+    w: i32,
+    h: i32,
+    right_handed: bool,
+    scale: f32,
+    out: &mut Vec<GuiDraw>,
+) {
+    if scale < 1.0 {
         let y = h - 20;
-        let x = if offhand_left {
+        let center = w / 2;
+        let x = if right_handed {
             center + 91 + 6
         } else {
             center - 91 - 22
@@ -384,7 +387,6 @@ pub fn hotbar(w: i32, h: i32, i: &HotbarInputs) -> Vec<GuiDraw> {
             progress,
         ));
     }
-    out
 }
 
 /// `Hud.extractCrosshair`'s full attack indicator: at full strength on a
@@ -492,8 +494,38 @@ pub fn experience_colored(
     out
 }
 
+// no wire: the vanilla layout reads these only during HUD extraction.
+/// The local player's state read by `Hud.extractHearts`.
+pub struct HealthInputs {
+    /// `Hud.tickCount`.
+    pub tick: i32,
+    pub max_health: f32,
+    pub absorption: f32,
+    pub regeneration: bool,
+    pub hardcore: bool,
+    /// Whether the current frame uses the blinking sprites, from `HealthHud::update_health`.
+    pub blink: bool,
+}
+
+/// The local player's state read by `Hud.extractFood`.
+pub struct FoodInputs {
+    pub tick: i32,
+    pub food: i32,
+    pub saturation: f32,
+    pub hunger: bool,
+}
+
+/// The local player's state read by `Hud.extractAirBubbles`.
+pub struct AirInputs {
+    pub tick: i32,
+    /// `getAirSupply`, `getMaxAirSupply`, `isEyeInFluid(WATER)`.
+    pub air: i32,
+    pub max_air: i32,
+    pub under_water: bool,
+}
+
 /// State kept between frames (`Hud.lastHealth`, `displayHealth`, ...).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct HealthHud {
     pub last_health: i32,
     pub display_health: i32,
@@ -502,9 +534,21 @@ pub struct HealthHud {
     pub health_blink_time: i64,
     /// `Hud.lastBubblePopSoundPlayed`.
     pub last_bubble_pop_sound: i32,
-    /// The `ui.hud.bubble_pop` volume and pitch `playAirBubblePoppedSound`
-    /// asked for this frame; the caller plays it and clears it.
-    pub bubble_pop_sound: Option<(f32, f32)>,
+    /// `Hud.random`: hearts reseed it, then food and air consume from the same stream.
+    pub random: LegacyRandom,
+}
+
+impl Default for HealthHud {
+    fn default() -> Self {
+        Self {
+            last_health: 0,
+            display_health: 0,
+            last_health_time: 0,
+            health_blink_time: 0,
+            last_bubble_pop_sound: 0,
+            random: crate::random_source::create(),
+        }
+    }
 }
 
 /// The two status-bar heights for one HUD frame, measured from its bottom edge.
@@ -545,8 +589,8 @@ pub fn vehicle_health(
     hearts: i32,
     health: f32,
     heights: &mut StatusBarHeights,
-) -> Vec<GuiDraw> {
-    let mut out = Vec::new();
+    out: &mut Vec<GuiDraw>,
+) {
     let current = f64::from(health).ceil() as i32;
     let x_right = w / 2 + 91;
     let rows = hearts / 10 + i32::from(hearts % 10 > 0);
@@ -569,7 +613,6 @@ pub fn vehicle_health(
         yo -= 10;
         base += 20;
     }
-    out
 }
 
 fn heart(
@@ -645,92 +688,78 @@ fn heart(
     table[usize::from(hardcore) * 4 + usize::from(half) * 2 + usize::from(blink)]
 }
 
-/// The four `Hud.extractPlayerHealth` paint steps. They share one draw buffer so
-/// splitting the steps needs neither more allocations nor copies of draw commands.
-#[derive(Debug)]
-pub struct PlayerHealthRows {
-    draws: Vec<GuiDraw>,
-    armor_end: usize,
-    hearts_end: usize,
-    food_end: usize,
-}
-
-impl PlayerHealthRows {
-    /// All the draws in their original order: armour, hearts, food, air.
-    pub fn draws(&self) -> &[GuiDraw] {
-        &self.draws
-    }
-
-    /// The individually paintable slices in that same order.
-    pub fn layers(&self) -> [&[GuiDraw]; 4] {
-        [
-            &self.draws[..self.armor_end],
-            &self.draws[self.armor_end..self.hearts_end],
-            &self.draws[self.hearts_end..self.food_end],
-            &self.draws[self.food_end..],
-        ]
+/// `Hud.extractArmorLevel`: stack armour above the heart rows actually extracted.
+pub fn armor_level(
+    armor: i32,
+    w: i32,
+    h: i32,
+    heights: &mut StatusBarHeights,
+    out: &mut Vec<GuiDraw>,
+) {
+    if armor > 0 {
+        let y = heights.left.push(h, 10);
+        let x_left = w / 2 - 91;
+        for n in 0..10 {
+            let name = match (n * 2 + 1).cmp(&armor) {
+                std::cmp::Ordering::Less => "hud/armor_full",
+                std::cmp::Ordering::Equal => "hud/armor_half",
+                std::cmp::Ordering::Greater => "hud/armor_empty",
+            };
+            out.push(sprite(name, x_left + n * 8, y, 9, 9));
+        }
     }
 }
 
 impl HealthHud {
-    /// `Hud.extractPlayerHealth` for a screen of `w` x `h` GUI pixels. Lay out
-    /// each row using its column's height, and share the same random stream
-    /// between hearts, food and air in that order. The vehicle's rows, if any,
-    /// have already reserved their space in `heights`.
-    pub fn layout(
+    /// `Hud.extractHealthLevel`'s bookkeeping before `extractHearts` asks for the sprite kind.
+    pub fn update_health(
+        &mut self,
+        health: f32,
+        tick: i32,
+        millis: i64,
+        damage_cooldown: bool,
+    ) -> bool {
+        let current = ceil(health);
+        let time = i64::from(tick);
+        let blink = self.health_blink_time > time && (self.health_blink_time - time) / 3 % 2 == 1;
+        if current < self.last_health && damage_cooldown {
+            self.last_health_time = millis;
+            self.health_blink_time = time + 20;
+        } else if current > self.last_health && damage_cooldown {
+            self.last_health_time = millis;
+            self.health_blink_time = time + 10;
+        }
+        if millis - self.last_health_time > 1000 {
+            self.display_health = current;
+            self.last_health_time = millis;
+        }
+        self.last_health = current;
+        self.random.set_seed(i64::from(tick.wrapping_mul(312_871)));
+        blink
+    }
+
+    /// `Hud.extractHearts`: append the heart sprites after bookkeeping and the kind hook.
+    pub fn health_level(
         &mut self,
         i: &HealthInputs,
+        kind: HeartKind,
         w: i32,
         h: i32,
         heights: &mut StatusBarHeights,
-    ) -> PlayerHealthRows {
-        let mut out = Vec::new();
-        let tick = i64::from(i.tick);
-        let current = ceil(i.health);
-        let blink = self.health_blink_time > tick && (self.health_blink_time - tick) / 3 % 2 == 1;
-        if current < self.last_health && i.damage_cooldown {
-            self.last_health_time = i.millis;
-            self.health_blink_time = tick + 20;
-        } else if current > self.last_health && i.damage_cooldown {
-            self.last_health_time = i.millis;
-            self.health_blink_time = tick + 10;
-        }
-        if i.millis - self.last_health_time > 1000 {
-            self.display_health = current;
-            self.last_health_time = i.millis;
-        }
-        self.last_health = current;
-        let old = self.display_health;
-        let mut random = LegacyRandom::new(i64::from(i.tick.wrapping_mul(312_871)));
-        let mut next = |bound: i32| random.next_int_bound(bound).unwrap_or(0);
-        let (x_left, x_right) = (w / 2 - 91, w / 2 + 91);
+        out: &mut Vec<GuiDraw>,
+    ) {
+        let (current, old, blink) = (self.last_health, self.display_health, i.blink);
+        let x_left = w / 2 - 91;
         let max_health = i.max_health.max(old.max(current) as f32);
         let absorption = ceil(i.absorption);
         let rows = ceil((max_health + absorption as f32) / 2.0 / 10.0);
         let row_height = (10 - (rows - 2)).max(3);
-        // Hearts occupy the bottom of the column, but armour still paints first.
         let y_hearts = heights.left.push(h, (rows - 1) * row_height + 10);
         let offset_index = if i.regeneration {
             i.tick % ceil(max_health + 5.0)
         } else {
             -1
         };
-        if i.armor > 0 {
-            let y = heights.left.push(h, 10);
-            for n in 0..10 {
-                let x = x_left + n * 8;
-                if n * 2 + 1 < i.armor {
-                    out.push(sprite("hud/armor_full", x, y, 9, 9));
-                }
-                if n * 2 + 1 == i.armor {
-                    out.push(sprite("hud/armor_half", x, y, 9, 9));
-                }
-                if n * 2 + 1 > i.armor {
-                    out.push(sprite("hud/armor_empty", x, y, 9, 9));
-                }
-            }
-        }
-        let armor_end = out.len();
         let containers = f64::from(max_health / 2.0).ceil() as i32;
         let absorb_containers = (f64::from(absorption) / 2.0).ceil() as i32;
         for c in (0..containers + absorb_containers).rev() {
@@ -738,7 +767,7 @@ impl HealthHud {
             let x = x_left + column * 8;
             let mut y = y_hearts - row * row_height;
             if current + absorption <= 4 {
-                y += next(2);
+                y += self.random.next_int_bound(2).unwrap_or(0);
             }
             if c < containers && c == offset_index {
                 y -= 2;
@@ -754,9 +783,9 @@ impl HealthHud {
             if c >= containers {
                 let ah = halves - containers * 2;
                 if ah < absorption {
-                    let withered = i.kind == HeartKind::Withered;
+                    let withered = kind == HeartKind::Withered;
                     let name = heart(
-                        Some(i.kind),
+                        Some(kind),
                         !withered,
                         i.hardcore,
                         ah + 1 == absorption,
@@ -766,49 +795,64 @@ impl HealthHud {
                 }
             }
             if blink && halves < old {
-                let name = heart(Some(i.kind), false, i.hardcore, halves + 1 == old, true);
+                let name = heart(Some(kind), false, i.hardcore, halves + 1 == old, true);
                 out.push(sprite(name, x, y, 9, 9));
             }
             if halves < current {
-                let name = heart(
-                    Some(i.kind),
-                    false,
-                    i.hardcore,
-                    halves + 1 == current,
-                    false,
-                );
+                let name = heart(Some(kind), false, i.hardcore, halves + 1 == current, false);
                 out.push(sprite(name, x, y, 9, 9));
             }
         }
-        let hearts_end = out.len();
-        if i.vehicle_hearts == 0 {
-            let y_food = heights.right.push(h, 10);
-            let (empty, half, full) = if i.hunger {
-                (
-                    "hud/food_empty_hunger",
-                    "hud/food_half_hunger",
-                    "hud/food_full_hunger",
-                )
-            } else {
-                ("hud/food_empty", "hud/food_half", "hud/food_full")
-            };
-            for n in 0..10 {
-                let mut y = y_food;
-                if i.saturation <= 0.0 && i.tick % (i.food * 3 + 1) == 0 {
-                    y += next(3) - 1;
-                }
-                let x = x_right - n * 8 - 9;
-                out.push(sprite(empty, x, y, 9, 9));
-                if n * 2 + 1 < i.food {
-                    out.push(sprite(full, x, y, 9, 9));
-                }
-                if n * 2 + 1 == i.food {
-                    out.push(sprite(half, x, y, 9, 9));
-                }
+    }
+
+    /// `Hud.extractFood`: append the food row and reserve its space in the right column.
+    pub fn food_level(
+        &mut self,
+        i: &FoodInputs,
+        w: i32,
+        h: i32,
+        heights: &mut StatusBarHeights,
+        out: &mut Vec<GuiDraw>,
+    ) {
+        let x_right = w / 2 + 91;
+        let y_food = heights.right.push(h, 10);
+        let (empty, half, full) = if i.hunger {
+            (
+                "hud/food_empty_hunger",
+                "hud/food_half_hunger",
+                "hud/food_full_hunger",
+            )
+        } else {
+            ("hud/food_empty", "hud/food_half", "hud/food_full")
+        };
+        for n in 0..10 {
+            let mut y = y_food;
+            if i.saturation <= 0.0 && i.tick % (i.food * 3 + 1) == 0 {
+                y += self.random.next_int_bound(3).unwrap_or(0) - 1;
+            }
+            let x = x_right - n * 8 - 9;
+            out.push(sprite(empty, x, y, 9, 9));
+            if n * 2 + 1 < i.food {
+                out.push(sprite(full, x, y, 9, 9));
+            }
+            if n * 2 + 1 == i.food {
+                out.push(sprite(half, x, y, 9, 9));
             }
         }
-        let food_end = out.len();
-        // Hud.extractAirBubbles.
+    }
+
+    /// `Hud.extractAirBubbles`: append the air row and return this frame's bubble-pop volume
+    /// and pitch, if any.
+    pub fn air_level(
+        &mut self,
+        i: &AirInputs,
+        w: i32,
+        h: i32,
+        heights: &mut StatusBarHeights,
+        out: &mut Vec<GuiDraw>,
+    ) -> Option<(f32, f32)> {
+        let mut pop_sound = None;
+        let x_right = w / 2 + 91;
         let max_air = i.max_air.max(1);
         let air = i.air.clamp(0, max_air);
         if i.under_water || air < max_air {
@@ -831,12 +875,12 @@ impl HealthHud {
                     if self.last_bubble_pop_sound != b {
                         let volume = 0.5 + 0.1 * (empty - 3 + 1).max(0) as f32;
                         let pitch = 1.0 + 0.1 * (empty - 5 + 1).max(0) as f32;
-                        self.bubble_pop_sound = Some((volume, pitch));
+                        pop_sound = Some((volume, pitch));
                         self.last_bubble_pop_sound = b;
                     }
                 } else if b > 10 - empty {
                     let wobble = if empty == 10 && i.tick % 2 == 0 {
-                        next(2)
+                        self.random.next_int_bound(2).unwrap_or(0)
                     } else {
                         0
                     };
@@ -844,41 +888,31 @@ impl HealthHud {
                 }
             }
         }
-        PlayerHealthRows {
-            draws: out,
-            armor_end,
-            hearts_end,
-            food_end,
-        }
+        pop_sound
     }
 }
 
 /// Draws the calls with the HUD batch under their poses; items are left to
 /// the caller (they need the item renderer) and so are the vignette and
-/// nausea blits (their blending needs the screen-effect pipeline).
-/// [`paint_items`] draws both.
+/// nausea blits (their blending needs the screen-effect pipeline) and player
+/// faces (their skins are the game's). [`paint_items`] draws the first two,
+/// [`paint_checked`] all three.
 pub fn paint(batch: &mut crate::hud::HudBatch, atlas: &crate::hud::HudAtlas, draws: &[GuiDraw]) {
-    paint_with(batch, atlas, draws, None);
-}
-
-/// Paints consecutive steps of one layer in order, sharing the painter's scratch space.
-pub fn paint_layers(
-    batch: &mut crate::hud::HudBatch,
-    atlas: &crate::hud::HudAtlas,
-    layers: &[&[GuiDraw]],
-) {
-    paint_with(batch, atlas, layers.iter().copied().flatten(), None);
+    paint_with(batch, atlas, draws, None, None);
 }
 
 /// [`paint`], and with `items` also each `Item` (its stack, scaled about its pivot, then its
-/// decorations) and the blits of every blend. Without `items` those draw nothing, as `paint`.
+/// decorations) and the blits of every blend, and with `faces` each `PlayerFace`. Without them
+/// those draw nothing, as `paint`.
 fn paint_with<'a>(
     batch: &mut crate::hud::HudBatch,
     atlas: &crate::hud::HudAtlas,
     draws: impl IntoIterator<Item = &'a GuiDraw>,
     mut items: Option<&mut dyn GuiItems>,
+    mut faces: Option<&mut dyn GuiFaces>,
 ) {
-    let mut stack = vec![IDENTITY];
+    // The initial identity is implicit, so a layer without Push does not allocate a pose stack.
+    let mut stack = Vec::new();
     for d in draws {
         let start = batch.vertices.len();
         let pose = *stack.last().unwrap_or(&IDENTITY);
@@ -916,14 +950,26 @@ fn paint_with<'a>(
                     r.v0 = v0;
                 }
                 let at = [*x as f32, *y as f32, *w as f32, *h as f32];
+                // A whole GUI sprite draws as its `gui.scaling` says (`GuiGraphicsExtractor.blitSprite`).
+                let draw = |batch: &mut crate::hud::HudBatch,
+                            key: &str,
+                            rect: crate::hud::Rect,
+                            at: [f32; 4],
+                            color: u32| {
+                    if region.is_none() && !effect {
+                        crate::ui::draw_whole_sprite(batch, atlas, key, rect, at, color);
+                    } else {
+                        batch.rect_uv(at[0], at[1], at[2], at[3], rect, color);
+                    }
+                };
                 match crate::hud::sprite_modifiers::draws(atlas, sprite, r, at, abgr(*color)) {
                     // A Polytone screen sprite modifier: the sprite changed, then its overlays.
                     Some(draws) => {
                         for d in draws {
-                            batch.rect_uv(d.at[0], d.at[1], d.at[2], d.at[3], d.rect, d.color);
+                            draw(batch, &d.key, d.rect, d.at, d.color);
                         }
                     }
-                    None => batch.rect_uv(at[0], at[1], at[2], at[3], r, abgr(*color)),
+                    None => draw(batch, sprite.as_ref(), r, at, abgr(*color)),
                 }
                 if *blend == Blend::Crosshair {
                     batch.invert_since(start);
@@ -955,17 +1001,10 @@ fn paint_with<'a>(
                 tex,
                 color,
             } => {
-                let Some(mut r) = atlas.blit_rect(texture.as_ref()).copied() else {
+                let at = [*x, *y, *w, *h];
+                if !blit(batch, atlas, texture, at, *uv, *src, *tex, *color) {
                     continue;
-                };
-                let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
-                let u0 = r.u0 + du * uv[0] / tex[0] as f32;
-                let v0 = r.v0 + dv * uv[1] / tex[1] as f32;
-                r.u1 = r.u0 + du * (uv[0] + src[0] as f32) / tex[0] as f32;
-                r.v1 = r.v0 + dv * (uv[1] + src[1] as f32) / tex[1] as f32;
-                r.u0 = u0;
-                r.v0 = v0;
-                batch.rect_uv(*x as f32, *y as f32, *w as f32, *h as f32, r, abgr(*color));
+                }
                 match blend {
                     Blend::Textured => {}
                     Blend::Vignette => batch.blend_since(start, crate::hud::Blend::Vignette),
@@ -988,6 +1027,25 @@ fn paint_with<'a>(
                     items.decorations(batch, *slot, *x, *y);
                 }
             }
+            GuiDraw::PlayerFace {
+                uuid,
+                x,
+                y,
+                size,
+                hat,
+                flip,
+                color,
+            } => {
+                if let Some(faces) = faces.as_deref_mut() {
+                    // The tab list's face blits, each a `Blit` of the skin, moved by this op's pose.
+                    let skin = faces.skin(*uuid);
+                    let at = [*x, *y, *size, *size];
+                    for (uv, src) in crate::tab_list::face_blits(*hat, *flip) {
+                        let tex = crate::tab_list::SKIN_TEX;
+                        blit(batch, atlas, &skin, at, uv, src, tex, *color);
+                    }
+                }
+            }
             GuiDraw::Fill {
                 x0,
                 y0,
@@ -995,14 +1053,11 @@ fn paint_with<'a>(
                 y1,
                 color,
             } => {
-                batch.fill(
-                    atlas,
-                    *x0 as f32,
-                    *y0 as f32,
-                    (x1 - x0) as f32,
-                    (y1 - y0) as f32,
-                    abgr(*color),
-                );
+                // `GuiGraphics.fill` orders the corners; a wrapped bar end can be past the
+                // other by more than an `int` holds, so the span is taken in floats.
+                let (x0, x1) = ((*x0).min(*x1) as f32, (*x0).max(*x1) as f32);
+                let (y0, y1) = ((*y0).min(*y1) as f32, (*y0).max(*y1) as f32);
+                batch.fill(atlas, x0, y0, x1 - x0, y1 - y0, abgr(*color));
             }
             GuiDraw::FillGradient {
                 x0,
@@ -1040,9 +1095,7 @@ fn paint_with<'a>(
                 stack.push(m);
             }
             GuiDraw::Pop => {
-                if stack.len() > 1 {
-                    stack.pop();
-                }
+                stack.pop();
             }
         }
         if pose != IDENTITY {
@@ -1055,6 +1108,33 @@ fn paint_with<'a>(
             }
         }
     }
+}
+
+/// A `Blit`'s quad: `texture`'s `src` texels from `uv` of its `tex` size, drawn at `at` (`x`,
+/// `y`, `w`, `h`) tinted `color`; `false`, drawing nothing, when the atlas lacks the texture.
+#[allow(clippy::too_many_arguments)]
+fn blit(
+    batch: &mut crate::hud::HudBatch,
+    atlas: &crate::hud::HudAtlas,
+    texture: &str,
+    [x, y, w, h]: [i32; 4],
+    uv: [f32; 2],
+    src: [i32; 2],
+    tex: [i32; 2],
+    color: u32,
+) -> bool {
+    let Some(mut r) = atlas.blit_rect(texture).copied() else {
+        return false;
+    };
+    let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
+    let u0 = r.u0 + du * uv[0] / tex[0] as f32;
+    let v0 = r.v0 + dv * uv[1] / tex[1] as f32;
+    r.u1 = r.u0 + du * (uv[0] + src[0] as f32) / tex[0] as f32;
+    r.v1 = r.v0 + dv * (uv[1] + src[1] as f32) / tex[1] as f32;
+    r.u0 = u0;
+    r.v0 = v0;
+    batch.rect_uv(x as f32, y as f32, w as f32, h as f32, r, abgr(color));
+    true
 }
 
 /// An ARGB colour as the HUD batch's packed RGBA.
@@ -1074,8 +1154,13 @@ fn opaque(color: u32) -> u32 {
 
 #[path = "hud_layout_items.rs"]
 mod items;
-pub use items::{GuiItems, Undrawable, item_slot, paint_checked, paint_items, undrawable};
+pub use items::{
+    GuiFaces, GuiItems, Undrawable, item_slot, paint_checked, paint_items, undrawable,
+};
 
+#[cfg(test)]
+#[path = "hud_layout_face_tests.rs"]
+mod face_tests;
 #[cfg(test)]
 #[path = "hud_layout_gradient_tests.rs"]
 mod gradient_tests;
@@ -1090,57 +1175,62 @@ mod player_health_tests {
     #[test]
     fn status_layers_stack_without_changing_the_distinct_draw_steps() {
         let mut hud = HealthHud::default();
-        let mut inputs = HealthInputs {
+        let blink = hud.update_health(20.0, 1, 2000, false);
+        let health = HealthInputs {
             tick: 1,
-            millis: 2000,
-            health: 20.0,
             max_health: 20.0,
             absorption: 4.0,
-            armor: 1,
+            regeneration: false,
+            hardcore: false,
+            blink,
+        };
+        let food = FoodInputs {
+            tick: 1,
             food: 19,
             saturation: 5.0,
-            kind: HeartKind::Normal,
-            regeneration: false,
             hunger: false,
-            hardcore: false,
-            damage_cooldown: false,
+        };
+        let air = AirInputs {
+            tick: 1,
             air: 300,
             max_air: 300,
             under_water: true,
-            vehicle_hearts: 0,
         };
         let (w, h) = (320, 240);
-        let rows = hud.layout(&inputs, w, h, &mut StatusBarHeights::default());
-        let [armor, hearts, food, air] = rows.layers();
-        assert_eq!(armor.len(), 10);
-        assert_eq!(armor[0], sprite("hud/armor_half", 69, 181, 9, 9));
-        assert_eq!(hearts.len(), 24);
-        assert_eq!(hearts[0], sprite("hud/heart/container", 77, 191, 9, 9));
-        assert_eq!(hearts[22], sprite("hud/heart/container", 69, 201, 9, 9));
-        assert_eq!(food.len(), 20);
-        assert_eq!(food[0], sprite("hud/food_empty", 242, 201, 9, 9));
-        assert_eq!(air.len(), 10);
-        assert_eq!(air[0], sprite("hud/air", 242, 191, 9, 9));
+        let mut heights = StatusBarHeights::default();
+        let mut rows = Vec::new();
+        hud.health_level(&health, HeartKind::Normal, w, h, &mut heights, &mut rows);
+        assert_eq!(rows.len(), 24);
+        assert_eq!(rows[0], sprite("hud/heart/container", 77, 191, 9, 9));
+        assert_eq!(rows[22], sprite("hud/heart/container", 69, 201, 9, 9));
+        rows.clear();
+        armor_level(1, w, h, &mut heights, &mut rows);
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[0], sprite("hud/armor_half", 69, 181, 9, 9));
+        rows.clear();
+        hud.food_level(&food, w, h, &mut heights, &mut rows);
+        assert_eq!(rows.len(), 20);
+        assert_eq!(rows[0], sprite("hud/food_empty", 242, 201, 9, 9));
+        rows.clear();
+        assert_eq!(hud.air_level(&air, w, h, &mut heights, &mut rows), None);
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[0], sprite("hud/air", 242, 191, 9, 9));
 
         // A mount's second row takes the place where air was, not a food row.
-        inputs.vehicle_hearts = 11;
-        inputs.armor = 0;
         let mut heights = StatusBarHeights::default();
-        let vehicle = vehicle_health(w, h, 11, 22.0, &mut heights);
-        let mounted = hud.layout(&inputs, w, h, &mut heights);
-        let [armor, same_hearts, food, air] = mounted.layers();
-        assert!(armor.is_empty());
-        assert_eq!(same_hearts, hearts);
-        assert!(food.is_empty());
-        assert_eq!(air[0], sprite("hud/air", 242, 181, 9, 9));
+        rows.clear();
+        vehicle_health(w, h, 11, 22.0, &mut heights, &mut rows);
         assert_eq!(
-            vehicle[0],
+            rows[0],
             sprite("hud/heart/vehicle_container", 242, 201, 9, 9)
         );
         assert_eq!(
-            vehicle[20],
+            rows[20],
             sprite("hud/heart/vehicle_container", 242, 191, 9, 9)
         );
+        rows.clear();
+        assert_eq!(hud.air_level(&air, w, h, &mut heights, &mut rows), None);
+        assert_eq!(rows[0], sprite("hud/air", 242, 181, 9, 9));
     }
 }
 

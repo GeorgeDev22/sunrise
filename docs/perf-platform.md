@@ -35,7 +35,7 @@ in `.local/minecraft/26.3/sources/server/`.
 | `tools/server_bench.py` | Load driver: MSPT from `/tick query`, RSS/CPU, chunks/s, bot counts; report kind `sunrise-server-benchmark` (`:595-609`). Compares Sunrise with vanilla and other servers, which cannot write `.hzperf`. | **Stays as the driver.** It gains a `--profile[=ARGS]` flag, which runs `sunrise-report` for the measure window and adds its run record with `sunrise-perf attach`. This replaces `perf/streaming-caps`' `--sunrise-report` and `perf/sampler`'s `--console-at`. |
 | `tools/perf_bench.py`, `graphics_bench.py`, `pacing_bench.py`, `entity_occlusion_bench.py`, `bench.py` | Client and server drivers with their own JSON. | **Stay as drivers**, out of scope. `pacing_bench.py` stops parsing `slow frame` log lines and runs `sunrise-perf query ticks --worst` on its capture (it needs each frame's span list). |
 | `sunrise-telemetry` (opt-in) | `Perf` payload ≤ 4 KiB, 12 a day (`payload.rs:9-50`, `:212-237`); consent switches off by default (`consent.rs:1-40`); scrubber `scrub.rs:1-10`. | **Stays separate.** Consent, size caps and the upload path are a different contract. Telemetry never queues or uploads a `.hzperf`. |
-| `alloc-census` | Compile feature; tagged mimalloc wrapper (`crates/sunrise-threads/src/heap_census.rs:182`); output only as `heap_by_tag_mb` in `sunrise-ctl memory` (`game/memory.rs:168-170`). | **Producer.** Its snapshot goes into `memory` at capture start, every 10 s and at stop. |
+| `alloc-census` | Compile feature; tagged mimalloc wrapper (`crates/sunrise-threads/src/heap_census.rs:182`); output as `heap_by_tag_mb` in `sunrise-ctl memory`. | **Producer.** Its snapshot goes into the capture's `memory` rows. |
 | `sunrise-ctl memory`, `status`, `stats`, `bench`, `fly … raw` | Live control replies (`control.rs:529-689`, `commands.rs:344-597`). | **Stay** as live state for agents and the benchmark driver. Captures reuse their producers; `FrameStats` feeds `health`. |
 | Dedicated `server-status`, supervisor metrics, Prometheus | `game/dedicated/status.rs:132-173`; supervisor 1 Hz samples `crates/sunrise-server/src/supervisor.rs:619-680`; `/api/v1/metrics/prometheus` (`api.rs:51-65`). | **Stay** for live external monitoring. `health` uses the same field names (`tps`, `mspt`, `rss`, `cpu`). Exporting counters there is a later PR (§3.6). |
 | `/debug start\|stop`, `/jfr`, `/perf` | Vanilla commands (`game/commands/extra.rs:1006-1163`); `/perf` is listed but has no executor. | **Stay.** They are vanilla parity, not this platform; `/perf` is a separate parity item. Remote profiling borrows its permission level (§4.2). |
@@ -254,7 +254,7 @@ message Capture {
   repeated CounterSample counters = 11;    // live: one per second per side
   repeated SlowEvent slow = 12;            // live
   repeated SpanBlock span_blocks = 13;     // live: one per block per thread
-  repeated MemorySnapshot memory = 14;     // live: start, every 10 s, stop
+  repeated MemorySnapshot memory = 14;     // live: start and periodic; dedicated server also at stop
   repeated TimelineChunk timeline = 15;    // live: one per second per thread while the timeline is on
   repeated SpanSummary spans = 16;         // end
   repeated Workers workers = 17;           // end
@@ -388,7 +388,10 @@ Notes on fields:
   compiled inventory. Unknown code provenance remains unspecified. A crate name is recorded only
   when canonical metadata supplies one.
 - `Stop.overhead`: `spans_ms_per_tick`, `spans_share`, `sampler_share_of_thread`, `writer_core_share`,
-  `dropped_samples`, `dropped_messages`, `timeline_stopped_t`, `heap_samples`, `heap_sample_ns`.
+  `dropped_samples`, `dropped_messages`, `timeline_stopped_t`, `heap_samples`, `heap_sample_ns`,
+  `memory_snapshot_ns`. The latter sums elapsed work across the completed sampling stages on
+  the window, server and worker threads, including work on a discarded sample; it excludes time
+  waiting for a request or reply.
 - `Start.settings`, `game_rules` and `sunrise_options` are typed allowlists, never a dump of a file or of the
   environment (§4).
 - `Start.build.symbols` tells the summary why inlined frames merged.
@@ -470,7 +473,7 @@ Notes on fields:
     of `span_blocks`, `spans` and a slow tick's `top`, so span sums stay consistent with the tick's wall time.
   - `SunriseOptions.max_view_distance` is always 0: the far ring it recorded was removed. Older captures still carry its distance.
   - `Overhead.mob_timing_ms_per_tick` and `mob_timing_share` price the mob tick sampling next to `spans_*`.
-  - `memory` snapshots are `sunrise-ctl memory` flattened (`game/memory.rs`, described in `docs/memory.md`), at the start, every 10 s and at the stop. A dedicated server names its columns `columns` (single player keeps `client_columns` and `server_columns`) and adds `entities`, `players`, `chunk_send`, `light_queue`, `generation_queue` and `allocator`. Every side has `named_mb` and `unattributed_mb`: `unattributed_mb = process.resident_mb - named_mb`, where `named_mb` adds the byte totals of the columns (a section the window and its server thread both hold once), `server_generation`, `entities`, `players`, `chunk_send`, the two queues, `renderer.cpu` (client) and the far tiles' `kept_mb`. All are estimates from capacities, so a negative `unattributed_mb` means overlap.
+  - `memory` snapshots are `sunrise-ctl memory` flattened (described in `docs/memory.md`). The client requests a sample at the start and every 10 s, timestamps it at the request and writes it once the census completes. Stopping discards a pending sample instead of waiting for a reply or taking another one. The dedicated server still samples at start, every 10 s and at stop. A dedicated server names its columns `columns` (single player keeps `client_columns` and `server_columns`) and adds `entities`, `players`, `chunk_send`, `light_queue`, `generation_queue` and `allocator`. Every side has `named_mb` and `unattributed_mb`: `unattributed_mb = process.resident_mb - named_mb`, where `named_mb` adds the byte totals of the columns (a section the window and its server thread both hold once), `server_generation`, `entities`, `players`, `chunk_send`, the two queues, `renderer.cpu` (client) and the far tiles' `kept_mb`. All are estimates from capacities, so a negative `unattributed_mb` means overlap.
 - `sunrise-perf query` rounds numbers to 3 decimals. `spans --slow` averages over the slow ticks; `ticks` and `tick`
   prefer a unit's whole tree from `spans.worst` over the 8 largest spans of `slow` and `slow_history`.
 
@@ -489,8 +492,9 @@ Notes on fields:
   `set` are relaxed atomics. Names are dotted. Labels are part of a counter's identity from day one (`CounterDef.labels`),
   so a Prometheus exporter is one small PR later: it would map `CounterDef` straight onto metric names and labels.
   Counters are the one place where ad-hoc instrumentation goes, instead of new log lines like the `s3:` lines.
-- **Memory:** `sunrise-ctl memory`'s reply (`game/memory.rs:153-170`), flattened to paths, at start, every 10 s and
-  at stop. Spec D's `flatten`/`diff` logic becomes `sunrise-perf query memory --diff`.
+- **Memory:** the same categories as `sunrise-ctl memory`, flattened to paths. Clients record their start and
+  periodic samples if they finish before the capture stops. Dedicated servers also record a final `stop` sample.
+  `sunrise-perf query memory` without a label selects the last available sample.
 
 ### 3.7 Files and lifecycle
 
@@ -1057,7 +1061,7 @@ prints it, and adds a warning when a budget is exceeded.
 | GPU pass timing | `--gpu` | ≤ 0.1 ms GPU per frame; never a CPU wait | async readback (`pack_timing.rs:16-20`) |
 | GPU detail | `--gpu=detail` | half the timed frames, plus one calibration wait at enable | C's alternation (`perf/gpu-pass-detail-output:…/pack_timing.rs:342-353`, `:767`) |
 | Timeline | `--timeline` | ≤ 3% while on; capped at 60 s | global mutex per span (`spans.rs:335`, `:363`) |
-| Memory snapshots | during a capture | < 2 ms every 10 s, on the thread that answers `memory` | |
+| Memory snapshots | during a capture | The client copies column references, then counts the sections off the frame thread. The client never waits for the server reply. | |
 | Writer: encode, deflate, sync flush per field | during a capture | off the game threads; never blocks a tick; < 0.5% of a core | sync flush costs a few bytes per field |
 | Symbolization | at stop | off the game threads | already on the "sunrise-profile-report" thread |
 | Remote transfer | after stop | ≤ 256 KiB/s, behind gameplay packets | |

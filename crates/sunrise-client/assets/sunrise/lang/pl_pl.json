@@ -391,8 +391,6 @@
   "sunrise.extras.chat_animation.tooltip": "Nowa linia czatu wsuwa się z lewej i pojawia stopniowo, zamiast wyświetlać się od razu w całości.",
   "sunrise.extras.chat_indicator": "Znacznik wiadomości",
   "sunrise.extras.chat_indicator.tooltip": "Kolorowy pasek po lewej stronie linii czatu.",
-  "sunrise.extras.discord_presence": "Discord Rich Presence",
-  "sunrise.extras.discord_presence.tooltip": "Pokazuje „Gra w Sunrise” w twoim profilu Discord, gdy Discord jest uruchomiony: menu, tryb jednoosobowy lub wieloosobowy, wymiar i czas gry. Nigdy nazwy świata ani adresu serwera.",
   "sunrise.extras.dynamic_lights": "Dynamiczne światła",
   "sunrise.extras.dynamic_lights.tooltip": "Pochodnie i inne źródła światła trzymane w dłoni, upuszczone lub płonące oświetlają otaczające bloki.",
   "sunrise.extras.fullbright": "Pełna jasność",

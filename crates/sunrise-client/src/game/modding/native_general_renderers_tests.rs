@@ -103,13 +103,10 @@ impl EntityRenderer for Missile {
         draw: &mut dyn BlockEntityDrawContext,
     ) -> Result<(), String> {
         *self.seen.lock().unwrap() = Some(entity.clone());
-        let fuel = entity
-            .attachments
-            .as_ref()
-            .ok_or("no snapshot")?
-            .get(&FUEL)
-            .map(|value| value.copied())
-            .map_err(|e| format!("{e:?}"))?;
+        let fuel = match &entity.attachments {
+            Some(snapshot) => snapshot.get(&FUEL).map_err(|e| format!("{e:?}"))?.copied(),
+            None => None,
+        };
         *self.fuel.lock().unwrap() = fuel;
         let extent = fuel.unwrap_or(1) as f32;
         let corners = [
@@ -213,35 +210,38 @@ fn spawn(id: i32, key: &str, at: [f64; 3]) -> C {
     })
 }
 
-/// The server's first snapshot of row `id`'s synced fields: `fuel`, or nothing synced.
-fn snapshot(id: u32, fuel: Option<i32>) -> C {
+/// The server's snapshot of row `id`'s synced fuel.
+fn snapshot(game: &mut Game<'_>, id: u32, fuel: i32) {
     use sunrise_mod_runtime::attachments::AttachmentSync;
-    let changes = fuel.map_or_else(Vec::new, |n| {
+    apply_attachment_snapshot(
+        game,
+        id,
         vec![AttachmentSync {
             namespace: "test".into(),
             name: "fuel".into(),
-            value: Some([("n".into(), Tag::Int(n))].into()),
-        }]
-    });
-    attachment_packet(id, true, changes)
+            value: Some([("n".into(), Tag::Int(fuel))].into()),
+        }],
+    );
 }
 
-fn attachment_packet(
+fn apply_attachment_snapshot(
+    game: &mut Game<'_>,
     id: u32,
-    replace: bool,
     changes: Vec<sunrise_mod_runtime::attachments::AttachmentSync>,
-) -> C {
+) {
     use sunrise_mod_runtime::attachments::Holder;
-    use sunrise_protocol::attachment_sync::{CHANNEL, Message, encode};
-    C::CustomPayload(sunrise_protocol::packets::configuration::CustomPayload {
+    use sunrise_protocol::attachment_sync::{CHANNEL, Message, decode_staged, encode};
+    let payload = sunrise_protocol::packets::configuration::CustomPayload {
         channel: CHANNEL.into(),
         data: encode(&Message {
             holder: Holder::Entity(id),
-            replace,
+            replace: true,
             changes,
         })
         .unwrap(),
-    })
+    };
+    // Attachment sync is staged at play ingress, not handled as a raw game packet.
+    game.apply_staged_attachment_sync(decode_staged(payload).unwrap());
 }
 
 /// One frame of the entity pass at `alpha`.
@@ -278,14 +278,12 @@ fn in_scene(test: &str, check: impl FnOnce(&mut Game<'_>, &Scene)) {
     };
     mod_platform::__private::initialize().unwrap();
     // A general type is declared only while the registration phase is current.
-    let registration =
-        mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::Registration);
+    let registration = mod_platform::__private::RegistrationGuard::open();
     mod_platform::testing::with_mods(mods().into(), || {
         mod_platform::__private::part_tests::install_parts_fixture(&mods()).unwrap();
         super::mods::register_entity_renderers(super::execution_role::ExecutionRole::Client);
         // A frame draws with a world open, as the window does.
         drop(registration);
-        let _world = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
         super::native_entity_refs::tests::with_client_game(|game| {
             let (pipe, _server) = sunrise_protocol::connection::Pipe::pair();
             game.connect_local(pipe, "Steve").unwrap();
@@ -320,9 +318,8 @@ fn in_scene(test: &str, check: impl FnOnce(&mut Game<'_>, &Scene)) {
             for (id, key) in [(5, "test:missile"), (6, "test:bomb"), (7, "test:plain")] {
                 game.handle_packet(spawn(id, key, [0.0, 321.0, 0.0]))
                     .unwrap();
-                game.handle_packet(snapshot(id as u32, (id == 5).then_some(7)))
-                    .unwrap();
             }
+            snapshot(game, 5, 7);
             let row = game
                 .remote
                 .as_mut()
@@ -355,7 +352,7 @@ fn a_row_is_drawn_by_its_types_renderer_at_the_frames_pose_reading_its_synced_fi
                 (10, [0.0, 319.0, 0.0]),  // in build height, no compiled section
             ] {
                 game.handle_packet(spawn(id, "test:missile", at)).unwrap();
-                game.handle_packet(snapshot(id as u32, Some(99))).unwrap();
+                snapshot(game, id as u32, 99);
             }
             let out = frame(game, 0.25);
             assert_eq!(
@@ -378,55 +375,34 @@ fn a_row_is_drawn_by_its_types_renderer_at_the_frames_pose_reading_its_synced_fi
 
 #[test]
 #[ignore = "daily"]
-fn an_oversized_unread_field_does_not_stop_general_submission() {
-    use sunrise_mod_runtime::attachments::{AttachmentSync, Holder};
+fn a_synced_field_larger_than_the_old_render_cap_reaches_submit() {
+    use sunrise_mod_runtime::attachments::AttachmentSync;
     in_scene(
-        "an_oversized_unread_field_does_not_stop_general_submission",
+        "a_synced_field_larger_than_the_old_render_cap_reaches_submit",
         |game, scene| {
-            // A valid synced field too big for the render projection, ordered
-            // before the only field the renderer reads.
-            let padding_bytes = 70 * 1024;
-            game.handle_packet(attachment_packet(
+            apply_attachment_snapshot(
+                game,
                 5,
-                true,
-                vec![AttachmentSync {
-                    namespace: "test".into(),
-                    name: "a_padding".into(),
-                    value: Some([("bytes".into(), Tag::ByteArray(vec![0; padding_bytes]))].into()),
-                }],
-            ))
-            .unwrap();
-            let held = &game.remote.as_ref().unwrap().attachments[&Holder::Entity(5)];
-            let value = held
-                .entry("test", "a_padding")
-                .unwrap()
-                .unwrap()
-                .saved()
-                .unwrap();
-            assert!(matches!(value.get(&"value".into()), Some(Tag::Compound(c))
-                if matches!(c.get(&"bytes".into()), Some(Tag::ByteArray(b)) if b.len() == padding_bytes)));
-
-            let max_x = |frame: &[Vertex]| {
-                assert_eq!(frame.len(), 4);
-                frame
-                    .iter()
-                    .map(|v| v.pos[0])
-                    .fold(f32::NEG_INFINITY, f32::max)
-            };
-            assert_eq!(max_x(&frame(game, 1.0)), 5.0);
-            assert_eq!(*scene.missile.fuel.lock().unwrap(), None);
-
-            game.handle_packet(attachment_packet(
-                5,
-                false,
                 vec![AttachmentSync {
                     namespace: "test".into(),
                     name: "fuel".into(),
-                    value: Some([("n".into(), Tag::Int(11))].into()),
+                    value: Some(
+                        [
+                            ("bytes".into(), Tag::ByteArray(vec![0; 70 * 1024])),
+                            ("n".into(), Tag::Int(11)),
+                        ]
+                        .into(),
+                    ),
                 }],
-            ))
-            .unwrap();
-            assert_eq!(max_x(&frame(game, 1.0)), 15.0);
+            );
+            let out = frame(game, 1.0);
+            assert_eq!(out.len(), 4);
+            assert_eq!(
+                out.iter()
+                    .map(|v| v.pos[0])
+                    .fold(f32::NEG_INFINITY, f32::max),
+                15.0,
+            );
             assert_eq!(*scene.missile.fuel.lock().unwrap(), Some(11));
         },
     );
@@ -462,16 +438,16 @@ fn general_submission_keeps_lookup_order_across_removal_and_reentry() {
                 spawn(12, "test:missile", [6.0, 321.0, 0.0]),
                 vanilla(42, "minecraft:zombie"),
                 spawn(8, "test:missile", [8.0, 321.0, 0.0]),
-                snapshot(8, Some(1)),
             ] {
                 game.handle_packet(packet).unwrap();
             }
+            snapshot(game, 8, 1);
             let submitted = |game: &mut Game<'_>| {
                 super::native_render_pair_tests::submitted_bodies(game, |game| frame(game, 1.0)).1
             };
-            assert_eq!(submitted(game), [5, 71, 42, 8]);
-            // Arrival of the snapshot reveals the row at its earlier spawn slot, not the tail.
-            game.handle_packet(snapshot(12, Some(1))).unwrap();
+            assert_eq!(submitted(game), [5, 71, 12, 42, 8]);
+            // The row is drawable from spawn. Sync updates its fields without moving its slot.
+            snapshot(game, 12, 1);
             assert_eq!(submitted(game), [5, 71, 12, 42, 8]);
             let own_type_spans = game
                 .entity_spans
@@ -496,7 +472,7 @@ fn general_submission_keeps_lookup_order_across_removal_and_reentry() {
                 .unwrap();
             game.handle_packet(spawn(12, "test:missile", [6.0, 321.0, 0.0]))
                 .unwrap();
-            game.handle_packet(snapshot(12, Some(1))).unwrap();
+            snapshot(game, 12, 1);
             assert_eq!(submitted(game), [5, 71, 42, 8, 12]);
 
             game.handle_packet(C::Respawn(play::Respawn {
@@ -519,8 +495,8 @@ fn general_submission_keeps_lookup_order_across_removal_and_reentry() {
             game.handle_packet(vanilla(42, "minecraft:zombie")).unwrap();
             game.handle_packet(spawn(12, "test:missile", [6.0, 321.0, 0.0]))
                 .unwrap();
-            assert_eq!(submitted(game), [42]);
-            game.handle_packet(snapshot(12, Some(1))).unwrap();
+            assert_eq!(submitted(game), [42, 12]);
+            snapshot(game, 12, 1);
             assert_eq!(submitted(game), [42, 12]);
         },
     );
@@ -597,15 +573,16 @@ fn load_saved_row(server: &mut Game<'_>, position: [f64; 3]) -> u32 {
         .find(|row| row.uuid == uuid)
         .unwrap()
         .id;
-    let tx = server.transaction_open();
-    fixture::FUEL
-        .set(
-            (server as &mut dyn Host).attachments(),
-            Holder::Entity(id),
-            7,
-        )
-        .unwrap();
-    server.transaction_close(&tx, true);
+    server.storage_scope(|server, _| {
+        fixture::FUEL
+            .set(
+                (server as &mut dyn Host).attachments(),
+                Holder::Entity(id),
+                7,
+            )
+            .unwrap();
+        ((), true)
+    });
     id
 }
 
@@ -614,27 +591,27 @@ fn load_saved_row(server: &mut Game<'_>, position: [f64; 3]) -> u32 {
 /// takes, so the row's first tracking snapshot holds the field.
 fn spawn_row(server: &mut Game<'_>, position: [f64; 3]) -> u32 {
     use mod_api::{EntitySpawn, Holder, Host, SpawnBody};
-    let tx = server.transaction_open();
-    let level = (server as &mut dyn Host)
-        .level("minecraft:overworld")
-        .expect("the overworld is in place");
-    let row = level
-        .spawn_entity(
-            server as &mut dyn mod_api::ServerHost,
-            fixture::KIND,
-            position,
-            &EntitySpawn::new(SpawnBody::General),
-        )
-        .expect("the spawn is admitted");
-    fixture::FUEL
-        .set(
-            (server as &mut dyn Host).attachments(),
-            Holder::Entity(row.id()),
-            7,
-        )
-        .unwrap();
-    server.transaction_close(&tx, true);
-    row.id()
+    server.storage_scope(|server, _| {
+        let level = (server as &mut dyn Host)
+            .level("minecraft:overworld")
+            .expect("the overworld is in place");
+        let row = level
+            .spawn_entity(
+                server as &mut dyn mod_api::ServerHost,
+                fixture::KIND,
+                position,
+                &EntitySpawn::new(SpawnBody::General),
+            )
+            .expect("the spawn is admitted");
+        fixture::FUEL
+            .set(
+                (server as &mut dyn Host).attachments(),
+                Holder::Entity(row.id()),
+                7,
+            )
+            .unwrap();
+        (row.id(), true)
+    })
 }
 
 /// Opens an integrated flat world whose window reads the fixture's renderer, has `place` put a row of the fixture's type with fuel 7 on the server above
@@ -650,15 +627,14 @@ fn integrated_scene(test: &str, place: fn(&mut Game<'_>, [f64; 3]) -> u32) {
     ) {
         return;
     }
-    sunrise_guest_stack::run_on_guest_stack(move || {
+    crate::game::native_entity_refs::tests::run_with_game_stack(move || {
         mod_platform::__private::initialize().unwrap();
         let mods = vec![mod_api::ModEntry::new(
             "general_render_fixture",
             Box::new(NativeProbe),
         )]
         .into();
-        let registration =
-            mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::Registration);
+        let registration = mod_platform::__private::RegistrationGuard::open();
         mod_platform::testing::with_mods(mods, || {
             super::native_entity_refs::tests::with_client_game(|game| {
                 super::mods::register_entity_renderers(
@@ -666,10 +642,6 @@ fn integrated_scene(test: &str, place: fn(&mut Game<'_>, [f64; 3]) -> u32) {
                 );
                 drop(registration);
                 game.resolve_entity_renderers();
-                // A window that loaded its mods sits in Setup when it joins a world, so the
-                // tags the server sends nest their reload notices in it.
-                game.mod_phase =
-                    mod_api::__private::PhaseOwner::new(mod_api::__private::ModPhase::Setup);
                 game.settings.render_distance = 2;
                 game.settings.simulation_distance = 2;
                 let options = sunrise_client::title::WorldOptions {
@@ -704,8 +676,7 @@ fn integrated_scene(test: &str, place: fn(&mut Game<'_>, [f64; 3]) -> u32) {
                         .unwrap()
                         .general
                         .rows
-                        .get(&(id as i32))
-                        .is_some_and(|r| r.shown)
+                        .contains_key(&(id as i32))
                 };
                 poll_until(game, ready);
                 let check_quad = |g: &mut Game<'_>| {

@@ -21,6 +21,7 @@ sunrise-threads = { path = "../sunrise-threads" }
 sunrise-world = { path = "../sunrise-world" }
 
 [dev-dependencies]
+mod_platform = { package = "sunrise-mod-api", path = "../sunrise-mod-api", features = ["testing"] }
 sunrise-client-lib = { path = "../sunrise-client-lib", default-features = false, features = ["test-mob-kind"] }
 
 [lints]

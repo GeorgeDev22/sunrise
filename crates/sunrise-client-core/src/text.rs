@@ -5,25 +5,8 @@ use crate::lang;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
-/// ChatFormatting colours by legacy code index 0..=15.
-pub const COLORS: [(char, &str, u32); 16] = [
-    ('0', "black", 0x000000),
-    ('1', "dark_blue", 0x0000AA),
-    ('2', "dark_green", 0x00AA00),
-    ('3', "dark_aqua", 0x00AAAA),
-    ('4', "dark_red", 0xAA0000),
-    ('5', "dark_purple", 0xAA00AA),
-    ('6', "gold", 0xFFAA00),
-    ('7', "gray", 0xAAAAAA),
-    ('8', "dark_gray", 0x555555),
-    ('9', "blue", 0x5555FF),
-    ('a', "green", 0x55FF55),
-    ('b', "aqua", 0x55FFFF),
-    ('c', "red", 0xFF5555),
-    ('d', "light_purple", 0xFF55FF),
-    ('e', "yellow", 0xFFFF55),
-    ('f', "white", 0xFFFFFF),
-];
+pub use sunrise_core::text::{CHAT_COLORS as COLORS, named_color};
+
 pub const BLACK: u32 = 0x000000;
 pub const GRAY: u32 = 0xAAAAAA;
 pub const DARK_GRAY: u32 = 0x555555;
@@ -35,10 +18,6 @@ pub const GOLD: u32 = 0xFFAA00;
 pub const WHITE: u32 = 0xFFFFFF;
 pub const LIGHT_PURPLE: u32 = 0xFF55FF;
 pub const DARK_PURPLE: u32 = 0xAA00AA;
-
-pub fn named_color(name: &str) -> Option<u32> {
-    COLORS.iter().find(|c| c.1 == name).map(|c| c.2)
-}
 
 /// Click actions carried by text components.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +92,9 @@ pub struct Style {
     pub font: Option<String>,
     /// Content metadata for a single U+FFFC object span; never inherited.
     pub inline_object: Option<InlineObject>,
+    /// Optional index into an in-process caller's style table for lossless
+    /// round-tripping of opaque API click/hover/metadata payloads across layout.
+    pub opaque_style_id: Option<usize>,
 }
 /// A style's `font` field: an identifier (`alt` is `minecraft:alt`).
 pub fn font_id(v: &Value) -> Option<String> {
@@ -150,6 +132,7 @@ impl Style {
         if self.font.is_none() {
             self.font.clone_from(&base.font);
         }
+        self.opaque_style_id = self.opaque_style_id.or(base.opaque_style_id);
     }
     pub fn is_bold(&self) -> bool {
         self.bold == Some(true)
@@ -440,6 +423,28 @@ impl Text {
         t.source = Some(Value::Object(c).into());
         t
     }
+    /// Render an argument-free translation, sharing its retained component with
+    /// the previous value when the key is unchanged. The rendered spans still
+    /// use the current language.
+    pub fn translate_reusing(key: &str, previous: Option<&Self>) -> Self {
+        let Some(source) = previous
+            .and_then(|text| text.source.as_ref())
+            .filter(|source| {
+                source
+                    .as_object()
+                    .filter(|component| component.len() == 1)
+                    .and_then(|component| component.get("translate"))
+                    .and_then(Value::as_str)
+                    == Some(key)
+            })
+        else {
+            return Self::translate(key, &[]);
+        };
+        let mut text = format_translatable(key, None, &[]);
+        text.source = Some(source.clone());
+        text.origins = local_origins();
+        text
+    }
     /// Component.translatableWithFallback(key, fallback, args): `translate`, with `fallback` as
     /// the template when the language has no `key`.
     pub fn translate_with_fallback(key: &str, fallback: &str, args: &[Text]) -> Self {
@@ -656,6 +661,31 @@ impl Text {
         if let Value::Object(o) = &mut c {
             for (k, v) in fields {
                 o.entry(k).or_insert(v);
+            }
+        }
+        // Raw JSON fields are decoded input, even when attached to a local root.
+        std::sync::Arc::make_mut(&mut self.origins).remove("");
+        self.replace_component(c);
+        self.refresh();
+        self
+    }
+    /// Replace raw component fields (wrapping a plain literal if needed) and
+    /// regenerate the rendered cache, as `MutableComponent.withStyle(UnaryOperator)`
+    /// does for `Entity.getDisplayName`. Nested components supplied as JSON are always remote.
+    pub fn set_component_fields(mut self, fields: Vec<(String, Value)>) -> Self {
+        let mut c = self.component();
+        if let Value::String(s) = c {
+            c = json!({ "text": s });
+        }
+        if let Value::Object(o) = &mut c {
+            for (k, v) in fields {
+                if k == "hover_event" {
+                    o.remove("hoverEvent");
+                }
+                if k == "click_event" {
+                    o.remove("clickEvent");
+                }
+                o.insert(k, v);
             }
         }
         // Raw JSON fields are decoded input, even when attached to a local root.

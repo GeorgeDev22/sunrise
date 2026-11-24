@@ -22,12 +22,6 @@ pub enum CreativeTabReadError {
     Reentrant,
 }
 
-impl crate::AccessRefusal for CreativeTabReadError {
-    fn unavailable() -> Self {
-        Self::Unavailable
-    }
-}
-
 impl crate::NoBackend for CreativeTabReadError {
     fn no_backend() -> Self {
         Self::Unavailable

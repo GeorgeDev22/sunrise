@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Ein nýggj kjaklinja rennur inn frá vinstru, meðan hon doyvir inn, í staðin fyri at síggja heil út.",
   "sunrise.extras.chat_indicator": "Boðvísari",
   "sunrise.extras.chat_indicator.tooltip": "Litaða strikan til vinstru á kjaklinju.",
-  "sunrise.extras.discord_presence": "Discord Rík nærvera",
-  "sunrise.extras.discord_presence.tooltip": "Vísir Spæla Sunrise á tínum Discord profili meðan Discord koyrir: valmyndir, einspælari ella fleirspælari, víddina og tíðina, sum er spæld. Ongantíð eitt heimsnavn ella adressa á einum ambætara.",
   "sunrise.extras.dynamic_lights": "Dynamisk ljós",
   "sunrise.extras.dynamic_lights.tooltip": "Kyndlar og aðrar ljóskeldur, sum verða hildnar, sleptar ella í eldi, tendra blokkarnar rundan um seg.",
   "sunrise.extras.fullbright": "Fullljós",

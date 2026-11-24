@@ -7,6 +7,10 @@ launcher. All of them run the same code (`crates/sunrise-native-build`). Every S
 signed `sdk.json` gets a tool made from that build's own source.
 Use that SDK's tool for the JSON commands: its horizon-mixins revision and patch match the SDK by construction.
 
+Native mod authors keep the same code and `sunrise-mod.toml`. On Windows the SDK sets the main-thread stack
+reservation when it links the fixed game executable, not when it links native mod libraries. If your tooling
+inspects the SDK's `sunrise-prebuilt.json` identity, stop reading `link_args`: that field has no replacement.
+
 The caller does what needs a player or their game: it checks that native code is allowed, fetches and verifies the
 SDK's slices, installs the pinned Rust, chooses the mods and which of them a build leaves out, and installs what the
 tool built. The tool compiles, and nothing else.
@@ -35,7 +39,7 @@ doesn't know is refused (exit 2).
 |---|---|
 | `contract` | `2`. A change to any field or event below takes a new number. |
 | `work` | The build's own folder: `build.log`, the horizon-mixins tool, the game source a mixin patch copies from, and kept compiles under `prebuilt-build/`. The launcher passes its `native/` folder, so the kept compiles are the ones its in-process build made. |
-| `toolchain` | `dir` (holding `bin/cargo` and `bin/rustc`), `target` (its host triple), `cargo_home`, `cargo_config` (`--config` values every cargo command gets; the launcher's Windows ARM64 flags) and `c_bin` (the folder of its C and link programs, when it brings them). The Rust release must be the SDK's (`sdk.json`'s `toolchain.rust`). |
+| `toolchain` | `dir` (holding `bin/cargo` and `bin/rustc`), `target` (its host triple), `cargo_home`, `cargo_config` (`--config` values every cargo command gets) and `c_bin` (the folder of its C and link programs, when it brings them). The Rust release must be the SDK's (`sdk.json`'s `toolchain.rust`). |
 | `package` | `runtime`, `api` and `engine`: the folders the SDK's three slices for this host and side are unpacked into. The API route reads only `runtime` and `api`. |
 | `mods` | A mod's folder, or a folder of mod folders, read in path order. Every mod in it is compiled: a caller leaves a mod out by not putting it there. |
 | `target` | `client` (the game) or `server` (the headless engine). |
@@ -53,11 +57,10 @@ Each line is an object whose `event` names it.
 | `built` | `route`, `binary`, `libraries`, `records`, `mods`, `internals`, `mixins`, `used` | The executable and the libraries to install beside it, in load order; `records` is each library's identity, the build record's `libraries`: one row per library, the patch library included, whose `identity` is `<build id> <mod id> <version> <rustc release> unwind` (the panic strategy the library's entry reports; the loader refuses `abort`); `route` is `prebuilt-api` or `prebuilt`, as the record names it; `mods` is the compiled mods in dependency order. `internals` has each compiled mod's `[[internals]]` by mod id, every absent `hash` taken from the SDK's catalog, as the build record keeps them; `mixins` is the horizon-mixins revision the build ran; `used` lists the kept folders and files under `work` it used, for a caller's cache to count as used. |
 | `failed` | `error`, `blame`, `used` | Why it did not build, as the build log ends with it. `blame` is `null`, or the mod the error is that mod's own and how: `{"mod": id, "kind": "compile" \| "build-script" \| "features"}`, the one a caller leaves out next time. `used` as for `built`. |
 
-For SDK downloads, registry release discovery and native-build downloads, the mod tool uses the first
+For SDK downloads and native-build downloads, the mod tool uses the first
 nonblank setting in this order: `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`, `all_proxy` for HTTPS, or
 `HTTP_PROXY`, `http_proxy`, `ALL_PROXY`, `all_proxy` for HTTP. A caller with a proxy setting of its own
-passes it in these variables. SDK and native-build downloads choose the route again at each redirect;
-registry release discovery does not follow redirects.
+passes it in these variables. Both choose the route again at each redirect.
 
 A proxy address without a scheme means HTTP. Supported schemes are `http://`, `socks4://`, `socks4a://`,
 `socks5://`, `socks5h://` and `socks://` (an alias for SOCKS5). An `https://` proxy address is not supported,
@@ -108,7 +111,8 @@ A `change` is `"removed"`, `"changed"`, `{"lost-impl": trait}`, `{"fields": {gai
 `{"not-buildable": {at}}`, `{"path": path}` or `{"route": {from, owner}}`. On a mod's own build, an indexed
 mixin refusal appears in `refusal`. When checking its fit on another build, the result remains
 `does-not-fit`: the misfit's `id` is display text with the full target, error code and reason, and its
-`change` is `"changed"`.
+`change` is `"changed"`. A known change to a declared game function is also `does-not-fit` with `change: "changed"`;
+its `id` names the full function path and says `body changed` or `declaration changed`.
 
 ## `native-discover` and `native-lock`
 
@@ -125,7 +129,8 @@ source and caches), `toolchain` (as for `native-build`) and `mods` (the mod's fo
 `native-lock` reads the pinned game's `Cargo.lock`, kept as `game-lock/<commit>.lock` in `work` and downloaded from
 that commit of the game's repository the first time; with no network, put the file there. It creates `work` when it
 is missing. A shared crates.io package keeps the game's version on the same semver line. If a direct or transitive
-requirement excludes that version, `native-lock` refuses without replacing the mod's `Cargo.lock`.
+requirement excludes that version or requests a feature it lacks, `native-lock` refuses without replacing the mod's
+`Cargo.lock`.
 
 `native-discover` checks the mod against the pinned game's source with the deprecation lint forced on the mod alone;
 it runs the tool itself as Cargo's rustc wrapper for that.

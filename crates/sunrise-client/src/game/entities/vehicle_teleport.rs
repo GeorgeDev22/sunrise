@@ -374,7 +374,8 @@ impl Game<'_> {
         | Target::Crystal(id)
         | Target::Dragon(id)
         | Target::Spawner(id)
-        | Target::Cloud(id)) = target
+        | Target::Cloud(id)
+        | Target::Bolt(id)) = target
         else {
             return Ok(None);
         };
@@ -764,7 +765,7 @@ impl Game<'_> {
         }
     }
 
-    /// The players seated on `vehicle` take `transition`: the acting body here (`leave_guest` publishes it), the others through the hub.
+    /// The players seated on `vehicle` take `transition`: the acting body here (the put-back at the end of `guest_turn` publishes it), the others through the hub.
     fn teleport_riding_players(
         &mut self,
         vehicle: u32,
@@ -960,6 +961,18 @@ impl Game<'_> {
                 if let Some(i) = self.fangs.list.iter().position(|e| e.id == id) {
                     self.fangs.list.update(i, |f| {
                         f.yaw = yaw;
+                    });
+                }
+            }
+            Target::Bolt(id) => {
+                if let Some(i) = self.bolts.iter().position(|e| e.id == id) {
+                    self.bolts.update(i, |b| {
+                        if yaw.is_finite() {
+                            b.rotation[0] = yaw;
+                        }
+                        if let Some(pitch) = pitch {
+                            b.rotation[1] = pitch;
+                        }
                     });
                 }
             }

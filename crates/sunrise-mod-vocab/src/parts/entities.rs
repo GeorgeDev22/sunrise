@@ -90,11 +90,9 @@ pub fn entity_providers<T: ?Sized + 'static, C: Copy + 'static>(
     entity: EntityRef,
     context: C,
 ) -> Option<EntityProviders<T, C>> {
-    let parts = installed()?
-        .keys
-        .entity_capabilities
-        .get(key.name)?
-        .get(entity.kind(host)?.id(host).as_str())?;
+    let by_kind = installed()?.keys.entity_capabilities.get(key.name)?;
+    let name = entity.kind(host)?.id(host)?;
+    let parts = by_kind.get(name.as_str())?;
     Some(EntityProviders {
         parts,
         entity,
@@ -118,14 +116,17 @@ impl<T: ?Sized + 'static, C: Copy + 'static> EntityProviders<T, C> {
     /// registered `before_game`, else, where the game has no answer (`game`), the first mod's.
     pub fn ask(self, host: &mut dyn ServerHost, game: bool) -> Option<Capability<T>> {
         let (entity, context) = (self.entity, self.context);
+        let mut index = 0;
         match ask_providers(
             host,
-            |index| next_provider(self.parts, index),
-            EntityProviderOf::get::<T, C>,
-            |provider, host| provider.provide(host, entity, context),
+            || next_provider(self.parts, &mut index),
+            |provider, host| provider.get::<T, C>()?.provide(host, entity, context),
             |_| game,
         ) {
-            Answer::Mod(found) => Some(found),
+            Answer::Mod(handler, owner) => Some(Capability {
+                handler,
+                owner: Some(owner),
+            }),
             Answer::Game | Answer::Nobody => None,
         }
     }

@@ -1,14 +1,14 @@
 //! What a mod declares of the game's own code (`[[native.mixin]]` targets, `[[native.loop]]` loops and its `internals`), as entries of the list of what it uses: one function reads them from a build's build data, for the packer to record at the pinned build and for the fit check to compare at the installed one.
 use std::path::Path;
 use sunrise_mod_package::internals::{self, ListedInternal};
-use sunrise_mod_package::mod_surface::uses::{Change, Entry, Misfit};
+use sunrise_mod_package::mod_surface::uses::{Change, Entry, GameCode, Misfit, UsesTable};
 use sunrise_mod_package::{
     Manifest,
     build_data::{self, ReadError},
 };
 use sunrise_platform::mod_build::api_gen::{
     self,
-    functions::{self, FunctionIndex},
+    functions::{self, Function, FunctionIndex},
 };
 
 /// What every such entry's id starts with; no surface item's id does.
@@ -39,13 +39,47 @@ pub fn declared(manifest: &Manifest) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Now {
     /// Its fingerprint there.
-    Is(String),
+    Is {
+        hash: String,
+        game_code: Option<GameCode>,
+    },
     /// The build has no such item.
     Gone,
     /// The target is present, but the function index refuses to replace it.
     Refused { code: &'static str, why: String },
     /// The build has it, and its build data does not hold the code a fingerprint needs (the body of a function it does not index), so no list can show it unchanged.
     Unjudged,
+}
+
+impl Now {
+    fn fingerprint<'a>(
+        hash: String,
+        loop_contract: Option<String>,
+        functions: impl IntoIterator<Item = (&'a str, &'a Function)>,
+    ) -> Self {
+        let digests = functions
+            .into_iter()
+            .map(|(path, function)| Some((path.to_owned(), function.digests.clone()?)))
+            .collect::<Option<_>>();
+        Self::Is {
+            hash,
+            game_code: digests.map(|functions| GameCode {
+                loop_contract,
+                functions,
+            }),
+        }
+    }
+
+    /// The record the packer writes if this build can fingerprint the item.
+    pub fn into_entry(self, id: String) -> Option<Entry> {
+        match self {
+            Self::Is { hash, game_code } => Some(Entry {
+                game_code,
+                ..Entry::plain(id, hash)
+            }),
+            Self::Gone | Self::Refused { .. } | Self::Unjudged => None,
+        }
+    }
 }
 
 /// The misfit of a mod that pins a horizon-mixins revision other than `revision`, the one the build's tool builds with: that build refuses the mod.
@@ -171,12 +205,8 @@ impl Data {
         let mixins = native.map_or(&[][..], |native| &native.mixin);
         let loops = native.map_or(&[][..], |native| &native.r#loop);
         let index = &self.index;
-        let code = |target: &str| {
-            index
-                .functions
-                .get(&api_gen::functions::key(target))
-                .map(|f| format!("{}:{}", f.signature_hash, f.sha256))
-        };
+        let code = |target: &str| index.functions.get(&functions::key(target));
+        let span_hash = |f: &Function| format!("{}:{}", f.signature_hash, f.sha256);
         let listed = &self.internals;
         let mut entries = Vec::new();
         for row in mixins {
@@ -188,7 +218,9 @@ impl Data {
                         why: refused.why.clone(),
                     }
                 } else {
-                    code(&row.target).map_or(Now::Gone, Now::Is)
+                    code(&row.target).map_or(Now::Gone, |f| {
+                        Now::fingerprint(span_hash(f), None, [(row.target.as_str(), f)])
+                    })
                 },
             ));
         }
@@ -206,10 +238,20 @@ impl Data {
                             listed.iter().find(|i| i.path == path && i.kind == "trait")
                         });
                     match (code(&l.entry), code(&generic), slot) {
-                        (Some(entry), Some(generic), Some(slot)) => Now::Is(format!(
-                            "{}|{}|{}|{}|{entry}|{generic}|{}",
-                            l.entry, l.generic, l.slot, l.side, slot.hash
-                        )),
+                        (Some(entry), Some(generic_fn), Some(slot)) => {
+                            let publication =
+                                format!("{}|{}|{}|{}", l.entry, l.generic, l.slot, l.side);
+                            Now::fingerprint(
+                                format!(
+                                    "{publication}|{}|{}|{}",
+                                    span_hash(entry),
+                                    span_hash(generic_fn),
+                                    slot.hash
+                                ),
+                                Some(format!("{publication}|{}", slot.hash)),
+                                [(l.entry.as_str(), entry), (generic.as_str(), generic_fn)],
+                            )
+                        }
                         _ => Now::Unjudged,
                     }
                 }
@@ -233,10 +275,19 @@ impl Data {
             let now = match found {
                 Err(_) => Now::Gone,
                 Ok(internal) => match internal.kind.as_str() {
-                    "fn" | "method" => code(&internal.path).map_or(Now::Unjudged, |code| {
-                        Now::Is(format!("{}:{}:{code}", internal.kind, internal.hash))
+                    "fn" | "method" => code(&internal.path).map_or(Now::Unjudged, |f| {
+                        // The function's declaration digest already covers the signature and
+                        // impl context that the internals table hashes separately.
+                        Now::fingerprint(
+                            format!("{}:{}:{}", internal.kind, internal.hash, span_hash(f)),
+                            None,
+                            [(internal.path.as_str(), f)],
+                        )
                     }),
-                    kind => Now::Is(format!("{kind}:{}", internal.hash)),
+                    kind => Now::Is {
+                        hash: format!("{kind}:{}", internal.hash),
+                        game_code: None,
+                    },
                 },
             };
             entries.push((id, now));
@@ -258,6 +309,30 @@ pub struct Compared {
     pub unjudged: Vec<String>,
 }
 
+/// The game code `manifest` declares, as `now` gives it in a build whose tool builds with horizon-mixins revision `revision` ([`tool`]), against `table`'s record of it. `now` is asked for only when the mod declares some; when it gives none, its error comes second and the misfits hold only what is known without it.
+pub fn compare_declared<E>(
+    manifest: &Manifest,
+    table: &UsesTable,
+    revision: &str,
+    now: impl FnOnce() -> Result<Vec<(String, Now)>, E>,
+) -> (Compared, Option<E>) {
+    let mut compared = Compared::default();
+    let mut uncompared = None;
+    if declared(manifest) {
+        let recorded: Vec<_> = table
+            .entries
+            .iter()
+            .filter(|entry| entry.id.starts_with(PREFIX))
+            .collect();
+        match now() {
+            Ok(now) => compared = compare(&recorded, now),
+            Err(why) => uncompared = Some(why),
+        }
+    }
+    compared.misfits.extend(tool(manifest, revision));
+    (compared, uncompared)
+}
+
 /// `now`, a build's [`entries`], against the list's `recorded` entries.
 pub fn compare(recorded: &[&Entry], now: Vec<(String, Now)>) -> Compared {
     let mut compared = Compared::default();
@@ -270,12 +345,45 @@ pub fn compare(recorded: &[&Entry], now: Vec<(String, Now)>) -> Compared {
                 compared.unjudged.push(id);
                 continue;
             }
-            (None, Now::Is(_)) => {
+            (None, Now::Is { .. }) => {
                 compared.unrecorded = true;
                 continue;
             }
-            (Some(made), Now::Is(now)) if made.hash != now => Change::Changed,
-            (Some(_), Now::Is(_)) => continue,
+            (Some(made), Now::Is { hash, game_code }) => {
+                match (&made.game_code, game_code) {
+                    (Some(old), Some(new)) => {
+                        // The raw span still verifies source bytes. It is not fit evidence when
+                        // both builds can compare tokens, and it misses edits to an impl header.
+                        for (function, now) in &new.functions {
+                            if let Some(made) = old.functions.get(function) {
+                                let change = if made.declaration != now.declaration {
+                                    Change::DeclarationChanged {
+                                        function: function.clone(),
+                                    }
+                                } else if made.body != now.body {
+                                    Change::BodyChanged {
+                                        function: function.clone(),
+                                    }
+                                } else {
+                                    continue;
+                                };
+                                compared.misfits.push(Misfit {
+                                    id: id.clone(),
+                                    change,
+                                });
+                            }
+                        }
+                        if old.loop_contract == new.loop_contract
+                            && old.functions.keys().eq(new.functions.keys())
+                        {
+                            continue;
+                        }
+                        Change::Changed
+                    }
+                    _ if made.hash != hash => Change::Changed,
+                    _ => continue,
+                }
+            }
         };
         compared.misfits.push(Misfit { id, change });
     }

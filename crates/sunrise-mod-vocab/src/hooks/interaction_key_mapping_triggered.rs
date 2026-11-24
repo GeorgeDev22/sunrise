@@ -12,7 +12,11 @@ pub trait Hooks {
     /// `[0, 1, 0]` for the top), at the point `at`. Set `canceled` and the impact
     /// does not happen: no damage, no knockback, no sound, no block reaction, the
     /// arrow does not stick, a pearl does not teleport, a potion or a fireball
-    /// does not burst. Cancellation leaves the projectile alive. A flying bobber
+    /// does not burst. Cancellation alone leaves the projectile alive. Resolve
+    /// the live owner with `host.entity(event.projectile)` and call `EntityRef::discard`
+    /// to consume it instead. Removal suppresses the hit even if the event is not
+    /// canceled. A decision invalidated by listener writes is not recomputed.
+    /// A flying bobber
     /// skips hooking and redirection to the hit point, but its ordinary move
     /// still stops against solid blocks. Water is not an impact. Bobbers notify
     /// before vanilla's entity deflection and world-border bounce; rockets notify
@@ -25,6 +29,8 @@ pub trait Hooks {
     /// listeners retaining the earlier family set filter out `minecraft:fishing_bobber`
     /// and `minecraft:firework_rocket`.
     #[hook(
+        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_projectile_impact",
+        dispatch = "api_carrier",
         side = "server",
         version = 2,
         contract = "cancel",
@@ -71,6 +77,8 @@ pub trait Hooks {
     /// found again by id after the board and dismount checks: gone, the click is spent and
     /// the player is not seated. Server-side.
     #[hook(
+        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_entity_mount",
+        dispatch = "api_carrier",
         side = "server",
         contract = "cancel",
         out = "canceled",
@@ -98,6 +106,8 @@ pub trait Hooks {
     /// of this flag. Attack and mining swing packets also honour the item swing veto. Pick
     /// only vetoes its packet and never swings. Fires on the window client.
     #[hook(
+        target = "sunrise_client::game::native_hooks::interaction::Game<'_>::native_interaction_key_mapping_triggered",
+        dispatch = "flat",
         side = "client",
         contract = "cancel",
         out = "canceled",
@@ -105,5 +115,11 @@ pub trait Hooks {
         version = 2,
         cancellable = true
     )]
-    fn interaction_key_mapping_triggered();
+    fn interaction_key_mapping_triggered(
+        key: InteractionKey,
+        hand: Hand,
+        attempt: InteractionAttempt,
+        swing_hand: &mut bool,
+        canceled: &mut bool,
+    );
 }

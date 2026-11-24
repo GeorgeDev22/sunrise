@@ -6,7 +6,15 @@ pub trait Hooks {
     /// Answer `ScreenOpening::Cancel` to keep the current one,
     /// `ScreenOpening::ModScreen` to open a mod's own screen instead, or
     /// `ScreenOpening::Vanilla` to open another vanilla screen instead.
+    /// The waiting screen and a warning's live return dialog can replace a
+    /// receiver with the same `dialog` id. `Cancel` keeps its mounted widgets
+    /// and focus, without emitting Closing or the replacement's Init.Post.
+    /// A server's container close that leaves no screen fires no Opening and
+    /// can't be cancelled; `screen_closing` still gets the screen it closes.
+    /// One that opens the title or the death screen fires Opening for it.
     #[hook(
+        receiver = "read",
+        dispatch = "flat",
         side = "client",
         contract = "replace",
         out = "outcome",
@@ -14,5 +22,9 @@ pub trait Hooks {
         neoforge = "ScreenEvent.Opening",
         cancellable = true
     )]
-    fn screen_opening();
+    fn screen_opening(
+        current: &ScreenView<'_>,
+        new: &ScreenView<'_>,
+        outcome: &mut Option<Answered<ScreenOpening>>,
+    );
 }

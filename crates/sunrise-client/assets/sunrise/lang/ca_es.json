@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Una nova línia de xat es desplaça des de l'esquerra mentre s'esvaeix, en lloc de semblar sencera.",
   "sunrise.extras.chat_indicator": "Indicador de missatge",
   "sunrise.extras.chat_indicator.tooltip": "La barra de colors a l'esquerra d'una línia de xat.",
-  "sunrise.extras.discord_presence": "Presència enriquida de Discord",
-  "sunrise.extras.discord_presence.tooltip": "Mostra Playing Sunrise al teu perfil de Discord mentre s'executa Discord: menús, un jugador o multijugador, la dimensió i el temps jugat. Mai el nom d'un món ni l'adreça d'un servidor.",
   "sunrise.extras.dynamic_lights": "Llums dinàmics",
   "sunrise.extras.dynamic_lights.tooltip": "Les torxes i altres fonts de llum agafades, caigudes o al foc il·luminen els blocs que els envolten.",
   "sunrise.extras.fullbright": "Lluminós total",

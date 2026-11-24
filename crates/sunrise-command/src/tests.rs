@@ -1717,6 +1717,91 @@ fn h149_oblique_local_offsets_are_grouped_before_the_origin() {
     );
 }
 
+/// `IntegerArgumentType.parse` before the mod's parser: a value out of range is refused with
+/// Brigadier's message (the bound, then the value found), and the parser sees only digits that fit.
+#[test]
+fn a_custom_integer_argument_is_bounded_before_its_parser() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let parsed = seen.clone();
+    let argument = ArgType::Custom(CustomArgument::new(
+        "example:stack",
+        CustomArgumentKind::Integer { min: 1, max: 64 },
+        move |input| {
+            parsed.lock().unwrap().push(input.to_owned());
+            Ok(format!("{input} items"))
+        },
+        |_, _| Vec::new(),
+    ));
+    let mut dispatcher = Dispatcher::new();
+    let command = dispatcher.literal(0, "stack");
+    let count = dispatcher.argument(command, "count", argument);
+    dispatcher.executes(count, "test");
+    let registries = reg();
+    let parsed = dispatcher.parse("stack 64", &registries);
+    let (context, _) = parsed.executable().unwrap();
+    assert_eq!(
+        context.get("count"),
+        Some(&Arg::Custom {
+            kind: "example:stack".into(),
+            value: "64 items".into(),
+        })
+    );
+    for (input, expected) in [
+        ("stack 65", Text::tr("argument.integer.big", &[&64, &65])),
+        ("stack 0", Text::tr("argument.integer.low", &[&1, &0])),
+        ("stack 7.5", Text::tr("parsing.int.invalid", &[&"7.5"])),
+    ] {
+        let error = dispatcher
+            .parse(input, &registries)
+            .executable()
+            .unwrap_err();
+        assert_eq!(error.message, expected, "{input}");
+        assert_eq!(error.cursor, "stack ".len(), "{input}");
+    }
+    assert_eq!(*seen.lock().unwrap(), ["64"]);
+}
+
+/// `LongArgumentType.longArg(min, max)`: an `i64` past `int`'s range, refused out of range with
+/// `argument.long.low` / `big`, and never a fraction.
+#[test]
+fn a_long_argument_reads_past_int_and_refuses_out_of_range() {
+    let mut dispatcher = Dispatcher::new();
+    let command = dispatcher.literal(0, "bank");
+    let total = dispatcher.argument(
+        command,
+        "total",
+        ArgType::Long {
+            min: -5,
+            max: 9_000_000_000,
+        },
+    );
+    dispatcher.executes(total, "test");
+    let registries = reg();
+    let parsed = dispatcher.parse("bank 9000000000", &registries);
+    let (context, _) = parsed.executable().unwrap();
+    assert_eq!(context.get("total"), Some(&Arg::Long(9_000_000_000)));
+    for (input, expected) in [
+        (
+            "bank 9000000001",
+            Text::tr(
+                "argument.long.big",
+                &[&9_000_000_000_i64, &9_000_000_001_i64],
+            ),
+        ),
+        (
+            "bank -6",
+            Text::tr("argument.long.low", &[&-5_i64, &-6_i64]),
+        ),
+        ("bank 1.5", Text::tr("parsing.long.invalid", &[&"1.5"])),
+    ] {
+        let error = dispatcher
+            .parse(input, &registries)
+            .executable()
+            .unwrap_err();
+        assert_eq!(error.message, expected, "{input}");
+    }
+}
+
 #[test]
 fn a_custom_argument_parses_completes_and_keeps_its_id() {
     let argument = ArgType::Custom(CustomArgument::new(
@@ -1775,6 +1860,262 @@ fn a_custom_argument_parses_completes_and_keeps_its_id() {
             .map(|s| s.text.as_str())
             .collect::<Vec<_>>(),
         ["press"]
+    );
+}
+
+/// `quest open <object:example:quest> <count:integer>` with a `Quotable` object whose parser
+/// hands back what it was given, between brackets so the decoded text is plain to see.
+fn quotable_quest_dispatcher(
+    suggest: impl Fn(&Registries, &str) -> Vec<CustomSuggestion> + Send + Sync + 'static,
+) -> Dispatcher {
+    let argument = ArgType::Custom(CustomArgument::new(
+        "example:quest",
+        CustomArgumentKind::Quotable,
+        |input| Ok(format!("[{input}]")),
+        suggest,
+    ));
+    let mut dispatcher = Dispatcher::new();
+    let quest = dispatcher.literal(0, "quest");
+    let open = dispatcher.literal(quest, "open");
+    let object = dispatcher.argument(open, "object", argument);
+    let count = dispatcher.argument(
+        object,
+        "count",
+        ArgType::Integer {
+            min: i32::MIN,
+            max: i32::MAX,
+        },
+    );
+    dispatcher.executes(count, "test");
+    dispatcher
+}
+
+#[test]
+fn a_quotable_custom_argument_reads_a_word_or_a_quoted_phrase_before_the_next_argument() {
+    // Brigadier's `StringReader.readString`: an unquoted word, or a phrase in either quote in
+    // which only that quote and `\` are escaped. The parser sees the decoded text, and the
+    // integer after it still parses.
+    let dispatcher = quotable_quest_dispatcher(|_, _| Vec::new());
+    let registries = reg();
+    for (typed, decoded) in [
+        ("1A2B3C4D5E6F7A8B", "1A2B3C4D5E6F7A8B"),
+        ("main.chapter-1+x", "main.chapter-1+x"),
+        (r##""#chapter_one""##, "#chapter_one"),
+        (r#""Some Title""#, "Some Title"),
+        (r#"'say "hi"'"#, r#"say "hi""#),
+        (r#""it's""#, "it's"),
+        (r#""a \"b\" \\ c""#, r#"a "b" \ c"#),
+        (r#"'it\'s'"#, "it's"),
+        (r#""""#, ""),
+        ("''", ""),
+        (r#""ünï cödé""#, "ünï cödé"),
+    ] {
+        let line = format!("quest open {typed} 7");
+        let parsed = dispatcher.parse(&line, &registries);
+        let (context, _) = parsed
+            .executable()
+            .unwrap_or_else(|e| panic!("{line}: {e:?}"));
+        assert_eq!(
+            context.get("object"),
+            Some(&Arg::Custom {
+                kind: "example:quest".into(),
+                value: format!("[{decoded}]"),
+            }),
+            "{line}"
+        );
+        assert_eq!(context.get("count"), Some(&Arg::Int(7)), "{line}");
+    }
+}
+
+#[test]
+fn a_quotable_custom_argument_refuses_a_bad_quote_with_brigadiers_cursor_errors() {
+    let dispatcher = quotable_quest_dispatcher(|_, _| Vec::new());
+    let registries = reg();
+    // `readStringUntil` ran off the end: `readerExpectedEndOfQuote` ("Unclosed quoted string")
+    // with the cursor at the end of the line.
+    let line = r#"quest open "Some Title 7"#;
+    let error = dispatcher
+        .parse(line, &registries)
+        .executable()
+        .unwrap_err();
+    assert_eq!(error.message, Text::tr("parsing.quote.expected.end", &[]));
+    assert_eq!(error.cursor, line.len());
+    // A `\` before anything but the active quote or `\`: `readerInvalidEscape` with that
+    // character, the cursor stepped back onto it. `\"` inside `'...'` is such an escape.
+    for (line, bad) in [
+        (r#"quest open "a\q" 7"#, "q"),
+        (r#"quest open 'a\"' 7"#, "\""),
+        (r#"quest open "a\'" 7"#, "'"),
+    ] {
+        let error = dispatcher
+            .parse(line, &registries)
+            .executable()
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            Text::tr("parsing.quote.escape", &[&bad]),
+            "{line}"
+        );
+        assert_eq!(error.cursor, line.find('\\').unwrap() + 1, "{line}");
+        assert!(error.context().unwrap().ends_with("<--[HERE]"), "{line}");
+    }
+    // A closed phrase must end the argument: Brigadier's `expectedArgumentSeparator`.
+    let line = r#"quest open "a"b 7"#;
+    assert!(dispatcher.parse(line, &registries).executable().is_err());
+}
+
+#[test]
+fn a_quotable_custom_completion_replaces_the_partly_quoted_prefix() {
+    // The type is handed the raw typed suffix, opening quote included, and its candidates are
+    // insertable syntax: a quoted title replaces the whole half-typed phrase.
+    let dispatcher = quotable_quest_dispatcher(|_, prefix| {
+        assert!(prefix.is_empty() || prefix.starts_with('"'), "{prefix}");
+        let typed = prefix.trim_start_matches('"');
+        ["Getting Started", "Getting Rich"]
+            .into_iter()
+            .filter(|title| title.starts_with(typed))
+            .map(|title| CustomSuggestion {
+                text: format!("\"{title}\""),
+                tooltip: None,
+                replace_start: None,
+            })
+            .collect()
+    });
+    let registries = reg();
+    let typed = r#"quest open "Getting St"#;
+    let parse = dispatcher.parse(typed, &registries);
+    let (range, suggestions) = dispatcher.suggestions(&parse, typed.len(), &registries);
+    assert_eq!(range, (11, typed.len()), "from the opening quote");
+    assert_eq!(
+        suggestions
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>(),
+        [r#""Getting Started""#]
+    );
+    let completed = suggestions[0].apply(typed);
+    assert_eq!(completed, r#"quest open "Getting Started""#);
+    let line = format!("{completed} 1");
+    let parsed = dispatcher.parse(&line, &registries);
+    assert_eq!(
+        parsed.executable().unwrap().0.get("object"),
+        Some(&Arg::Custom {
+            kind: "example:quest".into(),
+            value: "[Getting Started]".into(),
+        })
+    );
+}
+
+/// `quest open <object> <count:integer>` whose object, of `kind`, declares a provider answering
+/// `candidates`; it records the prefix each request carries.
+fn quest_provider_dispatcher(
+    kind: CustomArgumentKind,
+    candidates: &[&str],
+    prefixes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> Dispatcher {
+    let candidates: Vec<CustomSuggestion> = candidates
+        .iter()
+        .map(|text| CustomSuggestion {
+            text: (*text).to_owned(),
+            tooltip: None,
+            replace_start: None,
+        })
+        .collect();
+    let argument = CustomArgument::new(
+        "example:quest",
+        kind,
+        |input| Ok(format!("[{input}]")),
+        |_, _| panic!("the type's own suggest is not called once it declares a provider"),
+    )
+    .with_provider(move |_, prefix, _| {
+        prefixes.lock().unwrap().push(prefix.to_owned());
+        candidates.clone()
+    });
+    let mut dispatcher = Dispatcher::new();
+    let quest = dispatcher.literal(0, "quest");
+    let open = dispatcher.literal(quest, "open");
+    let object = dispatcher.argument(open, "object", ArgType::Custom(argument));
+    let count = dispatcher.argument(
+        object,
+        "count",
+        ArgType::Integer {
+            min: i32::MIN,
+            max: i32::MAX,
+        },
+    );
+    dispatcher.executes(count, "test");
+    dispatcher
+}
+
+#[test]
+fn a_quotable_providers_quoted_candidate_matches_the_phrase_content_typed() {
+    // The engine's match for a declared provider compares phrase content for a `Quotable`
+    // argument: an unquoted `Get`, a `'Get` and a `"Get` all keep the insertable
+    // `"Getting Started"`, while the provider still gets the raw typed text and the candidate is
+    // inserted as written over the whole typed argument.
+    let candidates = [
+        r#""Getting Started""#,
+        r#""Other Quest""#,
+        "getaway",
+        r#"'say "hi"'"#,
+    ];
+    let registries = reg();
+    for (typed, kept) in [
+        ("Get", vec![r#""Getting Started""#, "getaway"]),
+        ("'Get", vec![r#""Getting Started""#, "getaway"]),
+        (r#""Get"#, vec![r#""Getting Started""#, "getaway"]),
+        (r#""getting s"#, vec![r#""Getting Started""#]),
+        (r#""say \"h"#, vec![r#"'say "hi"'"#]),
+    ] {
+        let prefixes = std::sync::Arc::default();
+        let dispatcher = quest_provider_dispatcher(
+            CustomArgumentKind::Quotable,
+            &candidates,
+            std::sync::Arc::clone(&prefixes),
+        );
+        let line = format!("quest open {typed}");
+        let parse = dispatcher.parse(&line, &registries);
+        let (range, suggestions) = dispatcher.suggestions(&parse, line.len(), &registries);
+        assert_eq!(*prefixes.lock().unwrap(), [typed], "{line}: the raw prefix");
+        let mut offered: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
+        offered.sort_unstable();
+        let mut kept = kept;
+        kept.sort_unstable();
+        assert_eq!(offered, kept, "{line}");
+        assert_eq!(range, (11, line.len()), "{line}: the whole typed argument");
+        for suggestion in &suggestions {
+            let completed = format!("{} 1", suggestion.apply(&line));
+            assert!(
+                dispatcher
+                    .parse(&completed, &registries)
+                    .executable()
+                    .is_ok(),
+                "{completed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_word_providers_candidates_still_match_the_raw_typed_text() {
+    // Only `Quotable` reads phrase content: a `Word` argument keeps SharedSuggestionProvider's
+    // raw match, so a quoted candidate is not a completion of `Get`.
+    let prefixes = std::sync::Arc::default();
+    let dispatcher = quest_provider_dispatcher(
+        CustomArgumentKind::Word,
+        &[r#""Getting Started""#, "getaway"],
+        prefixes,
+    );
+    let registries = reg();
+    let line = "quest open Get";
+    let parse = dispatcher.parse(line, &registries);
+    let (_, suggestions) = dispatcher.suggestions(&parse, line.len(), &registries);
+    assert_eq!(
+        suggestions
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>(),
+        ["getaway"]
     );
 }
 

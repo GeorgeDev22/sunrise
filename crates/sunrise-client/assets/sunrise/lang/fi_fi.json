@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Uusi chat-linja liukuu sisään vasemmalta sen häipyessä sen sijaan, että se näyttäisi kokonaisena.",
   "sunrise.extras.chat_indicator": "Viestin ilmaisin",
   "sunrise.extras.chat_indicator.tooltip": "Värillinen palkki keskustelupalkin vasemmalla puolella.",
-  "sunrise.extras.discord_presence": "Discord Rich Presence",
-  "sunrise.extras.discord_presence.tooltip": "Näyttää Playing Sunrisein Discord-profiilissasi, kun Discord on käynnissä: valikot, yksin- tai moninpeli, ulottuvuus ja peliaika. Ei koskaan maailman nimeä tai palvelimen osoitetta.",
   "sunrise.extras.dynamic_lights": "Dynaamiset valot",
   "sunrise.extras.dynamic_lights.tooltip": "Taskulamput ja muut valonlähteet pitivät, putosivat tai syttyivät tuleen, sytyttivät ympärillään olevat lohkot.",
   "sunrise.extras.fullbright": "Fullbright",

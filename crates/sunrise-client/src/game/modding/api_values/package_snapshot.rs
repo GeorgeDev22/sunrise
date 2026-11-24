@@ -120,13 +120,16 @@ impl TryIntoApi for sunrise_mod_package::packages::AdjacentManifest {
     }
 }
 
-pub(in crate::game) fn install_packages(
-    native: &[sunrise_mod_package::packages::AdjacentManifest],
-    content: &[sunrise_mod_package::selection::SelectedPackage],
+pub(in crate::game) fn install_packages<'a>(
+    native: impl IntoIterator<Item = &'a sunrise_mod_package::packages::AdjacentManifest>,
+    content: impl IntoIterator<Item = &'a sunrise_mod_package::selection::SelectedPackage>,
 ) -> Result<(), mod_api::__private::platform::PlatformRefusal> {
-    let native: Vec<_> = native.iter().map(|p| p.try_into_api().unwrap()).collect();
+    let native: Vec<_> = native
+        .into_iter()
+        .map(|p| p.try_into_api().unwrap())
+        .collect();
     let content: Vec<_> = content
-        .iter()
+        .into_iter()
         .map(|p| p.package.try_into_api().unwrap())
         .collect();
     (mod_api::__private::platform::platform()?.install_packages)(&native, &content);

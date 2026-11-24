@@ -2,7 +2,7 @@
 //! `remove`): feeding babies, swallowing a held block, shearing it back
 //! out, lighting an explosive one, swallowing blocks from the ground and
 //! splitting into two babies.
-use super::Game;
+use super::{Game, item_abilities::ability};
 use sunrise_client::{
     items::ItemStack,
     mesher::Vertex,
@@ -139,7 +139,7 @@ impl Game<'_> {
             self.award_stat("used", item, 1);
             return true;
         }
-        if item == "minecraft:shears" && sulfur_cube::has_body(m) {
+        if self.held_shears(ability::SHEARS_REMOVE_ARMOR) && sulfur_cube::has_body(m) {
             // shear: out comes the block, and nothing is swallowed for 5 s.
             let sheared = self.mobs[index].extra.body_stack().map(|s| s.item.clone());
             self.eject_sulfur_block(index);

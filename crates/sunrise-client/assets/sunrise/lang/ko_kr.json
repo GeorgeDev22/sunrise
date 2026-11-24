@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "새 채팅 줄이 통째로 나타나는 대신 왼쪽에서 미끄러지듯 나타나며 서서히 페이드 인됩니다.",
   "sunrise.extras.chat_indicator": "메시지 표시기",
   "sunrise.extras.chat_indicator.tooltip": "채팅 줄 왼쪽에 있는 색상 바입니다.",
-  "sunrise.extras.discord_presence": "Discord 리치 프레즌스",
-  "sunrise.extras.discord_presence.tooltip": "Discord가 실행되는 동안 Discord 프로필에 'Sunrise 플레이 중'을 표시합니다: 메뉴, 싱글 플레이어 또는 멀티플레이어, 차원 및 플레이 시간. 월드 이름이나 서버 주소는 절대 표시되지 않습니다.",
   "sunrise.extras.dynamic_lights": "동적 조명",
   "sunrise.extras.dynamic_lights.tooltip": "들고 있거나 버려두거나 불이 붙은 횃불 및 기타 광원이 주변 블록을 밝힙니다.",
   "sunrise.extras.fullbright": "풀브라이트",

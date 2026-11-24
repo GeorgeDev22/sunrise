@@ -90,17 +90,6 @@ def install(game, folder, fanout_count):
     return shutil.copy2(game, folder / 'sunrise-client')
 
 
-# The game wants a main-thread stack of 136 MiB and, finding less, raises the limit and starts itself again.
-# Under Valgrind that second start would not see the raised limit, so every run gets the stack up front.
-STACK = 160 << 20
-
-
-def big_stack():
-    import resource  # Unix only, and only a measuring run needs it
-    hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
-    resource.setrlimit(resource.RLIMIT_STACK, (STACK if hard == resource.RLIM_INFINITY else min(STACK, hard), hard))
-
-
 def run_game(game, resources, work, mods, only, prefix=()):
     """One process of the benchmark; returns its lines by workload name."""
     work.mkdir(parents=True)
@@ -111,7 +100,7 @@ def run_game(game, resources, work, mods, only, prefix=()):
     game_dir.mkdir()
     command = [*prefix, str(game), '--resources', str(resources), '--game-dir', str(game_dir)]
     with open(work / 'game.log', 'w') as log:
-        done = subprocess.run(command, cwd=work, env=env, stdout=log, stderr=subprocess.STDOUT, preexec_fn=big_stack)
+        done = subprocess.run(command, cwd=work, env=env, stdout=log, stderr=subprocess.STDOUT)
     if done.returncode != 0:
         tail = (work / 'game.log').read_text(errors='replace')[-3000:]
         ran = out.read_text() if out.exists() else ''
@@ -158,10 +147,12 @@ def parse_dump(text):
     return name, instructions, allocations
 
 
-def callgrind(valgrind, game, resources, work, mods, only):
+def callgrind(valgrind, game, resources, work, mods, only, *, separate_threads=False):
     """One process under Callgrind; returns {workload: (instructions, allocator calls)} and the lines."""
-    prefix = [valgrind, '--tool=callgrind', f'--main-stacksize={STACK}', '--instr-atstart=no', '--dump-instr=no', '--collect-jumps=no',
+    prefix = [valgrind, '--tool=callgrind', '--instr-atstart=no', '--dump-instr=no', '--collect-jumps=no',
               '--cache-sim=no', '--branch-sim=no', f'--callgrind-out-file={work}/callgrind.out']
+    if separate_threads:
+        prefix.append('--separate-threads=yes')
     rows = run_game(game, resources, work, mods, only, prefix)
     counted = {}
     for dump in sorted(work.glob('callgrind.out*')):

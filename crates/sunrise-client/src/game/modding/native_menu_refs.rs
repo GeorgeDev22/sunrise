@@ -59,8 +59,9 @@ impl Game<'_> {
 
     /// `ServerPlayer.closeContainer` of a guest's menu: queue the client's close before
     /// running normal server teardown. Refuses clients, stale menus, a guest with a pending
-    /// disconnect or an active turn, and the inventory menu (window 0). While a click action
-    /// is active, true accepts a close at commit.
+    /// disconnect, and the inventory menu (window 0). In the guest's own turn it closes at the
+    /// call, through the same turn-aware teardown an open's close of the old menu uses
+    /// (`close_for_open`). While a click action is active, true accepts a close at commit.
     pub(super) fn menu_close_container(&mut self, menu: MenuRef) -> bool {
         let window = menu.fields().window;
         if !self.is_logical_server() || window == 0 {
@@ -69,7 +70,7 @@ impl Game<'_> {
         let Some(guest) = self.native_menu_guest(menu) else {
             return false;
         };
-        if guest.disconnect_pending || self.lan_acting == Some(guest.conn) {
+        if guest.disconnect_pending {
             return false;
         }
         self.request_menu_close(guest.conn, window, guest.menu_generation);
@@ -77,6 +78,7 @@ impl Game<'_> {
     }
 
     /// `DataSlot.set` of an owning mod's blockless menu, journaled by window generation.
+    /// The client reads the committed updates as live frame data, not opening bytes.
     pub(super) fn menu_set_data_slot(
         &mut self,
         menu: MenuRef,
@@ -98,7 +100,7 @@ impl Game<'_> {
             return Err(WrongOwner);
         }
         let &committed = open.blockless_data.get(index).ok_or(InvalidIndex)?;
-        let (conn, index) = (guest.conn, index as u16);
+        let conn = guest.conn;
         let key = (conn, guest.menu_generation, index);
         if self.pending_menu_data(key).unwrap_or(committed) == value {
             return Ok(false);
@@ -115,8 +117,8 @@ impl Game<'_> {
     /// one of its buttons does (`MultiPlayerGameMode.handleInventoryButtonClick`,
     /// `ContainerButtonClick`): the server's menu decides what it does
     /// (`clickMenuButton`, and `menu_button` for a mod's menu). For a client
-    /// mod's own input on a menu's screen where `screen_click` doesn't come,
-    /// such as a key or the wheel; no sound, that is the screen's. Refuses
+    /// mod's own input on a menu's screen other than a press, such as a key
+    /// or the wheel; no sound, that is the screen's. Refuses
     /// stale menus, non-client hosts and the inventory menu, which no server
     /// opened. True means sent, not that the menu took it.
     pub(super) fn menu_click_button(&mut self, menu: MenuRef, button: i32) -> bool {
@@ -126,7 +128,11 @@ impl Game<'_> {
     }
 
     pub(super) fn menu_slot_boxes(&self, menu: MenuRef) -> Option<Vec<Option<[f32; 4]>>> {
-        if self.screen != super::Screen::Inventory || !self.screen_hooks_open() {
+        if !matches!(
+            self.screen,
+            super::Screen::Inventory | super::Screen::Creative
+        ) || !self.screen_hooks_open()
+        {
             return None;
         }
         let name = self.native_client_menu_name(menu)?;
@@ -222,24 +228,21 @@ impl Game<'_> {
         }
     }
 
-    fn native_menu_guest(&self, menu: MenuRef) -> Option<&Guest> {
+    pub(super) fn native_menu_guest(&self, menu: MenuRef) -> Option<&Guest> {
         let guest = self.native_menu_player(menu.fields().player)?;
         let host = self.lan.as_ref()?;
         (host.hub.holder_guest(guest.uuid, self.dim.id())?.conn == guest.conn).then_some(())?;
         (guest.menu_generation == menu.fields().generation).then_some(())?;
         if let Some(open) = &guest.menu {
-            // A native menu's slots are the mods' own: its hidden ones only
-            // keep the game's clicks out. The handle remains live so visible
-            // slots can still be backed and used.
             (open.window == menu.fields().window).then_some(guest)
         } else {
             let play = host.play.get(&guest.conn);
             let menus = host.menus.get(&guest.conn);
             if menu.fields().window != 0
-                || menus.is_some_and(|m| m.crafting.table.is_some() || m.station.is_some())
-                || play.is_some_and(|p| {
-                    p.merchant.is_some() || p.lectern.is_some() || p.mount_window.is_some()
+                || menus.is_some_and(|m| {
+                    m.crafting.table.is_some() || m.station.is_some() || m.merchant.is_some()
                 })
+                || play.is_some_and(|p| p.lectern.is_some() || p.mount_window.is_some())
             {
                 return None;
             }
@@ -248,8 +251,8 @@ impl Game<'_> {
     }
 
     /// A player's current supported menu. Refuses crafting tables, merchants,
-    /// workstations, lecterns and mounts. Hidden slots remain unavailable through
-    /// the slot methods without invalidating the menu handle. Also refuses stale
+    /// workstations, lecterns and mounts. Local screen hides do not change server access.
+    /// Also refuses stale
     /// players and players whose state is swapped out by another active turn.
     /// The acting player's inventory, equipment, cursor and ender reads use Game's state.
     /// On a client, only the local player's supported menu is available.
@@ -286,9 +289,16 @@ impl Game<'_> {
         Some(menu.fields().window)
     }
 
-    /// Registry menu type; the inventory menu has no MenuType in vanilla.
-    /// The outer None means an unavailable menu.
+    /// Registry menu type (`AbstractContainerMenu.getType`); the inventory and
+    /// mount menus have no MenuType in vanilla. The outer None means an unavailable menu.
     pub(super) fn menu_kind(&self, menu: MenuRef) -> Option<Option<String>> {
+        if self.remote.is_some() {
+            let name = self.native_client_menu_name(menu)?;
+            return Some(
+                (name != "inventory" && !name.starts_with(super::remote::MOUNT_MENU))
+                    .then(|| name.to_owned()),
+            );
+        }
         let guest = self.native_menu_guest(menu)?;
         match &guest.menu {
             Some(m) => Some(Some(
@@ -342,12 +352,6 @@ impl Game<'_> {
         };
         if slot >= open.slot_count() {
             return None;
-        }
-        if open.hidden.contains(&slot) {
-            // The screen hides the click target, not a handler explicitly bound to that slot.
-            return self
-                .native_menu_place(guest.conn, open.window, slot)
-                .map(MenuSlotBacking::Place);
         }
         // A block menu whose block entities no longer show its slots (a chest's, over a
         // furnace set in its place) backs none of them, the player's included, until the close
@@ -463,10 +467,21 @@ impl Game<'_> {
         Some(rules.slot_gives(&env, slot))
     }
 
+    pub(super) fn menu_slot_gives_with_stack(
+        &self,
+        menu: MenuRef,
+        slot: usize,
+        stack: &ItemStack,
+    ) -> Option<bool> {
+        let (mut rules, env) = self.native_menu_rules(menu, slot)?;
+        rules.load_slot(slot, Some(stack.clone()));
+        Some(rules.slot_gives(&env, slot))
+    }
+
     pub(super) fn menu_owned_slot_limit(&self, menu: MenuRef, slot: usize) -> Option<u32> {
         let open = self.native_menu_guest(menu)?.menu.as_ref()?;
         let limit = *open.owned_slots()?.get(slot)?;
-        (!open.hidden.contains(&slot)).then_some(u32::from(limit))
+        Some(u32::from(limit))
     }
 
     /// The menu engine's model of `menu`, holding slot `slot`, for its slots' rules: the
@@ -491,8 +506,8 @@ impl Game<'_> {
                 };
                 let kind = match entity.and_then(|e| machine_menu(e, open.mod_type)) {
                     Some((kind, _)) => kind,
-                    None if let Some(layout) =
-                        open.mod_type.filter(|t| t.owned_slots.is_some()) =>
+                    None if open.slots == Slots::Native
+                        && let Some(layout) = open.mod_type =>
                     {
                         Kind::Mod(layout)
                     }
@@ -520,9 +535,18 @@ impl Game<'_> {
             let world = self.native_level_world(self.level(&guest.dimension)?)?;
             let limits = open.slots.stack_limits(world, open.size);
             rules.set_container_limits(limits);
-            rules.set_block_pos(open.pos.map(|(x, y, z)| [x, y, z]));
+            rules.set_block_pos(
+                (open.slots != Slots::Native)
+                    .then_some(open.pos)
+                    .flatten()
+                    .map(|(x, y, z)| [x, y, z]),
+            );
             if open.owned_slots().is_some() {
-                rules.load_container(&env, &guest.native_menu);
+                rules.load_container(&env, &guest.native_menu, None);
+            } else if open.slots == Slots::Native && open.mod_type.is_some() {
+                for (i, stack) in guest.native_menu.iter().take(open.size).enumerate() {
+                    rules.load_slot(i, stack.clone());
+                }
             }
         }
         (slot < rules.slot_count()).then_some(())?;
@@ -739,28 +763,36 @@ mod tests {
 
     const PANEL: &str = "test:panel";
 
-    #[derive(Clone)]
     struct Panel {
-        slots: usize,
         opening: Arc<Mutex<Option<(MenuRef, usize)>>>,
-    }
-    #[mod_api::sunrise_part]
-    impl mod_api::MenuPart for Panel {
-        fn screen(
-            &self,
-            _: &dyn mod_api::Host,
-            _: &mut mod_api::ScreenEvent<'_>,
-        ) -> Option<mod_api::Screen> {
-            Some(mod_api::Screen {
-                slots: vec![Some(mod_api::ScreenSlot::default()); self.slots],
-                ..Default::default()
-            })
-        }
     }
     #[mod_api::__subscriptions]
     impl mod_api::Hooks for Panel {
         fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
-            r.menu_part(PANEL, self.clone());
+            r.register_menu_screen(
+                PANEL,
+                Arc::new(
+                    |_: &dyn mod_api::ClientHost, open: mod_api::MenuScreenOpen<'_>| {
+                        Some(mod_api::MenuScreen::new(mod_api::MenuScreenLayout {
+                            width: 176.0,
+                            height: 166.0,
+                            slots: (0..open.backing_slots)
+                                .map(|index| {
+                                    Some(mod_api::ScreenSlot {
+                                        position: [
+                                            8.0 + (index % 9) as f32 * 18.0,
+                                            18.0 + (index / 9) as f32 * 18.0,
+                                        ],
+                                        no_item_icon: None,
+                                    })
+                                })
+                                .collect(),
+                            ..Default::default()
+                        }))
+                    },
+                ),
+            )
+            .unwrap();
         }
 
         fn screen_opening(
@@ -783,7 +815,6 @@ mod tests {
     ) {
         let opening = Arc::new(Mutex::new(None));
         let panel = Panel {
-            slots,
             opening: opening.clone(),
         };
         let mods: mod_api::Mods = vec![mod_api::ModEntry::new("test", Box::new(panel))].into();
@@ -812,9 +843,6 @@ mod tests {
                                 "minecraft:menu".into(),
                                 sunrise_protocol::registry::Ids::from_names(vec![PANEL.into()]),
                             );
-                        let _phase = mod_api::__private::PhaseOwner::scope(
-                            mod_api::__private::ModPhase::World,
-                        );
                         test(game, &opening);
                     })
                 },
@@ -872,20 +900,244 @@ mod tests {
         });
     }
 
+    fn creative_tab(game: &mut Game<'_>, pick: impl Fn(&sunrise_client::creative::Tab) -> bool) {
+        let tab = game.creative_screen.tabs.iter().position(pick).unwrap();
+        game.creative_screen.select(tab);
+    }
+
+    /// A hidden window's offscreen renderer over a joined level with the player's body in it,
+    /// so the public screen reads have a window to lay the screen out in. The event loop
+    /// returned holds the window.
+    fn offscreen_window(game: &mut Game<'_>) -> winit::event_loop::EventLoop<()> {
+        let (event_loop, window) = crate::game::native_entity_refs::tests::test_window([320, 240]);
+        game.options.offscreen = true;
+        game.renderer = Some(game.new_renderer(window).unwrap());
+        let remote = game.remote.as_mut().unwrap();
+        remote.level_load.finish();
+        let mut body = sunrise_client::motion::PlayerMotion::new(
+            game.motion,
+            sunrise_core::geometry::Vec3::ZERO,
+        )
+        .unwrap();
+        body.entity_id = remote.entity_id;
+        game.player = Some(body);
+        event_loop
+    }
+
+    fn window_batch(game: &Game<'_>) -> super::super::HudBatch {
+        let config = &game.renderer.as_ref().unwrap().config;
+        super::super::HudBatch::new(
+            [config.width, config.height],
+            game.settings.gui_scale_inputs(),
+        )
+    }
+
+    /// The creative screen's boxes, read through `MenuRef::slot_boxes`, are `InventoryMenu`'s
+    /// 46 slots where `CreativeModeInventoryScreen.selectTab` puts them, and each box's centre
+    /// hovers its slot.
+    #[test]
+    #[ignore = "daily"]
+    fn creative_boxes_follow_the_selected_tab() {
+        crate::game::in_own_process(
+            "game::native_menu_refs::tests::creative_boxes_follow_the_selected_tab",
+            || {
+                with_panel(0, |game, _| {
+                    let _window = offscreen_window(game);
+                    game.creative = true;
+                    game.screen = super::super::Screen::Creative;
+                    game.refresh_creative_tabs();
+                    let batch = window_batch(game);
+                    let (ox, oy) = Game::creative_origin(&batch);
+                    // Menu index, game slot, position on the inventory tab, shown on item tabs.
+                    let expected = |index: usize| -> Option<(usize, (f32, f32), bool)> {
+                        let row = |i: usize| (9.0 + (i % 9) as f32 * 18.0, (i / 9) as f32 * 18.0);
+                        match index {
+                            5..=8 => {
+                                let i = index - 5;
+                                let at =
+                                    (54.0 + (i / 2) as f32 * 54.0, 6.0 + (i % 2) as f32 * 27.0);
+                                Some((500 + i, at, false))
+                            }
+                            9..=35 => {
+                                let (x, y) = row(index - 9);
+                                Some((index, (x, 54.0 + y), false))
+                            }
+                            36..=44 => Some((index - 36, (row(index - 36).0, 112.0), true)),
+                            45 => Some((504, (35.0, 20.0), false)),
+                            _ => None,
+                        }
+                    };
+                    for tab in ["inventory", "items", "search"] {
+                        creative_tab(game, |t| match tab {
+                            "inventory" => t.inventory,
+                            "items" => !t.inventory && !t.search && !t.items.is_empty(),
+                            _ => t.search,
+                        });
+                        let host: &dyn mod_api::ClientHost = &*game;
+                        let menu = host.local_player().unwrap().container_menu(host).unwrap();
+                        let boxes = menu.slot_boxes(host).unwrap();
+                        assert_eq!(boxes.len(), 46, "{tab}");
+                        for (index, found) in boxes.into_iter().enumerate() {
+                            let want = expected(index)
+                                .filter(|&(_, _, item_tab)| tab == "inventory" || item_tab);
+                            assert_eq!(
+                                found,
+                                want.map(|(_, (x, y), _)| [ox + x, oy + y, 16.0, 16.0]),
+                                "{tab} slot {index}"
+                            );
+                            if let Some((slot, (x, y), _)) = want {
+                                assert_eq!(
+                                    game.slot_at(&batch, ox + x + 8.0, oy + y + 8.0),
+                                    Some(slot),
+                                    "{tab} slot {index}"
+                                );
+                            }
+                        }
+                    }
+                })
+            },
+        );
+    }
+
+    /// `screen_hovered_stack` gives a mod the hovered slot's whole stack, components included,
+    /// on the inventory screen and on both kinds of creative tab, where a catalog slot shows
+    /// the scrolled list; nothing over an empty slot, the trash slot or the world.
+    #[test]
+    #[ignore = "daily"]
+    fn the_hovered_stack_keeps_its_components() {
+        crate::game::in_own_process(
+            "game::native_menu_refs::tests::the_hovered_stack_keeps_its_components",
+            || {
+                use mod_api::{Tag, prelude::ScreensClientHost};
+                use sunrise_client::creative::Creative;
+                use sunrise_core::nbt::JavaString;
+
+                fn component<'s>(stack: &'s mod_api::ItemStack, id: &str) -> Option<&'s Tag> {
+                    stack.components()?.as_nbt().get(&JavaString::from(id))
+                }
+                let key = |id| mod_api::__private::item_key(id).unwrap();
+                let is_sword = |stack: Option<mod_api::ItemStack>| {
+                    let stack = stack.expect("the sword");
+                    assert_eq!(stack.item(), key("minecraft:diamond_sword"));
+                    assert_eq!(stack.count(), 1);
+                    assert_eq!(stack.damage_component(), Some(5));
+                    assert_eq!(
+                        component(&stack, "minecraft:enchantments"),
+                        Some(&Tag::compound([("minecraft:sharpness", Tag::Int(3))]))
+                    );
+                    assert_eq!(
+                        component(&stack, "minecraft:custom_name"),
+                        Some(&Tag::String("Blade".into()))
+                    );
+                };
+                let is_potion = |stack: Option<mod_api::ItemStack>| {
+                    let stack = stack.expect("the potion");
+                    assert_eq!(stack.item(), key("minecraft:potion"));
+                    assert_eq!(stack.count(), 1);
+                    assert_eq!(
+                        component(&stack, "minecraft:potion_contents"),
+                        Some(&Tag::compound([(
+                            "potion",
+                            Tag::String("minecraft:strong_healing".into())
+                        )]))
+                    );
+                };
+                let is_stone = |stack: Option<mod_api::ItemStack>| {
+                    let stack = stack.expect("the stone");
+                    assert_eq!(stack.item(), key("minecraft:stone"));
+                    assert_eq!(stack.count(), 17);
+                    assert!(stack.components().is_none());
+                };
+                with_panel(0, |game, _| {
+                    let _window = offscreen_window(game);
+                    let batch = window_batch(game);
+                    let hover = |game: &mut Game<'_>, slot: usize| {
+                        let (ox, oy) = game.inventory_origin(&batch);
+                        let (x, y) = game.slot_position(slot);
+                        game.cursor = (ox + x + 8.0, oy + y + 8.0);
+                        ScreensClientHost::screen_hovered_stack(&*game)
+                    };
+                    let sword = game
+                        .item_from_snbt(r#"{id:"minecraft:diamond_sword",count:1,components:{"minecraft:damage":5,"minecraft:enchantments":{"minecraft:sharpness":3},"minecraft:custom_name":"Blade"}}"#)
+                        .unwrap();
+                    let potion = game
+                        .item_from_snbt(r#"{id:"minecraft:potion",count:1,components:{"minecraft:potion_contents":{potion:"minecraft:strong_healing"}}}"#)
+                        .unwrap();
+                    game.inventory[0] = Some(sword.clone());
+                    game.inventory[9] = Some(potion.clone());
+                    game.inventory[10] = Some(ItemStack::new("minecraft:stone", 17));
+                    game.inventory[11] = None;
+                    game.armor[0] = Some(sword.clone());
+
+                    game.screen = super::super::Screen::Inventory;
+                    is_potion(hover(game, 9));
+                    is_stone(hover(game, 10));
+                    assert_eq!(hover(game, 11), None);
+                    game.screen = super::super::Screen::Playing;
+                    assert_eq!(hover(game, 9), None);
+
+                    game.creative = true;
+                    game.screen = super::super::Screen::Creative;
+                    game.refresh_creative_tabs();
+                    creative_tab(game, |t| t.inventory);
+                    is_potion(hover(game, 9));
+                    is_sword(hover(game, 500));
+                    assert_eq!(hover(game, 11), None);
+                    let (ox, oy) = game.inventory_origin(&batch);
+                    let (tx, ty) = Creative::TRASH_POSITION;
+                    game.cursor = (ox + tx + 8.0, oy + ty + 8.0);
+                    assert_eq!(ScreensClientHost::screen_hovered_stack(&*game), None);
+
+                    // Seven rows: scrolled to the bottom, the first shown row is the third.
+                    creative_tab(game, |t| !t.inventory && !t.search && !t.items.is_empty());
+                    let tab = game.creative_screen.selected_index();
+                    let mut items = vec![ItemStack::new("minecraft:stone", 17); 63];
+                    items[0] = sword.clone();
+                    items[1].count = 0;
+                    items[18] = potion;
+                    game.creative_screen.tabs[tab].items = items;
+                    game.creative_screen.forget_items();
+                    is_sword(hover(game, Creative::DISPLAY));
+                    assert_eq!(hover(game, Creative::DISPLAY + 1), None);
+                    is_stone(hover(game, Creative::DISPLAY + 2));
+                    is_sword(hover(game, 0));
+                    game.creative_screen.scroll = 1.0;
+                    is_potion(hover(game, Creative::DISPLAY));
+
+                    game.creative_screen = Creative::from_json(&serde_json::json!({
+                        "schema": 4, "item_features": {}, "potion_features": {}, "tabs": [{
+                            "id": "minecraft:search", "type": "SEARCH", "title": "Search Items",
+                            "build": [], "search_metadata": [{
+                                "stack": r#"{id:"minecraft:stone",count:17}"#,
+                                "ungrouped": true
+                            }]
+                        }]
+                    }))
+                    .unwrap();
+                    is_stone(hover(game, Creative::DISPLAY));
+                    is_sword(hover(game, 0));
+                });
+            },
+        );
+    }
+
     #[test]
     #[ignore = "daily"]
     fn number_key_swaps_predict_with_the_undisplayed_hotbar() {
+        use crate::game::inventory_slots::MOD_MENU_SLOT_BASE;
+
         with_panel(1, |game, _| {
             open_panel(game);
-            assert_eq!(game.slots(), [300]);
+            let slot = MOD_MENU_SLOT_BASE;
+            assert_eq!(game.slots(), [slot]);
             let held = ItemStack::new("minecraft:stone", 5);
             let stored = ItemStack::new("minecraft:dirt", 2);
             game.inventory[2] = Some(held.clone());
-            *game.slot_mut(300) = Some(stored.clone());
-            assert!(game.menu_ops(&[(Some(300), 2, Input::Swap)]));
+            *game.slot_mut(slot) = Some(stored.clone());
+            assert!(game.menu_ops(&[(Some(slot), 2, Input::Swap)]));
             assert_eq!(game.inventory[2], Some(stored));
-            assert_eq!(*game.slot_mut(300), Some(held));
-            assert_eq!(game.slots(), [300]);
+            assert_eq!(*game.slot_mut(slot), Some(held));
+            assert_eq!(game.slots(), [slot]);
         });
     }
 

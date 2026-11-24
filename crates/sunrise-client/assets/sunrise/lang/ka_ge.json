@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "ჩეთის ახალი ხაზი შემოდის მარცხნიდან, სანამ ის ქრება, ნაცვლად იმისა, რომ მთლიანად გამოჩნდეს.",
   "sunrise.extras.chat_indicator": "შეტყობინების ინდიკატორი",
   "sunrise.extras.chat_indicator.tooltip": "ფერადი ზოლი ჩატის ხაზის მარცხნივ.",
-  "sunrise.extras.discord_presence": "Discord-ის მდიდარი სტატუსი",
-  "sunrise.extras.discord_presence.tooltip": "აჩვენებს Playing Sunrise-ს თქვენს Discord პროფილზე, სანამ Discord მუშაობს: მენიუები, ერთი მოთამაშე ან მრავალმოთამაშიანი, განზომილება და თამაშის დრო. არასოდეს მსოფლიოს სახელი ან სერვერის მისამართი.",
   "sunrise.extras.dynamic_lights": "დინამიური ნათურები",
   "sunrise.extras.dynamic_lights.tooltip": "ჩირაღდნები და სხვა სინათლის წყაროები დაჭერილი, ჩამოშვებული ან ანთებული ანათებს მათ გარშემო არსებულ ბლოკებს.",
   "sunrise.extras.fullbright": "ფულბრაიტი",

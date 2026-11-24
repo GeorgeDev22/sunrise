@@ -1,7 +1,8 @@
 //! Restore the guest's first body without borrowing another player's RNG.
 use super::*;
 use sunrise_client::{
-    lan::guest::Guest,
+    lan::{guest::Guest, hub::CommittedMove},
+    landing::PlayerLandingPause,
     motion::{MotionResources, PlayerMotion, ServerTravel},
 };
 use sunrise_core::geometry::Vec3;
@@ -28,12 +29,32 @@ macro_rules! motion_world {
     };
 }
 
+// End the low-level body loan before its death or protection has to use Game. At a
+// distinct hurt site the next operation must already see the same hit's settlement.
+macro_rules! settle_guest_hit {
+    ($game:ident, $side:ident, $world:ident, $id:ident) => {
+        if $world.player.health.damage_completion.is_some() {
+            if let Err(collected) = $game.finish_guest_damage_before_resume() {
+                return (collected, None, ServerTravel::Continue);
+            }
+            let Some(player) = $game.player.as_mut().filter(|p| p.entity_id as u32 == $id) else {
+                return (Vec::new(), None, ServerTravel::Continue);
+            };
+            $side = game_side!($game);
+            $world = motion_world!($game, $side, player);
+        }
+    };
+}
+
 pub(super) fn initialize(resources: &MotionResources, guest: &mut Guest) -> bool {
     let p = Vec3::new(guest.position[0], guest.position[1], guest.position[2]);
     let Ok(motion) = PlayerMotion::new(resources, p) else {
         return false;
     };
     let mut motion = motion;
+    let spectator = guest.spectator();
+    motion.spectator = spectator;
+    motion.local_spectator = spectator;
     if let Some(tick_count) = guest.carried_tick_count.take() {
         motion.health.tick_count = tick_count;
     }
@@ -42,6 +63,7 @@ pub(super) fn initialize(resources: &MotionResources, guest: &mut Guest) -> bool
     let accepted_hit = guest.carried_hit.take();
     if let Some(motion) = guest.motion.as_mut() {
         motion.health.accepted_hit = accepted_hit;
+        motion.health.last_hurt_mob = guest.carried_last_hurt_mob.take();
         motion.random = sunrise_core::random::EntityRandom::own(
             sunrise_client::mobs::entity_random(entity_id, p),
         );
@@ -80,15 +102,152 @@ pub(super) fn initialize(resources: &MotionResources, guest: &mut Guest) -> bool
 }
 
 impl Game<'_> {
-    /// The guest's connection-path body: Entity.baseTick's fluid phase
-    /// (burning), then for each move
-    /// ServerPlayer.doCheckFallDamage (the fall distance grows while they go
-    /// down and hurts them where they land, as the host's own landing does;
-    /// water resets it, lava halves it) and checkMovementStatistics (the
-    /// exhaustion of sprinting and swimming), then LivingEntity.baseTick's
-    /// hazards (drowning, lava, fire blocks, suffocation, the void), and
-    /// regeneration and the food tick (ServerPlayer.doTick). Their hurt
-    /// sounds are heard at the guest.
+    /// `handlePlayerPositionChange`: complete the accepted movement before later
+    /// packets and `ServerPlayer.tick` can observe the player.
+    pub(in crate::game) fn guest_accepted_move(&mut self, conn: u32, commit: CommittedMove) {
+        let CommittedMove {
+            movement: accepted,
+            horizontal_collision,
+            from,
+            jump_yaw,
+        } = commit;
+        let Some(g) = self.lan.as_ref().and_then(|host| host.hub.guest(conn)) else {
+            return;
+        };
+        let id = g.entity_id as u32;
+        let spectator = g.spectator();
+        let dimensions = g.dimensions();
+        let at = accepted.position;
+        if let Some(yaw) = jump_yaw {
+            self.guest_jump(conn, from, yaw);
+        }
+        if crate::game::entity_sections::crossed(from, at) {
+            self.entity_section_step(id, from, at);
+        }
+        if spectator {
+            return;
+        }
+        let Some(events) = self.as_guest(conn, |game| {
+            let leather_boots = super::super::worn_boots::leather_boots(&game.armor);
+            let boat = game.riding_boat_fluid_box();
+            let Some(player) = game.player.as_mut() else {
+                return Vec::new();
+            };
+            player.fluids.boat = boat;
+            player.leather_boots = leather_boots;
+            player.shift_key_down = accepted.sneaking;
+            player.record_fall_reset = game.adv.marks.fall.is_some();
+            let mut side = game_side!(game);
+            let mut w = motion_world!(game, side, player);
+            let [x, y, z] = accepted.delta;
+            let movement = Vec3::new(x, y, z);
+            if w.set_on_ground_with_movement(accepted.on_ground, horizontal_collision, movement)
+                .is_ok()
+                && !touching_unloaded_chunk(at, dimensions, |x, z| {
+                    w.scene.chunks.contains_key(&(x, z))
+                })
+            {
+                let landed = (|| -> sunrise_client::Result<_> {
+                    // Entity.doCheckFallDamage queries support again before fallOn.
+                    w.check_supporting_block(accepted.on_ground, movement)?;
+                    let pos = w.legacy_on_position()?;
+                    let state = w.block_state(pos)?;
+                    w.check_guest_fall_damage(y, accepted.on_ground, state, pos)
+                })();
+                let tail = match landed {
+                    Ok(Some(PlayerLandingPause::Trample(trample))) => {
+                        let mut collected = std::mem::take(&mut w.player.events);
+                        game.trample_farmland(id, true, trample);
+                        let Some(player) =
+                            game.player.as_mut().filter(|p| p.entity_id as u32 == id)
+                        else {
+                            return collected;
+                        };
+                        collected.append(&mut player.events);
+                        player.events = collected;
+                        side = game_side!(game);
+                        w = motion_world!(game, side, player);
+                        w.finish_trample_fall(trample).ok().flatten()
+                    }
+                    Ok(Some(PlayerLandingPause::Damage(tail))) => Some(tail),
+                    Ok(None) | Err(_) => None,
+                };
+                if let Some(tail) = tail {
+                    if let Err(collected) = game.finish_guest_damage_before_resume() {
+                        return collected;
+                    }
+                    let Some(player) = game.player.as_mut().filter(|p| p.entity_id as u32 == id)
+                    else {
+                        return Vec::new();
+                    };
+                    side = game_side!(game);
+                    w = motion_world!(game, side, player);
+                    let _ = w.finish_guest_landing(tail);
+                }
+            }
+            let player = w.player;
+            if y > 0.0 {
+                player.reset_fall_distance();
+            }
+            player.record_fall_reset = false;
+            let moved = player
+                .position
+                .subtract(Vec3::new(from[0], from[1], from[2]));
+            let side = game_side!(game);
+            let _ = motion_world!(game, side, player).check_movement_statistics(moved);
+            game.movement_stats(moved);
+            let Some(player) = game.player.as_mut() else {
+                return Vec::new();
+            };
+            let events = std::mem::take(&mut player.events);
+            game.record_guest_motion_combat(&events);
+            events
+        }) else {
+            return;
+        };
+        let fall_end = events.iter().find_map(|event| match event {
+            MotionEvent::FallDistanceReset(at) => Some(at.components()),
+            _ => None,
+        });
+        self.guest_motion_events(conn, at, events);
+        let Some(host) = self.lan.as_ref() else {
+            return;
+        };
+        let Some(gi) = host.hub.guests.connection_index(conn) else {
+            return;
+        };
+        // LivingEntity.hurtServer: the turn already applied death protection.
+        // If it did not save the guest, finish ServerPlayer.die before the
+        // next packet can move them or change their drops.
+        if host.hub.guests[gi].health <= 0.0 {
+            self.guest_die(gi, conn);
+        }
+        // ServerPlayer.resetFallDistance: the first reset in this packet ends
+        // the tracked fall. Use its position and the health after protection.
+        if let Some(end) = fall_end
+            && self
+                .lan
+                .as_ref()
+                .and_then(|host| host.play.get(&conn))
+                .is_some_and(|play| play.marks.fall.is_some())
+        {
+            self.as_guest(conn, |game| {
+                if let Some(start) = game.adv.marks.fall.take()
+                    && game
+                        .player
+                        .as_ref()
+                        .is_some_and(|p| p.health.health() > 0.0)
+                {
+                    game.trigger_distance_at("minecraft:fall_from_height", start, Some(end));
+                }
+            });
+        }
+    }
+
+    /// The guest's connection-path body: fluid and block effects, hazards,
+    /// regeneration, food and travel (`ServerPlayer.doTick`). Accepted reports
+    /// have already run their fall checks; the body still walks their history
+    /// for `Entity.applyEffectsFromBlocks` and the movement a glide reads.
     pub(in crate::game) fn guest_server_tick(&mut self, conn: u32, body: bool) {
         // The last move's fall stands in for the server's delta movement.
         let Some(host) = self.lan.as_mut() else {
@@ -116,9 +275,6 @@ impl Game<'_> {
         let g = self.lan.as_ref().unwrap().hub.guest(conn).unwrap();
         let id = g.entity_id as u32;
         if g.spectator() {
-            // Spectators skip the movement replay and only file its position writes.
-            self.entity_section_walked(id, g.position, moves.iter().map(|m| m.delta));
-            let g = self.lan.as_ref().unwrap().hub.guest(conn).unwrap();
             // ServerPlayer.doTick runs the player's whole tick for a spectator
             // too, unless its box touches an unloaded chunk
             // (`touchingUnloadedChunk`, `guest_body_ticks`): its effects
@@ -129,9 +285,7 @@ impl Game<'_> {
             if !body {
                 return;
             }
-            if !g.effects.list.is_empty() {
-                self.as_guest(conn, |game| game.tick_mob_effects());
-            }
+            self.as_guest(conn, |game| game.tick_mob_effects());
             self.as_guest(conn, |game| {
                 game.handle_shoulder_entities();
                 let rules = game.world.health_rules;
@@ -146,11 +300,16 @@ impl Game<'_> {
                         game,
                         &sunrise_client::health::NO_ATTACK,
                         no_push,
-                        None
+                        None,
+                        acting_equipment!(game)
                     ),
                     &game.health_resources,
                     rules,
                 );
+                game.finish_guest_damage();
+                let Some(player) = game.player.as_mut().filter(|p| p.entity_id as u32 == id) else {
+                    return;
+                };
                 let events = std::mem::take(&mut player.events);
                 game.record_combat(&events);
             });
@@ -174,19 +333,29 @@ impl Game<'_> {
             let health = &motion.health;
             let leather_boots = super::super::worn_boots::leather_boots(&game.armor);
             let freeze_immune = game.wears_freeze_immune();
-            let burn_immune = game.wears_burn_from_stepping_immunity();
             let boat = game.riding_boat_fluid_box();
+            let swim_listener = game.has_swim_eligibility_listener();
             let Some(player) = game.player.as_mut() else {
                 return (Vec::new(), None, ServerTravel::Continue);
             };
             player.fluids.boat = boat;
-            // The supporting-block scan for this tick's moves reads the boots.
             player.leather_boots = leather_boots;
             let mut side = game_side!(game);
             let mut w = motion_world!(game, side, player);
             w.player.health.advance_body_clock();
-            let _ = w.fluid_base_tick();
-            w.player.ground.on_ground = from_ground;
+            if w.begin_fluid_tick().is_ok() {
+                let decision = if swim_listener { w.swim_entry() } else { None };
+                let answer = game.ask_swim_entry(decision);
+                let Some(player) = game.player.as_mut().filter(|p| p.entity_id as u32 == id) else {
+                    return (Vec::new(), None, ServerTravel::Continue);
+                };
+                side = game_side!(game);
+                w = motion_world!(game, side, player);
+                if w.swim_and_burn_tick(answer).is_ok() {
+                    settle_guest_hit!(game, side, w, id);
+                    w.finish_fluid_base_tick();
+                }
+            }
             // Player.aiStep: a flying player that isn't riding starts every tick
             // with no fall distance, so flying down in creative and switching to
             // survival lands without the flight's distance.
@@ -219,70 +388,6 @@ impl Game<'_> {
                 from = to;
             }
             let _ = w.server_stuck_in_blocks(start);
-            // Where the first move that went up ended, if one did, and whether the player
-            // was alive then: the hazards below may kill it later in this tick.
-            let mut rose = None;
-            let mut latest = end;
-            let mut from = start;
-            let mut replay = moves.iter().peekable();
-            while let Some(accepted) = replay.next() {
-                let movement = vector(accepted.delta);
-                let at = vector(accepted.position);
-                w.player.position = at;
-                w.player.shift_key_down = accepted.sneaking;
-                // File this accepted setPos before its landing or a later move.
-                // In particular, an intervening trample lift can cross a section too.
-                if crate::game::entity_sections::crossed(from.components(), at.components()) {
-                    let mut collected = std::mem::take(&mut w.player.events);
-                    game.entity_section_step(id, from.components(), at.components());
-                    let Some(player) = game.player.as_mut().filter(|p| p.entity_id as u32 == id)
-                    else {
-                        return (collected, None, ServerTravel::Continue);
-                    };
-                    collected.append(&mut player.events);
-                    player.events = collected;
-                    side = game_side!(game);
-                    w = motion_world!(game, side, player);
-                }
-                let landed = (|| -> sunrise_client::Result<_> {
-                    w.set_on_ground_with_movement(accepted.on_ground, false, movement)?;
-                    let pos = w.legacy_on_position()?;
-                    let state = w.block_state(pos)?;
-                    w.check_guest_fall_damage(movement.y, accepted.on_ground, state, pos)
-                })();
-                let Ok(landed) = landed else { break };
-                if let Some(trample) = landed {
-                    let mut collected = std::mem::take(&mut w.player.events);
-                    game.trample_farmland(id, true, trample);
-                    let Some(player) = game.player.as_mut().filter(|p| p.entity_id as u32 == id)
-                    else {
-                        return (collected, None, ServerTravel::Continue);
-                    };
-                    collected.append(&mut player.events);
-                    player.events = collected;
-                    side = game_side!(game);
-                    w = motion_world!(game, side, player);
-                    if w.finish_trample_fall(trample).is_err() {
-                        break;
-                    }
-                }
-                // handlePlayerPositionChange: an upward move resets the fall distance
-                // after the landing, and its advancement reads the post-landing health.
-                from = w.player.position;
-                if movement.y > 0.0 {
-                    w.player.fall_distance = 0.0;
-                    rose.get_or_insert((at, !w.player.health.dead_or_dying()));
-                }
-                // Preserve a lift on the final accepted move, but do not overwrite a
-                // position set after that report or rewind if the drain stopped early.
-                if replay.peek().is_none() && at == end {
-                    latest = w.player.position;
-                }
-                if w.check_movement_statistics(movement).is_err() {
-                    break;
-                }
-            }
-            w.player.position = latest;
             // A ServerPlayer travels on the server too
             // (MoveSimulationType.AUTHORITATIVE_SIDE_AND_SERVER), so every tick
             // on a ladder or vine LivingEntity.handleOnClimbable resets its fall
@@ -302,8 +407,14 @@ impl Game<'_> {
             w.player.shift_key_down = sneaking;
             let _ = w.player.set_sleeping(sleeping);
             w.player.freeze_immune = freeze_immune;
-            w.player.burn_from_stepping_immune = burn_immune;
-            let _ = w.server_block_damage(start);
+            let mut contact = None;
+            loop {
+                let progress = w.server_block_damage_until_hit(start, &mut contact);
+                settle_guest_hit!(game, side, w, id);
+                if !matches!(progress, Ok(false)) {
+                    break;
+                }
+            }
             let _ = w.update_soul_speed_block();
             // LivingEntity.baseTick's air supply: decided here, then `living_breathe` is
             // asked with the game itself, which `w` borrows, and its answer applied.
@@ -325,25 +436,21 @@ impl Game<'_> {
                 w = motion_world!(game, side, player);
                 if let Some((step, breath)) = answer {
                     let _ = w.apply_air(step, breath);
+                    settle_guest_hit!(game, side, w, id);
                 }
                 let _ = w.tick_lava_contact();
+                settle_guest_hit!(game, side, w, id);
             }
             let _ = w.apply_fire_contact();
-            let _ = w.server_hazards_tick(in_wall);
-            // LivingEntity.aiStep: a Riptide spin counts down on the server's
-            // copy too, or it would stay in the spin pose (eye 0.4) for good.
-            // LivingEntity.tick: a changed scale rebuilds the box. Player.tick
-            // ends with updatePlayerPose — or, for a passenger, the rideTick
-            // path that clears a swim (#4509 / #3308).
-            let _ = if riding {
-                w.passenger_pose_tick()
-            } else {
-                w.server_player_pose_tick()
-            };
-            let mut events = std::mem::take(&mut w.player.events);
-            if let Some((at, alive)) = rose {
-                game.end_tracked_fall(at, alive);
+            settle_guest_hit!(game, side, w, id);
+            if w.check_below_world().is_ok() {
+                settle_guest_hit!(game, side, w, id);
+                if in_wall {
+                    let _ = w.suffocation_hurt();
+                    settle_guest_hit!(game, side, w, id);
+                }
             }
+            let mut events = std::mem::take(&mut w.player.events);
             // Powder snow and cauldrons put the fire out along those moves.
             game.block_extinguish_player(&events);
             // Entity.baseTick: rain puts out a burning player.
@@ -363,17 +470,27 @@ impl Game<'_> {
                     _ => {}
                 }
             }
-            // ServerGamePacketListenerImpl.handleMovePlayer:
-            // Player.checkMovementStatistics for each move.
-            for accepted in moves {
-                game.movement_stats(vector(accepted.delta));
-            }
             // LivingEntity.baseTick: a new block position runs the worn
             // enchantments' location_changed effects (frost walker).
             game.location_changed_effects([start.x, start.y, start.z], from_ground);
             // LivingEntity.baseTick: outside the world border, then tickEffects.
             game.border_damage();
             game.tick_mob_effects();
+            // `LivingEntity.baseTick` ran effects before the remaining dirty
+            // attributes refresh in `LivingEntity.tick`. `Player.tick` then
+            // chooses its pose, including for a passenger (#4509 / #3308).
+            let Some(player) = game.player.as_mut() else {
+                return (events, None, ServerTravel::Continue);
+            };
+            let side = game_side!(game);
+            let mut w = motion_world!(game, side, player);
+            if riding {
+                let _ = w.player.refresh_attributes();
+                let _ = w.passenger_pose_tick();
+            } else {
+                let _ = w.server_player_pose_tick();
+            }
+            game.apply_player_waypoint_updates();
             // Soul Speed's effects (LivingEntity.baseTick's location_changed
             // and tick effects); its particle goes to the players around.
             soul = game.tick_soul_speed();
@@ -388,17 +505,23 @@ impl Game<'_> {
                     game,
                     &sunrise_client::health::NO_ATTACK,
                     no_push,
-                    None
+                    None,
+                    acting_equipment!(game)
                 ),
                 health,
                 rules,
             );
+            game.finish_guest_damage();
+            let Some(player) = game.player.as_mut().filter(|p| p.entity_id as u32 == id) else {
+                return (events, None, ServerTravel::Continue);
+            };
             events.append(&mut player.events);
             player.carry_client_movement(tick_movement);
             let side = game_side!(game);
             let travel = motion_world!(game, side, player)
                 .server_travel()
                 .unwrap_or(ServerTravel::Continue);
+            game.finish_guest_damage();
             // Player.aiStep's entity contacts run with the player's body,
             // even when the level and its mobs are frozen. Flush their damage
             // events and marked velocity through the existing guest path.
@@ -412,15 +535,7 @@ impl Game<'_> {
             // ServerEntity.sendChanges sends it as it is after this travel.
             let marked = std::mem::take(&mut player.health.sync_velocity);
             let velocity = marked.then_some(player.velocity);
-            // Player.causeFallDamage: a fall of 2 blocks or more counts.
-            for event in &events {
-                if let MotionEvent::Fall(sunrise_client::landing::FallEvent::Statistic(cm)) = event
-                {
-                    game.award_custom_stat("fall_one_cm", *cm);
-                }
-            }
-            game.record_combat(&events);
-            game.wear_armor(&events);
+            game.record_guest_motion_combat(&events);
             (events, velocity, travel)
         });
         let Some((events, marked, travel)) = events else {
@@ -445,6 +560,40 @@ impl Game<'_> {
                 }
             }
         });
+        self.guest_motion_events(conn, at, events);
+        if let Some(v) = marked {
+            if mod_api::__private::listened(mod_api::HookId::PlayerVelocity)
+                && let Some((uuid, name)) = self
+                    .lan
+                    .as_ref()
+                    .and_then(|host| host.hub.guest(conn))
+                    .map(|g| (g.uuid, g.name.clone()))
+            {
+                self.native_player_velocity(uuid, &name, [v.x, v.y, v.z]);
+            }
+            if !travel_synced
+                && let Some(g) = self.lan.as_ref().and_then(|host| host.hub.guest(conn))
+            {
+                g.send(&C::SetEntityMotion(play::SetEntityMotion {
+                    id: g.entity_id,
+                    velocity: [v.x, v.y, v.z],
+                }));
+            }
+        }
+    }
+
+    fn record_guest_motion_combat(&mut self, events: &[MotionEvent]) {
+        // Player.causeFallDamage: a fall of 2 blocks or more counts.
+        for event in events {
+            if let MotionEvent::Fall(sunrise_client::landing::FallEvent::Statistic(cm)) = event {
+                self.award_custom_stat("fall_one_cm", *cm);
+            }
+        }
+        self.record_combat(events);
+        self.wear_armor(events);
+    }
+
+    fn guest_motion_events(&mut self, conn: u32, at: [f64; 3], events: Vec<MotionEvent>) {
         for event in events {
             match event {
                 MotionEvent::Health(sunrise_client::health::HealthEvent::DamageBroadcast {
@@ -626,48 +775,6 @@ impl Game<'_> {
                 }
                 _ => {}
             }
-        }
-        if let Some(v) = marked {
-            if mod_api::__private::listened(mod_api::HookId::PlayerVelocity)
-                && let Some((uuid, name)) = self
-                    .lan
-                    .as_ref()
-                    .and_then(|host| host.hub.guest(conn))
-                    .map(|g| (g.uuid, g.name.clone()))
-            {
-                self.native_player_velocity(uuid, &name, [v.x, v.y, v.z]);
-            }
-            if !travel_synced
-                && let Some(g) = self.lan.as_ref().and_then(|host| host.hub.guest(conn))
-            {
-                g.send(&C::SetEntityMotion(play::SetEntityMotion {
-                    id: g.entity_id,
-                    velocity: [v.x, v.y, v.z],
-                }));
-            }
-        }
-    }
-}
-
-impl Game<'_> {
-    /// `ServerPlayer.resetFallDistance` for a move that went up: the tracked fall ends, and
-    /// `fall_from_height` measures it from where it began to `at`, where that move ended. A
-    /// later move of the same tick may have taken the player further. `alive` is the player's
-    /// state at that move (`getHealth() > 0`): a death later in the tick does not undo it.
-    fn end_tracked_fall(&mut self, at: Vec3, alive: bool) {
-        let Some(start) = self.adv.marks.fall.take() else {
-            return;
-        };
-        if !alive {
-            return;
-        }
-        let Some(player) = self.player.as_mut() else {
-            return;
-        };
-        let end = std::mem::replace(&mut player.position, at);
-        self.trigger_distance("minecraft:fall_from_height", start);
-        if let Some(player) = self.player.as_mut() {
-            player.position = end;
         }
     }
 }

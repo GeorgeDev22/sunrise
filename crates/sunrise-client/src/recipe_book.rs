@@ -1047,6 +1047,17 @@ pub struct RecipeIndex {
     recipes: std::collections::BTreeMap<String, Known>,
 }
 #[derive(Clone, Debug)]
+pub(crate) struct KnownEntry {
+    pub(crate) special: bool,
+    pub(crate) displays: usize,
+    /// `RecipeDisplay.craftingStation`: the workstation item of its displays.
+    pub(crate) station: &'static str,
+    /// `Recipe.showNotification`: unlocking it shows the `RecipeToast`.
+    pub(crate) notify: bool,
+    /// `result.id`, for the recipes the book doesn't list.
+    pub(crate) result: Option<String>,
+}
+#[derive(Clone, Debug)]
 struct Known {
     special: bool,
     displays: usize,
@@ -1093,34 +1104,71 @@ impl RecipeIndex {
         )
     }
 
-    /// Build book displays only from retained recipes with placement candidates.
+    /// Build book displays only from retained recipes with placement candidates,
+    /// using the metadata derived once during source decoding.
     pub(crate) fn from_recipes(recipes: &Recipes) -> Self {
-        Self::from_source_refs(recipes.by_type.values().flat_map(|entries| {
+        Self::from_known_entries(recipes.by_type.values().flat_map(|entries| {
             entries
                 .iter()
-                .filter(|entry| entry.has_placement_candidates())
-                .map(|entry| (entry.id.clone(), &*entry.json))
+                .filter_map(|entry| Some((entry.id.clone(), entry.book.clone()?)))
         }))
     }
 
-    pub(crate) fn from_serialized(recipes: &std::collections::BTreeMap<String, Box<str>>) -> Self {
-        let values: Vec<_> = recipes
-            .iter()
-            .filter_map(|(id, text)| serde_json::from_str(text).ok().map(|value| (id, value)))
+    /// Build book displays directly from the already-decoded resolved cohort,
+    /// sharing the exact same placement decision and display counts as `from_recipes`.
+    pub(crate) fn from_resolved(sources: &crate::crafting::ResolvedSources) -> Self {
+        Self::from_known_entries(sources.recipes.iter().filter_map(|recipe| {
+            Some((
+                crate::crafting::qualified(&recipe.name),
+                recipe.book_known()?,
+            ))
+        }))
+    }
+
+    pub(crate) fn from_known_entries(
+        entries: impl IntoIterator<Item = (String, KnownEntry)>,
+    ) -> Self {
+        let mut recipes: std::collections::BTreeMap<String, Known> = entries
+            .into_iter()
+            .map(|(id, entry)| {
+                (
+                    id,
+                    Known {
+                        special: entry.special,
+                        displays: entry.displays,
+                        first_display: 0,
+                        station: entry.station,
+                        notify: entry.notify,
+                        result: entry.result,
+                    },
+                )
+            })
             .collect();
-        Self::from_source_refs(values.iter().map(|(id, value)| ((*id).clone(), value)))
+        // RecipeManager.unpackRecipeInfo numbers the displays in registration
+        // order (path, then namespace), not in the order of the ids' text.
+        let mut order: Vec<_> = recipes
+            .iter_mut()
+            .map(|(id, r)| (crate::crafting::registration_key(id), r))
+            .collect();
+        order.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let mut next = 0;
+        for (_, r) in order {
+            r.first_display = next;
+            next += r.displays as i32;
+        }
+        Self { recipes }
     }
 
     fn from_source_refs<'a>(
         sources: impl IntoIterator<Item = (String, &'a serde_json::Value)>,
     ) -> Self {
-        let mut recipes = std::collections::BTreeMap::new();
-        let mut insert = |id: String, v: &serde_json::Value| {
+        Self::from_known_entries(sources.into_iter().filter_map(|(id, v)| {
             if !Ingredient::validate_persistence(v, &id) {
-                return;
+                return None;
             }
             let kind = v["type"].as_str().unwrap_or_default();
-            let special = mod_api::__private::parts_installation::crafting_recipe(kind).is_some()
+            let special = mod_api::__private::parts_installation::recipe_serializer(kind)
+                .is_some_and(|(recipe_type, _)| recipe_type == "minecraft:crafting")
                 || kind.starts_with("minecraft:crafting_special_")
                 || kind == "minecraft:crafting_decorated_pot"
                 // A brewing recipe has no recipe book display of its own
@@ -1136,34 +1184,17 @@ impl RecipeIndex {
             } else {
                 1
             };
-            recipes.insert(
+            Some((
                 id,
-                Known {
+                KnownEntry {
                     special,
                     displays,
-                    first_display: 0,
                     station: crafting_station(kind),
                     notify: v["show_notification"].as_bool().unwrap_or(true),
                     result: sunrise_world::loot::recipe_result_id(&v["result"]).map(str::to_owned),
                 },
-            );
-        };
-        for (id, value) in sources {
-            insert(id, value);
-        }
-        // RecipeManager.unpackRecipeInfo numbers the displays in registration
-        // order (path, then namespace), not in the order of the ids' text.
-        let mut order: Vec<_> = recipes
-            .iter_mut()
-            .map(|(id, r)| (crate::crafting::registration_key(id), r))
-            .collect();
-        order.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        let mut next = 0;
-        for (_, r) in order {
-            r.first_display = next;
-            next += r.displays as i32;
-        }
-        Self { recipes }
+            ))
+        }))
     }
     pub fn contains(&self, id: &str) -> bool {
         self.recipes.contains_key(id)

@@ -37,6 +37,7 @@ impl PartRegistrar {
 mod tests {
     use super::*;
     use crate::*;
+    use mod_vocab::__private::game::RegistrationContextNew;
 
     fn with_porter(f: impl FnOnce()) {
         crate::load_state::with_test_package_inventory(
@@ -264,11 +265,62 @@ mod tests {
         crate::testing::with_mods(vec![ModEntry::new("late", Box::new(Late))].into(), || {
             let mut blocks = Vec::new();
             // Call the engine dispatcher out of phase; a mod cannot retain the event.
-            crate::dispatch_blocks(&RegistrationContext::new(), &mut |block| {
-                blocks.push(block);
-                Ok(())
+            crate::dispatch_blocks(&RegistrationContext::new(), &mut |listen| {
+                assert!(listen(&mut |block| {
+                    blocks.push(block);
+                    Ok(())
+                }));
             });
             assert!(blocks.is_empty());
+        });
+    }
+
+    #[test]
+    fn panicking_block_declaration_drops_its_batch_and_is_skipped_next_time() {
+        struct Declares(bool);
+        #[crate::__subscriptions]
+        impl Hooks for Declares {
+            fn blocks(&self, _: &RegistrationContext, event: &mut BlocksEvent<'_>) {
+                event
+                    .register(Block::new("stone_variant", "minecraft:stone"))
+                    .unwrap();
+                if self.0 {
+                    panic!("declare then panic");
+                }
+            }
+        }
+        let mods = vec![
+            ModEntry::new("broken", Box::new(Declares(true))),
+            ModEntry::new("later", Box::new(Declares(false))),
+        ]
+        .into();
+        crate::testing::with_mods(mods, || {
+            let _registration = crate::__private::RegistrationGuard::open();
+            let context = RegistrationContext::new();
+            for expected in [[false, true].as_slice(), [true].as_slice()] {
+                let mut outcomes = Vec::new();
+                let mut published = Vec::new();
+                crate::dispatch_blocks(&context, &mut |listen| {
+                    let mut pending = Vec::new();
+                    let completed = listen(&mut |declaration| {
+                        pending.push(declaration.answer.id);
+                        Ok(())
+                    });
+                    outcomes.push(completed);
+                    if completed {
+                        published.extend(pending);
+                    }
+                });
+                assert_eq!(outcomes, expected);
+                assert_eq!(published, ["later:stone_variant"]);
+            }
+            assert_eq!(
+                mod_vocab::__private::take_hook_panics(),
+                [mod_vocab::__private::HookPanicReport {
+                    mod_id: "broken",
+                    hook: "blocks",
+                }]
+            );
         });
     }
 
@@ -308,18 +360,21 @@ mod tests {
         let mods: Mods = vec![ModEntry::new("porter", Box::new(Declares))].into();
         crate::testing::with_mods(mods, || {
             with_porter(|| {
-                let _registration =
-                    crate::__private::PhaseOwner::scope(crate::__private::ModPhase::Registration);
+                let _registration = crate::__private::RegistrationGuard::open();
                 let context = RegistrationContext::new();
                 let mut blocks = Vec::new();
                 let mut items = Vec::new();
-                crate::dispatch_blocks(&context, &mut |block| {
-                    blocks.push(block);
-                    Ok(())
+                crate::dispatch_blocks(&context, &mut |listen| {
+                    assert!(listen(&mut |block| {
+                        blocks.push(block);
+                        Ok(())
+                    }));
                 });
-                crate::dispatch_items(&context, &mut |item| {
-                    items.push(item);
-                    Ok(())
+                crate::dispatch_items(&context, &mut |listen| {
+                    assert!(listen(&mut |item| {
+                        items.push(item);
+                        Ok(())
+                    }));
                 });
                 assert_eq!(blocks.len(), 1);
                 assert_eq!(blocks[0].mod_id, "porter");
@@ -467,19 +522,6 @@ mod tests {
                 "runes_extra:infusing",
             );
             let book = host.recipe_book_type("runes:book").unwrap();
-            let screen = crate::Screen {
-                width: 176.0,
-                height: 166.0,
-                slots: vec![
-                    Some(crate::ScreenSlot {
-                        position: [8.0, 8.0],
-                        ..Default::default()
-                    });
-                    3
-                ],
-                recipe_book: Some(book.clone()),
-                ..Default::default()
-            };
             host.menu_recipe_book(
                 "runes:altar",
                 &book,
@@ -489,7 +531,6 @@ mod tests {
                     fuel: 1,
                     result: 2,
                 },
-                screen,
             )
             .unwrap();
             assert!(host.refused.is_empty(), "{:?}", host.refused);
@@ -509,18 +550,21 @@ mod tests {
             ]
             .into();
             crate::testing::with_mods(mods, || {
-                let _registration =
-                    crate::__private::PhaseOwner::scope(crate::__private::ModPhase::Registration);
+                let _registration = crate::__private::RegistrationGuard::open();
                 let context = RegistrationContext::new();
                 let mut blocks = Vec::new();
                 let mut items = Vec::new();
-                crate::dispatch_blocks(&context, &mut |block| {
-                    blocks.push(block);
-                    Ok(())
+                crate::dispatch_blocks(&context, &mut |listen| {
+                    assert!(listen(&mut |block| {
+                        blocks.push(block);
+                        Ok(())
+                    }));
                 });
-                crate::dispatch_items(&context, &mut |item| {
-                    items.push(item);
-                    Ok(())
+                crate::dispatch_items(&context, &mut |listen| {
+                    assert!(listen(&mut |item| {
+                        items.push(item);
+                        Ok(())
+                    }));
                 });
                 assert_eq!(
                     blocks

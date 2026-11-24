@@ -76,7 +76,7 @@ impl Game<'_> {
             // BLOCK_INTERACT: no THIS_ENTITY, ORIGIN = Vec3.atCenterOf(pos).
             without_this: Some(pos.map(|c| f64::from(c) + 0.5)),
         };
-        self.provider_int(provider, &context, 0).unwrap_or(0)
+        self.provider_int(provider, &context).unwrap_or(0)
     }
 
     /// ComposterWrapper's private transactional random, using the unchanged vanilla layers

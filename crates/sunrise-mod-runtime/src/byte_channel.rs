@@ -64,8 +64,35 @@ pub struct ReceiveLease<T> {
     shared: Arc<Shared<T>>,
     charge: usize,
 }
+impl<T> ReceiveLease<T> {
+    /// Reserve a replacement value without releasing and recharging buffers it inherits.
+    pub fn replace(mut self, owned_bytes: usize) -> Result<Permit<T>, ReserveError> {
+        let charge = owned_bytes
+            .checked_add(message_overhead::<T>())
+            .ok_or(ReserveError::Full)?;
+        let mut state = self.shared.lock();
+        if !state.receiver_alive || state.senders == 0 {
+            return Err(ReserveError::Disconnected);
+        }
+        let other = state.stats.reserved_bytes - self.charge;
+        if charge > self.shared.capacity - other {
+            return Err(ReserveError::Full);
+        }
+        state.held_bytes -= std::mem::take(&mut self.charge);
+        state.pending_bytes += charge;
+        state.stats.reserved_bytes = other + charge;
+        state.stats.peak_reserved_bytes = state.stats.peak_reserved_bytes.max(other + charge);
+        Ok(Permit {
+            shared: self.shared.clone(),
+            charge,
+        })
+    }
+}
 impl<T> Drop for ReceiveLease<T> {
     fn drop(&mut self) {
+        if self.charge == 0 {
+            return;
+        }
         let mut state = self.shared.lock();
         state.held_bytes -= self.charge;
         state.stats.reserved_bytes -= self.charge;
@@ -262,9 +289,40 @@ impl<T> Permit<T> {
         self.shared.ready.notify_one();
         Ok(())
     }
+
+    /// Publishes every item from the same channel atomically under one lock so a
+    /// consumer turn sees either the entire batch or none of it. On closure returns
+    /// ownership of all values outside the lock.
+    pub fn publish_batch(items: Vec<(Self, T)>) -> Result<(), Vec<T>> {
+        let Some(first) = items.first() else {
+            return Ok(());
+        };
+        let shared = Arc::clone(&first.0.shared);
+        assert!(
+            items.iter().all(|(p, _)| Arc::ptr_eq(&p.shared, &shared)),
+            "publish_batch items must belong to the same byte_channel"
+        );
+        let mut state = shared.lock();
+        if !state.receiver_alive || state.senders == 0 {
+            drop(state);
+            return Err(items.into_iter().map(|(_, value)| value).collect());
+        }
+        for (mut permit, value) in items {
+            state.queue.push_back((value, permit.charge));
+            state.pending_bytes -= permit.charge;
+            state.stats.queued_items += 1;
+            permit.charge = 0;
+        }
+        drop(state);
+        shared.ready.notify_one();
+        Ok(())
+    }
 }
 impl<T> Drop for Permit<T> {
     fn drop(&mut self) {
+        if self.charge == 0 {
+            return;
+        }
         let mut state = self.shared.lock();
         if state.receiver_alive && state.senders != 0 {
             state.pending_bytes -= self.charge;

@@ -174,7 +174,7 @@ fn a_player_riding_a_pig_is_told_its_own_tick_as_the_pig_is() {
             let mut pig = Mob::new(90, kind, Vec3::new(at[0] + 1.0, at[1], at[2]), 0.0);
             pig.no_ai = true;
             pig.no_gravity = true;
-            pig.on_ground = true;
+            pig.ground.on_ground = true;
             game.mobs.push(pig);
             game.lan
                 .as_mut()

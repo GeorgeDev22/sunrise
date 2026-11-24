@@ -64,7 +64,7 @@ fn plugin_player_stack_follows_network_moves_and_local_carriers() {
             "position {at:?}, expected [{x}, {y}, {z}]"
         );
     };
-    assert!(game.remote_ride(Keys::default(), 0).unwrap());
+    assert!(game.remote_ride(Keys::default()));
     close(game.player.as_ref().unwrap().position, 2.0, 65.7, 3.0);
     close(
         game.mobs.iter().find(|m| m.id == 41).unwrap().position,
@@ -82,7 +82,7 @@ fn plugin_player_stack_follows_network_moves_and_local_carriers() {
     .unwrap();
     for _ in 0..4 {
         game.tick_remote_entities(true);
-        game.remote_ride(Keys::default(), 0).unwrap();
+        game.remote_ride(Keys::default());
     }
     close(game.player.as_ref().unwrap().position, 12.0, 68.7, -4.0);
     close(
@@ -109,7 +109,7 @@ fn plugin_player_stack_follows_network_moves_and_local_carriers() {
     );
     // A direct stack has no intermediary's 0.5-height offset.
     set(&mut game, 40, vec![7, 41]);
-    game.remote_ride(Keys::default(), 0).unwrap();
+    game.remote_ride(Keys::default());
     close(game.player.as_ref().unwrap().position, 12.0, 68.2, -4.0);
     close(
         game.mobs.iter().find(|m| m.id == 41).unwrap().position,

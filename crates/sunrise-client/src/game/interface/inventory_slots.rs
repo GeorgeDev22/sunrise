@@ -2,6 +2,23 @@
 //! slot positions and hit tests, highlights, and the crafting result slot.
 use super::*;
 
+/// Disjoint internal slot base for mod menu backing slots (`ModMenuType`), well above
+/// vanilla container (`300..500`), armor/offhand (`500..=504`), station (`600..`), and
+/// mount (`700..`) slot ranges so large mod menus never alias unrelated inventory stores.
+pub(in crate::game) const MOD_MENU_SLOT_BASE: usize = 100_000;
+
+/// Decode a container backing index from either a vanilla container slot (`300..500`)
+/// or a mod menu backing slot (`MOD_MENU_SLOT_BASE..`).
+pub(in crate::game) fn container_slot_index(slot: usize) -> Option<usize> {
+    if slot >= MOD_MENU_SLOT_BASE {
+        Some(slot - MOD_MENU_SLOT_BASE)
+    } else if (300..500).contains(&slot) {
+        Some(slot - 300)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 thread_local! { pub(in crate::game) static SLOT_POSITIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
 
@@ -42,11 +59,11 @@ impl Game<'_> {
             self.draw_item_model(batch, stack, x, y);
             let text = capped.then(|| format!("\u{a7}e{}", stack.count));
             self.draw_item_decorations(batch, stack, x, y, text);
-        } else if let Some(icon) = slot
-            .checked_sub(300)
-            .and_then(|slot| self.native_screen_slot_icon(slot))
+        } else if let Some(icon) =
+            container_slot_index(slot).and_then(|slot| self.native_screen_slot_icon(slot))
+            && let Some(rect) = self.gui.atlas.gui_sprite_or_missing(icon)
         {
-            batch.sprite_scaled(&self.gui.atlas, icon, x, y, 16.0, 16.0, 0xFFFF_FFFF);
+            batch.rect_uv(x, y, 16.0, 16.0, rect, 0xFFFF_FFFF);
         }
     }
     /// `extractCarriedItem`: the carried stack at the cursor, showing what a
@@ -214,14 +231,18 @@ impl Game<'_> {
             500..504 => (8.0, 8.0 + (i - 500) as f32 * 18.0),
             // InventoryMenu: the shield slot.
             504 => (77.0, 62.0),
-            300..500 if let Some(p) = self.native_screen_slot(i - 300) => p,
-            300..500 => match self.container_kind() {
+            i if let Some(idx) = container_slot_index(i)
+                && let Some(p) = self.native_screen_slot(idx) =>
+            {
+                p
+            }
+            i if let Some(idx) = container_slot_index(i) => match self.container_kind() {
                 Some(BlockEntity::Furnace(_)) => {
-                    [(56.0, 17.0), (56.0, 53.0), (116.0, 35.0)][(i - 300).min(2)]
+                    [(56.0, 17.0), (56.0, 53.0), (116.0, 35.0)][idx.min(2)]
                 }
                 _ => (
-                    8.0 + ((i - 300) % 9) as f32 * 18.0,
-                    18.0 + ((i - 300) / 9) as f32 * 18.0,
+                    8.0 + (idx % 9) as f32 * 18.0,
+                    18.0 + (idx / 9) as f32 * 18.0,
                 ),
             },
             200 => {
@@ -299,10 +320,14 @@ impl Game<'_> {
         if !self.native_screen_shown() {
             return hits.next();
         }
-        hits.min_by_key(|&slot| match slot {
-            300.. => slot - 300,
-            9..36 => 1000 + slot,
-            _ => 2000 + slot,
+        hits.min_by_key(|&slot| {
+            if let Some(idx) = container_slot_index(slot) {
+                idx
+            } else if (9..36).contains(&slot) {
+                MOD_MENU_SLOT_BASE + slot
+            } else {
+                MOD_MENU_SLOT_BASE + 1000 + slot
+            }
         })
     }
     /// `AbstractContainerScreen.extractSlotHighlightBack` and
@@ -346,6 +371,9 @@ impl Game<'_> {
         self.draw_slot_highlight(batch, front, ox + sx, oy + sy);
     }
     pub(super) fn slot_mut(&mut self, i: usize) -> &mut Option<ItemStack> {
+        if i >= MOD_MENU_SLOT_BASE && !self.is_mount_chest_slot(i) {
+            return self.container_slot_mut(i - MOD_MENU_SLOT_BASE);
+        }
         if i >= mount_menu::SADDLE {
             return self.mount_slot_mut(i);
         }
@@ -373,6 +401,9 @@ impl Game<'_> {
             200 => self.craft_result(),
             309 if matches!(self.container_kind(), Some(BlockEntity::Crafter(_))) => {
                 self.crafter_result()
+            }
+            i if i >= MOD_MENU_SLOT_BASE && !self.is_mount_chest_slot(i) => {
+                self.container_slot(i - MOD_MENU_SLOT_BASE).clone()
             }
             i if i >= mount_menu::SADDLE => self.mount_slot(i).clone(),
             i if i >= stations::INPUT => self.station_slot(i).clone(),
@@ -434,10 +465,11 @@ impl Game<'_> {
             self.draw_slot_item(batch, drag.as_ref(), i, &stack, ox + sx, oy + sy);
         }
     }
-    pub(super) fn draw_inventory(&mut self, batch: &mut HudBatch) {
+    /// True when the inventory painter ran, not a station without its side regions.
+    pub(super) fn draw_inventory(&mut self, batch: &mut HudBatch) -> bool {
         screen_info::begin_container("container");
         if self.draw_station(batch) {
-            return;
+            return false;
         }
         let (ox, oy) = self.inventory_origin(batch);
         {
@@ -623,6 +655,7 @@ impl Game<'_> {
         if let Some(tooltip) = browser_tip {
             self.draw_mod_browser_tooltip(batch, tooltip);
         }
+        true
     }
 }
 

@@ -95,21 +95,21 @@ impl mod_api::ServerReloadListener for Guard {
     fn prepare(
         &self,
         _: &mod_api::ServerReloadContext,
-    ) -> std::result::Result<Box<dyn mod_api::ReloadApply>, mod_api::ReloadResourceError> {
+    ) -> std::result::Result<Box<dyn FnOnce() + Send + 'static>, mod_api::ReloadResourceError> {
         if self.0.load(Ordering::Relaxed) {
             return Err(mod_api::ReloadResourceError::new(
                 mod_api::Identifier::parse("reload_guard:guard").unwrap(),
                 std::io::Error::other("inventory fixture rejected the new generation"),
             ));
         }
-        Ok(<dyn mod_api::ReloadApply>::new(|| {}))
+        Ok(Box::new(|| {}))
     }
 }
 #[mod_api::__subscriptions]
 impl Hooks for Guard {
     fn add_server_reload_listeners(
         &self,
-        _: &dyn mod_api::Host,
+        _: &dyn mod_api::ReloadContext,
         event: &mut mod_api::AddServerReloadListenersEvent<'_>,
     ) {
         event
@@ -197,7 +197,10 @@ fn code_only_reload_publishes_one_new_inventory_after_prepare_and_preserves_old_
                     )
                     .unwrap();
                 }
-                game.ui.registries.sounds = game.audio.event_names();
+                // This fixture skips world open, which normally loads the built-in sound holders.
+                let registries = crate::game::chat::command_export(&original, false)
+                    .expect("prepared command registries");
+                game.ui.registries.fill_from_exported(&registries);
                 game.reload_datapacks(true, &[]).unwrap();
                 let loaded = |game: &Game<'_>, id: &str| {
                     let items = game.items();
@@ -224,6 +227,7 @@ fn code_only_reload_publishes_one_new_inventory_after_prepare_and_preserves_old_
                     crate::game::lan::sync::server_sources(
                         &game.options.resources,
                         &game.res.core.item_data,
+                        game.items(),
                         &game.pack_files(),
                     )
                     .unwrap()

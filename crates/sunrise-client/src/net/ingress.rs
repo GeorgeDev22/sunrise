@@ -27,6 +27,14 @@ pub enum Refusal {
     Pressure,
     Closed,
 }
+impl From<byte_channel::ReserveError> for Refusal {
+    fn from(error: byte_channel::ReserveError) -> Self {
+        match error {
+            byte_channel::ReserveError::Full => Self::Pressure,
+            byte_channel::ReserveError::Disconnected => Self::Closed,
+        }
+    }
+}
 pub struct Refused<T> {
     pub reason: Refusal,
     pub value: T,
@@ -50,12 +58,41 @@ pub struct Prepared<T> {
     permit: byte_channel::Permit<T>,
 }
 impl<T> Prepared<T> {
+    /// Inspect the prepared value before publishing.
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+    /// Consume the value inline, keeping its reservation until dispatch completes.
+    pub fn consume<R>(self, run: impl FnOnce(T) -> R) -> R {
+        let Self { value, permit } = self;
+        let result = run(value);
+        drop(permit);
+        result
+    }
     /// Failure returns the owned value, so its resources can be dropped after
     /// releasing any publication gate held by the caller.
     pub fn publish(self) -> Result<(), Refused<T>> {
         self.permit.publish(self.value).map_err(|value| Refused {
             reason: Refusal::Closed,
             value,
+        })
+    }
+    /// Publish every prepared item from the same channel atomically under one lock.
+    /// On closure, returns all owned values so they can be dropped outside any lock
+    /// or publication gate.
+    pub fn publish_batch(items: Vec<Self>) -> Result<(), Vec<Refused<T>>> {
+        let pairs = items
+            .into_iter()
+            .map(|prepared| (prepared.permit, prepared.value))
+            .collect();
+        byte_channel::Permit::publish_batch(pairs).map_err(|values| {
+            values
+                .into_iter()
+                .map(|value| Refused {
+                    reason: Refusal::Closed,
+                    value,
+                })
+                .collect()
         })
     }
 }
@@ -89,10 +126,21 @@ impl<T> Producer<T> {
         match reserve(&self.sender, (self.charge)(&value)) {
             Ok(permit) => Ok(Prepared { value, permit }),
             Err(error) => Err(Refused {
-                reason: match error {
-                    byte_channel::ReserveError::Full => Refusal::Pressure,
-                    byte_channel::ReserveError::Disconnected => Refusal::Closed,
-                },
+                reason: error.into(),
+                value,
+            }),
+        }
+    }
+    /// Prepare an inline delivery from a dequeued value's credit on this channel.
+    pub(crate) fn prepare_replacing(
+        &self,
+        value: T,
+        credit: ReceiveLease<T>,
+    ) -> Result<Prepared<T>, Refused<T>> {
+        match credit.replace((self.charge)(&value)) {
+            Ok(permit) => Ok(Prepared { value, permit }),
+            Err(error) => Err(Refused {
+                reason: error.into(),
                 value,
             }),
         }

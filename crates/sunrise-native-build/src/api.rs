@@ -191,14 +191,6 @@ impl<'a> Project<'a> {
 
     /// Parses the staged Cargo manifest, or one read by a caller with its own input bounds.
     pub fn parse(bundle: &'a Bundle, text: &str) -> Result<Self, ProjectError> {
-        Self::parse_with(bundle, text, |file| bundle.dir.join(file).exists())
-    }
-
-    pub(crate) fn parse_with(
-        bundle: &'a Bundle,
-        text: &str,
-        exists: impl Fn(&str) -> bool,
-    ) -> Result<Self, ProjectError> {
         let mod_id = || bundle.manifest.id.clone();
         let cargo: toml::Table = text.parse().map_err(|e| ProjectError::Cargo {
             mod_id: mod_id(),
@@ -209,16 +201,6 @@ impl<'a> Project<'a> {
                 return Err(ProjectError::Cargo {
                     mod_id: mod_id(),
                     reason: format!("[{section}] is not allowed in a native mod"),
-                });
-            }
-        }
-        for config in [".cargo/config", ".cargo/config.toml"] {
-            if exists(config) {
-                return Err(ProjectError::Cargo {
-                    mod_id: mod_id(),
-                    reason: format!(
-                        "{config} is not allowed in a native mod; source replacement is refused"
-                    ),
                 });
             }
         }
@@ -725,6 +707,31 @@ mod tests {
                 .is_file()
         );
         assert!(!stage_dir.join("crates/native-game").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Project-local Cargo and toolchain files are left out of the staged copy, not refused.
+    #[test]
+    fn local_cargo_and_toolchain_files_stay_out_of_the_staged_mod() {
+        let dir = fixture();
+        fs::create_dir_all(dir.join(".cargo")).unwrap();
+        fs::write(
+            dir.join(".cargo/config.toml"),
+            "[source.crates-io]\nreplace-with='local'\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel='nightly'\n",
+        )
+        .unwrap();
+        let bundle = super::super::bundle_in(&dir).unwrap().unwrap();
+        Project::read(&bundle).unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        super::super::copy_bundle(&bundle, staged.path()).unwrap();
+        assert!(staged.path().join("src/lib.rs").is_file());
+        assert!(!staged.path().join(".cargo").exists());
+        assert!(!staged.path().join("rust-toolchain.toml").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 

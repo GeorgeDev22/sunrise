@@ -7,8 +7,8 @@
 //! the tests take turns.
 extern crate sunrise_client_lib as sunrise_client;
 use mod_api::{
-    DatapackCandidate, DatapackField, DatapackFieldKind, DatapackReadError,
-    DatapackRegistryDeclaration, DatapackRegistrySet, DatapackRegistrySync, DatapackValue,
+    DatapackCandidate, DatapackField, DatapackFieldKind, DatapackRegistryDeclaration,
+    DatapackRegistrySet, DatapackRegistrySync, DatapackValue,
 };
 use std::{
     collections::BTreeMap,
@@ -80,15 +80,14 @@ fn candidate(power: i64) -> DatapackCandidate {
 }
 
 fn first_set(power: i64) -> Arc<DatapackRegistrySet> {
-    Arc::new(DatapackRegistrySet::first(
-        candidate(power),
-        datapack_net::next_session(),
-    ))
+    Arc::new(DatapackRegistrySet::from_candidate(candidate(power)))
 }
 
 fn power(set: &DatapackRegistrySet) -> Option<DatapackValue> {
-    let handle = set.handle("example:spell", "addon:fire").ok()?;
-    set.get(&handle).ok()?.get("power").cloned()
+    set.get("example:spell", "addon:fire")
+        .ok()?
+        .get("power")
+        .cloned()
 }
 
 fn start_lan() -> Lan {
@@ -173,7 +172,7 @@ impl Host {
             streaming: None,
         };
         for event in self.hub.tick(&mut ctx) {
-            if let HostEvent::Joined(conn) = event {
+            if let HostEvent::Joined(conn, _) = event {
                 self.joined.push(conn);
             }
         }
@@ -218,6 +217,7 @@ fn connect(port: u16, name: &str, data: &Arc<ItemData>) -> Session {
         ClientInformation::new(8),
         Arc::new(Default::default()),
         Arc::clone(data),
+        Arc::default(),
     )
 }
 
@@ -276,7 +276,6 @@ fn a_client_that_offers_the_registry_joins_and_reads_the_entry() {
     let session = connect(host.port(), "Mage", &data);
     join(&mut host, &session);
     let received = datapack_net::received().expect("the snapshot arrived before the join ended");
-    assert_eq!(received.generation(), 1);
     assert_eq!(power(&received), Some(DatapackValue::Int(7)));
 }
 
@@ -320,7 +319,7 @@ fn refused_client(brand: &str) -> (String, bool) {
     }
     c.send(&cfg::Serverbound::ClientInformation(ClientInformation::new(4)).encode())
         .unwrap();
-    let mut name = sunrise_protocol::buf::Writer::new();
+    let mut name = ::sunrise_core::vanilla_bytes::Writer::new();
     name.string(brand);
     c.send(
         &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
@@ -390,19 +389,13 @@ fn a_required_registry_refuses_a_client_without_the_mod_before_any_registry_data
 #[ignore = "daily"]
 fn a_reload_snapshot_gives_the_client_generation_two_and_stales_old_handles() {
     let _turn = begin();
-    let first = first_set(7);
-    datapack_net::serve(Some(first.clone()));
+    datapack_net::serve(Some(first_set(7)));
     let (_resources, data) = Resources::new("reload");
     let mut host = Host::start();
     let session = connect(host.port(), "Mage", &data);
     join(&mut host, &session);
     let joined = datapack_net::received().unwrap();
-    assert_eq!(joined.generation(), 1);
-    let held = joined.handle("example:spell", "addon:fire").unwrap();
-    assert_eq!(
-        joined.get(&held).unwrap().get("power"),
-        Some(&DatapackValue::Int(7))
-    );
+    assert_eq!(power(&joined), Some(DatapackValue::Int(7)));
     // The host registers the guest on a tick after the client joined.
     let deadline = Instant::now() + Duration::from_secs(30);
     while host.joined.is_empty() {
@@ -414,8 +407,8 @@ fn a_reload_snapshot_gives_the_client_generation_two_and_stales_old_handles() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    // What `/reload` does: publish the next generation, then send each joined client its snapshot.
-    datapack_net::serve(Some(Arc::new(first.reload(candidate(9)).unwrap())));
+    // What `/reload` does: publish the new set, then send each joined client its snapshot.
+    datapack_net::serve(Some(first_set(9)));
     let datapack_net::Step::Send(data) = datapack_net::reload_payload(
         host.hub
             .guests
@@ -450,17 +443,15 @@ fn a_reload_snapshot_gives_the_client_generation_two_and_stales_old_handles() {
         _ => None,
     });
     let next = datapack_net::received().unwrap();
-    assert_eq!(next.generation(), 2);
     assert_eq!(power(&next), Some(DatapackValue::Int(9)));
-    assert_eq!(next.get(&held), Err(DatapackReadError::StaleGeneration));
+    assert_eq!(power(&joined), Some(DatapackValue::Int(7)));
 }
 
 #[test]
 #[ignore = "daily"]
 fn a_refused_reload_disconnects_instead_of_retaining_the_old_generation() {
     let _turn = begin();
-    let first = first_set(7);
-    datapack_net::serve(Some(first.clone()));
+    datapack_net::serve(Some(first_set(7)));
     let (_resources, data) = Resources::new("refused_reload");
     let mut host = Host::start();
     let session = connect(host.port(), "Mage", &data);
@@ -483,7 +474,7 @@ fn a_refused_reload_disconnects_instead_of_retaining_the_old_generation() {
         .sender
         .clone();
     sender.datapack_offer = Some(Arc::from([255_u8]));
-    datapack_net::serve(Some(Arc::new(first.reload(candidate(9)).unwrap())));
+    datapack_net::serve(Some(first_set(9)));
     datapack_net::reload_connection(&sender);
     drive(&mut host, &session, |_, event| match event {
         Event::Disconnected { reason, .. } => {
@@ -510,6 +501,7 @@ fn an_incomplete_configuration_snapshot_refuses_finish_after_earlier_replies() {
         ClientInformation::new(8),
         Arc::new(sunrise_protocol::text::Language::new()),
         data,
+        Arc::default(),
     );
     let mut server = Connection::local(server);
     server

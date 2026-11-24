@@ -17,26 +17,23 @@ impl Game<'_> {
         seq: i32,
     ) -> bool {
         let is_fire_charge = &*stack.item == "minecraft:fire_charge";
-        let clicked = self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]);
         let name = self.block_name(hit.pos);
         // TntBlock.useItemOn primes TNT unless sneaking with hands full.
         // Server priming sends TNT_PRIMED and can refuse priming; leave ignition
         // effects and item consumption to the server.
         let sneaking = self.remote_shift_down();
         let hands_full = self.stack_in(self.selected).is_some() || self.offhand.is_some();
-        if !(sneaking && hands_full) && &*name == "minecraft:tnt" {
+        let starter = super::super::item_abilities::ability::FIRESTARTER_LIGHT;
+        if !(sneaking && hands_full)
+            && &*name == "minecraft:tnt"
+            && self.stack_can_perform(stack, starter, true)
+        {
             return true;
         }
-        if self.can_light(clicked, &name) {
-            let registry = self.pack.assets.registry;
-            if let Some(mut state) = registry.state(clicked).cloned() {
-                state.properties.insert("lit".into(), "true".into());
-                if let Ok(lit_state) = registry.resolve(&state) {
-                    let pos =
-                        sunrise_core::position::BlockPos::new(hit.pos[0], hit.pos[1], hit.pos[2]);
-                    self.predict_blocks(&[(pos, lit_state)], seq);
-                }
-            }
+        if let Ok(Some(lit_state)) = self.with_hand(hand, |g| g.fire_starter_lit(hit, stack, true))
+        {
+            let pos = sunrise_core::position::BlockPos::new(hit.pos[0], hit.pos[1], hit.pos[2]);
+            self.predict_blocks(&[(pos, lit_state)], seq);
             let at = [
                 f64::from(hit.pos[0]) + 0.5,
                 f64::from(hit.pos[1]) + 0.5,

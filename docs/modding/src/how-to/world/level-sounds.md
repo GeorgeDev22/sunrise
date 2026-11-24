@@ -6,6 +6,9 @@ Match the hook's `HostSide` to distinguish the requests; the event's sound,
 source, volume and pitch describe that side's request, and original volume and
 pitch remain available after edits. Returning `Flow::Cancel` suppresses that
 request. A server cancellation sends no packet, so there is no client request.
+Sounds played from inside a `play_level_sound_at_position` or
+`play_level_sound_at_entity` listener are not re-dispatched to level-sound
+listeners; they are validated and delivered or journaled normally in call order.
 
 Incoming sound packets, including `/playsound`, ask the client level hooks.
 An entity-sound packet stays bound to its emitter. UI clicks, engine-local
@@ -29,12 +32,48 @@ plays at the requested position; only a genuinely entity-bound sound
 | Block-breaking/level-event effects, explosions, pickup packets | None | Client-level `playLocalSound` or direct sound manager playback |
 | Dragon/fang/sniffer local effects, ticking ambience, UI | None | Entity-local effects, sound instances or widgets, not `playSeededSound` |
 
+## Block hit sounds
+
+Use a block part's `play_hit_sound` for client mining sounds. The event supplies the
+block state, position and face. Play your sound through the supplied `ClientHost` and
+return `Flow::Cancel` to suppress the vanilla sound for that hit.
+
+The default plays the state's hit sound at volume `(volume + 1) / 8` and pitch
+`pitch * 0.5`. Sculk growth sounds do not use this hook.
+
 ## Playing a level sound from a server mod
 
 `LevelRef::play_sound(host, sound, at, source, volume, pitch, except)` is `ServerLevel.playSound(except, ...)`:
 every player in range hears it, except the player in `except`. Pass the player whose own client already played the
 sound for its action; pass `None` to play it to everyone. The game finds that player's connection itself. A fake
 player has no client, so it leaves no one out; a stale player handle queues nothing and the call returns `false`.
+
+Inside an open transaction, `LevelRef::play_sound`, `EntityRef::play_sound`, `EntityRef::play_bound_sound`,
+`PlayerRef::play_sound`, and `PlayerRef::stop_sound` validate arguments at the call and defer delivery according to
+[the owning level's transaction](../../concepts/transactions.md#deferred-level-entity-and-player-effects).
+For transactional server requests, `play_level_sound_at_position` and `play_level_sound_at_entity` run
+synchronously at the call; only the resolved sound is deferred. Commit replays no mod callbacks and delivers
+packets in journal order. For directed sounds, `true` means accepted, not that a client received or played it.
+A deferred directed request is discarded on abort or if the player no longer resolves at commit.
+
+Outside a transaction, a queued level sound draws its seed at the call even if a later hook cancels it. Inside
+one, it draws a seed only when the resolved sound is published. A directed play request draws from the request
+level's random when published. The `HitHost::play_sound_at` and `play_sound_from` calls below always queue at the call.
+
+### Sound seeds
+
+A level sound's seed picks which of its variants the clients play. Vanilla's `Level.playSound` draws it from the
+level's `soundSeedGenerator` and then calls `playSeededSound` with it; a mod can take those two steps apart:
+
+- `LevelRef::next_sound_seed(host)` draws the next seed of the stream `play_sound` takes its seeds from, without
+  playing anything.
+- `LevelRef::play_seeded_sound(host, sound, at, source, volume, pitch, except, seed)` is
+  `ServerLevel.playSeededSound(except, x, y, z, ...)`, and `EntityRef::play_seeded_bound_sound(host, sound, source,
+  volume, pitch, except, seed)` its entity-bound overload. They send `seed` as given and draw nothing.
+
+Draw first and play second to model a `playSound` call whose sound may still be refused after the draw: the stream
+moves as vanilla's does whether the sound plays or not. Inside a transaction the draw happens at the call and stays
+drawn if the transaction aborts, while a held `play_sound` draws only when it is published at commit.
 
 ## Engine playback and live parameters
 
@@ -93,6 +132,6 @@ fn living_incoming_damage(&self, hit: &mut dyn HitHost, e: &mut LivingIncomingDa
 `Level.playSound(null, entity, ...)`: every player in range hears it, the entity's own player included
 (unlike `EntityRef::play_sound`). The sounds queue at the call, with their seeds drawn then from the level's
 sound-seed stream, so a hit a listener cancels still plays them. The entity draws (`next_float`, `next_double`,
-`next_bool`, `next_int(host, bound)`) advance the entity's actual stream. A hit lends its attacker where the game applies a melee hit (the attacking player or mob, for player → mob, mob → mob and mob → player) and no entity at any other damage site (environment, projectiles, explosions, potions and the like); the attacking mob's own random is the one its AI draws from, and a hit built inside a mob's own tick lends none. Any other entity, a stale handle, a client and an out-of-range `bound` answer `None` (`false` for a sound). Where a hit lends no sound queue (a client's prediction, piston restitution) `play_sound_at` and `play_sound_from` return false.
+`next_bool`, `next_int(host, bound)`) advance the entity's actual stream. A hit lends the entity the hit's source names as its causing entity, where the game has it at hand: the attacking player or mob of a melee hit (player → mob, mob → mob and mob → player) or of Thorns, the shooter or owner of a projectile, a firework rocket, evoker fangs, a wither skull, a thrown trident or a wind charge, the igniter or owner of an explosion, and a pufferfish stinging a mob inside its own tick. A guest that is not in place is lent from its hub record, for its reads only (it lends no random and plays no sound); the integrated owner displaced by another player's turn is not lent. Other damage lends none: damage with no causing entity (environment, fall, fire, drowning) and the sites that do not lend theirs (a thrown potion's or an effect cloud's owner, among others). When the victim caused its own hit (a player's own TNT hurting that player), the source names the victim and `causing()` answers `None`: the listener reads it through `victim()`. The attacking mob's own random is the one its AI draws from. Any other entity, a stale handle, a client and an out-of-range `bound` answer `None` (`false` for a sound). Where a hit lends no sound queue (a client's prediction, piston restitution) `play_sound_at` and `play_sound_from` return false.
 Hooks: `living_incoming_damage`, `living_damage_pre`, `living_damage_post`, `living_shield_block` and
 `living_use_totem`.

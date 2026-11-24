@@ -75,7 +75,7 @@ impl Game<'_> {
         self.open_container_slots = Some((key, self.open_container_size()));
         self.set_screen(super::Screen::Inventory);
         self.capture(false);
-        self.right = false;
+        self.set_mapping_held("key.use", false);
     }
     /// The custom name of the open container, or its default title
     /// (a double chest is named by whichever half has a name).

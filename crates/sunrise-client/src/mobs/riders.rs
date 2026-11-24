@@ -424,10 +424,7 @@ fn controller<'a>(m: &Mob, w: &'a MobWorld) -> Option<&'a Seen> {
         .and_then(|id| w.passenger_object(id))
         .filter(|r| {
             r.alive
-                && !w.data.entity_has(
-                    "minecraft:non_controlling_rider",
-                    &format!("minecraft:{}", super::species::def(r.species).name),
-                )
+                && !w.entity_tag_bit(&r.kind, crate::items::EntityTypeTags::NON_CONTROLLING_RIDER)
         })
 }
 /// Vehicle goal flags are independent of whether the rider has a combat target.
@@ -602,10 +599,10 @@ pub fn tick_until_consumption(
     w: &MobWorld,
     level: &mut super::DamageLevel<'_>,
     events: &mut Vec<super::MobEvent>,
-    trample: &mut Option<super::ai::MobTrample>,
+    movement: &mut Option<super::ai::MobMovement>,
 ) -> super::ai::TickProgress {
     tick_with(mobs, index, w, level, events, |m, w, level, events| {
-        m.tick_until_consumption(w, level, events, trample)
+        m.tick_until_consumption(w, level, events, movement)
     })
 }
 
@@ -617,11 +614,11 @@ pub fn resume_after_consumption(
     level: &mut super::DamageLevel<'_>,
     was_on_fire: bool,
     events: &mut Vec<super::MobEvent>,
-    trample: &mut Option<super::ai::MobTrample>,
+    movement: &mut Option<super::ai::MobMovement>,
 ) -> super::ai::TickProgress {
     tick_with(mobs, index, w, level, events, |m, w, level, events| {
         let progress =
-            super::ai::resume_after_consumption(m, w, level, was_on_fire, events, Some(trample));
+            super::ai::resume_after_consumption(m, w, level, was_on_fire, events, Some(movement));
         if matches!(progress, super::ai::TickProgress::Complete(_)) {
             super::neutral_anger::after_tick(m, w.game_time);
         }
@@ -639,7 +636,7 @@ pub fn resume_after_breathing(
     known_speed: sunrise_core::geometry::Vec3,
     breath: Option<crate::breathing::Breath>,
     events: &mut Vec<super::MobEvent>,
-    trample: &mut Option<super::ai::MobTrample>,
+    movement: &mut Option<super::ai::MobMovement>,
 ) -> super::ai::TickProgress {
     tick_with(mobs, index, w, level, events, |m, w, level, events| {
         let progress = super::ai::resume_after_breathing(
@@ -650,7 +647,7 @@ pub fn resume_after_breathing(
             air,
             known_speed,
             breath,
-            Some(trample),
+            Some(movement),
         );
         if matches!(progress, super::ai::TickProgress::Complete(_)) {
             super::neutral_anger::after_tick(m, w.game_time);
@@ -659,17 +656,36 @@ pub fn resume_after_breathing(
     })
 }
 
-/// Resume after the level applied (or refused) the paused landing.
-pub fn resume_after_trample(
+/// Resume the tick with its current navigation owner after settling a hit.
+pub fn resume_after_damage(
     mobs: &mut JoinList<Mob>,
     index: usize,
     w: &MobWorld,
     level: &mut super::DamageLevel<'_>,
-    trample: &mut Option<super::ai::MobTrample>,
+    resume: super::ai::DamageResume,
+    events: &mut Vec<super::MobEvent>,
+    movement: &mut Option<super::ai::MobMovement>,
+) -> super::ai::TickProgress {
+    tick_with(mobs, index, w, level, events, |m, w, level, events| {
+        let progress = super::ai::resume_after_damage(m, w, level, events, resume, Some(movement));
+        if matches!(progress, super::ai::TickProgress::Complete(_)) {
+            super::neutral_anger::after_tick(m, w.game_time);
+        }
+        progress
+    })
+}
+
+/// Resume after the level applied (or refused) the paused landing.
+pub fn resume_movement(
+    mobs: &mut JoinList<Mob>,
+    index: usize,
+    w: &MobWorld,
+    level: &mut super::DamageLevel<'_>,
+    movement: &mut Option<super::ai::MobMovement>,
     events: &mut Vec<super::MobEvent>,
 ) -> super::ai::TickProgress {
     tick_with(mobs, index, w, level, events, |m, w, level, events| {
-        let progress = super::ai::resume_after_trample(m, w, level, trample, events);
+        let progress = super::ai::resume_movement(m, w, level, movement, events);
         if matches!(progress, super::ai::TickProgress::Complete(_)) {
             super::neutral_anger::after_tick(m, w.game_time);
         }
@@ -703,7 +719,10 @@ fn tick_with<R>(
             owner = vehicle;
         }
     }
-    if !mod_api::__private::listened(mod_api::HookId::LivingChangeTarget) {
+    // The fast path has no live mob list, so resumed Creaking cramming would drop every pinned peer.
+    if mobs[index].species() != Species::Creaking
+        && !mod_api::__private::listened(mod_api::HookId::LivingChangeTarget)
+    {
         if owner == index {
             return step(&mut mobs[index], w, level, events);
         }
@@ -822,7 +841,7 @@ mod tests {
         kind.id = "minecraft:zombie".into();
         let mut rider = Mob::new(72, Arc::new(kind), Vec3::new(2.0, 80.0, 0.5), 0.0);
         rider.extra.mount = Some(71);
-        rider.on_ground = true;
+        rider.ground.on_ground = true;
         rider.ai.nav.speed_modifier = 3.75;
         rider.ai.nav.target_pos = Some([1, 2, 3]);
         rider.ai.goals.clear();
@@ -883,6 +902,11 @@ mod tests {
         let mut rider = of(72, Species::Skeleton);
         rider.extra.mount = Some(vehicle.id);
         vehicle.extra.rider = Some(rider.id);
+        let custom = std::sync::Arc::make_mut(&mut rider.kind);
+        custom.id = "test:custom_rider".into();
+        // Its place in the one-type registry the tags below bind, as a content type's is set
+        // at load; in the resource world's registry that slot is a type outside the tag.
+        custom.flags.entity_tag_slot = Some(0);
         let retained = [rider.seen(None, &crate::items::Items::empty())];
         let root = std::env::var_os("SUNRISE_TEST_RESOURCES").expect("prepared resources required");
         assert!(crate::mobs::world::with_resource_test_world(
@@ -902,6 +926,25 @@ mod tests {
                 assert!(w.seen(rider.id).is_none());
                 assert!(w.target_info(super::super::Who::Mob(rider.id)).is_none());
                 assert_eq!(w.others_near(vehicle.bounds()).count(), 0);
+
+                let mut items = crate::items::Items::empty();
+                items.set_entity_type_tags(crate::items::EntityTypeTags::from_ordered(
+                    [(
+                        "minecraft:non_controlling_rider".into(),
+                        vec![rider.kind.id.clone()],
+                    )]
+                    .into(),
+                    vec![rider.kind.id.clone()].into(),
+                ));
+                drive(
+                    &mut vehicle,
+                    &MobWorld {
+                        items: Some(&items),
+                        ..w.clone()
+                    },
+                );
+                assert_eq!(vehicle.ai.goals.disabled & CONTROLLED, 0);
+
                 vehicle.extra.rider = None;
                 drive(&mut vehicle, &w);
                 assert_eq!(vehicle.ai.goals.disabled & CONTROLLED, 0);

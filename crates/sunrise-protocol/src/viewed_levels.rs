@@ -62,10 +62,11 @@
 //! wrapped, and a run never mixes levels. A serverbound play payload on the channel is a protocol
 //! error (`custom_payload`'s codec refuses it).
 use crate::{
-    buf::{Codec, Ident, Reader, Writer},
+    buf::{Codec, Ident, Reader},
     ids::play::clientbound as id,
     packets::play::{Clientbound, SpawnInfo},
 };
+use sunrise_core::vanilla_bytes::Writer;
 
 /// The reserved engine channel (`custom_payload::is_reserved_channel`).
 pub const CHANNEL: &str = "sunrise:levels";

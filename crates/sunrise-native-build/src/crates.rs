@@ -339,16 +339,31 @@ pub fn local_path(root: &Path, relative: &Path, path: &str) -> Result<PathBuf, S
     if path.contains('\\') {
         return Err("dependency path must use portable separators".into());
     }
-    let mut inside = relative.to_path_buf();
-    for component in Path::new(path).components() {
+    let mut inside = PathBuf::new();
+    for component in relative.components().chain(Path::new(path).components()) {
         match component {
-            Component::Normal(part) => inside.push(part),
+            Component::Normal(part) => {
+                // A Windows drive prefix can parse as Normal in the middle of a path,
+                // then replace the path so far when pushed on its own. Reject it on every host.
+                if matches!(part.as_encoded_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic())
+                    || matches!(
+                        Path::new(part).components().next(),
+                        Some(Component::Prefix(_) | Component::RootDir)
+                    )
+                {
+                    return Err("path outside the mod is refused".into());
+                }
+                inside.push(part);
+            }
             Component::CurDir => {}
             Component::ParentDir if inside.pop() => {}
             _ => return Err("path outside the mod is refused".into()),
         }
     }
-    let mut checked = root.to_path_buf();
+    let mut checked = fs::canonicalize(root).map_err(|e| e.to_string())?;
+    if !checked.join(&inside).starts_with(&checked) {
+        return Err("path outside the mod is refused".into());
+    }
     for part in inside.components() {
         checked.push(part);
         let meta = fs::symlink_metadata(&checked).map_err(|e| e.to_string())?;

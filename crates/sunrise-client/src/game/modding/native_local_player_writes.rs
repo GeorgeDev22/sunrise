@@ -19,6 +19,18 @@ impl Game<'_> {
         }
     }
 
+    /// Sets the local player's fall-flying flag, so the next tick's glide detection sends
+    /// `START_FALL_FLYING` as a jump-started glide does. `false` with no player of its own.
+    pub(super) fn start_local_player_gliding(&mut self) -> bool {
+        match self.player.as_mut() {
+            Some(body) => {
+                body.fall_flying = true;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The local player's on-ground flag, which this tick's jump decision reads and its move
     /// then sets again from the collision. `false` with no player of its own.
     pub(super) fn set_local_player_on_ground(&mut self, on_ground: bool) -> bool {
@@ -62,7 +74,7 @@ impl Game<'_> {
         }
         let [x, y, z] = delta;
         self.in_this_levels_colliders(|game| {
-            game.move_local_player(MoverType::SelfMovement, Vec3::new(x, y, z))
+            game.move_local_player(MoverType::SelfMovement, Vec3::new(x, y, z), false)
         })
         .map(|moved| moved.map(Vec3::components))
         .map_err(|_| LevelWriteError::Unavailable)
@@ -75,6 +87,7 @@ mod tests {
     use crate::game::native_entity_refs::tests::with_game;
     use mod_api::HostSide;
     use std::sync::{Arc, Mutex};
+    use sunrise_protocol::packets::play;
 
     /// Writes a velocity and a ground flag before the local player's tick, and records what
     /// the tick left of them.
@@ -101,9 +114,10 @@ mod tests {
     }
 
     /// A client of a server whose local player is loaded, in the air over an empty chunk.
-    fn loaded_client(game: &mut Game<'_>) {
+    /// Returns the server end's reader, what the client sends.
+    fn loaded_client(game: &mut Game<'_>) -> sunrise_protocol::connection::ConnReader {
         game.options.execution_role = crate::game::execution_role::ExecutionRole::Client;
-        let (client, _server) = sunrise_protocol::connection::Pipe::pair();
+        let (client, server) = sunrise_protocol::connection::Pipe::pair();
         game.connect_local(client, "writes").unwrap();
         let remote = game.remote.as_mut().unwrap();
         remote.logged_in = true;
@@ -119,6 +133,9 @@ mod tests {
         game.player = Some(player);
         game.streaming
             .insert_remote(&mut game.world, sunrise_client::chunk::Chunk::empty(0, 0));
+        sunrise_protocol::connection::Connection::local(server)
+            .split()
+            .0
     }
 
     #[test]
@@ -374,6 +391,7 @@ mod tests {
                         player.reset_fall_distance(host),
                         Err(mod_api::LevelWriteError::Unavailable),
                     );
+                    assert!(host.client_executor().is_none());
                     self.0.lock().unwrap().push((
                         event.old_section,
                         event.new_section,
@@ -413,7 +431,67 @@ mod tests {
             game.player = None;
             assert!(!game.set_local_player_velocity([0.0; 3]));
             assert!(!game.set_local_player_on_ground(true));
+            assert!(!game.start_local_player_gliding());
             assert_eq!(game.move_local_player_by([1.0, 0.0, 0.0]), Ok(None));
+        });
+    }
+
+    /// A client whose connection completed login and configuration, with its player loaded.
+    fn loaded_menu_client(game: &mut Game<'_>) -> sunrise_protocol::connection::ConnReader {
+        let (peer, _writer) = crate::game::remote::tests::connect_menu_test(game);
+        crate::game::remote::tests::spawn_menu_test(game);
+        let remote = game.remote.as_mut().unwrap();
+        remote.loaded_sent = true;
+        let mut player = sunrise_client::motion::PlayerMotion::new(
+            game.motion,
+            sunrise_core::geometry::Vec3::new(0.5, 64.0, 0.5),
+        )
+        .unwrap();
+        player.entity_id = remote.entity_id;
+        game.player = Some(player);
+        game.streaming
+            .insert_remote(&mut game.world, sunrise_client::chunk::Chunk::empty(0, 0));
+        peer
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn start_local_player_gliding_from_the_tick_pre_hook_reports_the_start() {
+        struct Start;
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for Start {
+            fn player_tick_pre(&self, host: HostSide<'_>, event: &mut mod_api::PlayerTickPreEvent) {
+                if let HostSide::Client(host) = host
+                    && host.local_player() == Some(event.player)
+                {
+                    assert!(host.start_local_player_gliding());
+                }
+            }
+        }
+        let mods = vec![mod_api::ModEntry::new("start", Box::new(Start))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                let mut peer = loaded_menu_client(game);
+                game.player.as_mut().unwrap().fall_flying = false;
+                game.tick_remote().unwrap();
+                assert!(game.player.as_ref().unwrap().fall_flying);
+                peer.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut seen = 0;
+                loop {
+                    let (id, body) = peer.recv().unwrap_or_else(|e| {
+                        panic!("no START_FALL_FLYING after {seen} packets: {e}")
+                    });
+                    seen += 1;
+                    if let Ok(play::Serverbound::PlayerCommand(command)) =
+                        play::Serverbound::decode(id, &body)
+                        && command.action == 6
+                    {
+                        assert_eq!(command.data, 0);
+                        break;
+                    }
+                }
+            });
         });
     }
 
@@ -438,7 +516,7 @@ mod tests {
             game.world.set(2, 64, 0, stone).unwrap();
 
             let mut move_and_read = |movement| {
-                game.move_local_player(MoverType::SelfMovement, movement)
+                game.move_local_player(MoverType::SelfMovement, movement, false)
                     .unwrap();
                 player.collision_flags(game).unwrap().unwrap()
             };

@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Une nouvelle ligne de chat glisse depuis la gauche en apparaissant progressivement, au lieu d'apparaître d'un coup.",
   "sunrise.extras.chat_indicator": "Marqueur de message",
   "sunrise.extras.chat_indicator.tooltip": "La barre colorée à gauche d'une ligne de chat.",
-  "sunrise.extras.discord_presence": "Présence Discord",
-  "sunrise.extras.discord_presence.tooltip": "Affiche « Joue à Sunrise » sur votre profil Discord tant que Discord fonctionne : menus, solo ou multijoueur, la dimension et le temps de jeu. Jamais le nom d'un monde ni l'adresse d'un serveur.",
   "sunrise.extras.dynamic_lights": "Lumières dynamiques",
   "sunrise.extras.dynamic_lights.tooltip": "Les torches et autres sources de lumière tenues en main, jetées ou en feu éclairent les blocs autour d'elles.",
   "sunrise.extras.fullbright": "Pleine luminosité",

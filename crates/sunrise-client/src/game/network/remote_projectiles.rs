@@ -2,15 +2,12 @@
 //! end crystals on a server's client (`ClientPacketListener.handleAddEntity`
 //! and `handleSetEntityData`): the server simulates them, the client draws
 //! them where it says and interpolates their moves.
-use super::{FallStep, FallingBlock, Game, fireworks::fireworks_of};
+use super::{FallingBlock, Game, fireworks::fireworks_of};
 use crate::game::native_ticks::{TickRound, places_of, slot_place};
 use sunrise_client::items::ItemStack;
 use sunrise_client::join_seq::{JoinList, RestoreOrder};
+use sunrise_client::particles::{ParticleOptions, ParticleType};
 use sunrise_client::projectiles::{Projectile, ProjectileKind};
-use sunrise_client::{
-    collisions::SceneCollisions,
-    particles::{ParticleOptions, ParticleType},
-};
 use sunrise_core::{geometry::Vec3, position::BlockPos, random::RandomSource};
 use sunrise_protocol::entity_data::Value;
 use sunrise_world::registry::BlockStateId;
@@ -216,6 +213,7 @@ impl Game<'_> {
         match kind {
             "minecraft:evoker_fangs" => self.insert_fangs(id, position, yaw, 0, 0),
             "minecraft:tnt" => self.tnts.push(super::tnt::PrimedTnt {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 rotation: [0.0, 0.0],
                 join: Default::default(),
@@ -226,7 +224,7 @@ impl Game<'_> {
                 velocity,
                 fuse: 80,
                 ticks: 0,
-                on_ground: false,
+                ground: Default::default(),
                 fall_distance: 0.0,
                 stuck: Vec3::ZERO,
                 in_water: false,
@@ -238,11 +236,13 @@ impl Game<'_> {
             }),
             // FallingBlockEntity.recreateFromPacket: the block state is the data.
             "minecraft:falling_block" => self.falling.push(FallingBlock {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 rotation: [0.0, 0.0],
                 join: Default::default(),
                 id,
                 state: BlockStateId(data.max(0) as u32),
+                blocks_building: true,
                 start_pos: BlockPos::default(),
                 position: at,
                 previous: at,
@@ -252,7 +252,7 @@ impl Game<'_> {
                 portal: Default::default(),
                 drop_item: false,
                 fall_distance: 0.0,
-                on_ground: false,
+                ground: Default::default(),
                 fire_ticks: 0,
                 sync_velocity: false,
                 stuck: Vec3::ZERO,
@@ -281,6 +281,7 @@ impl Game<'_> {
                 radius: 3.0,
                 waiting: false,
                 particle: default_cloud_particle(),
+                random: sunrise_client::random_source::entity(),
             }),
             "minecraft:eye_of_ender" => {
                 self.end
@@ -354,7 +355,11 @@ impl Game<'_> {
                 match (index, value) {
                     (8, Value::Float(r)) => c.radius = *r,
                     (9, Value::Bool(w)) => c.waiting = *w,
-                    (10, _) => c.particle = particle.unwrap_or_else(default_cloud_particle),
+                    (10, Value::Particle(_)) => {
+                        if let Some(particle) = particle {
+                            c.particle = particle;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -370,8 +375,8 @@ impl Game<'_> {
                             && let Some(r) = self.rockets.iter_mut().find(|r| r.id == id)
                         {
                             let (_, explosions) = fireworks_of(&stack);
-                            r.explosions = explosions;
-                            r.item = stack;
+                            r.explosions = explosions.into();
+                            r.item = stack.into();
                         }
                     }
                     // DATA_ATTACHED_TO_TARGET (OptionalInt: the id plus 1).
@@ -556,6 +561,7 @@ impl Game<'_> {
         nested_spawn_tests::after_lift(self, nested_spawn_tests::Point::OwnRocket);
         for r in rockets.iter_mut().filter(|r| r.attached_to == Some(me)) {
             self.follow_own_player(r);
+            self.pick_section_move(r.id, r.position.components());
             self.rocket_spark(r);
         }
         self.rockets.restore(
@@ -580,9 +586,11 @@ impl Game<'_> {
             Some(self.border.geometry()),
             Some(&self.res.motion().blocks),
         );
+        let side = game_side!(self);
+        let sections = self.client_pick.sections.get_mut();
         self.tnts.retain_mut(|t| {
             // A fluid lookup that fails leaves it where its move put it.
-            let _ = t.tick(
+            let _ = t.tick_among(
                 world,
                 collision,
                 assets,
@@ -591,8 +599,16 @@ impl Game<'_> {
                 &self.loop_context,
                 border,
                 blocks,
+                Some(&side),
+                &[],
             );
-            t.fuse > 0
+            let kept = t.fuse > 0;
+            if kept {
+                sections.move_id(t.id, t.position.components());
+            } else {
+                sections.remove(t.id);
+            }
+            kept
         });
         // PrimedTnt.tick: while the fuse is still lit, a client adds one SMOKE
         // particle at (x, y + 0.5, z). The server's Level.addParticle never
@@ -602,18 +618,13 @@ impl Game<'_> {
         for p in smoking {
             self.particles.add(&smoke, [p.x, p.y + 0.5, p.z], [0.0; 3]);
         }
-        // FallingBlockEntity.tick runs on a client too: the block falls by
-        // itself between the server's updates (every 20 ticks), then waits
-        // where it lands for the server to place it and remove it.
+        // Clients simulate motion and drag; only the server places/removes the landing block.
         let mut falling = self.falling.lift();
         #[cfg(test)]
         nested_spawn_tests::after_lift(self, nested_spawn_tests::Point::Falling);
         falling.for_each_mut(|f| {
-            if let Ok(FallStep::Landed(_)) = self.fall_step(f, false, &[]) {
-                // Block.updateEntityMovementAfterFallOn, then getAirDrag 0.98F.
-                let drag = f64::from(0.98_f32);
-                f.velocity = Vec3::new(f.velocity.x * drag, 0.0, f.velocity.z * drag);
-            }
+            let _ = self.fall_step(f, false, &[]);
+            self.pick_section_move(f.id, f.position.components());
         });
         self.falling.restore(
             falling,
@@ -666,23 +677,40 @@ impl Game<'_> {
                 &mut arrow_events,
             );
         } else {
-            let rain = self.arrow_rain();
-            let arrow_scene = self.arrow_scene(&rain);
-            let w = self.mob_world_base(&[]);
-            let world = super::creatures::ProjWorld {
-                w: &w,
-                targets: &[],
-                border: Some(self.border.bounds()),
-            };
-            projectiles.for_each_mut(|p| {
-                if !round.canceled(p.id) {
-                    remote_projectile_step(p, &arrow_scene, &world, &mut arrow_events);
+            // Their visits, counted once the loop hands the game back: no hook runs between.
+            let mut visited = Vec::new();
+            {
+                let rain = self.arrow_rain();
+                let arrow_scene = self.arrow_scene(&rain);
+                let w = self.mob_world_base(&[]);
+                let world = super::creatures::ProjWorld {
+                    w: &w,
+                    targets: &[],
+                    border: Some(self.border.bounds()),
+                };
+                projectiles.for_each_mut(|p| {
+                    let ticks = !round.canceled(p.id);
+                    if ticks || self.client_passenger(p.id) {
+                        visited.push(p.id);
+                    }
+                    if ticks {
+                        remote_projectile_step(p, &arrow_scene, &world, &mut arrow_events);
+                        self.pick_section_move(p.id, p.position.components());
+                    }
+                });
+                for t in &mut tridents {
+                    let ticks = !round.canceled(t.id);
+                    if ticks || self.client_passenger(t.id) {
+                        visited.push(t.id);
+                    }
+                    if ticks {
+                        super::trident::remote_tick(t, &world, self.remote_eye(t.owner));
+                        self.pick_section_move(t.id, t.position.components());
+                    }
                 }
-            });
-            for t in &mut tridents {
-                if !round.canceled(t.id) {
-                    super::trident::remote_tick(t, &world, self.remote_eye(t.owner));
-                }
+            }
+            for id in visited {
+                self.count_client_tick(id);
             }
         }
         self.creatures.projectiles.restore(
@@ -717,16 +745,10 @@ impl Game<'_> {
         #[cfg(test)]
         nested_spawn_tests::after_lift(self, nested_spawn_tests::Point::RemoteRocket);
         for r in &mut rockets {
-            r.remote_step(
-                &mut SceneCollisions {
-                    world: &self.world,
-                    binding: self.collision,
-                    subject: None,
-                },
-                &self.loop_context,
-            );
+            r.remote_step(self.body_motion(&game_side!(self)));
             if let Some(target) = r.attached_to {
                 if me == Some(target) {
+                    self.pick_section_move(r.id, r.position.components());
                     continue;
                 }
                 if let Some(m) = self.mobs.iter().find(|m| m.id == target) {
@@ -739,6 +761,7 @@ impl Game<'_> {
                     r.position = m.position;
                 }
             }
+            self.pick_section_move(r.id, r.position.components());
             self.rocket_spark(r);
         }
         self.rockets.restore(
@@ -757,8 +780,16 @@ impl Game<'_> {
 
     /// `AreaEffectCloud.clientTick` for each cloud a server tracks.
     fn tick_remote_clouds(&mut self) {
-        for c in &self.potions.clouds {
-            cloud_client_tick(&mut self.particles, c.at, c.radius, c.waiting, &c.particle);
+        for c in &mut self.potions.clouds {
+            cloud_client_tick(
+                &mut self.particles,
+                &self.world,
+                c.at,
+                c.radius,
+                c.waiting,
+                &c.particle,
+                &mut c.random,
+            );
         }
     }
 
@@ -863,6 +894,7 @@ impl Game<'_> {
         let slots: Vec<u32> = projectiles.iter().map(|p| p.id).collect();
         let mut places = None;
         let mut slot = 0;
+        let mut visited = Vec::new();
         while slot < slots.len() {
             // The projectiles up to the next one told alone, through one set of views.
             {
@@ -882,13 +914,23 @@ impl Game<'_> {
                     if round.alone_kind(projectiles[i].entity_type()) {
                         break;
                     }
-                    if !round.canceled(projectiles[i].id) {
+                    let id = projectiles[i].id;
+                    let ticks = !round.canceled(id);
+                    if ticks || self.client_passenger(id) {
+                        visited.push(id);
+                    }
+                    if ticks {
                         projectiles.update(i, |p| {
-                            remote_projectile_step(p, &scene, &world, arrow_events)
+                            remote_projectile_step(p, &scene, &world, arrow_events);
+                            self.pick_section_move(p.id, p.position.components());
                         });
                     }
                     slot += 1;
                 }
+            }
+            // Their visits, counted before the next one told alone hears its Pre.
+            for id in visited.drain(..) {
+                self.count_client_tick(id);
             }
             let Some(i) = slots
                 .get(slot)
@@ -902,7 +944,10 @@ impl Game<'_> {
             let changed;
             (projectiles, tridents, changed) =
                 self.remote_projectiles_told(projectiles, tridents, |game| {
-                    ticks = game.native_tick_pre_one(round, id, kind);
+                    told_visit(game, id, |game| {
+                        ticks = game.native_tick_pre_one(round, id, kind);
+                        ticks
+                    });
                 });
             if changed.0 {
                 places = Some(places_of(projectiles.iter().map(|p| p.id)));
@@ -920,7 +965,8 @@ impl Game<'_> {
                     border: Some(self.border.bounds()),
                 };
                 projectiles.update(i, |p| {
-                    remote_projectile_step(p, &scene, &world, arrow_events)
+                    remote_projectile_step(p, &scene, &world, arrow_events);
+                    self.pick_section_move(p.id, p.position.components());
                 });
             }
             let changed;
@@ -946,10 +992,19 @@ impl Game<'_> {
                 targets: &[],
                 border: Some(self.border.bounds()),
             };
+            let mut visited = Vec::new();
             for t in &mut tridents {
-                if !round.canceled(t.id) {
-                    super::trident::remote_tick(t, &world, self.remote_eye(t.owner));
+                let ticks = !round.canceled(t.id);
+                if ticks || self.client_passenger(t.id) {
+                    visited.push(t.id);
                 }
+                if ticks {
+                    super::trident::remote_tick(t, &world, self.remote_eye(t.owner));
+                    self.pick_section_move(t.id, t.position.components());
+                }
+            }
+            for id in visited {
+                self.count_client_tick(id);
             }
         }
         let mut places = None;
@@ -962,7 +1017,10 @@ impl Game<'_> {
             let changed;
             (projectiles, tridents, changed) =
                 self.remote_projectiles_told(projectiles, tridents, |game| {
-                    ticks = game.native_tick_pre_one(round, id, TRIDENT);
+                    told_visit(game, id, |game| {
+                        ticks = game.native_tick_pre_one(round, id, TRIDENT);
+                        ticks
+                    });
                 });
             if changed.1 {
                 places = Some(places_of(tridents.iter().map(|t| t.id)));
@@ -978,7 +1036,9 @@ impl Game<'_> {
                     border: Some(self.border.bounds()),
                 };
                 let eye = self.remote_eye(tridents[i].owner);
-                super::trident::remote_tick(&mut tridents[i], &world, eye);
+                let t = &mut tridents[i];
+                super::trident::remote_tick(t, &world, eye);
+                self.pick_section_move(t.id, t.position.components());
             }
             let changed;
             (projectiles, tridents, changed) =
@@ -1282,6 +1342,33 @@ mod nested_spawn_tests {
             .default_state("minecraft:sand")
             .unwrap();
         spawn(game, "minecraft:falling_block", sand.0 as i32, id);
+    }
+    #[test]
+    #[ignore = "daily"]
+    fn client_falling_block_keeps_collision_bounce_through_drag() {
+        crate::game::native_entity_refs::tests::with_client_game(|game| {
+            use std::sync::Arc;
+            let slime = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:slime_block")
+                .unwrap();
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
+            game.world.set(4, 63, 4, slime).unwrap();
+            falling(game, 48);
+            game.falling.update(0, |f| {
+                f.position = Vec3::new(4.5, 64.25, 4.5);
+                f.velocity = Vec3::new(0.0, -0.96, 0.0);
+            });
+            game.tick_remote_projectiles(|_, p| p);
+            let f = &game.falling[0];
+            assert_eq!(f.position.y.to_bits(), 64.0_f64.to_bits());
+            assert_eq!(f.velocity.y.to_bits(), 0.7878808308504466_f64.to_bits());
+            assert!(f.ground.on_ground);
+        });
     }
     fn projectile(game: &mut Game<'_>, id: u32) {
         spawn(game, "minecraft:shulker_bullet", 0, id);
@@ -1647,5 +1734,17 @@ mod entity_tick_tests {
                 (true, "post", arrow().0, arrow().1, vec![after])
             ]
         );
+    }
+}
+
+/// The visit of one entity told alone: a passenger counts before its Pre (`tickPassenger`), a
+/// root once `pre` let it through (`tickNonPassenger`).
+fn told_visit(game: &mut Game<'_>, id: u32, pre: impl FnOnce(&mut Game<'_>) -> bool) {
+    let passenger = game.client_passenger(id);
+    if passenger {
+        game.count_client_tick(id);
+    }
+    if pre(game) && !passenger {
+        game.count_client_tick(id);
     }
 }

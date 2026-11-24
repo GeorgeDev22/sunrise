@@ -87,6 +87,15 @@ pub(super) fn charge(retained: usize) -> usize {
     retained.saturating_add(std::mem::size_of::<Queued>() * 2)
 }
 
+/// A pairing payload carries its own prepaid charge until the queued body is dropped.
+pub(super) fn body_charge(body: &Body) -> usize {
+    if body.is_prepared() {
+        0
+    } else {
+        charge(body.retained())
+    }
+}
+
 pub(super) struct Queued {
     body: Body,
     prepared: bool,
@@ -170,21 +179,26 @@ impl Outbox {
     /// Past [`MAX_PENDING`] a capped connection closes. The thread to wake, if
     /// this is the first news it has since it last looked.
     pub(super) fn push(&self, bodies: Vec<Body>, end: Option<End>) -> Option<&Arc<Worker>> {
+        self.push_checked(bodies, end).ok().flatten()
+    }
+    // An accepted send may need no wake: its worker is already listed or not attached yet.
+    fn push_checked(
+        &self,
+        bodies: Vec<Body>,
+        end: Option<End>,
+    ) -> Result<Option<&Arc<Worker>>, ()> {
         let bodies = bodies
             .into_iter()
             .map(|body| Queued {
-                cost: charge(body.retained()),
+                cost: body_charge(&body),
+                prepared: body.is_prepared(),
                 body,
-                prepared: false,
                 pending: self.pending.clone(),
             })
-            .collect();
-        self.push_queued(bodies, end)
-    }
-    fn push_queued(&self, bodies: Vec<Queued>, end: Option<End>) -> Option<&Arc<Worker>> {
+            .collect::<Vec<_>>();
         let mut q = self.queue();
         match (q.at, q.end) {
-            (At::Closed, _) => return None,
+            (At::Closed, _) => return Err(()),
             (_, None) => {
                 if q.bodies.is_empty() {
                     q.bodies = bodies;
@@ -198,24 +212,33 @@ impl Outbox {
                 };
             }
             (_, Some(End::Disconnect)) if end == Some(End::Close) => q.end = end,
-            (_, Some(_)) => return None,
+            (_, Some(_)) => return Err(()),
         }
         let At::Slot(slot) = q.at else {
-            return None;
+            return Ok(None);
         };
         if std::mem::replace(&mut q.listed, true) {
-            return None;
+            return Ok(None);
         }
         drop(q);
-        self.worker
+        Ok(self
+            .worker
             .post(|i| i.serve.push(slot))
-            .then_some(&self.worker)
+            .then_some(&self.worker))
     }
     /// [`Self::push`], waking the thread at once.
     pub(super) fn send(&self, bodies: Vec<Body>, end: Option<End>) {
-        if let Some(worker) = self.push(bodies, end) {
+        self.try_send(bodies, end);
+    }
+    /// Whether the already reserved bodies were admitted, independently of waking a worker.
+    pub(super) fn try_send(&self, bodies: Vec<Body>, end: Option<End>) -> bool {
+        let Ok(wake) = self.push_checked(bodies, end) else {
+            return false;
+        };
+        if let Some(worker) = wake {
             worker.wake();
         }
+        true
     }
     #[cfg(any(test, feature = "test-payload-probe"))]
     pub(super) fn queued_contents(&self) -> Vec<Vec<u8>> {
@@ -354,7 +377,10 @@ fn start(threads: usize) -> std::io::Result<Pool> {
         });
         let mine = worker.clone();
         // Mod payload handlers run on these threads (the server's network root).
-        sunrise_guest_stack::spawn(format!("sunrise-net-{n}"), move || run(poll, &mine))?;
+        std::thread::Builder::new()
+            .stack_size(sunrise_threads::GAME_THREAD_STACK_BYTES)
+            .name(format!("sunrise-net-{n}"))
+            .spawn(move || run(poll, &mine))?;
         workers.push(worker);
     }
     Ok(Pool { workers })
@@ -640,7 +666,7 @@ impl Conn {
     /// if one could not be.
     fn frame(&mut self, now: Instant, bodies: Vec<Queued>, _queued: bool) -> bool {
         for body in &bodies {
-            // A bundle's delimiters travel as bodies of their own, possibly in different batches.
+            // Do not insert a droppable packet between a bundle's delimiters.
             if self.outbox.droppable.get().is_some()
                 && !body.prepared
                 && body.body.first()

@@ -246,7 +246,7 @@ pub fn travel(m: &mut Mob, w: &super::MobWorld) {
         y * f64::from(0.98_f32),
         m.velocity.z * f64::from(0.91_f32),
     );
-    m.on_ground = false;
+    m.ground.on_ground = false;
 }
 /// `Vex.tick`: the limited life costs a heart a second once spent.
 pub fn ai_step(m: &mut Mob, w: &super::MobWorld, level: &mut DamageLevel<'_>) {
@@ -444,6 +444,12 @@ mod owner_save_tests {
     impl WhoLookup for Level {
         fn who_by_uuid(&self, uuid: [i32; 4]) -> Option<Who> {
             self.0.get(&uuid).copied()
+        }
+
+        fn mob_uuid(&self, id: u32) -> Option<[i32; 4]> {
+            self.0
+                .iter()
+                .find_map(|(&uuid, &who)| (who == Who::Mob(id)).then_some(uuid))
         }
     }
 

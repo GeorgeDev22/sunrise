@@ -1,4 +1,5 @@
 //! Host backends: what the game answers the API with.
+use crate::world::random::with_random_draw;
 use crate::*;
 
 /// Why a fake player's `perform_action` did nothing at all: it was refused before any of the
@@ -34,15 +35,6 @@ pub enum ActionRefused {
 pub trait NoBackend {
     /// The error for a host without a game.
     fn no_backend() -> Self;
-}
-
-/// The error a gated Host method refuses with when it is called outside the side or phase that
-/// allows it, in place of unwinding: `Result<_, E>` with `E: AccessRefusal` is what the game-side
-/// forwarder generator accepts for an `#[access]` method (it finds the `impl`s in this crate, so
-/// the impl is the marker), and it answers `Err(E::unavailable())` before the call runs.
-pub trait AccessRefusal {
-    /// The refusal for a call outside its allowed phase.
-    fn unavailable() -> Self;
 }
 
 impl NoBackend for ActionRefused {
@@ -254,6 +246,9 @@ pub fn client_backend_mut_of(host: &mut dyn ClientHost) -> Option<&mut dyn Clien
 macro_rules! host_attachment_store {
     ($($host:ident),+) => { $(
         impl AttachmentStore for dyn $host + '_ {
+            fn read_only(&mut self, holder: Holder) -> AttachmentResult<bool> {
+                self.attachments().read_only(holder)
+            }
             fn validate_attachment(&mut self, namespace: &str, name: &str, sync: bool) -> AttachmentResult<()> {
                 crate::parts::validate_attachment_use(namespace, name, sync)
             }
@@ -290,13 +285,14 @@ host_attachment_store!(
 macro_rules! level_random_draws {
     ($($host:ident),+) => { $(
         impl dyn $host + '_ {
-            /// Draw from the level's own random stream, in vanilla's order: `draw` gets the
-            /// stream and the level keeps it after. None on a non-authoritative level.
+            /// Borrow the hook's level stream (`Level.getRandom`) for the closure only:
+            /// `host.with_random(|rng| rng.next_int_bound(bound))`. Returns `None` without
+            /// invoking `draw` if the host does not lend an authoritative level stream.
+            ///
+            /// Draws advance the live stream directly in vanilla's order and are not rolled
+            /// back on panic/unwind or transaction abort, matching vanilla `Level.getRandom()`.
             pub fn with_random<T>(&mut self, draw: impl FnOnce(&mut dyn RandomSource) -> T) -> Option<T> {
-                let mut random = self.random()?;
-                let drawn = draw(&mut random);
-                self.set_random(random);
-                Some(drawn)
+                with_random_draw(draw, |draw| self.lend_random(draw))
             }
         }
     )+ };

@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Новата линија за разговор се лизга од лево додека бледне, наместо да се појавува целина.",
   "sunrise.extras.chat_indicator": "Индикатор за порака",
   "sunrise.extras.chat_indicator.tooltip": "Лентата во боја лево од линијата за разговор.",
-  "sunrise.extras.discord_presence": "Богат статус на Discord",
-  "sunrise.extras.discord_presence.tooltip": "Прикажува Репродукција Sunrise на вашиот профил на Discord додека работи Discord: менија, еден играч или мултиплеер, димензијата и времето на играње. Никогаш името на светот или адресата на серверот.",
   "sunrise.extras.dynamic_lights": "Динамични светла",
   "sunrise.extras.dynamic_lights.tooltip": "Факели и други извори на светлина држени, паднати или запалени ги осветлуваат блоковите околу нив.",
   "sunrise.extras.fullbright": "Фулбрајт",

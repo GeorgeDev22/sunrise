@@ -470,6 +470,13 @@ impl FixedStep {
         }
         f64::from(self.timer.game_time_delta_partial_tick(true))
     }
+    /// `Camera.getCameraEntityPartialTicks`: `1.0` when frozen (`isEntityFrozen`), else partial tick.
+    pub fn camera_fraction_for(&self, entity_frozen: bool) -> f64 {
+        if entity_frozen {
+            return 1.0;
+        }
+        self.camera_fraction()
+    }
     /// After a frame: whether the game is paused by a screen (the residual
     /// stops accumulating) and whether the level is frozen.
     pub fn end_frame(&mut self, pause: bool) {
@@ -510,6 +517,10 @@ impl FixedStep {
     }
     pub fn rate(&self) -> f32 {
         self.manager.base.tickrate()
+    }
+    /// `TickRateManager.millisecondsPerTick`: finite even for a NaN rate (it is from the nanoseconds).
+    pub fn millis_per_tick(&self) -> f32 {
+        self.manager.base.milliseconds_per_tick()
     }
     pub fn set_rate(&mut self, rate: f32) {
         self.manager.set_tick_rate(rate);

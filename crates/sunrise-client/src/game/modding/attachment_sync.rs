@@ -3,52 +3,15 @@
 //! snapshots to the players who started seeing a holder; a client keeps them.
 //!
 //! The channel is an engine declaration in the negotiated payload table
-//! (`raw_payloads::engine`): a message goes only to a placed player whose connection
-//! offered it, is prepared against that connection's current epoch and is published
-//! at the root commit, in order with the player's other packets.
+//! (`raw_payloads::engine`): a message goes only to a player whose connection offered it
+//! and who sees the holder. It is prepared against the current epoch and published at
+//! the root commit, in order with the player's other packets.
 use super::Game;
-use crate::lan::{
-    conn::PlayerSender,
-    guest::Guest,
-    hub::{AttachmentSnapshot, Hub},
-};
+use crate::lan::{conn::PlayerSender, hub::AttachmentSnapshot};
 use mod_api::{PayloadBytes, PayloadId, PayloadSendError};
 use sunrise_client::raw_payloads::Endpoint;
 use sunrise_mod_runtime::attachments::{Attachments, Holder};
 use sunrise_protocol::attachment_sync::{self, Message};
-
-/// Whether `guest` reads attachment sync: placed, and its connection's play epoch
-/// has the channel negotiated. A vanilla client never offers it.
-fn reads_attachment_sync(guest: &Guest) -> bool {
-    guest.placed && guest.negotiated_attachment_sync()
-}
-
-/// The guests `holder`'s changes go to: those in the level in place who see it,
-/// and a player's own wherever they are.
-fn recipients(hub: &Hub, holder: Holder) -> impl Iterator<Item = &Guest> {
-    let owner = match holder {
-        Holder::Player(uuid) => hub.holder_guest(uuid, &hub.config.dimension),
-        _ => None,
-    };
-    let sees = move |g: &Guest| match holder {
-        Holder::Level => true,
-        Holder::Chunk([x, z]) => g.sent_chunks.contains(&(x, z)),
-        Holder::BlockEntity([x, _, z]) => g.sent_chunks.contains(&(x >> 4, z >> 4)),
-        Holder::Entity(id) => g.tracker.is_tracking(id as i32),
-        Holder::Player(_) => owner.is_some_and(|o| g.tracker.is_tracking(o.entity_id)),
-        _ => false,
-    };
-    hub.guests.iter().filter(move |g| {
-        (owner.is_some_and(|o| g.conn == o.conn && g.participates_online())
-            || (hub.here(g) && sees(g)))
-            && reads_attachment_sync(g)
-    })
-}
-
-/// The senders of `holder`'s recipients, taken out of the hub so a send may journal.
-fn recipient_senders(hub: &Hub, holder: Holder) -> Vec<PlayerSender> {
-    recipients(hub, holder).map(|g| g.sender.clone()).collect()
-}
 
 impl Game<'_> {
     /// The messages that give a player `holder`'s synced attachments whole: its
@@ -81,22 +44,9 @@ impl Game<'_> {
                     .map(|((x, y, z), map)| (Holder::BlockEntity([x, y, z]), map.synced())),
             );
         }
-        // A general row is shown on a client once its first snapshot arrives with it
-        // (`remote/general.rs`), so it gets one even with nothing synced, as a player does.
-        let general = |holder: &Holder| match holder {
-            Holder::Entity(id) => self
-                .resident_entities
-                .general
-                .rows
-                .iter()
-                .any(|row| row.id == *id),
-            _ => false,
-        };
         holders
             .into_iter()
-            .filter(|(holder, changes)| {
-                !changes.is_empty() || matches!(holder, Holder::Player(_)) || general(holder)
-            })
+            .filter(|(holder, changes)| !changes.is_empty() || matches!(holder, Holder::Player(_)))
             .map(|(holder, changes)| Message {
                 holder,
                 replace: true,
@@ -140,7 +90,7 @@ impl Game<'_> {
             };
             // Each channel is its own: a peer with only the collider channel still gets the
             // collider.
-            let reads = reads_attachment_sync(guest);
+            let reads = guest.negotiated_attachment_sync();
             let reads_collider = collider_entity.is_some() && guest.negotiated_collider_sync();
             if !reads && !reads_collider {
                 continue;
@@ -149,16 +99,13 @@ impl Game<'_> {
                 hub.attachment_snapshots.push(snapshot);
                 continue;
             }
-            // A guest is a player holder, whose entity another player tracks.
-            let holder = match holder {
-                Holder::Entity(id) => hub
-                    .guests
-                    .iter()
-                    .find(|g| g.entity_id == id as i32)
-                    .map_or(holder, |g| Holder::Player(g.uuid)),
-                _ => holder,
-            };
-            let messages = if reads {
+            // Both non-player entities' (`Holder::Entity`) and tracked players'
+            // (`Holder::Player`) initial non-empty synced attachments were already sent
+            // atomically inside `ServerEntity::pairing`'s `BundleDelimiter` bundle; keep
+            // `Holder::Entity` snapshots here for collider sync only. The recipient's own
+            // `Holder::Player(uuid)` from `send_level_info` still sends with `replace: true`
+            // even when empty, clearing stale replica fields on join or respawn.
+            let messages = if reads && !matches!(holder, Holder::Entity(_)) {
                 self.attachment_snapshot(holder)
             } else {
                 Vec::new()
@@ -184,7 +131,7 @@ impl Game<'_> {
             let senders = self
                 .lan
                 .as_ref()
-                .map_or_else(Vec::new, |host| recipient_senders(&host.hub, holder));
+                .map_or_else(Vec::new, |host| host.hub.attachment_recipients(holder));
             for message in &messages {
                 self.send_attachment_sync(&senders, message);
             }
@@ -206,14 +153,14 @@ impl Game<'_> {
             let senders = self
                 .lan
                 .as_ref()
-                .map_or_else(Vec::new, |host| recipient_senders(&host.hub, holder));
+                .map_or_else(Vec::new, |host| host.hub.attachment_recipients(holder));
             self.send_attachment_sync(&senders, &message);
         }
     }
 
     /// Queue `message` for each of `senders` through the negotiated transport. A peer
     /// that has the channel absent, or is between epochs, is sent nothing and that is no
-    /// error. Any other refusal is named in the log once per connection epoch: a message
+    /// error. Every other refusal is named in the log: a message
     /// past the connection's frame limits or one that cannot be written is not sent and the
     /// player stays joined; a full outgoing queue closes the connection, as a full queue
     /// did before, since the replica would miss the update.
@@ -229,16 +176,10 @@ impl Game<'_> {
             if !refused(&error) {
                 continue;
             }
-            if sender
-                .payload_transport()
-                .epoch()
-                .is_none_or(|epoch| epoch.first_engine_refusal())
-            {
-                log::warn!(
-                    "Sunrise: attachment sync for {:?} not sent: {error:?}",
-                    message.holder
-                );
-            }
+            log::warn!(
+                "Sunrise: attachment sync for {:?} not sent: {error:?}",
+                message.holder
+            );
             if matches!(error, PayloadSendError::Backpressure) {
                 sender.close();
             }
@@ -278,15 +219,35 @@ fn refused(error: &PayloadSendError) -> bool {
 }
 
 impl Game<'_> {
-    /// A `sunrise:attachment_sync` payload the server sent the window.
-    pub(super) fn remote_attachment_sync(&mut self, data: &[u8]) {
-        let message = match attachment_sync::decode(data) {
-            Ok(message) => message,
-            Err(e) => return log::debug!("Sunrise: a bad attachment sync: {e}"),
-        };
-        let Some(remote) = self.remote.as_mut() else {
+    /// Apply an already decoded sync in play packet order, when its holder should exist.
+    pub(super) fn remote_attachment_sync(&mut self, message: Message) {
+        let Some(remote) = self.remote.as_ref() else {
             return;
         };
+        let foreign_player = match message.holder {
+            Holder::Entity(id) => {
+                let id_i32 = id as i32;
+                let known = id_i32 == remote.entity_id
+                    || remote.tracked(id_i32).is_some()
+                    || remote.tracked_entity(id_i32).is_some()
+                    || self.level_dragon_part(id).is_some();
+                if !known {
+                    log::warn!("Sunrise: received attachment sync for unknown entity {id}");
+                    return;
+                }
+                None
+            }
+            Holder::Player(uuid) if uuid != remote.profile() => {
+                let Some(id) = remote.player_entity(uuid) else {
+                    log::warn!("Sunrise: received attachment sync for unknown player {uuid:032x}");
+                    return;
+                };
+                Some(id)
+            }
+            // The recipient's own initial sync does not come from an entity pairing.
+            _ => None,
+        };
+        let remote = self.remote.as_mut().unwrap();
         let map = remote.attachments.entry(message.holder).or_default();
         if message.replace {
             map.replace_contents(Attachments::default());
@@ -295,15 +256,17 @@ impl Game<'_> {
             map.apply_sync(change);
         }
         if let Holder::Entity(id) = message.holder {
-            remote
-                .general
-                .attachments_arrived(id as i32, message.replace, map);
+            remote.general.attachments_arrived(id as i32, map);
         }
-        self.bind_remote_attachment(message.holder);
+        self.bind_remote_attachment_with_player(message.holder, foreign_player);
     }
 
     /// Publish a synced copy once its scoped client holder can be named.
     pub(super) fn bind_remote_attachment(&mut self, holder: Holder) {
+        self.bind_remote_attachment_with_player(holder, None);
+    }
+
+    fn bind_remote_attachment_with_player(&mut self, holder: Holder, player: Option<u32>) {
         use mod_api::{AttachmentHolder as H, ChunkRef, EntityRef};
         let Some(remote) = &self.remote else { return };
         let Some(level) = self.level(&remote.level) else {
@@ -315,7 +278,7 @@ impl Game<'_> {
                 let id = if uuid == remote.profile() {
                     u32::try_from(remote.entity_id).ok()
                 } else {
-                    remote.player_entity(uuid)
+                    player.or_else(|| remote.player_entity(uuid))
                 };
                 let Some(id) = id else { return };
                 H::Player(mod_api::__private::game::player_ref(

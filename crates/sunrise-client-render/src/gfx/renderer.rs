@@ -81,6 +81,12 @@ pub struct Renderer {
     /// for the settings in `graphics::gpu_culling_offer`), and whether the last frame drew
     /// them so (`gpu_frame`).
     pub(crate) gpu_culling: Option<gpu_culling::GpuCulling>,
+    /// Sourced geometry's residency beside them (`sourced_geometry::gpu::Sourced`): its
+    /// record table, made with the first recorded mesh and dropped with the last, each
+    /// mesh's record in it, and the meshes a GPU frame still lists the CPU. Whether the
+    /// last frame drew them so is `gpu_sourced_frame`.
+    pub(crate) sourced: sourced_geometry::gpu::Sourced,
+    pub(crate) gpu_sourced_frame: bool,
     pub(crate) gpu_culling_offer: crate::graphics::GpuCullingOffer,
     pub(crate) gpu_frame: bool,
     /// GPU frames since GPU culling was switched on: the first and every 64th after it
@@ -123,6 +129,8 @@ pub struct Renderer {
     /// frame's.
     pub(crate) overlay_crosshair: Option<wgpu::RenderPipeline>,
     pub(crate) overlay_hand: Option<wgpu::RenderPipeline>,
+    pub(crate) overlay_hand_banner_pattern: Option<wgpu::RenderPipeline>,
+    pub(crate) overlay_hand_glint: Option<wgpu::RenderPipeline>,
     pub(crate) debug_line_buffer: wgpu::Buffer,
     pub(crate) debug_line_capacity: u64,
     /// The terrain resources with the debug crosshair's projection
@@ -139,6 +147,13 @@ pub struct Renderer {
     pub(crate) world_views: world_views::Kept,
     pub(crate) world_view_side: u32,
     pub(crate) entity_pipeline: wgpu::RenderPipeline,
+    /// `RenderPipelines.BANNER_PATTERN` (`RenderTypes.bannerPattern`): blended no-depth-write patterns.
+    pub(crate) banner_pattern_pipeline: wgpu::RenderPipeline,
+    /// `RenderPipelines.GLINT` (`RenderTypes.patternedShieldGlint`): equal-depth glint-only pass.
+    pub(crate) glint_only_pipeline: wgpu::RenderPipeline,
+    pub(super) particle_pipelines: particle_draws::ParticlePipelines,
+    pub(super) explicit_opaque_particles: particle_draws::ParticleDraws,
+    pub(super) explicit_translucent_particles: particle_draws::ParticleDraws,
     pub(crate) static_entity_pipeline: wgpu::RenderPipeline,
     pub(crate) static_entity_group: wgpu::BindGroup,
     pub(crate) static_entity_transform: wgpu::Buffer,
@@ -174,6 +189,7 @@ pub struct Renderer {
     pub(crate) world_primitives: world_primitives::WorldPrimitives,
     pub(crate) text_polygon_offset_pipeline: wgpu::RenderPipeline,
     pub(crate) world_text_pipeline: wgpu::RenderPipeline,
+    pub(crate) text_mark_pipelines: [wgpu::RenderPipeline; 2],
     pub(crate) fluid_pipeline: wgpu::RenderPipeline,
     pub(crate) terrain_model_pipelines: [wgpu::RenderPipeline; 4],
     pub(crate) celestial: celestial::Celestial,
@@ -218,6 +234,7 @@ pub struct Renderer {
     pub(crate) static_entity_indices: wgpu::Buffer,
     pub(crate) static_entity_index_quads: u32,
     pub(crate) entity_batch: EntityBatch,
+    pub(crate) entity_order: entity_skin::OrdinaryOrder,
     /// Ordinary entity models posed on the GPU; `None` without compute shaders.
     pub(crate) entity_skin: Option<entity_skin::EntitySkin>,
     pub(crate) group: wgpu::BindGroup,
@@ -283,6 +300,8 @@ pub struct Renderer {
     pub(crate) depth: wgpu::TextureView,
     pub(crate) sections: resident::Resident<SectionGpu>,
     pub(crate) lods: FxHashMap<crate::lod::TileKey, lod::Tile>,
+    /// Vertex bytes of the current tile meshes (not their fading stand-ins).
+    pub(crate) lod_vertex_bytes: u64,
     /// The same tiles by cell (`lod::TileGrid`), to test them a handful of
     /// boxes at a time (`draw_frame`).
     pub(crate) lod_cells: lod::TileGrid,
@@ -331,6 +350,10 @@ pub struct Renderer {
     /// Per-frame scratch, kept to avoid allocating every frame.
     pub(crate) visible: Vec<resident::Visible>,
     pub(crate) visible_lods: Vec<lod::Visible>,
+    /// Every far tile in view, whether the GPU's solid draws own it or not: the water's
+    /// re-sort walks it (`draw_frame`), so its budget and rotation do not follow which
+    /// solid draws the sourced-geometry pass took over.
+    pub(crate) translucent_lods: Vec<lod::Visible>,
     /// The sections a shader pack's shadow camera sees (`external::ShadowView`).
     pub(crate) shadow_visible: Vec<resident::Visible>,
     /// The external shader pipeline world frames call (`external`); `None` draws vanilla's way.
@@ -362,7 +385,7 @@ pub struct Renderer {
     /// The shadow camera's draws by page, in bands of distance from the light.
     pub(crate) shadow_runs: page_runs::PageRuns,
     /// Block-entity blocks per meshed section (world position, state id).
-    pub(crate) block_entities: FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
+    pub(crate) block_entities: super::census::SectionLists,
     /// Changes on every mesh upload for that section; block-entity static
     /// geometry also depends on the section's packed light.
     pub(crate) block_entity_section_revisions: FxHashMap<SectionKey, u64>,
@@ -382,7 +405,7 @@ pub struct Renderer {
     /// Changes whenever `block_entities` does (unique across renderers).
     pub(crate) block_entity_revision: u64,
     /// The light sources of each section and their revision, for `block_light`.
-    pub(crate) light_blocks: FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
+    pub(crate) light_blocks: super::census::SectionLists,
     pub(crate) light_revision: u64,
     /// VisGraph face connectivity per meshed section (cave culling).
     pub(crate) occlusion: occlusion::Occlusion,
@@ -452,6 +475,17 @@ pub struct Renderer {
     pub(crate) shared_material_maps: [Option<wgpu::Texture>; 2],
     /// The pack's terrain program reads flat draws' vertices (`pack_terrain_inputs`).
     pub(crate) pack_terrain_flat: bool,
+    /// Vertex shaders read the section arena's pages (`flat::pages_readable`): a pack's terrain
+    /// program can read its quad's corners there in per-section draws too (`pack_terrain_draws`).
+    pub(crate) terrain_pages: bool,
+    /// The pack's terrain programs read their pages in per-section draws: decided as
+    /// `pack_terrain_inputs` last took them, from `pack_terrain_bindings`.
+    pub(crate) pack_terrain_pages: bool,
+    /// What the pack being loaded binds in its terrain programs' vertex stage
+    /// (`set_pack_terrain_bindings`).
+    pub(crate) pack_terrain_bindings: pack_atlas::TerrainBindings,
+    /// The section arena's pages are storage too (`arena_storage`, `follow_arena_storage`).
+    pub(crate) arena_storage: bool,
     /// OptiFine/Iris separate ambient occlusion: pass vertex alpha to hz_Color.a.
     pub separate_ao: bool,
     /// Shader-pack terrain pages used by post processing, retained between frames.
@@ -502,6 +536,9 @@ pub struct Renderer {
     /// `draw_frame`'s frames past its early returns, and the one whose statistics are shown.
     pub(crate) frame_serial: u64,
     pub(crate) stats_frame: u64,
+    /// The readback halves a GPU frame's statistics wait for (`in_flight::collect_stats`):
+    /// a half alone undercounts the frame.
+    pub(crate) stats_halves: in_flight::StatsHalves,
     pub uploaded_bytes: u64,
     pub(crate) started: Instant,
     /// The next frame to write to a PNG path (control socket, F2, world icon).

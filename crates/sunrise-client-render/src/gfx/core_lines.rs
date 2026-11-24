@@ -26,6 +26,7 @@ pub(crate) const GLUE: Glue = Glue {
     // 26.3's ProjMat already has wgpu's reversed 0 to 1 depth (Projection: zZeroToOne).
     finish: "",
     vertex_id: "int(gl_VertexIndex)",
+    interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
 };
 
 pub(crate) struct CoreLines {
@@ -295,9 +296,8 @@ mod tests {
     }
 
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = crate::gfx::test_gpu::instance();
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
-        pollster::block_on(adapter.request_device(&Default::default())).ok()
+        let (_, device, queue) = crate::gfx::test_gpu::optional_device()?;
+        Some((device, queue))
     }
 
     /// One edge across the middle of a 64 by 64 target, 4 pixels wide, blue (ARGB `ff0000ff`),
@@ -555,6 +555,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_pack_fragment_shader_colours_the_outline() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue)) = device() else {
@@ -569,6 +570,7 @@ mod tests {
     /// A pack's own include with a bigger block than vanilla's (an older `DynamicTransforms`)
     /// is not used, and the outline draws natively, rather than failing at the draw.
     #[test]
+    #[ignore = "daily"]
     fn a_pack_block_bigger_than_vanillas_falls_back() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, _)) = device() else {
@@ -586,6 +588,7 @@ mod tests {
     /// Vanilla's own `rendertype_lines.vsh` (from the prepared resources) under a pack's
     /// fragment shader.
     #[test]
+    #[ignore = "daily"]
     fn vanillas_lines_vertex_shader_takes_a_packs_fragment_shader() {
         let _gpu = crate::gfx::test_gpu::lock();
         let root = std::env::var_os("SUNRISE_RESOURCES")
@@ -595,15 +598,10 @@ mod tests {
                     .join("../../.local/sunrise-client")
                     .join(sunrise_core::VANILLA_VERSION)
             });
-        let Ok(vertex) = std::fs::read_to_string(
+        let vertex = std::fs::read_to_string(
             root.join("assets/minecraft/shaders/core/rendertype_lines.vsh"),
-        ) else {
-            eprintln!(
-                "skipping resource-backed lines shader check: {}",
-                root.display()
-            );
-            return;
-        };
+        )
+        .expect("prepared vanilla rendertype_lines.vsh");
         let include = |id: &str| {
             let (namespace, path) = id.split_once(':')?;
             std::fs::read_to_string(root.join(format!("assets/{namespace}/{path}"))).ok()

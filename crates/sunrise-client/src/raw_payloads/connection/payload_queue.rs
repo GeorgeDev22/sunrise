@@ -14,7 +14,7 @@ pub(super) struct PayloadQueue {
 }
 
 /// Finishing or cancelling a root releases the next receiving turn, never invokes it.
-pub(in crate::raw_payloads) struct PayloadTurn {
+pub(crate) struct PayloadTurn {
     connection: Weak<Connection>,
 }
 impl Drop for PayloadTurn {
@@ -68,7 +68,7 @@ impl Connection {
     }
 
     /// Park a dedicated receiver until the active root finishes or its epoch ends.
-    pub(in crate::raw_payloads) fn wait_payloads(&self, epoch: &Epoch) -> bool {
+    pub(crate) fn wait_payloads(&self, epoch: &Epoch) -> bool {
         let queue = self.payloads.lock().unwrap();
         let queue = self
             .payload_ready

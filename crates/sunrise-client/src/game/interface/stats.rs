@@ -5,8 +5,7 @@
 use super::native_hooks::PhantomSpawnResult;
 use super::{Dim, Game};
 use std::path::PathBuf;
-use sunrise_core::geometry::Vec3;
-use sunrise_core::random::RandomSource;
+use sunrise_core::{geometry::Vec3, identifier::Identifier, random::RandomSource};
 
 pub(super) use sunrise_gameplay::stats::{Stats, locate_player_json, player_json};
 use sunrise_gameplay::stats::{namespaced, stat_registry};
@@ -57,26 +56,16 @@ impl Game<'_> {
         }
         let valid = amount >= 0
             && stat_registry(&new_ty).is_some_and(|registry| {
-                let known = |registry: &str, id: &str| {
-                    if let Some(host) = self.lan.as_ref() {
-                        use sunrise_core::identifier::Identifier;
-                        // Parsing aliases here would let counters, criteria and packets
-                        // disagree about the spelling of the same statistic.
-                        let (Some(registry), Some(id)) = (
-                            Identifier::parse_namespaced(registry),
-                            Identifier::parse_namespaced(id),
-                        ) else {
-                            return false;
-                        };
-                        return host.hub.synced_id(&registry, &id).is_some();
-                    }
-                    self.ui
-                        .registries
-                        .ids(registry)
-                        .iter()
-                        .any(|entry| entry == id)
+                // Unlike a save document, rewrites must already use the canonical spelling
+                // shared by counters, criteria and packets.
+                let (Some(ty), Some(key)) = (
+                    Identifier::parse_namespaced(&new_ty),
+                    Identifier::parse_namespaced(&new_key),
+                ) else {
+                    return false;
                 };
-                known("minecraft:stat_type", &new_ty) && known(registry, &new_key)
+                self.stat_registry_contains("minecraft:stat_type", &ty)
+                    && self.stat_registry_contains(registry, &key)
             });
         if valid {
             Some((new_ty, new_key, amount))
@@ -91,6 +80,18 @@ impl Game<'_> {
             Some((ty.to_owned(), key.to_owned(), n))
         }
     }
+    pub(super) fn stat_registry_contains(&self, registry: &str, id: &Identifier) -> bool {
+        if let Some(host) = self.lan.as_ref() {
+            return Identifier::parse_namespaced(registry)
+                .is_some_and(|registry| host.hub.synced_id(&registry, id).is_some());
+        }
+        self.ui
+            .registries
+            .ids(registry)
+            .iter()
+            .any(|entry| entry.split_once(':') == Some((id.namespace(), id.path())))
+    }
+
     fn stats_path(&self) -> Option<PathBuf> {
         Some(locate_player_json(
             &self.world_root,
@@ -128,27 +129,80 @@ impl Game<'_> {
         if self.lan_acting_fake {
             return;
         }
-        // No mod, no name copied: the per-tick counters come through here.
-        let acting = if !mod_api::__private::listened(mod_api::HookId::PlayerStatAward) {
-            None
-        } else {
-            self.lan_acting_uuid.zip(self.lan_acting_name.clone())
-        };
-        if let Some((player, name)) = acting {
-            let award = namespaced(ty, |stat_type| {
+        self.award_stat_to(
+            ty,
+            key,
+            n,
+            |game| game.lan_acting_uuid.zip(game.lan_acting_name.clone()),
+            |game| &mut game.stats,
+        );
+    }
+
+    /// Edit the award before borrowing its owner's stats. The normal counter,
+    /// dirty set and scoreboard event are all written by `Stats::add`.
+    pub(super) fn award_stat_to(
+        &mut self,
+        ty: &str,
+        key: &str,
+        n: i32,
+        identity: impl FnOnce(&Self) -> Option<(u128, String)>,
+        stats: impl FnOnce(&mut Self) -> &mut Stats,
+    ) {
+        // No listener, no player name copied: per-tick counters come through here.
+        if mod_api::__private::listened(mod_api::HookId::PlayerStatAward)
+            && let Some((player, name)) = identity(self)
+        {
+            if let Some((ty, key, amount)) = namespaced(ty, |stat_type| {
                 self.edited_stat_award(player, &name, stat_type, key, n)
-            });
-            if let Some((ty, key, amount)) = award {
-                self.stats
-                    .add(ty.strip_prefix("minecraft:").unwrap_or(&ty), &key, amount);
+            }) {
+                stats(self).add(ty.strip_prefix("minecraft:").unwrap_or(&ty), &key, amount);
             }
-            return;
+        } else {
+            stats(self).add(ty, key, n);
         }
-        self.stats.add(ty, key, n);
     }
     /// `Player.awardStat(Identifier)`: `n` more of the custom statistic `key`.
     pub(super) fn award_custom_stat(&mut self, key: &str, n: i32) {
         namespaced(key, |key| self.award_stat("custom", key, n));
+    }
+    /// `ServerPlayer.awardStat` for a causing entity, regardless of who owns the acting turn.
+    pub(in crate::game) fn award_custom_stat_for(&mut self, player: u32, key: &str, n: i32) {
+        use super::lan_actions::CombatPlayer;
+        match self.combat_player(player) {
+            Some(CombatPlayer::InPlace) => self.award_custom_stat(key, n),
+            Some(CombatPlayer::Displaced(depth, _)) => self.award_displaced_stat(depth, key, n),
+            Some(CombatPlayer::Parked(guest)) => {
+                self.as_guest(guest.conn, |g| g.award_custom_stat(key, n));
+            }
+            None => {}
+        }
+    }
+
+    pub(super) fn award_displaced_stat(&mut self, depth: usize, key: &str, n: i32) {
+        let frame = &self.lan_displaced_players[depth];
+        if frame.fake {
+            return;
+        }
+        namespaced(key, |key| {
+            self.award_stat_to(
+                "custom",
+                key,
+                n,
+                |game| {
+                    let frame = &game.lan_displaced_players[depth];
+                    frame.uuid.map(|uuid| {
+                        (
+                            uuid,
+                            frame
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| super::chat::PLAYER_NAME.to_owned()),
+                        )
+                    })
+                },
+                |game| &mut game.lan_displaced_players[depth].stats,
+            );
+        });
     }
     /// The per-tick counters (`Player.tick`/`ServerPlayer.tick` awardStat).
     pub(super) fn tick_player_stat_counters(&mut self) {

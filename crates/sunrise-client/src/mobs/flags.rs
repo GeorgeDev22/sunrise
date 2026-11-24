@@ -10,17 +10,14 @@ pub struct Flags {
     pub climber: bool,
     /// Striders stand on lava.
     pub lava_walker: bool,
-    /// EntityTypeTags.POWDER_SNOW_WALKABLE_MOBS, resolved at load.
-    pub powder_snow_walkable: bool,
+    /// Slot in the owning level's bound entity type tags. Synthetic types have no slot.
+    pub entity_tag_slot: Option<usize>,
     /// LivingEntity.omnidirectionalAirMover (bees and parrots).
     pub omnidirectional: bool,
     pub fire_immune: bool,
     /// Cleared by default, like `EntityType.Builder` before `notInPeaceful`.
     pub not_in_peaceful: bool,
-    /// Membership of the `minecraft:burn_in_daylight` entity type tag, resolved at load.
-    pub burns_in_day: bool,
     pub undead: bool,
-    pub breathes_water: bool,
     /// Drowns out of water (fish, squid, dolphins after their air runs out).
     pub needs_water: bool,
     /// Hurt by water (endermen, blazes, striders out of lava, snow golems).

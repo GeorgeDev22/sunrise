@@ -754,6 +754,7 @@ fn content_id(file: &str) -> Option<String> {
         "tags" => {
             return Some(format!("tags/{ns}:{}", rest.strip_suffix(".json")?));
         }
+        kind if crate::providers::NUMBER_PROVIDER_KINDS.contains(&kind) => kind,
         _ => return None,
     };
     Some(format!("{kind}/{ns}:{}", rest.strip_suffix(".json")?))
@@ -869,6 +870,34 @@ pub fn read_recipe_priority_layer(
 
 impl DataStore {
     pub fn load(packs: &[&DataPack]) -> Self {
+        let mut kinds: Vec<_> = [
+            "advancement",
+            "banner_pattern",
+            "damage_type",
+            "data_maps",
+            "dialog",
+            "dimension_type",
+            "enchantment",
+            "function",
+            "instrument",
+            "item_modifier",
+            "jukebox_song",
+            "loot_table",
+            "painting_variant",
+            "predicate",
+            "recipe",
+            "recipe_filter",
+            "slot_source",
+            "tags",
+            "trade_set",
+            "villager_trade",
+            "world_clock",
+            "worldgen/biome",
+        ]
+        .into_iter()
+        .chain(crate::providers::NUMBER_PROVIDER_KINDS)
+        .collect();
+        kinds.sort_unstable();
         let mut s = Self::default();
         for pack in packs {
             let builtin = pack.id == "vanilla";
@@ -889,30 +918,7 @@ impl DataStore {
             // `tags` walks the whole tags tree, so a `tags/function` file is
             // listed by both kinds: handle every file once.
             let mut seen = std::collections::BTreeSet::new();
-            for f in pack.list_kinds(&[
-                "advancement",
-                "banner_pattern",
-                "damage_type",
-                "data_maps",
-                "dialog",
-                "dimension_type",
-                "enchantment",
-                "function",
-                "instrument",
-                "item_modifier",
-                "jukebox_song",
-                "loot_table",
-                "painting_variant",
-                "predicate",
-                "recipe",
-                "recipe_filter",
-                "slot_source",
-                "tags",
-                "trade_set",
-                "villager_trade",
-                "world_clock",
-                "worldgen/biome",
-            ]) {
+            for f in pack.list_kinds(&kinds) {
                 if !seen.insert(f.clone()) {
                     continue;
                 }

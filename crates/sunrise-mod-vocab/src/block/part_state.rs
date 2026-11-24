@@ -32,8 +32,8 @@ use std::{cell::RefCell, fmt, sync::Arc};
 /// their own nested transaction and store the new value only when the closure returns.
 /// Every call first checks that `entity` is still the block entity it named, in the
 /// level this host is in: a replaced, removed or unloaded one refuses with
-/// [`PartStateError::Stale`]. A block entity out of the world for its own tick still
-/// answers, through [`BlockEntitiesHost::block_entity_identity`].
+/// [`PartStateError::Stale`]. In `block_entity_tick`, take the resident entity's handle
+/// from `event.subject.with_view` before borrowing the Host from `event.subject.host()`.
 ///
 /// Server-side only for now: `DATA` must not sync, and a client's copy holds nothing
 /// of it, so a client reads the default.
@@ -66,9 +66,10 @@ pub trait BlockEntityPartState: BlockEntityPart + Sized {
     ) -> Result<Self::Data, PartStateError> {
         Ok(Self::state_existing_in(level, entity)?.unwrap_or_else(Self::DATA.default))
     }
-    /// The existing value through a read-only level. No chunk loading or loot generation;
-    /// unloaded/stale holders fail and clients return None. Owning game thread only, never
-    /// reachable from worker-thread hook bodies.
+    /// The existing value through a read-only level, including tentative writes visible in
+    /// its current transaction. No chunk loading or loot generation; unloaded/stale holders
+    /// fail and clients return None. Owning game thread only, never reachable from
+    /// worker-thread hook bodies.
     fn state_existing_in(
         level: &dyn crate::LevelHost,
         entity: BlockEntityRef,
@@ -77,7 +78,10 @@ pub trait BlockEntityPartState: BlockEntityPart + Sized {
             .block_entity_part_snapshot(entity, Self::DATA.namespace, Self::DATA.name)?
             .query(Self::DATA)
             .map_err(|error| attachment(Self::DATA, error))?
-            .get(AttachmentHolder::BlockEntity(entity))
+            .get(
+                level.attachment_read_scope(),
+                AttachmentHolder::BlockEntity(entity),
+            )
             .map_err(|error| match error {
                 AttachmentRowError::Value(error) => attachment(Self::DATA, error),
                 _ => PartStateError::Stale,
@@ -85,7 +89,8 @@ pub trait BlockEntityPartState: BlockEntityPart + Sized {
     }
 
     /// Changes the block entity's value with `edit`, starting from the default when it has
-    /// none, and stores the result: see [`edit_part_state`].
+    /// none, and stores the result: see [`edit_part_state`]. If the host cannot open a
+    /// transaction, returns [`PartStateError::Unavailable`] without calling `edit`.
     fn edit_state<R>(
         host: &mut dyn ServerHost,
         entity: BlockEntityRef,
@@ -97,9 +102,16 @@ pub trait BlockEntityPartState: BlockEntityPart + Sized {
 
 /// Why a block entity's or an entity's Part state could not be read or changed. Nothing was
 /// stored.
+///
+/// This is a process-local access refusal, not a `Wire` type.
+///
+/// ```compile_fail,E0277
+/// fn requires_wire<T: mod_api::wire::Wire>() {}
+/// requires_wire::<mod_api::PartStateError>();
+/// ```
+// no wire: local Part state access refusal carrying static names and runtime states.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
 pub enum PartStateError {
     /// The handle names a block entity or an entity of another level than the one this host
     /// is in.
@@ -120,6 +132,10 @@ pub enum PartStateError {
     /// Something else changed the value while the edit's closure ran; the edit stored
     /// nothing and its transaction was aborted.
     Changed,
+    /// A transaction could not be opened on the host in the current phase.
+    Unavailable,
+    /// The edit ran, but the host rolled back its requested commit.
+    CommitRefused,
     /// The attachment store refused the value: it does not decode (its saved bytes are
     /// kept), does not encode, or the key holds another Rust type.
     Attachment {
@@ -140,6 +156,8 @@ impl fmt::Display for PartStateError {
             Self::HolderBusy => f.write_str("the entity is out of its level for its own tick"),
             Self::Reentrant => f.write_str("this holder's state is already being edited"),
             Self::Changed => f.write_str("the state changed while it was being edited"),
+            Self::Unavailable => f.write_str("transactions are unavailable in the current phase"),
+            Self::CommitRefused => f.write_str("the host refused to commit the state edit"),
             Self::Attachment {
                 namespace,
                 name,
@@ -152,7 +170,15 @@ impl fmt::Display for PartStateError {
 impl std::error::Error for PartStateError {}
 
 /// Why a Part's state declaration was refused at registration.
-#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// This is a process-local registration refusal, not a `Wire` type.
+///
+/// ```compile_fail,E0277
+/// fn requires_wire<T: mod_api::wire::Wire>() {}
+/// requires_wire::<mod_api::PartStateRefusal>();
+/// ```
+// no wire: local Part state registration refusal carrying &'static str type names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PartStateRefusal {
     /// `DATA.sync` is set: Part state is not sent to clients yet.
@@ -190,7 +216,15 @@ impl PartStateRefusal {
 }
 
 /// A Part with state could not be attached.
-#[derive(sunrise_mod_api_macros::Wire, Clone, Debug, PartialEq, Eq)]
+///
+/// This is a process-local registration error, not a `Wire` type.
+///
+/// ```compile_fail,E0277
+/// fn requires_wire<T: mod_api::wire::Wire>() {}
+/// requires_wire::<mod_api::BlockEntityStateError>();
+/// ```
+// no wire: local block-entity Part registration error.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BlockEntityStateError {
     /// The Part itself was refused, as by `block_entity_part`.
@@ -242,7 +276,15 @@ impl From<BlockEntityPartError> for BlockEntityStateError {
 }
 
 /// One Part state declaration, as the registrar checks it.
-#[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// This is a process-local startup declaration, not a `Wire` type.
+///
+/// ```compile_fail,E0277
+/// fn requires_wire<T: mod_api::wire::Wire>() {}
+/// requires_wire::<mod_api::PartStateDeclaration>();
+/// ```
+// no wire: local startup declaration carrying a Rust type name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PartStateDeclaration {
     /// The state's namespace.
@@ -361,9 +403,10 @@ pub fn read_state<H: PartStateHolder, T: Clone + Send + Sync + 'static>(
     key: &AttachmentType<T>,
 ) -> Result<Option<T>, PartStateError> {
     entity.part_state_holder(host)?;
-    host.query(key)
-        .map_err(|error| attachment(key, error))?
-        .get(entity.attachment_holder())
+    let query = host.query(key).map_err(|error| attachment(key, error))?;
+    let scope = host.attachment_read_scope();
+    scope
+        .and_then(|scope| query.get(scope, entity.attachment_holder()))
         .map_err(|error| match error {
             AttachmentRowError::Value(error) => attachment(key, error),
             _ => PartStateError::Stale,
@@ -418,7 +461,7 @@ pub fn edit_part_state<H: PartStateHolder, T: Clone + Send + Sync + 'static, R>(
     edit: impl FnOnce(&mut dyn ServerHost, &mut T) -> R,
 ) -> Result<R, PartStateError> {
     let _editing = Editing::enter(entity.attachment_holder(), key)?;
-    host.transaction(|host, _| {
+    match host.transaction(|host, _| {
         let at = entity.part_state_holder(host)?;
         let store = host.attachments();
         let current = key
@@ -443,7 +486,14 @@ pub fn edit_part_state<H: PartStateHolder, T: Clone + Send + Sync + 'static, R>(
         key.set(store, at, value)
             .map_err(|error| attachment(key, error))?;
         Ok(answer)
-    })
+    }) {
+        Ok(answer) => Ok(answer),
+        Err(crate::TransactionError::Aborted(error)) => Err(error),
+        Err(crate::TransactionError::InvalidContext | crate::TransactionError::Unavailable) => {
+            Err(PartStateError::Unavailable)
+        }
+        Err(crate::TransactionError::CommitRefused) => Err(PartStateError::CommitRefused),
+    }
 }
 
 fn same(a: Option<&AttachmentValue>, b: Option<&AttachmentValue>) -> bool {

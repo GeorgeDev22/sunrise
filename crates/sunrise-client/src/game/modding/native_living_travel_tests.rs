@@ -244,10 +244,9 @@ fn a_panicking_listener_keeps_the_resolved_travel_and_is_disabled() {
     );
 }
 
-/// The resolved values, not an earlier listener's replacement, are what a
-/// later panicking listener leaves behind (#2414 ruling A).
+/// A later listener's panic cannot undo an accepted input and velocity.
 #[test]
-fn a_panic_after_a_replacement_keeps_the_resolved_values() {
+fn a_panic_after_a_replacement_keeps_the_accepted_values() {
     let mods: mod_api::Mods = vec![
         mod_api::ModEntry::new(
             "replacer",
@@ -282,8 +281,7 @@ fn a_panic_after_a_replacement_keeps_the_resolved_values() {
         assert!(runs);
         assert_eq!(
             (input, velocity),
-            (Vec3::new(0.216, 0.0, 0.0), Vec3::new(1.0, -0.078_4, 0.0)),
-            "the resolved values, not the replacer's (0.5, 9.0)"
+            (Vec3::new(0.5, 0.0, 0.0), Vec3::new(9.0, 0.0, 0.0)),
         );
     });
 }

@@ -3,7 +3,7 @@
 //! another section. `tools/test_chunk_entity_order_parity.py` compares the
 //! printed sequences with the real `PersistentEntitySectionManager`.
 use super::*;
-use crate::game::native_entity_refs::tests::with_game;
+use crate::game::native_entity_refs::tests::{collect_game_all_entities, with_game};
 
 fn doubles(values: [f64; 3]) -> Tag {
     Tag::List(
@@ -32,7 +32,7 @@ fn name(tag: &Tag) -> i32 {
 /// Every lookup member's name, in lookup order.
 fn lookup_order(game: &mut Game<'_>) -> Vec<i32> {
     let level = game.level(game.dim.id()).unwrap();
-    let members = game.level_all_entities(level).unwrap();
+    let members = collect_game_all_entities(game, level).unwrap();
     members
         .into_iter()
         .filter_map(|e| game.persist.uuids.get(&e.id()).copied())
@@ -62,6 +62,10 @@ fn snapshot(game: &mut Game<'_>) -> Vec<i32> {
 #[test]
 #[ignore = "daily"]
 fn chunk_loaded_families_keep_vanilla_lookup_and_save_order() {
+    run_chunk_loaded_families_keep_vanilla_lookup_and_save_order();
+}
+
+pub(in crate::game) fn run_chunk_loaded_families_keep_vanilla_lookup_and_save_order() {
     with_game(|game| {
         let a = (0, 0);
         let b = (1, 0);
@@ -162,8 +166,11 @@ fn chunk_loaded_families_keep_vanilla_lookup_and_save_order() {
         let tnt = tnt.unwrap();
         tnt.position.y = -20.0;
         // Its movement boundary reports the crossing as it happens.
-        let tnt = tnt.id;
-        game.resident_entities.table.get_mut().entered_section(tnt);
+        let (tnt, at) = (tnt.id, tnt.position.components());
+        game.resident_entities
+            .table
+            .get_mut()
+            .entered_section(tnt, at);
         lookup.push(snapshot(game));
         let mut chunks = game.entity_chunks(&HashSet::from([a, b]), false);
         chunks.sort_by_key(|(key, _)| *key);
@@ -194,6 +201,11 @@ fn chunk_loaded_families_keep_vanilla_lookup_and_save_order() {
 #[test]
 #[ignore = "daily"]
 fn a_crossing_without_a_listener_saves_after_the_entity_already_in_the_section() {
+    run_a_crossing_without_a_listener_saves_after_the_entity_already_in_the_section();
+}
+
+pub(in crate::game) fn run_a_crossing_without_a_listener_saves_after_the_entity_already_in_the_section()
+ {
     with_game(|game| {
         assert!(!mod_api::__private::listened(
             mod_api::HookId::EntityEnteringSection

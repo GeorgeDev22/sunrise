@@ -68,7 +68,12 @@ impl Game<'_> {
         if !level_event_data_ok(id, data, self.res.facts().states.len()) {
             return false;
         }
-        self.level_event_at(id, pos, data);
+        self.emit_level_effect(super::journal_level_write::PendingWrite::Event {
+            level: super::Dim::from_id(level.dimension_id()),
+            id,
+            pos,
+            data,
+        });
         true
     }
     /// Plays the break effect of `state` at `pos` (`Level.levelEvent(2001, pos,
@@ -97,7 +102,12 @@ impl Game<'_> {
         if !level_event_data_ok(id, data, self.res.facts().states.len()) {
             return false;
         }
-        self.global_level_event(id, pos, data);
+        self.emit_level_effect(super::journal_level_write::PendingWrite::GlobalEvent {
+            level: super::Dim::from_id(level.dimension_id()),
+            id,
+            pos,
+            data,
+        });
         true
     }
     /// Sends game event `event` (`minecraft:block_change`...) from `at`, as

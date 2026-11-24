@@ -1388,7 +1388,7 @@ fn rewrite(
             open,
             open,
             format!(
-                " if let ::std::option::Option::Some(__fnr) = {call} {{ return __fnr({}); }}{rebind}",
+                " if let ::std::option::Option::Some(__fnr) = {call} {{ ::core::hint::cold_path(); return __fnr({}); }}{rebind}",
                 arguments.join(", ")
             ),
         ));
@@ -1546,7 +1546,7 @@ mod tests {
         );
         assert!(
             out.contains(
-                "fn next(&mut self, __fnr_p1: (u32, u32), mut c: u8, __fnr_p3: bool) -> u32 { if let ::std::option::Option::Some(__fnr) = Self::__fnr_read_slot_0() { return __fnr(self, __fnr_p1, c, __fnr_p3); } let (a, b) = __fnr_p1;\n"
+                "fn next(&mut self, __fnr_p1: (u32, u32), mut c: u8, __fnr_p3: bool) -> u32 { if let ::std::option::Option::Some(__fnr) = Self::__fnr_read_slot_0() { ::core::hint::cold_path(); return __fnr(self, __fnr_p1, c, __fnr_p3); } let (a, b) = __fnr_p1;\n"
             ),
             "{out}"
         );
@@ -1707,7 +1707,7 @@ mod tests {
         assert!(out.contains("crate :: __REPLACE [7usize]"), "{out}");
         assert!(out.contains("crate :: __REPLACE [8usize]"), "{out}");
         assert!(
-            out.contains("{ if let ::std::option::Option::Some(__fnr) = __fnr_read_slot_8() { return __fnr(); } __fnr_read_slot_7().is_some() }"),
+            out.contains("{ if let ::std::option::Option::Some(__fnr) = __fnr_read_slot_8() { ::core::hint::cold_path(); return __fnr(); } __fnr_read_slot_7().is_some() }"),
             "{out}"
         );
         syn::parse_file(&out).unwrap();
@@ -1766,7 +1766,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            out.contains("{ if let ::std::option::Option::Some(__fnr) = Self::__fnr_read_slot_0() { return __fnr(self, mob); } true }"),
+            out.contains("{ if let ::std::option::Option::Some(__fnr) = Self::__fnr_read_slot_0() { ::core::hint::cold_path(); return __fnr(self, mob); } true }"),
             "{out}"
         );
         let staged = syn::parse_file(&out).unwrap();

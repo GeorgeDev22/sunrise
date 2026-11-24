@@ -11,7 +11,7 @@ The launcher keeps these managed caches under its data folder:
   download left in it.
 - `native/sdk/`: each build's small SDK files (`sdk.json`, `surface.json`, `build-data/`) and the
   build id of each release seen; kept, so a mod's fit is told offline. What the published releases keep is in
-  [Retention](../../reference/sdk/07-retention.md).
+  [Retention](../../reference/sdk/01-release.md#retention).
 - `native/source/`: pinned source used to copy functions for mixins.
 - `native/tools/`: pinned horizon-mixins executables.
 - `native/prebuilt-build/`: mod, registry dependency, patch-library and linking outputs.

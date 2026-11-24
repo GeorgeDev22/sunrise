@@ -26,7 +26,6 @@ use sunrise_client::{
 };
 use sunrise_core::{position::BlockPos, random::RandomSource};
 use sunrise_world::{level::Ticks, registry::BlockStateId};
-use winit::keyboard::KeyCode;
 
 thread_local! {
     /// Level and game events recorded while a fixture case runs.
@@ -674,10 +673,9 @@ impl Game<'_> {
         self.player = Some(player);
         self.yaw = op["yaw"].as_f64().unwrap_or(0.0) as f32;
         self.pitch = 90.0;
-        self.keys.clear();
-        if op["sneaking"].as_bool().unwrap_or(false) {
-            self.keys.insert(KeyCode::ShiftLeft);
-        }
+        self.clear_device_keys();
+        // The oracle supplies the acting player's logical sneak state for each click.
+        self.set_mapping_held("key.sneak", op["sneaking"].as_bool().unwrap_or(false));
         self.using = None;
         // The oracle's player wears nothing: no armor left on from an earlier case.
         self.armor = Default::default();
@@ -856,7 +854,13 @@ impl Game<'_> {
                     .ok_or("the target is gone")?;
                 let kind = self.mobs[index].kind.id.clone();
                 let bonus = self.smash_damage_bonus(&kind);
-                let hurt = self.hurt_by_player(index, base + bonus, source);
+                let join = self.mobs[index].join;
+                let (hurt, _) = self.hurt_by_player(index, base + bonus, source);
+                let index = self
+                    .mob_index
+                    .find(&self.mobs, id)
+                    .filter(|&i| self.mobs[i].join == join && !self.mobs[i].removed)
+                    .ok_or("the target is gone")?;
                 // The hurt sound the mob raised, where it stands.
                 for event in std::mem::take(&mut self.mobs[index].outbox) {
                     if let sunrise_client::mobs::MobEvent::Sound(s, at, volume, pitch) = event {
@@ -1134,7 +1138,7 @@ impl Game<'_> {
         )?);
         self.yaw = 0.0;
         self.pitch = 90.0;
-        self.keys.clear();
+        self.clear_device_keys();
         self.inventory[self.selected] = stack.clone();
         self.offhand = None;
         let state = self.world.block(pos.x, pos.y, pos.z);
@@ -1226,7 +1230,7 @@ impl Game<'_> {
         if kind == "minecraft:armor_stand" {
             let mut stand = sunrise_client::entities::ArmorStand::new(id, at, yaw);
             stand.marker = e["marker"].as_bool().unwrap_or(false);
-            stand.on_ground = e["ground"].as_bool().unwrap_or(false);
+            stand.ground.on_ground = e["ground"].as_bool().unwrap_or(false);
             stand.show_arms = e["arms"].as_bool().unwrap_or(false);
             stand.disabled_slots = e["disabled"].as_i64().unwrap_or(0) as i32;
             if let Some(last_hit) = e["last_hit"].as_i64() {
@@ -1275,7 +1279,7 @@ impl Game<'_> {
         if flag("loot") {
             mob.extra.pick_up_loot = true;
         }
-        mob.on_ground = flag("ground");
+        mob.ground.on_ground = flag("ground");
         if let Some(health) = e["health"].as_f64() {
             mob.attrs.max_health = health as f32;
             mob.health = health as f32;

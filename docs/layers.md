@@ -79,9 +79,9 @@ Vanilla Minecraft: Java Edition 26.3, and nothing else.
 ### Portable crates
 
 `sunrise-core`, `sunrise-world`, `sunrise-protocol`, `sunrise-items`, `sunrise-command`, `sunrise-client-core`
-and `sunrise-assets` hold vanilla's rules and data with no desktop in them. `sunrise-threads` and
-`sunrise-guest-stack` provide the desktop-free execution plumbing: worker scheduling, sampling and stack
-reservations, and `sunrise-java-properties` reads and writes Java-properties files with the standard library alone. These portable crates have no window, GPU, sound, gamepad or clipboard library, no HTTP client,
+and `sunrise-assets` hold vanilla's rules and data with no desktop in them. `sunrise-threads` provides worker
+scheduling and sampling, and `sunrise-java-properties` reads and writes Java-properties files with the standard
+library alone. These portable crates have no window, GPU, sound, gamepad or clipboard library, no HTTP client,
 and no engine crate outside the portable list. The platform sits on the desktop engine
 (`wgpu`, `winit`, `cpal`), which a handheld console or a browser can't run, so a port there builds on these crates
 instead. They stay that way: the layer check fails when one takes `winit`, `wgpu`, `cpal`, `gilrs`, `arboard` or
@@ -268,6 +268,12 @@ The seam's points 1-3 above, as they work today (layer plan M5).
 | `sunrise-game` | platform | The game for an executable to start: `sunrise_game::main()`, the allocator, the mod API mark. The platform's own parts register here as they leave the engine (M6) |
 | `sunrise-official` | Sunrise | The official executable: `register()` adds the Sunrise crates' hooks, then it runs `sunrise_game::main()` |
 
+If you embed the game in your own executable, remove calls to and imports of the retired
+`sunrise_game::prepare_main_stack`, `sunrise_platform::prepare_main_stack` and
+`sunrise_mod_host::prepare_main_stack` re-exports. Register your hooks as before, then call
+`sunrise_game::main()`. On Windows, reserve the main stack at your executable's link as the
+[game build does](release-flow.md#builds).
+
 A Sunrise crate that runs in the game:
 
 1. depends on `sunrise-platform` (never on an engine crate) and implements `Hooks` on a `static`, only the methods it
@@ -302,7 +308,7 @@ context for HUD and chat overlays, a settings page) comes with that type's platf
 that belongs to one subsystem (an input source, the compositor) lives in the engine crate that owns it, with the
 same shape: registered before the game runs, read-only after.
 
-**What players get.** The release builds (`game-build.yml`, so the nightly and the release; `tools/ci/build-musl.sh`)
+**What players get.** The release builds (`game-build.yml`, so the nightly and the release)
 build `sunrise-official` and ship it as `sunrise-client`, the name the launcher and players know. The fixed client
 executable in the prebuilt SDK links the same official layer and calls `sunrise_official::register()` before starting
 with native mods. The dedicated server build (`sunrise-engine`)
@@ -672,7 +678,8 @@ Rust and finds every host. It skips tests, placeholders (`example.com`, `*.test`
 
 - `homes`: the list file;
 - `vanilla`: vanilla's endpoints, allowed anywhere;
-- `not_addresses`: strings that look like hosts but are not contacted, each with its reason;
+- `not_addresses`: strings that look like hosts but are not contacted, each with its reason. A `path host`
+  entry applies only in that file;
 - `allowed`: today's addresses outside the list file, as "path host".
 
 `allowed` only shrinks. A branch may move an entry with its code, but it may not add a host or grow the list.
@@ -685,7 +692,7 @@ Vanilla's endpoints (engine, the same as Java Edition):
 | `textures.minecraft.net` | skins and capes | `skins.rs` |
 | `pc.realms.minecraft.net`, `java.frontend.realms.minecraft-services.net` | Realms | `realms/client.rs` |
 | `aka.ms/…` | vanilla's help links (accessibility, moderation, EULA, Realms terms), opened only on a click | `game/options.rs`, `game/screens.rs`, `ban_notice.rs`, `realms.rs`, `eula.rs` |
-| `libraries.minecraft.net`, `piston-meta.mojang.com`, `resources.download.minecraft.net` | the vanilla jars, libraries and assets | `sunrise-prepare`, launcher |
+| `libraries.minecraft.net`, `piston-meta.mojang.com`, `launchermeta.mojang.com`, `piston-data.mojang.com`, `resources.download.minecraft.net` | vanilla jars, the Java runtime, libraries and assets | `sunrise-prepare`, launcher |
 
 Sunrise's own and third-party addresses (Sunrise layer):
 

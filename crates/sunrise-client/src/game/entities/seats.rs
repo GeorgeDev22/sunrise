@@ -49,7 +49,7 @@ impl Seat {
         sunrise_client::mobs::living::teleports::snap_to(mob, self.passenger_position(offset));
         mob.velocity = Vec3::ZERO;
         mob.fall_distance = 0.0;
-        mob.on_ground = false;
+        mob.ground.on_ground = false;
         mob.extra.passenger = true;
         mob.ai.nav.stop();
     }
@@ -94,10 +94,9 @@ pub(in crate::game) fn could_accept_passenger(kind: &str) -> bool {
 }
 
 /// `EntityType.canSerialize`, which `Entity.startRiding` requires of a vehicle on the server and which a
-/// save requires of a root: false for the types built with `noSave()`, of which `Game::others` can hold
-/// the leash knot (`EntityTypes.java:614-618`).
+/// save requires of a root: false for the types built with `noSave()`.
 pub(in crate::game) fn saves_with_chunk(kind: &str) -> bool {
-    !matches!(kind, "minecraft:leash_knot")
+    !matches!(kind, "minecraft:leash_knot" | "minecraft:lightning_bolt")
 }
 
 impl Game<'_> {

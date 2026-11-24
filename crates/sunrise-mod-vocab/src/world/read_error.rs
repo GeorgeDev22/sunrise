@@ -11,11 +11,6 @@ pub enum LevelReadError {
     Unavailable,
 }
 
-impl crate::AccessRefusal for LevelReadError {
-    fn unavailable() -> Self {
-        Self::Unavailable
-    }
-}
 impl crate::NoBackend for LevelReadError {
     fn no_backend() -> Self {
         Self::Unavailable

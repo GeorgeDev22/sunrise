@@ -7,7 +7,7 @@ use crate::text::TextFormError;
 #[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
 pub enum GuiPaintError {
-    /// A `Text` op's text could not cross to the game (deeper than 512 nodes, malformed).
+    /// A `Text` op's text could not cross to the game (unrepresentable metadata).
     Text(TextFormError),
     /// A `GuiDraw::Item` names a slot that is not a hotbar slot (0-8) or the off hand (40).
     ItemSlot {

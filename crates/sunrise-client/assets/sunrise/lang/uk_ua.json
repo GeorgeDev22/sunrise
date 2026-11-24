@@ -393,8 +393,6 @@
   "sunrise.extras.chat_animation.tooltip": "Новий рядок чату виїжджає зліва, поступово з’являючись, замість того щоб з’явитися одразу.",
   "sunrise.extras.chat_indicator": "Позначка повідомлення",
   "sunrise.extras.chat_indicator.tooltip": "Кольорова смужка ліворуч від рядка чату.",
-  "sunrise.extras.discord_presence": "Discord Rich Presence",
-  "sunrise.extras.discord_presence.tooltip": "Показує «Грає в Sunrise» у вашому профілі Discord, поки Discord запущено: меню, одиночна чи мережева гра, вимір і час гри. Ніколи не назву світу чи адресу сервера.",
   "sunrise.extras.dynamic_lights": "Динамічне світло",
   "sunrise.extras.dynamic_lights.tooltip": "Смолоскипи та інші джерела світла, які тримають у руках, викинуті чи палаючі, освітлюють блоки навколо.",
   "sunrise.extras.fullbright": "Повна яскравість",

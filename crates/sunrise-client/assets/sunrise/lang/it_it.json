@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Una nuova linea di chat scorre da sinistra mentre si dissolve, invece di apparire intera.",
   "sunrise.extras.chat_indicator": "Indicatore di messaggio",
   "sunrise.extras.chat_indicator.tooltip": "La barra colorata a sinistra di una chat line.",
-  "sunrise.extras.discord_presence": "Presenza ricca di discordia",
-  "sunrise.extras.discord_presence.tooltip": "Mostra Playing Sunrise sul tuo profilo Discord mentre Discord è in esecuzione: menu, giocatore singolo o multiplayer, la dimensione e il tempo giocato. Mai il nome di un mondo o l'indirizzo di un server.",
   "sunrise.extras.dynamic_lights": "Luci dinamiche",
   "sunrise.extras.dynamic_lights.tooltip": "Torce e altre fonti di luce tenute, lasciate cadere o in fiamme illuminano i blocchi attorno a loro.",
   "sunrise.extras.fullbright": "Piena luminosità",

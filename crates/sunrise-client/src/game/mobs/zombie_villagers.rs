@@ -277,7 +277,7 @@ fn carry_over(from: &Mob, to: &mut Mob) {
     to.previous_head_pitch = from.head_pitch;
     to.fall_distance = from.fall_distance;
     to.hurt_time = from.hurt_time;
-    to.on_ground = from.on_ground;
+    to.ground.on_ground = from.ground.on_ground;
     to.fire_ticks = from.fire_ticks;
     to.persistent = from.persistent;
     to.custom_name = from.custom_name.clone();
@@ -426,6 +426,7 @@ mod tests {
         use sunrise_client::mobs::{Anim, Brain, MobType, Part};
         use sunrise_core::geometry::Vec3;
         let kind = MobType {
+            type_key: Default::default(),
             shadow: None,
             id: name.into(),
             species,
@@ -469,6 +470,7 @@ mod tests {
                 pose: [0.0; 9],
                 polygons: Vec::new(),
                 children: Vec::new(),
+                layer: None,
             }),
             layers: Default::default(),
             texture: String::new(),

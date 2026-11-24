@@ -482,7 +482,7 @@ pub trait TrialSpawnerExt: Sized {
     ) -> Option<[f64; 3]>;
     /// `TrialSpawner.tickServer`: the next state of the block.
     #[allow(clippy::too_many_arguments)]
-    fn server_tick<L: TrialSpawnerLevel, R: RandomSource>(
+    fn server_tick<L: TrialSpawnerLevel, R: RandomSource + Clone>(
         &mut self,
         l: &L,
         random: &mut R,
@@ -495,7 +495,7 @@ pub trait TrialSpawnerExt: Sized {
     ) -> TrialState;
     /// `TrialSpawnerState.tickAndGetNext`.
     #[allow(clippy::too_many_arguments)]
-    fn tick_and_get_next<L: TrialSpawnerLevel, R: RandomSource>(
+    fn tick_and_get_next<L: TrialSpawnerLevel, R: RandomSource + Clone>(
         &mut self,
         l: &L,
         random: &mut R,
@@ -506,7 +506,7 @@ pub trait TrialSpawnerExt: Sized {
         events: &mut Vec<TrialEvent>,
     ) -> TrialState;
     /// `TrialSpawner.spawnMob`: the UUID of the mob added, if one was.
-    fn spawn_mob<L: TrialSpawnerLevel, R: RandomSource>(
+    fn spawn_mob<L: TrialSpawnerLevel, R: RandomSource + Clone>(
         &mut self,
         l: &L,
         random: &mut R,
@@ -907,7 +907,7 @@ impl TrialSpawnerExt for TrialSpawner {
             .then_some(down)
     }
     #[allow(clippy::too_many_arguments)]
-    fn server_tick<L: TrialSpawnerLevel, R: RandomSource>(
+    fn server_tick<L: TrialSpawnerLevel, R: RandomSource + Clone>(
         &mut self,
         l: &L,
         random: &mut R,
@@ -934,7 +934,7 @@ impl TrialSpawnerExt for TrialSpawner {
         self.tick_and_get_next(l, random, pos, state, spawn, eject, events)
     }
     #[allow(clippy::too_many_arguments)]
-    fn tick_and_get_next<L: TrialSpawnerLevel, R: RandomSource>(
+    fn tick_and_get_next<L: TrialSpawnerLevel, R: RandomSource + Clone>(
         &mut self,
         l: &L,
         random: &mut R,
@@ -951,7 +951,7 @@ impl TrialSpawnerExt for TrialSpawner {
                 // getOrCreateDisplayEntity: made once, from the next data's id.
                 if !self.has_display {
                     let id = self.next_or_create(random, events).id();
-                    self.has_display = id.is_some_and(|id| l.entity_exists(&id));
+                    self.has_display = id.is_some_and(|id| l.spawner_type(&id).is_some());
                 }
                 if self.has_display {
                     S::WaitingForPlayers
@@ -1067,7 +1067,7 @@ impl TrialSpawnerExt for TrialSpawner {
             }
         }
     }
-    fn spawn_mob<L: TrialSpawnerLevel, R: RandomSource>(
+    fn spawn_mob<L: TrialSpawnerLevel, R: RandomSource + Clone>(
         &mut self,
         l: &L,
         random: &mut R,
@@ -1077,7 +1077,8 @@ impl TrialSpawnerExt for TrialSpawner {
     ) -> Option<Uuid> {
         let data = self.next_or_create(random, events).clone();
         // EntityType.by: an unknown type spawns nothing.
-        let id = data.id().filter(|id| l.entity_exists(id))?;
+        let id = data.id()?;
+        let kind = l.spawner_type(&id)?;
         let at = match spawner::read_pos(data.entity.get(&JavaString::from("Pos"))) {
             Some(p) => p,
             None => {
@@ -1090,15 +1091,17 @@ impl TrialSpawnerExt for TrialSpawner {
                 [x, y, z]
             }
         };
-        // Entity types Sunrise cannot create spawn nothing.
-        let kind = l.mob_type(&id)?;
-        let (species, width, height) = (kind.species, kind.width as f32, kind.height as f32);
-        let spawn_box = spawn_selection::spawn_aabb(species, at[0], at[1], at[2], width, height);
-        if !l.no_collision(spawn_box) || !in_line_of_sight(l, center(pos), at) {
+        if !l.no_collision(kind.spawn_aabb(at)) || !in_line_of_sight(l, center(pos), at) {
             return None;
         }
         let block = at.map(|v| v.floor() as i32);
-        if !spawn_rules::check_spawn_rules(kind, l, Reason::TrialSpawner, random, block) {
+        if !spawn_rules::check_spawn_rules(
+            kind.placement_type(&id),
+            l,
+            Reason::TrialSpawner,
+            random,
+            block,
+        ) {
             return None;
         }
         if let Some(rules) = data.custom_spawn_rules
@@ -1106,6 +1109,9 @@ impl TrialSpawnerExt for TrialSpawner {
         {
             return None;
         }
+        // loadEntityRecursive: entity types Sunrise cannot create spawn nothing.
+        let mob = l.mob_type(&id)?;
+        let species = mob.species;
         let yaw = random.next_float() * 360.0;
         let placed = spawner::entity_position(species, at);
         let own = placed.map(|v| v.floor() as i32);
@@ -1114,23 +1120,15 @@ impl TrialSpawnerExt for TrialSpawner {
             placed[0],
             placed[1],
             placed[2],
-            width * scale,
-            height * scale,
+            mob.width as f32 * scale,
+            mob.height as f32 * scale,
         );
         let pending = spawn_selection::Pending {
             yaw,
             fresh: data.unconfigured(),
         };
         if !spawn_selection::position_ok(l, &id, Reason::TrialSpawner, placed, pending, || {
-            spawn_selection::spawn_obstruction(
-                species,
-                l,
-                bounds,
-                Some(&[]),
-                own[0],
-                own[1],
-                own[2],
-            )
+            spawn_selection::spawn_obstruction(species, l, bounds, true, own[0], own[1], own[2])
         }) {
             return None;
         }

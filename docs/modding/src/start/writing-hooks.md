@@ -55,7 +55,7 @@ Read the hook's signature. The host parameter tells you which game operations yo
 | `HostSide<'_>` | Match on `HostSide::Server(host)` and `HostSide::Client(host)`; each branch gets that side's mutable host. Do server-only work in the server branch. |
 | `LevelSide<'_>` | Match on `LevelSide::Server(level)` and `LevelSide::Client(level)`. These are level-only hosts, with no `open_menu` or commands. |
 
-In the World phase, a mutable `ServerHost` can open a chest-style menu
+With a world open, a mutable `ServerHost` can open a chest-style menu
 through `MenusServerHost::open_menu` (`host.open_menu(…)`).
 `ServicesServerHost::commands` gives you the `Commands` service: call
 `host.commands().run_command(line)` to execute a server command, or
@@ -81,6 +81,11 @@ descriptions, not Rust signatures. For the exact signature, go to the matching
 method on `mod_api::Hooks` in your editor, using the pinned SDK under
 [`.sunrise/sdk/api/`](../reference/sdk/03-in-a-project.md#sunrisesdk).
 For a scoped hook, look at the relevant Part trait instead.
+
+The engine declares the parameters of each hook in vocabulary types in
+`crates/sunrise-mod-vocab/src/hooks/`. The listener method and event come from that declaration.
+When adding a hook to the engine, give its game function the generated `fire::<Name>Call`
+carrier rather than copying the parameter list. See [Adding a hook](https://github.com/sunrise-org/sunrise/blob/main/docs/mod-api/adding-a-hook.md).
 
 ## Order between mods
 

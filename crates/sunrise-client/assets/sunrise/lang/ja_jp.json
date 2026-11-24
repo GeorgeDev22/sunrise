@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "新しいチャット ラインは全体として表示されるのではなく、フェードインしながら左側からスライドして表示されます。",
   "sunrise.extras.chat_indicator": "メッセージインジケーター",
   "sunrise.extras.chat_indicator.tooltip": "チャットラインの左側にある色付きのバー。",
-  "sunrise.extras.discord_presence": "Discord のリッチなプレゼンス",
-  "sunrise.extras.discord_presence.tooltip": "Discord の実行中に、Discord プロフィールに Playing Sunrise が表示されます: メニュー、シングル プレーヤーまたはマルチプレーヤー、ディメンション、および再生時間が表示されます。決して世界の名前やサーバーのアドレスではありません。",
   "sunrise.extras.dynamic_lights": "ダイナミックライト",
   "sunrise.extras.dynamic_lights.tooltip": "トーチやその他の光源を持ったり、落としたり、火をつけたりすると、周囲のブロックが点灯します。",
   "sunrise.extras.fullbright": "フルブライト",

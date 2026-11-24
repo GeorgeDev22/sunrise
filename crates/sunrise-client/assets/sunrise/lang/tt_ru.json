@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Яңа чат сызыгы сулдан кереп китә, ул бөтенләй күренми.",
   "sunrise.extras.chat_indicator": "Хәбәр күрсәткече",
   "sunrise.extras.chat_indicator.tooltip": "Чат сызыгының сул ягында.",
-  "sunrise.extras.discord_presence": "Discord Бай булу",
-  "sunrise.extras.discord_presence.tooltip": "Discord эшләгәндә Discord профилегездә Sunrise уйнауны күрсәтә: менюлар, бер уенчы яки мультиплеер, үлчәм һәм уйнаган вакыт. Беркайчан да дөнья исеме яки сервер адресы.",
   "sunrise.extras.dynamic_lights": "Динамик утлар",
   "sunrise.extras.dynamic_lights.tooltip": "Факеллар һәм башка яктылык чыганаклары тирә-юньдәге блокларны тоттылар, ташладылар яки утка тоттылар.",
   "sunrise.extras.fullbright": "Фолбрайт",

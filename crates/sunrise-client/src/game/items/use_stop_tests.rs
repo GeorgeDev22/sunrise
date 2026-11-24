@@ -294,7 +294,7 @@ fn nether_portal_stops_use_in_target_level() {
                     1.8,
                     false,
                 );
-                game.start_server_trip(1, super::Dim::Nether, Some(plan), false);
+                game.start_server_trip(1, super::Dim::Nether, Some(plan));
                 let player = &game.lan.as_ref().unwrap().hub.guests[0];
                 assert_eq!(player.dimension, "minecraft:the_nether");
                 assert_eq!(player.position, [1.5, 70.0, 1.5]);

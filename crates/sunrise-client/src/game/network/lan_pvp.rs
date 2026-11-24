@@ -4,7 +4,10 @@
 //! attack (blocking, armour, knockback), when the `pvp` game rule allows it
 //! (`ServerPlayer.canHarmPlayer`, `isPvpAllowed`). A player's arrow on
 //! another player lands the same way.
-use super::{Game, lan_mobs::guest_bounds, mace::Spared};
+use super::{
+    Game, chat::PLAYER_NAME, commands::Target, lan_actions::CombatPlayer, lan_mobs::guest_bounds,
+    mace::Spared,
+};
 use sunrise_client::enchant::EffectContext;
 
 use sunrise_client::{
@@ -279,18 +282,49 @@ impl Game<'_> {
         }
     }
 
-    /// `ServerPlayer.canHarmPlayer`: the `pvp` game rule is on, and the
-    /// victim's team lets the attacker's hurt it (`Player.canHarmPlayer`:
-    /// allies only with friendly fire on).
+    /// `ServerPlayer.canHarmPlayer` of the players `attacker` and `victim` (entity ids) on
+    /// their teams: the `pvp` game rule as it stands, handed to
+    /// [`can_harm_player`](sunrise_client::health::can_harm_player), which decides.
     pub(in crate::game) fn player_may_harm(
         &self,
-        victim: Option<&sunrise_client_core::scoreboard::Team>,
-        attacker: Option<&sunrise_client_core::scoreboard::Team>,
+        attacker: i32,
+        victim: i32,
+        attacker_team: Option<&sunrise_client_core::scoreboard::Team>,
+        victim_team: Option<&sunrise_client_core::scoreboard::Team>,
     ) -> bool {
-        self.ui
-            .rules
-            .bool_at(sunrise_client::gamerules::vanilla::PVP)
-            && sunrise_client::scoreboard::teams_allow_damage(victim, attacker)
+        let answer = sunrise_client::health::can_harm_player(
+            attacker,
+            victim,
+            self.ui
+                .rules
+                .bool_at(sunrise_client::gamerules::vanilla::PVP),
+            attacker_team,
+            victim_team,
+        );
+        #[cfg(test)]
+        let answer = super::rule_replacements::harm(attacker, victim).unwrap_or(answer);
+        let _ = (attacker, victim);
+        answer
+    }
+
+    /// [`player_may_harm`](Self::player_may_harm) for a hit on the guest `victim` by the guest
+    /// `attacker` (connections), or by the player in place when none: a player's projectile or
+    /// trident, which the victim's hurt refuses when it answers false. A guest no longer here
+    /// is entity -1, on no team.
+    pub(in crate::game) fn guest_may_harm(&self, attacker: Option<u32>, victim: u32) -> bool {
+        let board = &self.score.board;
+        let guest = |conn: u32| {
+            self.lan
+                .as_ref()
+                .and_then(|host| host.hub.guest(conn))
+                .map_or((-1, None), |g| (g.entity_id, board.players_team(&g.name)))
+        };
+        let (attacker, attacker_team) = match attacker {
+            Some(conn) => guest(conn),
+            None => (self.own_entity_id(), self.player_team()),
+        };
+        let (victim, victim_team) = guest(victim);
+        self.player_may_harm(attacker, victim, attacker_team, victim_team)
     }
 
     /// A player's projectile on a player: the hit runs as the victim, whose
@@ -306,18 +340,12 @@ impl Game<'_> {
         let Hit::Entity { at, .. } = hit else {
             return Ok(());
         };
-        let Some(host) = self.lan.as_ref() else {
+        if self.lan.is_none() {
             return self.projectile_hit(p, hit);
+        }
+        let refused = match victim {
+            Victim::Guest(conn) => !self.guest_may_harm(p.guest, conn),
         };
-        let team_of = |game: &Self, name: &str| game.score.board.players_team(name).cloned();
-        let attacker = match p.guest {
-            Some(conn) => host.hub.guest(conn).and_then(|g| team_of(self, &g.name)),
-            None => self.player_team().cloned(),
-        };
-        let target = match victim {
-            Victim::Guest(conn) => host.hub.guest(conn).and_then(|g| team_of(self, &g.name)),
-        };
-        let refused = !self.player_may_harm(target.as_ref(), attacker.as_ref());
         let on_player = Hit::Entity {
             who: Who::Player,
             at,
@@ -344,6 +372,26 @@ impl Game<'_> {
         result.unwrap_or(Ok(()))
     }
 
+    /// `AbstractArrow.onHitEntity`: an arrow that hurt a player tells its owner, a player other
+    /// than the one hit, with `PLAY_ARROW_HIT_SOUND`, unless the arrow is silent.
+    pub(super) fn arrow_hit_sound_to_shooter(&self, p: &Projectile) {
+        let (Some(host), Some(shooter)) = (self.lan.as_ref(), p.guest) else {
+            return;
+        };
+        if self.lan_acting == Some(shooter) || self.entity_silent(p.id) {
+            return;
+        }
+        host.hub.send_to(
+            shooter,
+            &sunrise_protocol::packets::play::Clientbound::GameEvent(
+                sunrise_protocol::packets::play::GameEvent {
+                    event: sunrise_client::lan::hub::game_event::PLAY_ARROW_HIT_SOUND,
+                    param: 0.0,
+                },
+            ),
+        );
+    }
+
     pub(super) fn player_attacker(&self, conn: Option<u32>) -> Option<(u32, Text)> {
         match conn {
             Some(conn) => {
@@ -360,13 +408,30 @@ impl Game<'_> {
         let Some(host) = self.lan.as_ref() else {
             return false;
         };
-        let team = match victim {
-            Victim::Guest(conn) => host
-                .hub
+        // CombatTracker: the attacking player is the death message's killer.
+        // Without it the message is built with one argument and a template
+        // that names a killer ("%1$s was slain by %2$s") shows as written.
+        let attacker_note = s.attacker.and_then(|conn| {
+            host.hub
                 .guest(conn)
-                .and_then(|g| self.score.board.players_team(&g.name)),
+                .map(|a| (a.entity_id, self.player_text(&a.name, a.uuid)))
+        });
+        let attacker_id = self.player.as_ref().map_or(0, |p| p.entity_id);
+        let attacker_id = attacker_note.as_ref().map_or(attacker_id, |(id, _)| *id);
+        // The blow's attacker as `canHarmPlayer` asks it: the host with no attacking guest,
+        // and a guest no longer here as entity -1 (with the blow's own team), as
+        // `guest_may_harm` asks it.
+        let harm_attacker = match (s.attacker, &attacker_note) {
+            (Some(_), Some((id, _))) => *id,
+            (Some(_), None) => -1,
+            (None, _) => attacker_id,
         };
-        let harm = self.player_may_harm(team, s.team.as_ref());
+        let (victim_id, team) = match victim {
+            Victim::Guest(conn) => host.hub.guest(conn).map_or((-1, None), |g| {
+                (g.entity_id, self.score.board.players_team(&g.name))
+            }),
+        };
+        let harm = self.player_may_harm(harm_attacker, victim_id, s.team.as_ref(), team);
         if s.knockback_attack {
             self.audio.play(
                 "minecraft:entity.player.attack.knockback",
@@ -377,17 +442,8 @@ impl Game<'_> {
         }
         // Player.attack: the hurt (with its knockback away from the
         // attacker), then causeExtraKnockback along the attacker's yaw.
-        // CombatTracker: the attacking player is the death message's killer.
-        // Without it the message is built with one argument and a template
-        // that names a killer ("%1$s was slain by %2$s") shows as written.
-        let attacker_note = s.attacker.and_then(|conn| {
-            host.hub
-                .guest(conn)
-                .map(|a| (a.entity_id, self.player_text(&a.name, a.uuid)))
-        });
-        let attacker_id = self.player.as_ref().map_or(0, |p| p.entity_id);
         // Taken here, before the victim is swapped in, so the attacker's hands are found.
-        let attack = self.attack_of(attacker_note.as_ref().map_or(attacker_id, |(id, _)| *id));
+        let attack = self.attack_of(attacker_id);
         let land = |g: &mut Self| {
             g.with_attack(attack.clone(), |g| {
                 g.combat.player_attacker = Some((s.from, s.disable_blocking));
@@ -533,39 +589,38 @@ impl Game<'_> {
     /// score.
     pub(super) fn guest_award_kill_score(&mut self, victim: u32, at: [f64; 3]) {
         let Some(id) = self
-            .guest_combat
-            .get(&victim)
+            .guest_combat_record(victim)
             .and_then(|c| c.kill_credit(self.world.game_time))
         else {
             return;
         };
-        let name = self
-            .lan
-            .as_ref()
-            .and_then(|host| host.hub.guest(victim))
-            .map(|g| g.name.clone());
-        let in_place = self.lan_acting.is_none()
-            && self
-                .player
+        // `awardKillScore` excludes the victim, even when that body is in place.
+        if let Some(killer) = self.combat_player(id)
+            && let Some(name) = self
+                .lan
                 .as_ref()
-                .is_some_and(|p| p.entity_id as u32 == id);
-        let guest = self.lan.as_ref().and_then(|host| {
-            host.hub
-                .guests
-                .iter()
-                // `awardKillScore`'s `victim != this`: a player's own blow that
-                // killed them credits nothing.
-                .find(|g| g.entity_id as u32 == id && g.conn != victim)
-                .map(|g| g.conn)
-        });
-        if in_place {
-            self.award_custom_stat("player_kills", 1);
-            self.score_player_killed_named(name, true);
-        } else if let Some(kconn) = guest {
-            self.as_guest(kconn, |g| {
-                g.award_custom_stat("player_kills", 1);
-                g.score_player_killed_named(name, true);
-            });
+                .and_then(|host| host.hub.guest(victim))
+                .filter(|g| g.entity_id as u32 != id)
+                .map(|g| g.name.clone())
+        {
+            match killer {
+                CombatPlayer::InPlace => {
+                    self.award_custom_stat("player_kills", 1);
+                    self.score_player_killed_named(Some(name), true);
+                }
+                CombatPlayer::Displaced(depth, _) => {
+                    let frame = &self.lan_displaced_players[depth];
+                    let killer = frame.name.as_deref().unwrap_or(PLAYER_NAME).to_owned();
+                    self.award_displaced_stat(depth, "player_kills", 1);
+                    self.score_player_kill_for(&killer, Some(&name), true);
+                }
+                CombatPlayer::Parked(guest) => {
+                    self.as_guest(guest.conn, |g| {
+                        g.award_custom_stat("player_kills", 1);
+                        g.score_player_killed_named(Some(name), true);
+                    });
+                }
+            }
         }
         self.create_wither_rose_by(at, Some(id));
     }
@@ -660,7 +715,14 @@ impl Game<'_> {
             }
         }
         let (xd, zd) = sweep.knockback;
-        let attacker = self.player_attacker(sweep.attacker);
+        // The sweep uses the attacking player's source, even for a local body.
+        let attacker = match sweep.attacker {
+            Some(conn) => self.player_attacker(Some(conn)),
+            None => self
+                .player
+                .as_ref()
+                .map(|p| (p.entity_id as u32, self.target_name(Target::Player))),
+        };
         let attacker_id = self.player.as_ref().map_or(0, |p| p.entity_id);
         let attack = self.attack_of(attacker.as_ref().map_or(attacker_id, |(id, _)| *id as i32));
         let land = |g: &mut Self| {
@@ -699,13 +761,11 @@ impl Game<'_> {
                 Vec::new()
             })
         };
+        let attacker_id = attacker.as_ref().map_or(attacker_id, |(id, _)| *id as i32);
         for (victim, id, team) in victims {
             if sweep.skip == Some(id)
                 || sunrise_client::scoreboard::teams_allied(team.as_ref(), sweep.team.as_ref())
-                || !self
-                    .ui
-                    .rules
-                    .bool_at(sunrise_client::gamerules::vanilla::PVP)
+                || !self.player_may_harm(attacker_id, id, sweep.team.as_ref(), team.as_ref())
             {
                 continue;
             }
@@ -733,5 +793,394 @@ impl Game<'_> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(in crate::game) mod arrow_hit_sound_tests {
+    use super::{Victim, Who};
+    use std::fmt::Write as _;
+    use std::path::PathBuf;
+    use std::sync::{Arc, atomic::AtomicUsize, mpsc};
+    use sunrise_client::{
+        command::args::GameMode,
+        gamerules::Value,
+        lan::{Out, PlayerSender},
+        motion::PlayerMotion,
+        projectiles::{Hit, Projectile, ProjectileKind},
+    };
+    use sunrise_core::geometry::Vec3;
+    use sunrise_protocol::packets::play::Clientbound;
+
+    fn load_witness() -> Witness {
+        let value = std::env::var_os("SUNRISE_ARROW_HIT_DING_WITNESS").unwrap_or_else(|| {
+            panic!(
+                "SUNRISE_ARROW_HIT_DING_WITNESS is unset; run tools/test_arrow_hit_ding_parity.py, which records the witness"
+            )
+        });
+        let raw_path = PathBuf::from(value);
+        let path = if raw_path.is_dir() {
+            raw_path.join("arrow_hit_ding.json")
+        } else {
+            raw_path
+        };
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "failed to read witness {} (record via tools/test_arrow_hit_ding_parity.py): {e}",
+                path.display()
+            )
+        });
+        serde_json::from_str(&raw).expect("valid 26.3 arrow-hit witness JSON")
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Witness {
+        minecraft_version: String,
+        cases: Vec<WitnessCase>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct WitnessCase {
+        name: String,
+        shooter: String,
+        victim: String,
+        silent: bool,
+        pvp: bool,
+        victim_mode: String,
+        victim_hurt: bool,
+        victim_health_before_bits: String,
+        victim_health_after_bits: String,
+        alice_game_events: Vec<WireGameEvent>,
+        bob_game_events: Vec<WireGameEvent>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+    struct WireGameEvent {
+        event: u8,
+        param_bits: String,
+        payload_hex: String,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CaseOutcome {
+        victim_hurt: bool,
+        victim_health_before_bits: String,
+        victim_health_after_bits: String,
+        alice_game_events: Vec<WireGameEvent>,
+        bob_game_events: Vec<WireGameEvent>,
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for &b in bytes {
+            write!(out, "{b:02x}").unwrap();
+        }
+        out
+    }
+
+    fn float_bits_hex(value: f32) -> String {
+        format!("{:08x}", value.to_bits())
+    }
+
+    fn player_conn(name: &str) -> u32 {
+        match name {
+            "Alice" => 12,
+            "Bob" => 13,
+            other => panic!("unexpected witness player: {other}"),
+        }
+    }
+
+    /// Wire `ClientboundGameEventPacket` records sent to a guest connection.
+    fn game_events(receiver: &mpsc::Receiver<Out>) -> Vec<WireGameEvent> {
+        let mut events = Vec::new();
+        for sent in receiver.try_iter() {
+            let bodies = match sent {
+                Out::Packet(p) => vec![p],
+                Out::Packets(p) => p,
+                Out::Disconnect(_) => panic!("unexpected disconnect"),
+            };
+            for body in bodies {
+                let mut reader = sunrise_protocol::buf::Reader::new(&body);
+                let id = reader.varint().unwrap();
+                if let Ok(Clientbound::GameEvent(e)) = Clientbound::decode(id, reader.rest()) {
+                    events.push(WireGameEvent {
+                        event: e.event,
+                        param_bits: float_bits_hex(e.param),
+                        payload_hex: hex(&body),
+                    });
+                }
+            }
+        }
+        events
+    }
+
+    /// Run one recorded vanilla 26.3 arrow-hit case between guests 12 (Alice) and 13 (Bob).
+    fn run_case(case: &WitnessCase) -> CaseOutcome {
+        let shooter = player_conn(&case.shooter);
+        let victim = player_conn(&case.victim);
+        let victim_mode = match case.victim_mode.as_str() {
+            "survival" => GameMode::Survival,
+            "creative" => GameMode::Creative,
+            other => panic!("unexpected witness victim_mode: {other}"),
+        };
+        let mut outcome = None;
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            let mut receivers = Vec::new();
+            for conn in [12, 13] {
+                let (tx, rx) = mpsc::channel();
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .update_guest(conn, |g| {
+                        g.sender = PlayerSender::new(tx, Arc::new(AtomicUsize::new(0)));
+                    })
+                    .unwrap();
+                receivers.push(rx);
+            }
+            let mut body = PlayerMotion::new(game.motion, Vec3::new(3.0, 64.0, 5.0)).unwrap();
+            body.entity_id = victim as i32;
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(victim, |g| {
+                    g.motion = Some(Box::new(body));
+                    g.load_timeout = 0;
+                })
+                .unwrap();
+            assert!(game.ui.rules.set("pvp", Value::Bool(case.pvp)));
+            game.as_guest(victim, |g| {
+                g.set_game_mode(GameMode::Creative);
+                if victim_mode != GameMode::Creative {
+                    g.set_game_mode(victim_mode);
+                }
+            })
+            .unwrap();
+            for g in &game.lan.as_ref().unwrap().hub.guests {
+                g.sender.flush();
+            }
+            for rx in &receivers {
+                while rx.try_recv().is_ok() {}
+            }
+            let health_before = game.lan.as_ref().unwrap().hub.guest(victim).unwrap().health;
+            let mut arrow = Projectile::new(
+                ProjectileKind::Arrow {
+                    base_damage: 2.0,
+                    critical: false,
+                    effect: None,
+                },
+                Vec3::new(1.0, 65.0, 5.0),
+                Some(Who::Player),
+            );
+            arrow.guest = Some(shooter);
+            arrow.velocity = Vec3::new(0.0, -1.0, 0.0);
+            if case.silent {
+                game.persist.raw.insert(
+                    arrow.id,
+                    sunrise_core::nbt::Tag::compound([("Silent", sunrise_core::nbt::Tag::Byte(1))]),
+                );
+            }
+            let hit = Hit::Entity {
+                who: Who::Player,
+                at: Vec3::new(2.7, 65.0, 5.0),
+            };
+            game.projectile_hits_player(&arrow, hit, Victim::Guest(victim))
+                .unwrap();
+            let health_after = game.lan.as_ref().unwrap().hub.guest(victim).unwrap().health;
+            for g in &game.lan.as_ref().unwrap().hub.guests {
+                g.sender.flush();
+            }
+            outcome = Some(CaseOutcome {
+                victim_hurt: health_after < health_before,
+                victim_health_before_bits: float_bits_hex(health_before),
+                victim_health_after_bits: float_bits_hex(health_after),
+                alice_game_events: game_events(&receivers[0]),
+                bob_game_events: game_events(&receivers[1]),
+            });
+        });
+        outcome.unwrap()
+    }
+
+    /// Vanilla 26.3 witness recorded by `tools/test_arrow_hit_ding_parity.py`: exact wire `ClientboundGameEventPacket` and victim health bits on player arrow hits.
+    #[test]
+    #[ignore = "run by tools/test_arrow_hit_ding_parity.py"]
+    fn an_arrow_that_hurts_another_player_dings_its_shooter() {
+        run_an_arrow_that_hurts_another_player_dings_its_shooter();
+    }
+
+    pub(in crate::game) fn run_an_arrow_that_hurts_another_player_dings_its_shooter() {
+        let witness = load_witness();
+        assert_eq!(witness.minecraft_version, "26.3");
+        assert!(!witness.cases.is_empty());
+        for case in witness.cases {
+            let actual = run_case(&case);
+            let expected = CaseOutcome {
+                victim_hurt: case.victim_hurt,
+                victim_health_before_bits: case.victim_health_before_bits,
+                victim_health_after_bits: case.victim_health_after_bits,
+                alice_game_events: case.alice_game_events,
+                bob_game_events: case.bob_game_events,
+            };
+            assert_eq!(actual, expected, "26.3 witness case {}", case.name);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sunrise_client::gamerules::Value;
+
+    /// A fresh survival body for guest `conn` (entity `conn`), where `with_guests` stands it.
+    fn fresh_body(game: &mut Game<'_>, conn: u32) {
+        let mut body =
+            sunrise_client::motion::PlayerMotion::new(game.motion, Vec3::new(3.0, 64.0, 5.0))
+                .unwrap();
+        body.entity_id = conn as i32;
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .update_guest(conn, |g| {
+                g.motion = Some(Box::new(body));
+                g.load_timeout = 0;
+                g.loaded = true;
+            })
+            .unwrap();
+        game.as_guest(conn, |g| {
+            use sunrise_client::command::args::GameMode;
+            g.set_game_mode(GameMode::Creative);
+            g.set_game_mode(GameMode::Survival);
+        })
+        .unwrap();
+    }
+
+    fn health(game: &Game<'_>, conn: u32) -> f32 {
+        let host = game.lan.as_ref().unwrap();
+        host.hub
+            .guest(conn)
+            .unwrap()
+            .motion
+            .as_ref()
+            .unwrap()
+            .health
+            .health()
+    }
+
+    /// What each player-on-player rule answers for guest 12 on guest 13, each from a fresh
+    /// body: the `PlayerRef::can_harm` read, an arrow (`AbstractArrow.canHitEntity`), another
+    /// projectile or a trident (the victim's hurt), a spear's stab, a melee blow, its sweep
+    /// (which also spares allies, `doSweepAttack`'s `isAlliedTo`) and a blast of guest 12's
+    /// primed TNT.
+    fn every_site(game: &mut Game<'_>) -> [bool; 7] {
+        let (a, b) = (game.player(12).unwrap(), game.player(13).unwrap());
+        fresh_body(game, 13);
+        let read = a.can_harm(&*game, b) == Some(true);
+        let arrow = game.can_arrow_harm_player(Who::Mob(12), None, Who::Mob(13));
+        let projectile = game.guest_may_harm(Some(12), 13);
+        let spear = game.stab_players_for(12).iter().any(|p| p.conn == 13);
+        let attacker_team = game.score.board.players_team("guest12").cloned();
+        let mut blow = Strike::test_blow(12);
+        blow.team = attacker_team.clone();
+        let melee = game.pvp_land(Victim::Guest(13), &blow);
+
+        fresh_body(game, 13);
+        let sweep = Sweep {
+            attacker: Some(12),
+            creative: false,
+            from: [3.0, 64.0, 5.0],
+            damage: 1.0,
+            custom_damage: None,
+            knockback: (0.0, 0.0),
+            team: attacker_team,
+            hit_box: Aabb::new(Vec3::new(0.0, 60.0, 0.0), Vec3::new(6.0, 70.0, 10.0)),
+            skip: None,
+            ignite: 0.0,
+        };
+        let before = health(game, 13);
+        game.sweep_players(&sweep);
+        let swept = health(game, 13) < before;
+
+        fresh_body(game, 13);
+        game.combat.blast_owner = Some((12, sunrise_client::text::Text::literal("guest12")));
+        game.combat.blast_owner_player = true;
+        game.combat.blast_guest = Some(12);
+        let before = health(game, 13);
+        game.server_explode(
+            [3.0, 64.0, 8.0],
+            2.0,
+            super::super::explosion::BlockInteraction::Keep,
+            false,
+        )
+        .unwrap();
+        let blasted = health(game, 13) < before;
+        game.combat.blast_owner = None;
+        game.combat.blast_owner_player = false;
+        game.combat.blast_guest = None;
+        [read, arrow, projectile, spear, melee, swept, blasted]
+    }
+
+    /// The guests of `with_guests`, in an empty chunk the blasts see through.
+    fn with_two_guests(test: impl FnOnce(&mut Game<'_>)) {
+        super::super::native_guest_turn_tests::with_guests(|game| {
+            game.world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)),
+            );
+            test(game);
+        });
+    }
+
+    /// `ServerPlayer.canHarmPlayer` is answered in one place,
+    /// [`can_harm_player`](sunrise_client::health::can_harm_player), and every
+    /// player-on-player rule takes its answer for guest 12 on guest 13, the `pvp` rule first,
+    /// then the teams. The sweep alone also spares allies.
+    #[test]
+    #[ignore = "daily"]
+    fn every_player_on_player_rule_takes_can_harm_player() {
+        with_two_guests(|game| {
+            let mut answers = Vec::new();
+            for (pvp, team) in [
+                (true, None),
+                (false, None),
+                (true, Some(false)),
+                (true, Some(true)),
+            ] {
+                game.ui.rules.set("pvp", Value::Bool(pvp));
+                if let Some(friendly_fire) = team {
+                    let board = &mut game.score.board;
+                    board.add_team("red").allow_friendly_fire = friendly_fire;
+                    board.add_to_team("guest12", "red");
+                    board.add_to_team("guest13", "red");
+                }
+                let board = &game.score.board;
+                let (own, other) = (board.players_team("guest12"), board.players_team("guest13"));
+                let allied = sunrise_client::scoreboard::teams_allied(own, other);
+                let expected = sunrise_client::health::can_harm_player(12, 13, pvp, own, other);
+                answers.push(expected);
+                let mut wanted = [expected; 7];
+                wanted[5] = expected && !allied;
+                assert_eq!(every_site(game), wanted, "pvp {pvp}, team {team:?}");
+            }
+            assert_eq!(answers, [true, false, false, true]);
+        });
+    }
+
+    /// A mod's row that changes `canHarmPlayer`'s answer changes it at every site: with the
+    /// answer replaced on this thread (`rule_replacements::HARM`), two players on a server with
+    /// `pvp` off hurt each other everywhere, and with `pvp` on and no teams nowhere.
+    #[test]
+    #[ignore = "daily"]
+    fn a_replaced_can_harm_player_answer_reaches_every_site() {
+        use super::super::rule_replacements::{HARM, replaced};
+        with_two_guests(|game| {
+            game.ui.rules.set("pvp", Value::Bool(false));
+            let sites = replaced(&HARM, |_, _| true, || every_site(game));
+            assert_eq!(sites, [true; 7], "pvp off, answered true");
+            game.ui.rules.set("pvp", Value::Bool(true));
+            let sites = replaced(&HARM, |_, _| false, || every_site(game));
+            assert_eq!(sites, [false; 7], "pvp on, answered false");
+        });
     }
 }

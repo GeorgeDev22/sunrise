@@ -150,7 +150,10 @@ pub(super) fn spawnable(pos: [f64; 3]) -> bool {
 }
 
 // Native mods use these; nothing in Sunrise does.
-#[allow(dead_code, reason = "native mod API (docs/native-mods.md)")]
+#[allow(
+    dead_code,
+    reason = "native mod API (docs/modding/src/how-to/native-mods.md)"
+)]
 impl Game<'_> {
     /// Whether this is a level that simulates (not a client's copy) and the one
     /// in place is `dimension`.

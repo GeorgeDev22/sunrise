@@ -24,36 +24,42 @@ impl Game<'_> {
     pub(super) fn native_model_3d(
         &self,
         batch: &mut HudBatch,
-        subject: Gui3dSubject,
+        subject: Gui3dSubject<'_>,
         view: Gui3dView,
     ) -> Result<(), Gui3dError> {
         if !self.native_window() {
             return Err(Gui3dError::Unavailable);
         }
-        if !view.is_drawable() {
-            return Err(Gui3dError::NotFinite);
-        }
-        let pose = view_pose(view);
-        if !pose.is_finite() {
-            return Err(Gui3dError::NotFinite);
-        }
+        let pose = || {
+            if !view.is_drawable() {
+                return Err(Gui3dError::NotFinite);
+            }
+            let pose = view_pose(view);
+            pose.is_finite()
+                .then_some(pose)
+                .ok_or(Gui3dError::NotFinite)
+        };
         let (start, blends) = (batch.vertices.len(), batch.blends.len());
         match subject {
             Gui3dSubject::Item(stack) => {
-                let stack = crate::game::api_values::stack_value(&stack)
-                    .map_err(|_| Gui3dError::UnknownItem)?;
-                // GuiGraphicsExtractor.item draws nothing for an empty stack.
-                if &*stack.item == "minecraft:air"
-                    || stack.count == 0
-                    || self.res.items().get(&stack.item).is_none()
-                {
+                let item =
+                    mod_api::__private::item_key_id(stack.item()).ok_or(Gui3dError::UnknownItem)?;
+                // GuiGraphicsExtractor.item checks for emptiness before inspecting components.
+                // ItemStack already guarantees a nonzero count.
+                if item == "minecraft:air" {
+                    return Ok(());
+                }
+                let pose = pose()?;
+                if self.res.items().get(item).is_none() {
                     return Err(Gui3dError::UnknownItem);
                 }
+                let stack = crate::game::api_values::encode_stack(stack, item.into())
+                    .map_err(|_| Gui3dError::InvalidStack)?;
                 if !self.draw_item_model_posed(batch, &stack, pose) {
                     return Err(Gui3dError::NotFinite);
                 }
             }
-            Gui3dSubject::Model(model) => self.draw_model_posed(batch, model, pose)?,
+            Gui3dSubject::Model(model) => self.draw_model_posed(batch, model, pose()?)?,
         }
         // A turn can overflow a corner: draw nothing rather than something broken.
         if !batch.vertices[start..]
@@ -135,7 +141,8 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mod_api::IDENTITY_TRANSFORM;
+    use crate::game::host::draw::GameDrawContext;
+    use mod_api::{DrawContext, IDENTITY_TRANSFORM};
 
     #[test]
     fn the_identity_at_size_16_is_the_slots_pose() {
@@ -159,7 +166,7 @@ mod tests {
         assert_eq!(right, Vec3::new(100.0, 90.0, 0.0));
     }
 
-    /// An item whose turn overflows is refused, and the batch is as it was.
+    /// A borrowed stack is reusable, and a refused second draw leaves the first draw intact.
     #[test]
     #[ignore = "daily"]
     fn an_overflowing_item_is_refused_and_leaves_the_batch_as_it_was() {
@@ -170,19 +177,79 @@ mod tests {
             )
             .unwrap();
             let mut batch = HudBatch::scratch([320, 240]);
-            let (vertices, blends) = (batch.vertices.len(), batch.blends.len());
-            // Twice 3e38 pixels a block is not a number: the pose overflows.
-            let mut turn = mod_api::IDENTITY_TRANSFORM;
+            let mut draw = GameDrawContext::new(game, &mut batch);
+            let view = Gui3dView::new([40.0, 30.0], 16.0, IDENTITY_TRANSFORM);
+            draw.model_3d(Gui3dSubject::Item(&stack), view).unwrap();
+            let (vertices, blends) = (draw.surface.vertices.len(), draw.surface.blends.len());
+            assert!(vertices > 0, "the first draw submitted the sword");
+
+            // Twice 3e38 pixels a block is not finite: the pose overflows.
+            let mut turn = IDENTITY_TRANSFORM;
             turn[0] = 2.0;
             let view = Gui3dView::new([40.0, 30.0], 3.0e38, turn);
             assert_eq!(
-                game.native_model_3d(&mut batch, Gui3dSubject::Item(stack), view),
+                draw.model_3d(Gui3dSubject::Item(&stack), view),
                 Err(Gui3dError::NotFinite)
             );
             assert_eq!(
-                (batch.vertices.len(), batch.blends.len()),
+                (draw.surface.vertices.len(), draw.surface.blends.len()),
                 (vertices, blends)
             );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn air_stack_is_noop_and_unknown_item_is_refused() {
+        super::super::native_entity_refs::tests::with_client_game(|game| {
+            let mut batch = HudBatch::scratch([320, 240]);
+            let mut draw = GameDrawContext::new(game, &mut batch);
+            let view = Gui3dView::new([40.0, 30.0], 16.0, IDENTITY_TRANSFORM);
+
+            let air =
+                mod_api::ItemStack::new(mod_api::__private::item_key("minecraft:air").unwrap(), 1)
+                    .unwrap();
+            let mut sword = mod_api::ItemStack::of(
+                mod_api::__private::item_key("minecraft:diamond_sword").unwrap(),
+            );
+            let invalid = mod_api::Tag::compound([(
+                "on_consume_effects",
+                mod_api::Tag::List(vec![mod_api::Tag::compound([
+                    ("type", mod_api::Tag::String("example:charge".into())),
+                    ("bad", mod_api::Tag::Double(f64::NAN.to_bits())),
+                ])]),
+            )]);
+            let mut air = air;
+            for stack in [&mut air, &mut sword] {
+                stack
+                    .set_components([("minecraft:consumable".into(), invalid.clone())].into())
+                    .unwrap();
+            }
+            let invalid_view = Gui3dView::new([f32::NAN, 30.0], 16.0, IDENTITY_TRANSFORM);
+            let mut turn = IDENTITY_TRANSFORM;
+            turn[0] = 2.0;
+            let overflowing_view = Gui3dView::new([40.0, 30.0], 3.0e38, turn);
+            for view in [view, invalid_view, overflowing_view] {
+                assert_eq!(draw.model_3d(Gui3dSubject::Item(&air), view), Ok(()));
+            }
+            assert_eq!(
+                draw.model_3d(Gui3dSubject::Item(&sword), view),
+                Err(Gui3dError::InvalidStack)
+            );
+            assert!(draw.surface.vertices.is_empty());
+            assert!(draw.surface.blends.is_empty());
+
+            let unknown = mod_api::ItemStack::new(
+                mod_api::__private::parts_installation::item_key(u32::MAX),
+                1,
+            )
+            .unwrap();
+            assert_eq!(
+                draw.model_3d(Gui3dSubject::Item(&unknown), view),
+                Err(Gui3dError::UnknownItem)
+            );
+            assert!(draw.surface.vertices.is_empty());
+            assert!(draw.surface.blends.is_empty());
         });
     }
 }

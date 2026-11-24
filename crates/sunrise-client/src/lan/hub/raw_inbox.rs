@@ -7,9 +7,16 @@ pub(super) struct PacketDrain {
     pub(super) started: bool,
     // Ordinary action deferral survives raw yields until this guest turn ends.
     pub(super) movement_held: bool,
+    // While a spectator's turn travels, remember where to finish the other
+    // connections in this pass.
+    spectator_source: Option<String>,
 }
 
 impl Hub {
+    fn drains_in(&self, g: &Guest) -> bool {
+        self.watches(g) || (g.respawning && g.dimension == self.config.dimension)
+    }
+
     /// Handle the players in this level's packets (`ServerGamePacketListenerImpl`
     /// for each), before the level's scheduled block ticks so a place landed in
     /// the same tick as a falling block's schedule still sees the support
@@ -21,57 +28,76 @@ impl Hub {
             conns: self
                 .guests
                 .iter()
-                .filter(|g| self.here(g) || (g.held && self.watches(g)))
+                .filter(|g| self.drains_in(g))
                 .map(|g| g.conn)
                 .collect(),
             next: 0,
             started: false,
             movement_held: false,
+            spectator_source: None,
         });
+        if !pass.started {
+            // A travelling spectator's turn ended and the original level is back.
+            pass.spectator_source = None;
+        }
         while let Some(&conn) = pass.conns.get(pass.next) {
-            let Some(i) = self.guests.iter().position(|g| g.conn == conn) else {
-                pass.next += 1;
-                pass.started = false;
-                pass.movement_held = false;
-                continue;
-            };
-            // A raw root may close the physical endpoint before its Left event
-            // reaches the next frozen poll. Do not acknowledge or apply later
-            // input in this incarnation while waiting for that notification.
-            if self.discard_closed_input(i) {
-                pass.next += 1;
-                pass.started = false;
-                pass.movement_held = false;
-                continue;
-            }
-            if !self.here(&self.guests[i])
-                && !(self.guests[i].held && self.watches(&self.guests[i]))
+            // A game turn may close the physical endpoint before its Left event
+            // reaches the next frozen poll. Do not apply input in that incarnation.
+            if let Some(i) = self.guests.connection_index(conn)
+                && !self.discard_closed_input(i)
+                && self.drains_in(&self.guests[i])
             {
-                pass.next += 1;
-                pass.started = false;
-                pass.movement_held = false;
-                continue;
-            }
-            let frozen = self.guests[i].handover.is_some() || self.guests[i].held;
-            if frozen {
-                self.keep_acknowledgements(i, &mut events);
-            }
-            if self.process_inbox(i, ctx, &mut events, !pass.started, &mut pass.movement_held) {
-                pass.started = true;
-                self.packet_drain = Some(pass);
-                return events;
-            }
-            if !frozen && self.here(&self.guests[i]) {
-                self.tick_floating(i, &mut events);
+                let g = &self.guests[i];
+                let frozen = g.handover.is_some() || g.held || g.respawning;
+                if frozen {
+                    self.keep_acknowledgements(i, &mut events);
+                }
+                if self.process_inbox(
+                    i,
+                    ctx,
+                    &mut events,
+                    !pass.started,
+                    &mut pass.movement_held,
+                    &mut pass.spectator_source,
+                ) {
+                    pass.started = true;
+                    self.packet_drain = Some(pass);
+                    return events;
+                }
+                if !frozen && self.here(&self.guests[i]) {
+                    self.tick_floating(i, &mut events);
+                }
             }
             pass.next += 1;
             pass.started = false;
             pass.movement_held = false;
+            if pass
+                .spectator_source
+                .as_deref()
+                .is_some_and(|source| source != self.config.dimension.as_str())
+            {
+                self.packet_drain = Some(pass);
+                return events;
+            }
+            pass.spectator_source = None;
         }
         events
     }
 
-    /// A raw boundary must finish in Game before continuing this same level pass.
+    /// A UUID teleport resumes the same connection in its new level, then restores
+    /// the source level before the pass advances to the next connection.
+    pub fn packet_resume_dimension(&self) -> Option<&str> {
+        let pass = self.packet_drain.as_ref()?;
+        let source = pass.spectator_source.as_deref()?;
+        if pass.started
+            && let Some(guest) = self.guest(pass.conns[pass.next])
+        {
+            return Some(&guest.dimension);
+        }
+        Some(source)
+    }
+
+    /// A game turn must finish before continuing the packet pass.
     /// Resuming drains only the frozen inbox turn: no poll, maintenance or world tick.
     pub fn packets_paused(&self) -> bool {
         self.packet_drain.is_some()

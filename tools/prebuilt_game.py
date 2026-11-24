@@ -10,7 +10,8 @@ native trait mods against it with rustc alone, in seconds, without the game's so
                                                           # engine-<target>[-server].tar.xz, build-data.tar.xz
                                                           # and surface.json, in DIST; for the client side also
                                                           # tool-<target>.tar.xz (cargo-sunrise-mod); --stage-tool the
-                                                          # sunrise-stage `build` compiled, instead of compiling it
+                                                          # sunrise-stage `build` compiled, instead of compiling it;
+                                                          # --programs also programs-<target>[-server].tar.xz
     python3 tools/prebuilt_game.py tool DIST              # just this computer's tool-<target>.tar.xz, as `pack` makes it
                                                           # (the rolling mod-tool release, tools/ci/mod_tool.py)
     python3 tools/prebuilt_game.py gather LEGS DIST       # the release folder from every packing leg's DIST, once
@@ -29,6 +30,7 @@ import json
 import lzma
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -60,7 +62,7 @@ SMOKE = "prebuilt-smoke"
 # Where `smoke` installs the same executable without selected mods, for `start`.
 SMOKE_API = "prebuilt-smoke-api"
 EXECUTABLE = "sunrise-client.exe" if sys.platform == "win32" else "sunrise-client"
-# The furthest a game started without its prepared files gets (game.rs `missing_resources`): past loading the
+# The furthest a game started without its prepared files gets (`loading_screen::preflight_resources`): past loading the
 # game's libraries and the mods' runtime environment (`entry::main_with`), where a split allocator aborts (#3877).
 NO_RESOURCES = "Sunrise's prepared game files are missing"
 # The MinGW runtime the game's GNU DLLs import on Windows, installed beside the executable.
@@ -82,8 +84,6 @@ SDK_BASE = "sunrise-core"
 # Source files the folder carries besides compiler outputs.
 CARRIED = {"Cargo.toml": None, IDENTITY: None, LOCK: ROOT / LOCK, TEMPLATE: ROOT / "crates/sunrise-client/src" / TEMPLATE,
            NATIVE_MODS_TEMPLATE: ROOT / "crates/sunrise-client/src" / NATIVE_MODS_TEMPLATE}
-# What the game's build script asks the `sunrise-client` executable's link for (Windows' 8 MB main stack).
-LINK_ARG = "cargo:sunrise-executable-link-arg="
 # Native libraries the build scripts point the final link at (the `windows` crates' MinGW import libraries):
 # cargo passes their folders to rustc, a plain rustc gets them from here (`-L native=OUT/native`).
 NATIVE = "native"
@@ -109,6 +109,9 @@ XZ_PRESET = 6
 # The SDK's `tool` asset: `cargo sunrise-mod native-build` compiles native mods as the launcher does.
 TOOL = "cargo-sunrise-mod"
 TOOL_PROGRAM = TOOL + (".exe" if sys.platform == "win32" else "")
+# The SDK's `programs` asset: what the player folder holds besides the game program, so the runtime slice's game installs
+# from the SDK alone.
+PROGRAMS = "programs"
 
 
 LAUNCHER_FILES = ("src/game_app.rs", "assets/icons/sunrise.icns")  # game_app.rs include_bytes!es the icon
@@ -241,7 +244,7 @@ def stage(target_dir: Path, stage_tool: Path | None = None, *, sdk_dylibs: bool 
             # Build the tool from a stable copy of the unmodified commit, not the disposable rewrite tree.
             source = target_dir / "stage-in"
             sync_stage(scratch, source)
-            command = ["cargo", "run", "--locked", "--release", "-q", "-p", "sunrise-mod-api-gen",
+            command = ["cargo", "run", "--locked", "--release", "-q", "-p", "sunrise-stage",
                        "--bin", "sunrise-stage", "--"]
             env = {**os.environ, "CARGO_TARGET_DIR": str(target_dir / "tools")}
             label = "Stage release build and execution"
@@ -451,28 +454,56 @@ def official_externs(deps: Path) -> list[str]:
     return ["--cfg", 'feature="official"', "--extern", f"sunrise_official={library}"] if library else []
 
 
-def api_route(out: Path, link_args: list[str]) -> list[str]:
+def api_route(out: Path, host: str) -> list[str]:
     """Build the fixed executable shared by both native routes, once for this SDK."""
     deps = out / "deps"
     folder = out / RUNTIME
     folder.mkdir()
     common = ["--edition", "2024", "-C", "prefer-dynamic", "-C", "opt-level=3", "-L", f"dependency={deps}",
               "-L", f"dependency={out / 'host'}", "-L", f"native={out / NATIVE}"]
-    origin = {"linux": ["-Wl,-rpath,$ORIGIN"], "darwin": ["-Wl,-rpath,@executable_path"]}.get(sys.platform, [])
+    link_args = {"linux": ["-Wl,-rpath,$ORIGIN"], "darwin": ["-Wl,-rpath,@executable_path"]}.get(sys.platform, [])
+    if sys.platform == "win32":
+        # Match packaging/windows/exe.rs at this executable's link, not in SDK metadata.
+        link_args = ["/STACK:8388608" if host.endswith("-msvc") else "-Wl,--stack,8388608"]
     run(["rustc", *common, "--crate-type", "bin", "--crate-name", "sunrise_native_game",
-         *(flag for arg in origin + link_args for flag in ("-C", f"link-arg={arg}")),
+         *(flag for arg in link_args for flag in ("-C", f"link-arg={arg}")),
          *extern_args(deps, "sunrise_client"), *extern_args(deps, "mod_api"), *extern_args(deps, "sunrise_mod_package"),
          *extern_args(deps, "sunrise_mod_host"), *official_externs(deps),
          "-o", str(folder / EXECUTABLE), str(API_MAIN)])
     built = sorted(path.relative_to(out).as_posix() for path in folder.iterdir())
     if not {path.name for path in folder.iterdir()} <= api_route_files():
         sys.exit(f"the API route's build left {built}, not only {sorted(api_route_files())}")
-    return built
+    for library in runtime_support():
+        shutil.copy2(library, folder / library.name)
+    return sorted(path.relative_to(out).as_posix() for path in folder.iterdir())
 
 
 def api_route_files() -> set[str]:
-    """The runtime binary folder contains only the fixed executable."""
+    """What the build leaves in the runtime binary folder: only the fixed executable."""
     return {EXECUTABLE}
+
+
+def runtime_support() -> list[Path]:
+    """What the fixed executable loads besides the game's libraries: Rust's standard library, and on Windows the MinGW
+    runtime the GNU DLLs import. The runtime slice carries them beside the executable in `bin/`, so it runs as is with no
+    Rust toolchain. Not in `deps/`: the build tool installs every runtime `deps/` library as the game's and adds these
+    from the player's toolchain itself (sunrise-native-build's `runtime_libraries`), so a second copy there would be
+    listed twice."""
+    libdir = Path(run(["rustc", "--print", "target-libdir"]).strip())
+    libraries = [path for path in libdir.iterdir() if runtime_support_file(path.name) and path.name not in MINGW_RUNTIME]
+    if len(libraries) != 1:
+        sys.exit(f"{libdir} holds {len(libraries)} dynamic Rust standard libraries, not one")
+    if sys.platform == "win32":
+        gcc = shutil.which("gcc")
+        if gcc is None:
+            sys.exit("no gcc on PATH, so no MinGW runtime to put beside the executable")
+        libraries += [Path(gcc).parent / name for name in MINGW_RUNTIME]
+    return libraries
+
+
+def runtime_support_file(name: str) -> bool:
+    """Whether `name` is one of [`runtime_support`]'s files."""
+    return name in MINGW_RUNTIME or (name.startswith(("libstd-", "std-")) and name.endswith((".so", ".dll", ".dylib")))
 
 
 def holder_mark() -> bytes:
@@ -607,10 +638,10 @@ def _build_locked(out: Path, server: bool, target_dir: Path) -> None:
     packages = ["-p", GAME, "-p", OFFICIAL] if official else ["-p", GAME]
     # Encoded flags take precedence over RUSTFLAGS in Cargo.
     environment = {key: value for key, value in os.environ.items() if key != "CARGO_ENCODED_RUSTFLAGS"}
-    # The SDK game builds with 16 codegen units, not the release profile's 1: on Linux its final step took 270 s
-    # instead of 422 s with no measurable change in the dedicated server's tick (1.670 against 1.677 ms). The
-    # player release keeps the profile's single unit and ThinLTO.
-    environment["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] = "16"
+    # The SDK game is the game players run with native mods: it keeps the release profile's single codegen unit,
+    # whatever the environment says. Against 16 units, the bare dedicated server ran 8.6% fewer instructions per
+    # tick and its mean tick fell measurably; the cost is the build's final step (422 s against 270 s on Linux).
+    environment["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] = "1"
     messages = run(
         ["cargo", "build", "--locked", *packages, "--lib",
          "--target", host, "--profile", PROFILE, "--message-format", "json-render-diagnostics", *features],
@@ -657,14 +688,11 @@ def _build_locked(out: Path, server: bool, target_dir: Path) -> None:
     for name, path in carried.items():
         (out / name).write_bytes(blobs[path])
     patches = carry_patches(staged, out)
-    game = next(script for script in scripts if script["package_id"].split("#")[0].endswith("/sunrise-client"))
     for manifest in BUILD_DATA:
         shutil.copy2(staged / manifest, out / manifest)
-    output = Path(game["out_dir"]).parent / "output"
-    link_args = executable_link_args(output)
     if official and dylib(deps, "sunrise_official") is None:
         sys.exit("prebuilt client is missing the sunrise-official dylib")
-    sliced = slices(metadata, copied, api_route(out, link_args))
+    sliced = slices(metadata, copied, api_route(out, host))
     files = {str(path.relative_to(out).as_posix()): sha256(path) for path in sorted(out.rglob("*")) if path.is_file()}
     identity = {
         "package_format": layout,
@@ -674,7 +702,6 @@ def _build_locked(out: Path, server: bool, target_dir: Path) -> None:
         "profile": PROFILE,
         "side": "server" if server else "client",
         "rustflags": rustflags,
-        "link_args": link_args,
         "facade_crates": eligible,
         # The game crate's features: a `[[native.mixin]]` build compiles functions copied out of its source
         # under the same cfgs (function replacement).
@@ -724,11 +751,6 @@ def carry_patches(staged: Path, out: Path) -> dict:
     return patches
 
 
-def executable_link_args(output: Path) -> list[str]:
-    """Executable policy emitted by the engine library's build script into the SDK identity."""
-    return [line[len(LINK_ARG):] for line in output.read_text().splitlines() if line.startswith(LINK_ARG)]
-
-
 def dylib(deps: Path, crate: str) -> Path | None:
     """A dylib carries its own metadata, so it has no `.rmeta` beside it."""
     names = {f"{prefix}{crate}.{ext}" for prefix in ("lib", "") for ext in ("so", "dll", "dylib")}
@@ -764,7 +786,7 @@ def check(out: Path) -> None:
         and not (path.parent == out / "deps" and path.name.endswith(SUFFIXES))
         and not (path.parent == out / "host" and path.name.endswith((".so", ".dll", ".dylib", ".dll.a")))
         and not (path.parent == out / NATIVE and path.name.endswith(NATIVE_SUFFIXES))
-        and not (path.parent == out / RUNTIME and path.name in api_route_files())
+        and not (path.parent == out / RUNTIME and (path.name in api_route_files() or runtime_support_file(path.name)))
     ]
     if stray:
         sys.exit(f"prebuilt folder holds files that aren't compiler outputs: {stray}")
@@ -895,27 +917,22 @@ def install_package(folder: Path, mod: str, source: str, dependencies: str) -> N
 
 
 def runtime_libraries(out: Path) -> list[Path]:
-    """What the launcher installs beside the executable (sunrise-launcher's src/native_mods/prebuilt.rs `runtime_libraries`),
-    by the same rule: every shared library the identity's `runtime` slice records under `deps/`, std, and on Windows
-    the MinGW runtime the GNU DLLs import. So `start` fails when the record misses a library the game loads."""
+    """What is installed beside the executable: every shared library the identity's `runtime` slice records under
+    `deps/` (sunrise-native-build's `runtime_libraries` rule), and std and the MinGW runtime from the slice's own `bin/`
+    ([`runtime_support`]; the build tool takes the toolchain's copies of the same files). So `start` fails when the
+    slice misses a library the game loads, and the game it starts needs no Rust toolchain."""
     runtime = json.loads((out / IDENTITY).read_text())["slices"]["runtime"]
-    libraries = [out / name for name in runtime
-                 if name.startswith("deps/") and name.endswith((".so", ".dll", ".dylib"))]
-    libdir = Path(run(["rustc", "--print", "target-libdir"]).strip())
-    libraries += [path for path in libdir.iterdir()
-                  if path.name.startswith(("libstd-", "std-")) and path.suffix in (".so", ".dll", ".dylib")]
-    if sys.platform == "win32":
-        gcc = shutil.which("gcc")
-        if gcc is None:
-            sys.exit("smoke: no gcc on PATH, so no MinGW runtime to install beside the executable")
-        libraries += [Path(gcc).parent / name for name in MINGW_RUNTIME]
-    return libraries
+    return [out / name for name in runtime
+            if (name.startswith("deps/") and name.endswith((".so", ".dll", ".dylib")))
+            or (name.startswith(f"{RUNTIME}/") and runtime_support_file(Path(name).name))]
 
 
 def start(out: Path) -> None:
-    """Start two installations of the fixed executable (with smoke's two libraries and without mods),
-    each in dedicated mode with no game data: it loads the game's libraries and sets up the mods' runtime, then
-    stops at the missing prepared files. Only a client SDK registers the launcher download hook. Fails on a crash,
+    """Start two installations of the fixed executable (with smoke's two libraries and without mods)
+    with no game data: it loads the game's libraries and sets up the mods' runtime, then stops at the missing
+    prepared files. A client SDK starts as a headless client, whose refusal names the launcher's download page
+    (the hook only its official layer registers); a server SDK starts as a dedicated server, which never
+    advertises the launcher. Fails on a crash,
     a hang or any other stop, so an archive whose libraries disagree (two allocators, #3877) cannot ship. On Windows
     it runs without MinGW on PATH, as on a player's computer, so a runtime DLL the launcher would not install fails
     here (#3521)."""
@@ -966,7 +983,8 @@ def start(out: Path) -> None:
                 if probe.returncode != 0:
                     sys.exit(f"bundled launch API failed: {probe.stderr}")
                 json.loads(probe.stdout)
-            command = [str(executable), "--resources", str(scratch / "no-resources"), "--dedicated", "--nogui"]
+            role = ["--headless"] if client else ["--dedicated", "--nogui"]
+            command = [str(executable), "--resources", str(scratch / "no-resources"), *role]
             print("+", " ".join(command), flush=True)
             result = subprocess.run(command, cwd=game, env=environment, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", timeout=300)
@@ -1016,16 +1034,24 @@ def archives(out: Path, sliced: dict[str, list[str]]) -> dict[str, list[str]]:
                                 if parent != Path("."))} | set(names)) for kind, names in chosen.items()}
 
 
-def pack(out: Path, dist: Path, stage_tool: Path | None = None, with_tool: bool = False) -> None:
+def pack(out: Path, dist: Path, stage_tool: Path | None = None, with_tool: bool = False,
+         with_programs: bool = False) -> None:
     """The SDK release's assets from a checked folder OUT, into DIST: the package as its `runtime`, `api` and `engine`
     archives for its target and side ([`archives`]), the build data, the surface export of this source and, for the
     client side, the target's `tool` ([`tool`]): one per target, as it serves both sides. `with_tool` packs it on a server
     leg too, for a server-only SDK that no client leg completes (the fn-replace fixtures): the launcher needs the tool
-    even to export a server."""
+    even to export a server. `with_programs` packs the target and side's `programs` too ([`programs`])."""
     check(out)
     identity = json.loads((out / IDENTITY).read_text())
     if identity.get("package_format") != package_format(ROOT) or identity.get("commit") != head():
         sys.exit(f"{out} is not this source's package (format {package_format(ROOT)}, commit {head()})")
+    if with_programs:
+        import release_file
+
+        if not lists_programs(release_file.LAUNCHER_MIN, release_file.UNKNOWN_KINDS_LAUNCHER):
+            sys.exit(f"{PROGRAMS}-* waits for the launcher floor: an sdk.json listing a kind a launcher doesn't know "
+                     "stops that launcher reading the whole SDK, so tools/release_file.py's LAUNCHER_MIN must first "
+                     "reach UNKNOWN_KINDS_LAUNCHER, the first launcher that skips such kinds")
     dist.mkdir(parents=True, exist_ok=True)
     suffix = "-server" if identity["side"] == "server" else ""
     jobs = {dist / f"{kind}-{identity['target']}{suffix}.tar.xz": (out, names)
@@ -1033,6 +1059,9 @@ def pack(out: Path, dist: Path, stage_tool: Path | None = None, with_tool: bool 
     jobs[dist / BUILD_DATA_ARCHIVE] = (out, [".", *BUILD_DATA])
     if identity["side"] == "client" or with_tool:
         jobs[dist / f"tool-{identity['target']}.tar.xz"] = (tool(identity["target"]), [".", TOOL_PROGRAM])
+    if with_programs:
+        folder = programs(identity, out.parent / f"{PROGRAMS}-{identity['target']}{suffix}")
+        jobs[dist / f"{folder.name}.tar.xz"] = (folder, tree(folder))
     # Each archive keeps its single xz stream; only independent archives run concurrently.
     with ProcessPoolExecutor(max_workers=len(jobs)) as pool:
         pending = {archive: pool.submit(tar_xz, folder, names, archive) for archive, (folder, names) in jobs.items()}
@@ -1041,10 +1070,38 @@ def pack(out: Path, dist: Path, stage_tool: Path | None = None, with_tool: bool 
     if failures:
         sys.exit("SDK archive compression failed: " + "; ".join(failures))
     command = ([str(stage_tool.resolve())] if stage_tool is not None else
-               ["cargo", "run", "--locked", "--release", "-q", "-p", "sunrise-mod-api-gen", "--bin", "sunrise-stage", "--"])
+               ["cargo", "run", "--locked", "--release", "-q", "-p", "sunrise-stage", "--bin", "sunrise-stage", "--"])
     run(command + ["surface", str(ROOT), str(dist / SURFACE)], cwd=ROOT)
     for asset in sorted(dist.iterdir()):
         print(f"{asset.name}: {asset.stat().st_size} bytes")
+
+
+def lists_programs(launcher_min: str, unknown_kinds: str) -> bool:
+    """Whether an SDK may list the `programs` kind: only once every launcher that may install the build
+    (`launcher_min` on) skips SDK asset kinds it doesn't know, which `unknown_kinds` names ("" until one is released)."""
+    version = lambda text: tuple(int(part) for part in text.split("."))
+    return bool(unknown_kinds) and version(launcher_min) >= version(unknown_kinds)
+
+
+def programs(identity: dict, folder: Path) -> Path:
+    """FOLDER, the `programs` slice for the package's target and side: the player folder without its game program, from
+    the one list of what it holds (the `package` route of `sdk/inputs.json`, `package-server` for a server leg). Each
+    companion program is built from this source for this computer the way the list says to make it, then `xtask package
+    --no-game` lays the folder out as it does the player archive's; on Windows x64 Microsoft's DXC goes in beside them,
+    as in the player archive (tools/ci/fetch_dxc.py). The checkout's `exporters/` is a required input."""
+    if rustc_host() != identity["target"]:
+        sys.exit(f"the programs for {identity['target']} are built on that computer, not on {rustc_host()}")
+    route = "package-server" if identity["side"] == "server" else "package"
+    inputs = json.loads(INPUTS.read_text())
+    for name in inputs["routes"][route]["program"]:
+        cargo, build, *rest = shlex.split(inputs["how"][name].replace("PROFILE", "--release"))
+        run([cargo, build, "--locked", *rest], cwd=ROOT)
+    # Where the player folder's game program would be: its companions are beside it.
+    game = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")).resolve() / PROFILE / EXECUTABLE
+    run(["cargo", "run", "--locked", "-q", "-p", "xtask", "--", route, "--no-game", str(game), str(folder)], cwd=ROOT)
+    if identity["side"] == "client" and identity["target"].startswith("x86_64-pc-windows"):
+        run([sys.executable, str(ROOT / "tools/ci/fetch_dxc.py"), str(folder)], cwd=ROOT)
+    return folder
 
 
 def tool(target: str) -> Path:
@@ -1203,6 +1260,9 @@ def main() -> None:
     pack_parser.add_argument("--stage-tool", type=Path, help="the sunrise-stage binary to export the surface with")
     pack_parser.add_argument("--with-tool", action="store_true",
                              help="also pack the target's tool on a server leg (a server-only SDK no client leg completes)")
+    pack_parser.add_argument("--programs", action="store_true",
+                             help="also pack programs-<target>[-server].tar.xz: the player folder without the game "
+                                  "program (needs the checkout's exporters/)")
     tool_parser = commands.add_parser("tool")
     tool_parser.add_argument("dist", type=Path)
     gather_parser = commands.add_parser("gather")
@@ -1221,7 +1281,7 @@ def main() -> None:
     elif args.command == "start":
         start(args.out.resolve())
     elif args.command == "pack":
-        pack(args.out.resolve(), args.dist.resolve(), args.stage_tool, args.with_tool)
+        pack(args.out.resolve(), args.dist.resolve(), args.stage_tool, args.with_tool, args.programs)
     elif args.command == "tool":
         pack_tool(args.dist.resolve())
     elif args.command == "gather":

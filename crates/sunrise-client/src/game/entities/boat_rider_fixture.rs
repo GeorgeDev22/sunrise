@@ -35,13 +35,15 @@ impl Game<'_> {
             let [x, y, z] = case.velocity;
             b.velocity = Vec3::new(x, y, z);
             b.delta_rotation = case.spin;
-            self.keys.release_source(Source::Agent);
+            for key in self.keys.release_source(Source::Agent) {
+                self.release_device_key(&key, Source::Agent);
+            }
             for (key, held) in [KeyCode::KeyA, KeyCode::KeyD, KeyCode::KeyW, KeyCode::KeyS]
                 .into_iter()
                 .zip(case.keys)
             {
                 if held {
-                    self.keys.press(key, Source::Agent);
+                    self.press_device_key(key, Source::Agent);
                 }
             }
             self.boats.push(b);
@@ -57,16 +59,13 @@ impl Game<'_> {
                     |_, yaw| yaw,
                     |_| false,
                 );
-                self.remote_ride(
-                    Keys {
-                        left: case.keys[0],
-                        right: case.keys[1],
-                        forward: case.keys[2],
-                        backward: case.keys[3],
-                        ..Keys::default()
-                    },
-                    7,
-                )?;
+                self.remote_ride(Keys {
+                    left: case.keys[0],
+                    right: case.keys[1],
+                    forward: case.keys[2],
+                    backward: case.keys[3],
+                    ..Keys::default()
+                });
                 let packets = self.remote_vehicle_packets();
                 if case.event != 0 {
                     self.remote_boat_event(3, case.event);

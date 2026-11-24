@@ -707,7 +707,7 @@ impl Game<'_> {
                 let mut effect =
                     EffectInstance::new("hero_of_the_village", raid::HERO_DURATION, amplifier);
                 effect.visible = false;
-                g.potions.effects.add(effect);
+                g.apply_player_effect(effect);
                 g.award_custom_stat("raid_win", 1);
                 g.trigger_player("minecraft:hero_of_the_village");
             }),
@@ -852,7 +852,7 @@ impl Game<'_> {
         s.ticks_outside_raid = 0;
         s.active_raid = true;
         s.registered = true;
-        m.on_ground = true;
+        m.ground.on_ground = true;
         self.apply_raid_buffs(id, kind, wave, odds);
         Some(id)
     }
@@ -1418,7 +1418,7 @@ impl Game<'_> {
             sunrise_client::effects::EffectInstance::new("bad_omen", 120_000, i32::from(amplifier));
         effect.visible = false;
         let new = self.potions.effects.get("bad_omen").is_none();
-        self.potions.effects.add(effect);
+        self.apply_player_effect(effect);
         // MobEffect.onEffectAdded: Bad Omen's sound when it is new, at the
         // player's feet.
         if new && let Some(p) = self.player.as_ref() {
@@ -1439,21 +1439,20 @@ impl SiegeLevel for Game<'_> {
     fn biome_tag(&self, tag: &str, pos: [i32; 3]) -> bool {
         self.natural_level().biome_tag(tag, pos[0], pos[1], pos[2])
     }
-    fn check_spawn_rules(
-        &mut self,
-        kind: &str,
-        reason: spawn_rules::Reason,
-        pos: [i32; 3],
-    ) -> bool {
-        let Some(kind) = self.res.mob_types().get(kind) else {
-            return false;
-        };
+    fn check_zombie_spawn_rules(&mut self, [x, y, z]: [i32; 3]) -> bool {
         let mut random = std::mem::replace(
             &mut self.world.random,
             LevelRandom::for_level(LegacyRandom::new(0)),
         );
-        let ok =
-            spawn_rules::check_spawn_rules(kind, &self.natural_level(), reason, &mut random, pos);
+        let ok = spawn_rules::monster_rules(
+            Species::Zombie,
+            &self.mob_world_base(&[]),
+            spawn_rules::Reason::Event,
+            &mut random,
+            x,
+            y,
+            z,
+        );
         self.world.random = random;
         ok
     }
@@ -1594,6 +1593,10 @@ mod bar_players_tests;
 #[cfg(test)]
 #[path = "tests/victory.rs"]
 mod victory_tests;
+
+#[cfg(test)]
+#[path = "tests/spawn_placements.rs"]
+mod spawn_placement_tests;
 
 #[cfg(test)]
 mod entity_ticking_tests {

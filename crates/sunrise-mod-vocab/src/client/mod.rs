@@ -1,7 +1,9 @@
 //! Client-only surfaces: screens, input, sound, drawing and options.
 
 pub(crate) mod audio_stream;
+pub(crate) mod block_extra_models;
 pub(crate) mod block_state_definition;
+pub(crate) mod client_executor;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod camera;
@@ -39,13 +41,16 @@ pub mod hud_layout;
 pub mod hud_mode;
 pub(crate) mod key_mapping;
 pub(crate) mod keyframe_animation;
+pub(crate) mod menu_screen;
 pub(crate) mod mod_key_refusal;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod mesher;
+pub(crate) mod microphone;
 pub(crate) mod model_instance;
 pub(crate) mod model_layers;
 pub(crate) mod model_loader;
+pub(crate) mod movement_input;
 // #861 part 1: keys and views of the baked model cache.
 pub(crate) mod baked_models;
 // hidden: a module of game-side types; mods use their re-exports
@@ -56,6 +61,7 @@ pub(crate) mod pack_finders;
 pub(crate) mod particle_keys;
 pub(crate) mod particle_providers;
 mod particle_stacks;
+pub(crate) mod particle_types;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod particles;
@@ -72,10 +78,12 @@ pub(crate) mod screenshot;
 pub(crate) mod section_visibility;
 pub(crate) mod skull_models;
 pub(crate) mod special_model_renderers;
+pub(crate) mod standalone_models;
 pub(crate) mod terrain_draw;
 // hidden: module of API-owned label layout values; mods use the re-export
 #[doc(hidden)]
 pub mod text_layout;
+pub(crate) mod tooltip_components;
 pub(crate) mod types;
 /// Buttons and text fields for mod screens.
 pub mod widgets;

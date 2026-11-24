@@ -187,7 +187,7 @@ impl Game<'_> {
     /// A non-mob kind's saved invulnerability (#916), the one parse of its
     /// entity data: the `Invulnerable` flag and the `invulnerable_time`
     /// window. `(false, 0)` where its data has neither.
-    fn saved_invulnerability(&self, id: u32) -> (bool, i32) {
+    pub(super) fn saved_invulnerability(&self, id: u32) -> (bool, i32) {
         use sunrise_core::nbt::Tag;
         match self.persist.raw.get(&id) {
             Some(Tag::Compound(map)) => (
@@ -229,6 +229,30 @@ impl Game<'_> {
             .is_some_and(|kind| registry.in_tag(kind, "minecraft:bypasses_invulnerability"));
         !(bypass || creative_source)
     }
+    /// `Entity.isInvulnerableToBase` for resident items and orbs. These bodies
+    /// have no intrinsic fire immunity; item-stack resistance is checked separately.
+    pub(in crate::game) fn resident_item_or_orb_immune(
+        &self,
+        id: u32,
+        entity_type: &str,
+        source: sunrise_world::damage_source::DamageTypeId,
+        creative_source: bool,
+    ) -> bool {
+        let (flag, window) = self.saved_invulnerability(id);
+        sunrise_client::health::BodyImmunity {
+            removed: false,
+            invulnerable: flag || window > 0,
+            creative_source,
+            fire_immune: false,
+            fall_immune: world_items!(self).entity_type_tags.has_flag(
+                entity_type,
+                sunrise_client::items::EntityTypeTags::FALL_DAMAGE_IMMUNE,
+            ),
+            source_has_tag: |tag| self.health_resources.damage.immunity_tag(source, tag),
+        }
+        .vanilla()
+    }
+
     /// `DamageSource.isCreativePlayer` (#916): the causing player's creative
     /// mode, the host's own or a guest's; false for anything else. The one
     /// decision every invulnerability gate shares with `/damage`'s and the

@@ -92,7 +92,7 @@ fn with_two_pigs(test: impl FnOnce(&mut Game<'_>)) {
             let mut mob = Mob::new(id, kind.clone(), Vec3::new(x, 80.0, 0.5), 0.0);
             mob.no_ai = true;
             mob.no_gravity = true;
-            mob.on_ground = true;
+            mob.ground.on_ground = true;
             game.mobs.push(mob);
         }
         test(game);
@@ -297,7 +297,7 @@ fn scoped_despawn_view_tracks_peer_turns_and_defers_mid_pass_spawns() {
             let mut observer = Mob::new(73, kind, Vec3::new(7.0, 80.0, 0.5), 0.0);
             observer.no_ai = true;
             observer.no_gravity = true;
-            observer.on_ground = true;
+            observer.ground.on_ground = true;
             game.mobs.push(observer);
             super::super::super::entity::taken_pass_tests::with_spawn(
                 |game| {
@@ -305,7 +305,7 @@ fn scoped_despawn_view_tracks_peer_turns_and_defers_mid_pass_spawns() {
                     let mut spawned = Mob::new(74, kind, Vec3::new(10.0, 80.0, 0.5), 0.0);
                     spawned.no_ai = true;
                     spawned.no_gravity = true;
-                    spawned.on_ground = true;
+                    spawned.ground.on_ground = true;
                     game.mobs.push(spawned);
                     // The ordinary host can already read the spawn buffer.
                     // Only the scoped view must keep it outside this pass.
@@ -580,7 +580,7 @@ fn pig_ticks(named: bool, replace_cancels: bool) -> TickCalls {
             game.mobs.update(first, |mob| {
                 mob.no_ai = false;
                 mob.no_gravity = false;
-                mob.on_ground = false;
+                mob.ground.on_ground = false;
                 // Already falling: a mob moves by its velocity before gravity adds to it, so
                 // one at rest would not move in its first tick.
                 mob.velocity = Vec3::new(0.0, -0.5, 0.0);

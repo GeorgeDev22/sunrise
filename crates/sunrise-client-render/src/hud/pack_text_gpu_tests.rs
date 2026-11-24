@@ -21,7 +21,7 @@ fn set_pack_text(gpu: &mut Gpu, fsh: &str, modifiers: &str) {
         ),
     ]);
     let mut atlas = super::super::HudAtlas::boot();
-    load_shaders(&mut atlas, &pack, &ResourceSource::default());
+    load_shaders(&mut atlas, &pack, &ResourceSource::default()).unwrap();
     let text = &atlas.text_shaders;
     let gui = text.gui.as_deref().expect("the GUI text's program");
     gpu.hud

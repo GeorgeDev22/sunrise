@@ -74,8 +74,11 @@ callee without arguments: `autosave_interval` or `self.next_autosave_interval`. 
 `MODIFY_EXPRESSION_VALUE`, write the whole expression: `autosave_interval(rate)`. `MODIFY_VARIABLE` uses
 `variable` instead. `require` is how many matches the body has (inside `slice`, if set), and `ordinal` picks one, from 0.
 
-For a struct-literal receiver, omit whitespace outside literals and the trailing field comma. For example,
-use `selector = "ItemPlace::MenuSlot{menu,slot:n}.stack"` with `AFTER_CALL` to select the `.stack(host)` call.
+For a struct-literal receiver, omit whitespace outside literals and the trailing field comma.
+For example, given `ItemPlace::MenuSlot { menu, slot: n }.with_stack(host, |stack| stack.count())`,
+use `selector = "ItemPlace::MenuSlot{menu,slot:n}.with_stack"` with `AFTER_CALL`.
+If the helper reads the result, use `result = "Option<u32>"` here: `with_stack` returns
+an option of the callback's result, not the stack view.
 
 ## Fields
 
@@ -117,15 +120,22 @@ A target is the function's module path, then its type and name:
 - a trait method: the module of the `impl Trait for Type` block, then `<Type as Trait>` as written, then the
   function: `sunrise_client::game::level_access::<GameLevel<'_> as LevelAccess>::block_state`.
 
-To get the module from the file, start from `crates/sunrise-client/src/`, which is `sunrise_client`. A folder
-directly under `src/game/` that holds a `.game-area` file is an **area**, and an area is not a module.
+To get the module from the file, start from `crates/sunrise-client/src/`, which is `sunrise_client`, and follow
+the `mod` items. `game.rs` declares each file of an **area**, a folder directly under `src/game/` such as `world/`,
+with a `#[path]`, and an area is not a module.
 
 So `src/game/world/autosave.rs` is `sunrise_client::game::autosave` (`world/` is an area). But
-`src/game/native_hooks/` has no `.game-area`, so `src/game/native_hooks/base.rs` is
-`sunrise_client::game::native_hooks::base`.
+`src/game/native_hooks/` is a module that `game.rs` declares with `mod native_hooks;`, so
+`src/game/native_hooks/base.rs` is `sunrise_client::game::native_hooks::base`.
 
 Any function of the game crate can take a mixin. A function in a crate below it, such as `sunrise_world`, needs
 the marker `#[sunrise_mod_api_macros::replaceable]` in its source. Otherwise, target a replaceable caller or callee.
+
+A literal item-level `include!("path.rs")` adds declarations to the containing module, not to a new
+module. A lower-crate copy and its mirror reach those declarations under the same visibility and
+`cfg` rules as declarations written directly in that module. Each nested path is relative to the file
+that spells it. An unreadable or invalid required fragment stops the build and names the file.
+This does not make an `include!` inside a copied function body replaceable.
 
 These functions are refused:
 
@@ -189,7 +199,7 @@ A row the build can't apply stops the build, naming the mod, the row and the rea
 | | `<target>: <reason>`, such as ``it is generic over types or takes `impl Trait` …`` | Target a caller or callee that can be copied. |
 | | ``<target>: it names `<path>`, which crosses a non-public `use` in `<module>` `` | The signature or body uses a re-export the prebuilt game keeps private. Target a caller or callee that can be copied. |
 | | ``<target>: it names `<path>`, which reaches the non-public crate-root function `<name>` `` | The prebuilt game keeps that function private. Target a caller or callee that can be copied. |
-| `E_MIXIN_SOURCE` | `<target>: <why>`, such as `<file> differs from this game build's functions.json` | The game's source could not be read, or is not the build's: retry the build. |
+| `E_MIXIN_SOURCE` | `<target>: <why>`, naming the unreadable, invalid or mismatched source file | Check that the SDK source is intact and matches the game build. |
 | `E_MIXIN_INDEX` | `<path>: …: the game build's SDK has no function index …`, or `functions.json describes game build <commit>, not <commit>` | The SDK on disk is damaged or another build's: fetch the SDK again. |
 | `E_OVERWRITE_CONFLICT` | from the tool: `OVERWRITE must be exclusive on <function>; competing injections: <mod>/<row>, …`; it names every row, of any mods, on the function | For competing rows of one mod, remove one of those rows. For rows of different mods, keep only one of those mods installed. |
 | `E_FINGERPRINT` | from the tool: `original function changed; expected <hash>, got <hash>`, or for an `OVERWRITE` with none: ``OVERWRITE requires the `fingerprint` of the function it replaces; expected <none>, got <hash>`` | Check the game's new function still suits your replacement, then set `fingerprint` to the `got` value. |

@@ -181,6 +181,8 @@ mod tests {
             sprite: Some("test:block/honey".into()),
             tint: Some(0xC0FF_AA00),
             world: None,
+            bucket_item: None,
+            measures: Default::default(),
         }
     }
 

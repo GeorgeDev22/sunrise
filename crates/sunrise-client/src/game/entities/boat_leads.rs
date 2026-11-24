@@ -284,7 +284,7 @@ impl Game<'_> {
 
     /// `Leashable.angularFriction`.
     fn boat_angular_friction(&self, b: &Boat) -> f32 {
-        if b.on_ground {
+        if b.ground.on_ground {
             let (x, z) = (b.position.x.floor() as i32, b.position.z.floor() as i32);
             let y = (b.position.y - 0.500_001).floor() as i32;
             let state = self.world.block(x, y, z);
@@ -323,10 +323,12 @@ impl Game<'_> {
         if let Some((holder, player)) = found {
             // The boat is out of the list while it ticks: its own knot is
             // made here, not found by `lead_fences`.
-            if let Holder::Knot(fence) = holder {
+            b.leash_knot_id = if let Holder::Knot(fence) = holder {
                 self.forget_untied_knots();
-                self.tie_knot(fence);
-            }
+                Some(self.tie_knot(fence))
+            } else {
+                None
+            };
             b.leash = Some(holder);
             b.leash_player = player;
             b.leash_pending = None;
@@ -428,6 +430,10 @@ impl Game<'_> {
     /// sneak click on a mob, `LeadItem.bindPlayerMobs`, the knot's
     /// `interact`), the ones in reach of `at`. Whether any did.
     pub(super) fn tie_player_boats(&mut self, at: glam::DVec3, to: Holder) -> bool {
+        let knot_id = match to {
+            Holder::Knot(fence) => self.knot_ids.get(&fence).copied(),
+            _ => None,
+        };
         let mut any = false;
         for i in self.player_led_boats(at) {
             // Leashable.setLeashedTo: `this != holder`.
@@ -435,8 +441,11 @@ impl Game<'_> {
                 continue;
             }
             if self.boat_can_attach(i, at) {
-                self.boats.update(i, |b| b.leash = Some(to));
-                self.boats.update(i, |b| b.leash_player = None);
+                self.boats.update(i, |b| {
+                    b.leash = Some(to);
+                    b.leash_knot_id = knot_id;
+                    b.leash_player = None;
+                });
                 any = true;
             }
         }
@@ -479,7 +488,7 @@ impl Game<'_> {
         let id = self.boats[i].id;
         // The sneak branch: the player's mobs and boats on leads are re-tied
         // to this boat.
-        let sneaking = self.keys.held(Action::Sneak);
+        let sneaking = self.held_mapping(Action::Sneak);
         if sneaking
             && self.tie_player_leads(glam::DVec3::new(c.x, c.y, c.z), Holder::Boat(id), None)
         {
@@ -489,7 +498,7 @@ impl Game<'_> {
         }
         // Entity.shearOffAllLeashConnections: its own lead and every one
         // hanging on it.
-        if item.as_deref() == Some("minecraft:shears") {
+        if self.held_shears(super::item_abilities::ability::SHEARS_HARVEST) {
             let held_mobs: Vec<u32> = self
                 .mobs
                 .iter()

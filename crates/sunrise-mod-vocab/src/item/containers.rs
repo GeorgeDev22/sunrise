@@ -13,9 +13,6 @@ pub struct ModBlockEntity {
     pub(crate) id: String,
     pub(crate) fields: ModBlockEntityFields,
     pub(crate) revision: ModRevision,
-    /// What a callback asked for with `ModBlockEntityView::set_client_update_fields`, on its
-    /// way to the runtime's queue. The queue itself never reaches a snapshot.
-    pub(crate) client_update_fields: Option<Compound>,
 }
 /// What a `ModBlockEntity` can change: its saved compound without `id`,
 /// `x`, `y`, `z` and `Items`, its item slots
@@ -32,8 +29,6 @@ pub struct ModBlockEntityFields {
 }
 /// Which contents a `ModBlockEntity` has had: one per entity made (a clone
 /// is another), counted on by each change. Equal revisions, equal contents.
-/// Rejected callback writebacks also advance the engine revision to invalidate stale copies;
-/// this may cause one extra client redraw even though the fields were retained.
 /// Neither saved nor compared.
 #[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
@@ -68,14 +63,7 @@ impl ModBlockEntity {
             id,
             fields,
             revision,
-            client_update_fields: None,
         }
-    }
-
-    // hidden: the game moves what a callback asked for to the runtime's queue
-    #[doc(hidden)]
-    pub fn client_update_fields(&self) -> Option<&Compound> {
-        self.client_update_fields.as_ref()
     }
 
     pub fn new(id: String, fields: ModBlockEntityFields) -> Self {
@@ -86,19 +74,20 @@ impl ModBlockEntity {
                 born: sunrise_mod_runtime::block_entities::new_identity(),
                 changes: 0,
             },
-            client_update_fields: None,
         }
     }
     /// The block entity's immutable type id (`mymod:machine`).
     ///
-    /// ```compile_fail
-    /// let mut entity = sunrise_client_render::containers::ModBlockEntity::default();
-    /// entity.id = "other:machine".into();
+    /// Mods cannot assign the private `id` field:
+    /// ```compile_fail,E0616
+    /// let mut entity = mod_api::ModBlockEntity::default();
+    /// entity.id = String::from("other:machine");
     /// ```
     ///
-    /// ```compile_fail
-    /// let mut entity = sunrise_client_render::containers::ModBlockEntity::default();
-    /// entity.id().push_str("_changed");
+    /// Even with mutable access to the entity, `id()` returns a shared `&str`:
+    /// ```compile_fail,E0596
+    /// let entity = &mut mod_api::ModBlockEntity::default();
+    /// entity.id().make_ascii_uppercase();
     /// ```
     pub fn id(&self) -> &str {
         &self.id
@@ -190,12 +179,16 @@ impl ModContainerInsertRule {
 /// from (`canTakeItemThroughFace`); and the vanilla menu that shows its
 /// slots when the block is used, if any (`MOD_MENUS`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-// exhaustive: the game builds it with a literal; mods only read it
+// exhaustive: mods construct the declaration when calling Registrar::block_container
 #[derive(sunrise_mod_api_macros::Wire)]
 pub struct ModContainer {
+    /// Number of persisted slots. Registration refuses counts over 256: vanilla's
+    /// `ItemStackWithSlot.CODEC` stores slot indices in an unsigned byte.
     pub slots: usize,
     pub faces: [Vec<usize>; 6],
     pub inputs: Vec<usize>,
+    /// The slots items may leave through a side (`canTakeItemThroughFace`); a
+    /// `BlockEntityPart::can_take_item_through_face` answer replaces this per query.
     pub outputs: Vec<usize>,
     /// The admission rule for each slot, by slot index. Missing entries mean [`Any`](ModContainerInsertRule::Any).
     pub insert_rules: Vec<ModContainerInsertRule>,
@@ -279,17 +272,6 @@ mod tests {
         assert_ne!(other_kind, machine);
         let fresh = ModBlockEntity::default();
         assert_ne!(fresh.revision(), ModBlockEntity::default().revision());
-    }
-
-    #[test]
-    fn queues_client_update_fields_without_changing_revision_or_copying_them() {
-        let mut entity = ModBlockEntity::new("test:machine".into(), Default::default());
-        let revision = entity.revision();
-        let batch = Compound::from([("effect".into(), Tag::Int(23))]);
-        crate::ModBlockEntityView::new(&mut entity).set_client_update_fields(batch.clone());
-        assert_eq!(entity.client_update_fields(), Some(&batch));
-        assert_eq!(entity.revision(), revision);
-        assert_eq!(entity.clone().client_update_fields(), None);
     }
 
     #[test]

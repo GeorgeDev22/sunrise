@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "ينزلق خط الدردشة الجديد من اليسار بينما يتلاشى للداخل، بدلاً من أن يظهر كاملاً.",
   "sunrise.extras.chat_indicator": "مؤشر الرسالة",
   "sunrise.extras.chat_indicator.tooltip": "الشريط الملون الموجود على يسار خط الدردشة.",
-  "sunrise.extras.discord_presence": "وجود الخلاف الغني",
-  "sunrise.extras.discord_presence.tooltip": "يعرض Playing Sunrise على ملف تعريف Discord الخاص بك أثناء تشغيل Discord: القوائم، أو اللاعب الفردي أو المتعدد، والبعد ووقت اللعب. لا يوجد أبدًا اسم عالمي أو عنوان خادم.",
   "sunrise.extras.dynamic_lights": "أضواء ديناميكية",
   "sunrise.extras.dynamic_lights.tooltip": "تم حمل المشاعل ومصادر الضوء الأخرى أو إسقاطها أو إشعال النار فيها على الكتل المحيطة بها.",
   "sunrise.extras.fullbright": "فولبرايت",

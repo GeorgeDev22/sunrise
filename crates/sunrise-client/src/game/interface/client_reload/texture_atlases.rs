@@ -15,8 +15,6 @@ const MAX_SPRITES: usize = 4096;
 pub(in crate::game) fn collect_texture_atlases() -> Vec<TextureAtlasRegistration> {
     let mut atlases = Vec::new();
     if mod_api::__private::listened(mod_api::HookId::RegisterTextureAtlases) {
-        let _phase =
-            mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::Registration);
         Game::native_register_texture_atlases(&mod_api::RegistrationContext::new(), &mut atlases);
     }
     atlases
@@ -150,8 +148,8 @@ fn stage_sprite(
         files.insert(path.to_owned(), Resource::file(source.clone(), file));
         return true;
     }
-    let load = |texture: &str| {
-        let file = atlas_sources::texture_resource(texture, "textures");
+    let load = |texture: &str, directory: &str| {
+        let file = atlas_sources::texture_resource(texture, directory);
         sunrise_client::hud::decode_bytes(&source.read(&file).ok()?).ok()
     };
     let Some(png) = atlas_sources::generate(origin, &load).and_then(encode) else {
@@ -421,8 +419,8 @@ mod tests {
             let mut kept = self.0.lock().unwrap();
             kept.0 += 1;
             if kept.0 == 1 {
-                event.atlases.push(maps());
-                event.atlases.push(presets());
+                event.register(maps());
+                event.register(presets());
             }
         }
 
@@ -609,42 +607,42 @@ mod tests {
             _: &mod_api::RegistrationContext,
             event: &mut mod_api::RegisterSpriteSourcesEvent<'_>,
         ) {
-            event.sources.push("checker_mod:checker".into());
-        }
-        fn sprite_source(
-            &self,
-            _: &mod_api::RegistrationContext,
-            event: &mut mod_api::SpriteSourceEvent<'_>,
-        ) {
-            if event.source != "checker_mod:checker" || event.atlas.path() != "icons" {
-                return;
-            }
-            let shade = match event.config.get("shade") {
-                Some(sunrise_core::nbt::Tag::Byte(shade)) => *shade as u8,
-                _ => 0,
-            };
-            event.output.push(mod_api::SpriteSourceOutput::Pixels {
-                sprite: Identifier::parse("icons_mod:checker").unwrap(),
-                width: 2,
-                height: 2,
-                rgba: [shade, shade, shade, 255].repeat(4),
+            event.register(Identifier::parse("checker_mod:checker").unwrap(), |input| {
+                if input.atlas.path() != "icons" {
+                    return Ok(Vec::new());
+                }
+                let shade = match input.config.get("shade") {
+                    Some(sunrise_core::nbt::Tag::Byte(shade)) => *shade as u8,
+                    _ => 0,
+                };
+                Ok(vec![
+                    mod_api::SpriteSourceOutput::Pixels {
+                        sprite: Identifier::parse("icons_mod:checker").unwrap(),
+                        width: 2,
+                        height: 2,
+                        rgba: [shade, shade, shade, 255].repeat(4),
+                    },
+                    mod_api::SpriteSourceOutput::Remove {
+                        sprite: Identifier::parse("icons_mod:icons/star").unwrap(),
+                    },
+                ])
             });
-            event.output.push(mod_api::SpriteSourceOutput::Remove {
-                sprite: Identifier::parse("icons_mod:icons/star").unwrap(),
+            event.register(Identifier::parse("checker_mod:empty").unwrap(), |_| {
+                Ok(Vec::new())
             });
         }
     }
 
     /// A registered source type lists the mod's sprites where its entry stands, a reload asks
-    /// again with the definition as the packs now give it, and with no mod answering the entry
-    /// lists nothing.
+    /// again with the definition as the packs now give it, and a provider returning no outputs
+    /// leaves earlier sources intact.
     #[test]
     fn a_mods_sprite_source_lists_its_sprites_and_answers_again_on_reload() {
-        let stage = |shade: u8| {
+        let stage = |kind: &str, shade: u8| {
             let definition = format!(
                 r#"{{"sources":[
                     {{"type":"directory","source":"icons","prefix":"icons/"}},
-                    {{"type":"checker_mod:checker","shade":{shade}}}
+                    {{"type":"{kind}","shade":{shade}}}
                 ]}}"#
             );
             stage_texture_atlases(
@@ -681,22 +679,110 @@ mod tests {
             Game::native_register_sprite_sources(&mod_api::RegistrationContext::new(), &mut types);
             assert_eq!(
                 sunrise_client_render::mod_sprite_sources::register(types),
-                ["checker_mod:checker"]
+                ["checker_mod:checker", "checker_mod:empty"]
             );
-            let first = stage(40);
+            let first = stage("checker_mod:checker", 40);
             assert_eq!(checker_pixels(&first), (2, 2, [40, 40, 40, 255].repeat(4)));
             assert!(first.source().contains(&heart));
             assert!(
                 !first.source().contains(&star),
                 "the source removed the star"
             );
-            let reloaded = stage(90);
+            let reloaded = stage("checker_mod:checker", 90);
             assert_eq!(checker_pixels(&reloaded).2[..4], [90, 90, 90, 255]);
+            let empty = stage("checker_mod:empty", 40);
+            assert!(!empty.source().contains(&checker));
+            assert!(empty.source().contains(&star) && empty.source().contains(&heart));
         });
-        mod_platform::testing::with_mods(Vec::new().into(), || {
-            let unanswered = stage(40);
-            assert!(!unanswered.source().contains(&checker));
-            assert!(unanswered.source().contains(&star) && unanswered.source().contains(&heart));
+    }
+
+    #[test]
+    fn a_panicking_texture_atlas_listener_rolls_back_only_its_own_entries_and_is_poisoned() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct AtlasMod {
+            atlas: &'static str,
+            panic: bool,
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for AtlasMod {
+            fn register_texture_atlases(
+                &self,
+                _: &mod_api::RegistrationContext,
+                event: &mut mod_api::RegisterTextureAtlasesEvent<'_>,
+            ) {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                event.register(registration(self.atlas, self.atlas));
+                if self.panic {
+                    panic!("atlas registration boom");
+                }
+            }
+        }
+
+        let calls_a = Arc::new(AtomicUsize::new(0));
+        let calls_b = Arc::new(AtomicUsize::new(0));
+        let calls_c = Arc::new(AtomicUsize::new(0));
+        let mods: mod_api::Mods = vec![
+            mod_api::ModEntry::new(
+                "mod_a",
+                Box::new(AtlasMod {
+                    atlas: "mod_a:a",
+                    panic: false,
+                    calls: Arc::clone(&calls_a),
+                }),
+            ),
+            mod_api::ModEntry::new(
+                "mod_b",
+                Box::new(AtlasMod {
+                    atlas: "mod_b:b",
+                    panic: true,
+                    calls: Arc::clone(&calls_b),
+                }),
+            ),
+            mod_api::ModEntry::new(
+                "mod_c",
+                Box::new(AtlasMod {
+                    atlas: "mod_c:c",
+                    panic: false,
+                    calls: Arc::clone(&calls_c),
+                }),
+            ),
+        ]
+        .into();
+
+        mod_platform::testing::with_mods(mods, || {
+            let first = collect_texture_atlases();
+            let first_ids: Vec<String> =
+                first.iter().map(|entry| entry.atlas.to_string()).collect();
+            assert_eq!(first_ids, ["mod_a:a", "mod_c:c"]);
+            assert_eq!(calls_a.load(Ordering::Relaxed), 1);
+            assert_eq!(calls_b.load(Ordering::Relaxed), 1);
+            assert_eq!(calls_c.load(Ordering::Relaxed), 1);
+            let toasts = mod_api::__private::take_hook_panics();
+            assert!(
+                toasts.contains(&mod_api::__private::HookPanicReport {
+                    mod_id: "mod_b",
+                    hook: "register_texture_atlases",
+                }),
+                "expected panic toast for mod_b, got {toasts:?}"
+            );
+
+            let second = collect_texture_atlases();
+            let second_ids: Vec<String> =
+                second.iter().map(|entry| entry.atlas.to_string()).collect();
+            assert_eq!(second_ids, ["mod_a:a", "mod_c:c"]);
+            assert_eq!(calls_a.load(Ordering::Relaxed), 2);
+            assert_eq!(
+                calls_b.load(Ordering::Relaxed),
+                1,
+                "poisoned listener must not run on a second dispatch"
+            );
+            assert_eq!(calls_c.load(Ordering::Relaxed), 2);
         });
     }
 }

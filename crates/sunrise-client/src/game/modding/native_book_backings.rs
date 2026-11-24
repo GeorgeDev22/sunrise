@@ -50,7 +50,7 @@ pub(super) struct Backings {
     main_keys: Vec<Option<MainKey>>,
     native: Option<Vec<Option<NativeMenuSlot>>>,
     native_menu: Option<(u32, u128, i32)>,
-    native_hidden: BTreeSet<usize>,
+
     clear: BTreeSet<MainKey>,
     pub source_keys: Vec<Vec<Option<Key>>>,
 }
@@ -116,7 +116,7 @@ impl Backings {
             main_keys: Vec::with_capacity(before.size),
             native,
             native_menu,
-            native_hidden: before.hidden.iter().copied().collect(),
+
             clear: BTreeSet::new(),
             source_keys: Vec::new(),
         };
@@ -163,15 +163,12 @@ impl Backings {
         }
         let cleared: Vec<usize> = if any_slot {
             (0..before.size)
-                .filter(|slot| !before.hidden.contains(slot) && value.main_keys[*slot].is_some())
+                .filter(|slot| value.main_keys[*slot].is_some())
                 .collect()
         } else {
             plan.cleared_slots().to_vec()
         };
         for slot in cleared {
-            if before.hidden.contains(&slot) {
-                return Err(Refusal::Unavailable);
-            }
             let key = value
                 .main_keys
                 .get(slot)
@@ -283,9 +280,7 @@ impl Backings {
         };
         if game.menu(uuid, window).is_none()
             || native.iter().enumerate().any(|(slot, before)| {
-                !self.native_hidden.contains(&slot)
-                    && game.native_menu_place(conn, window, slot)
-                        != before.as_ref().map(|slot| slot.place)
+                game.native_menu_place(conn, window, slot) != before.as_ref().map(|slot| slot.place)
             })
         {
             return false;
@@ -297,24 +292,25 @@ impl Backings {
         };
         let player = menu.fields().player;
         let host: &mut dyn ServerHost = game;
-        native.iter().enumerate().all(|(slot, before)| {
-            if self.native_hidden.contains(&slot) {
-                return true;
-            }
-            match before {
+        native
+            .iter()
+            .enumerate()
+            .all(|(slot, before)| match before {
                 Some(before) => {
                     before.place.resolves(host, player)
                         && menu.slot_backing(host, slot)
                             == Some(MenuSlotBacking::Place(before.place))
-                        && ItemPlace::MenuSlot { menu, slot }.stack(host).as_ref()
+                        && ItemPlace::MenuSlot { menu, slot }
+                            .with_stack(host, |stack| stack.project())
+                            .flatten()
+                            .as_ref()
                             == before.stack.as_ref()
                 }
                 None => matches!(
                     menu.slot_backing(host, slot),
                     Some(MenuSlotBacking::Native(_))
                 ),
-            }
-        })
+            })
     }
     /// Whether `slot` is stored in a block, so a placement there can be published.
     pub fn stores(&self, slot: usize) -> bool {

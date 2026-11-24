@@ -2,7 +2,7 @@
 use super::{TryIntoApi, TryIntoEngine};
 
 macro_rules! gui_draw_value {
-    ($draw:expr, $from:ident, $to:ident, $convert:ident($($args:expr),*)) => {
+    ($draw:expr, $from:ident, $to:ident, $text:expr) => {
         match $draw {
             $from::Sprite {
                 sprite,
@@ -96,7 +96,7 @@ macro_rules! gui_draw_value {
                 color,
                 shadow,
             } => $to::Text {
-                text: text.$convert($($args),*)?,
+                text: $text(text)?,
                 x: *x,
                 y: *y,
                 color: *color,
@@ -117,6 +117,23 @@ macro_rules! gui_draw_value {
                 scale: *scale,
                 pivot: *pivot,
             },
+            $from::PlayerFace {
+                uuid,
+                x,
+                y,
+                size,
+                hat,
+                flip,
+                color,
+            } => $to::PlayerFace {
+                uuid: *uuid,
+                x: *x,
+                y: *y,
+                size: *size,
+                hat: *hat,
+                flip: *flip,
+                color: *color,
+            },
             $from::Push(ops) => $to::Push(ops.clone()),
             $from::Pop => $to::Pop,
         }
@@ -129,7 +146,12 @@ impl TryIntoApi for sunrise_client::hud_layout::GuiDraw {
     fn try_into_api(&self) -> Result<Self::Api, Self::Error> {
         use mod_api::client::hud_layout::GuiDraw as Api;
         use sunrise_client::hud_layout::GuiDraw as Engine;
-        Ok(gui_draw_value!(self, Engine, Api, try_into_api()))
+        Ok(gui_draw_value!(
+            self,
+            Engine,
+            Api,
+            |t: &sunrise_client::text::Text| t.try_into_api()
+        ))
     }
 }
 impl<C: ?Sized> TryIntoEngine<C> for mod_api::client::hud_layout::GuiDraw {
@@ -138,6 +160,11 @@ impl<C: ?Sized> TryIntoEngine<C> for mod_api::client::hud_layout::GuiDraw {
     fn try_into_engine(&self, _: &C) -> Result<Self::Engine, Self::Error> {
         use mod_api::client::hud_layout::GuiDraw as Api;
         use sunrise_client::hud_layout::GuiDraw as Engine;
-        Ok(gui_draw_value!(self, Api, Engine, try_into_engine(&())))
+        Ok(gui_draw_value!(
+            self,
+            Api,
+            Engine,
+            sunrise_client_lib::api_text::to_engine
+        ))
     }
 }

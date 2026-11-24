@@ -65,7 +65,22 @@ pub(crate) fn collect_animated_layers(
         .collect()
 }
 
+impl resident::ResidentSize for SectionGpu {
+    fn census_bytes(&self) -> (u64, usize) {
+        (
+            self.vertex_bytes(),
+            std::mem::size_of_val(&*self.animated_layers),
+        )
+    }
+}
+
 impl SectionGpu {
+    /// Bytes in the vertex arena, before rounding up to the allocator's span.
+    pub(super) fn vertex_bytes(&self) -> u64 {
+        (self.solid_slots + u64::from(self.translucent) * 4)
+            * std::mem::size_of::<super::TerrainVertex>() as u64
+    }
+
     /// Its fade code this frame: 0, drawn whole, or `lod::HELD` (whole, in
     /// front of far terrain) while it leaves (`leaving`) or its column has left
     /// the render distance and far terrain is coming in under it (`retiring`).
@@ -246,7 +261,7 @@ pub(super) fn begin_shrink<'a>(
 pub(super) fn decide_fade(
     s: &SectionGpu,
     key: SectionKey,
-    fades: &mut gpu_culling::Fades,
+    fades: &mut section_fade::Fades,
     f: FadeInputs<'_>,
 ) -> bool {
     let fading = s.drawn_faded(key, f);
@@ -301,7 +316,7 @@ pub(super) fn forget_records(sections: &mut resident::Resident<SectionGpu>, rows
 pub(super) fn mark_fades(
     sections: &mut resident::Resident<SectionGpu>,
     records: &mut gpu_culling::Records,
-    fades: &mut gpu_culling::Fades,
+    fades: &mut section_fade::Fades,
     rows: usize,
     f: FadeInputs<'_>,
 ) {

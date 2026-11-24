@@ -10,13 +10,11 @@ pub trait LevelSpawningBackend {
     /// The level's natural spawning limits by category ([`SpawnLimits`]):
     /// [`SpawnLimits::VANILLA`] until a mod sets others. Reads parked levels.
     /// None on a client and for a stale handle.
-    #[access(WorldOnly)]
     fn level_spawn_limits(&self, level: LevelRef) -> Option<SpawnLimits>;
     /// Side: server.
     /// Which categories the level's natural spawning may spawn ([`SpawnFlags`]):
     /// both on until a mod turns one off. Reads parked levels. None on a
     /// client and for a stale handle.
-    #[access(WorldOnly)]
     fn level_spawn_flags(&self, level: LevelRef) -> Option<SpawnFlags>;
     /// Side: server.
     /// `ServerLevel.canSpawnEntitiesInChunk`: whether natural spawning may place
@@ -24,7 +22,6 @@ pub trait LevelSpawningBackend {
     /// position outside the chunk it started in. Sunrise's answer is the one
     /// its spawner uses: the chunk is loaded. Reads parked levels and loads
     /// nothing. None on a client and for a stale handle.
-    #[access(WorldOnly)]
     fn level_can_spawn_entities_in_chunk(&self, level: LevelRef, pos: [i32; 2]) -> Option<bool>;
 }
 /// The handles' writes of the `level_spawning` area, implemented by the game and reached through [`BackendMut`].
@@ -49,7 +46,6 @@ pub trait LevelSpawningBackendMut {
     /// cancelled the spawn or a mob a mod kept out.
     /// Inside a transaction its join waits for the root commit, so a mod keeping the mob out is not
     /// known at the call: the handle is returned and reads stale from the commit on.
-    #[access(WorldOnly)]
     fn level_spawn_mob(
         &mut self,
         level: LevelRef,
@@ -107,7 +103,6 @@ pub trait LevelSpawningBackendMut {
     /// the spawn or an entity a mod kept out. Inside a transaction its join
     /// waits for the root commit, so a mod keeping the entity out is not known
     /// at the call: the handle is returned and reads stale from the commit on.
-    #[access(WorldOnly)]
     fn level_spawn_entity(
         &mut self,
         level: LevelRef,
@@ -122,12 +117,10 @@ pub trait LevelSpawningBackendMut {
     /// world opens with vanilla's, so a mod sets its own in `level_load`. Mobs
     /// already in the level stay. False, with nothing set, on a client and for
     /// a stale handle or a level that isn't open.
-    #[access(WorldOnly)]
     fn level_set_spawn_limits(&mut self, level: LevelRef, limits: SpawnLimits) -> bool;
     /// Side: server.
     /// Sets which categories the level's natural spawning may spawn
     /// ([`SpawnFlags`]), from the next spawn pass on. Kept and refused as
     /// `set_spawn_limits`.
-    #[access(WorldOnly)]
     fn level_set_spawn_flags(&mut self, level: LevelRef, flags: SpawnFlags) -> bool;
 }

@@ -32,6 +32,14 @@ pub const TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY: u32 = 44;
 /// `RenderTypes.translucentMovingBlock`: a translucent block drawn outside the terrain, from the
 /// terrain sprite arrays; alpha blended, depth written, quads sorted far to near.
 pub const TERRAIN_MODEL_TRANSLUCENT_OVERLAY: u32 = 46;
+/// `RenderTypes.patternedShieldGlint`: equal-depth, no-depth-write glint-only overlay pass.
+pub const GLINT_ONLY_OVERLAY: u32 = 48;
+/// `RenderTypes.bannerPattern`: translucent-blended, no-depth-write, no-alpha-cutout pattern pass.
+pub const BANNER_PATTERN_OVERLAY: u32 = 49;
+/// Opaque `Font.DisplayMode.POLYGON_OFFSET` text (`SubmitNodeCollection.canRenderAsSolid`).
+pub const TEXT_POLYGON_OFFSET_SOLID_OVERLAY: u32 = 50;
+/// Opaque `Font.DisplayMode.NORMAL` text, including the outline behind a sign's offset fill.
+pub const TEXT_NORMAL_SOLID_OVERLAY: u32 = 51;
 pub const WATER_MASK_OVERLAY: u32 = 13;
 pub const TRANSLUCENT_PARTICLE_OVERLAY: u32 = 15;
 pub const OIT_ENTITY: u32 = 1 << 24;

@@ -178,16 +178,26 @@ mod tests {
             assert!(!format!("{v:?}").contains("(0, 0)"));
         }
         let _owner = in_mod("m");
+        v.register_listener(&mut |v| {
+            assert_eq!(
+                v.block_tickets(),
+                vec![([1, 2, 3], set(&[[0, 0], [0, 1]], &[]))]
+            );
+            assert_eq!(v.entity_tickets(), vec![(9, set(&[[5, 5]], &[]))]);
+            assert!(v.remove_block_ticket([1, 2, 3], [0, 1], false));
+            assert!(!v.remove_block_ticket([1, 2, 3], [0, 1], false));
+            assert_eq!(v.remove_entity_tickets(9), 1);
+            assert_eq!(v.remove_block_tickets([1, 2, 3]), 1);
+            true
+        });
         assert_eq!(
-            v.block_tickets(),
-            vec![([1, 2, 3], set(&[[0, 0], [0, 1]], &[]))]
+            v.into_removed(),
+            [
+                ticket(0, block, (0, 1)),
+                ticket(0, entity, (5, 5)),
+                ticket(0, block, (0, 0)),
+            ]
         );
-        assert_eq!(v.entity_tickets(), vec![(9, set(&[[5, 5]], &[]))]);
-        assert!(v.remove_block_ticket([1, 2, 3], [0, 1], false));
-        assert!(!v.remove_block_ticket([1, 2, 3], [0, 1], false));
-        assert_eq!(v.remove_entity_tickets(9), 1);
-        assert_eq!(v.remove_block_tickets([1, 2, 3]), 1);
-        assert_eq!(v.into_removed().len(), 3);
     }
 
     #[test]
@@ -199,25 +209,33 @@ mod tests {
         };
         let both = vec![ticket(0, owner, (3, 3)), spawning];
         let mut v1 = ControllerTickets::new("m", both.clone());
-        let v = &mut v1;
         let _m = in_mod("m");
-        assert_eq!(
-            v.block_tickets(),
-            vec![([4, 5, 6], set(&[[3, 3]], &[[3, 3]]))]
-        );
-        // A singular removal takes the kind it names and leaves the other.
-        assert!(v.remove_block_ticket([4, 5, 6], [3, 3], true));
-        assert!(!v.remove_block_ticket([4, 5, 6], [3, 3], true));
-        assert_eq!(v.block_tickets(), vec![([4, 5, 6], set(&[[3, 3]], &[]))]);
-        assert!(v.remove_block_ticket([4, 5, 6], [3, 3], false));
-        assert!(v.block_tickets().is_empty());
+        v1.register_listener(&mut |v| {
+            assert_eq!(
+                v.block_tickets(),
+                vec![([4, 5, 6], set(&[[3, 3]], &[[3, 3]]))]
+            );
+            // A singular removal takes the kind it names and leaves the other.
+            assert!(v.remove_block_ticket([4, 5, 6], [3, 3], true));
+            assert!(!v.remove_block_ticket([4, 5, 6], [3, 3], true));
+            assert_eq!(v.block_tickets(), vec![([4, 5, 6], set(&[[3, 3]], &[]))]);
+            assert!(v.remove_block_ticket([4, 5, 6], [3, 3], false));
+            assert!(v.block_tickets().is_empty());
+            true
+        });
         // The other order, and the entity side.
         let mut v2 = ControllerTickets::new("m", both.clone());
-        assert!(v2.remove_block_ticket([4, 5, 6], [3, 3], false));
-        assert_eq!(v2.block_tickets(), vec![([4, 5, 6], set(&[], &[[3, 3]]))]);
+        v2.register_listener(&mut |v| {
+            assert!(v.remove_block_ticket([4, 5, 6], [3, 3], false));
+            assert_eq!(v.block_tickets(), vec![([4, 5, 6], set(&[], &[[3, 3]]))]);
+            true
+        });
         // Remove-all takes both.
         let mut v3 = ControllerTickets::new("m", both);
-        assert_eq!(v3.remove_block_tickets([4, 5, 6]), 2);
+        v3.register_listener(&mut |v| {
+            assert_eq!(v.remove_block_tickets([4, 5, 6]), 2);
+            true
+        });
         assert_eq!(v1.into_removed().len(), 2);
         assert_eq!(v2.into_removed().len(), 1);
         assert_eq!(v3.into_removed().len(), 2);
@@ -232,8 +250,11 @@ mod tests {
                 },
             ],
         );
-        assert!(v.remove_entity_ticket(7, [1, 1], true));
-        assert_eq!(v.entity_tickets(), vec![(7, set(&[[1, 1]], &[]))]);
+        v.register_listener(&mut |v| {
+            assert!(v.remove_entity_ticket(7, [1, 1], true));
+            assert_eq!(v.entity_tickets(), vec![(7, set(&[[1, 1]], &[]))]);
+            true
+        });
         assert!(v.into_removed()[0].natural_spawning);
     }
 }

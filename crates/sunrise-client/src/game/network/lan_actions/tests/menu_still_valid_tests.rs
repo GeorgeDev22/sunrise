@@ -224,14 +224,16 @@ fn a_mod_menu_part_decides_whether_its_menu_stays_open() {
                 sent: Vec::new(),
                 drag: None,
                 sent_data: Vec::new(),
+                reported_unsent_data_len: None,
                 blockless_data: Vec::new(),
-                hidden: Vec::new(),
+
                 mod_type: Some(shell),
                 registry_id: "test:shell".into(),
                 craft: None,
                 links: Vec::new(),
                 asks_still_valid: asks_still_valid(Some(shell), "test:shell"),
                 opening_item: None,
+                slot_changed_seen: None,
             };
             assert!(menu.asks_still_valid);
             let before = asked();

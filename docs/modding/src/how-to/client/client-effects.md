@@ -1,6 +1,19 @@
 # Client effects and tooltips
 
-Use client services to edit tooltips, draw extra camera views and change local sound output. See the [API reference](../../reference/api.md) for the generated signatures.
+Use client services to edit tooltips, read effect blends, draw extra camera views and change
+local sound output. See the [API reference](../../reference/api.md) for the generated signatures.
+
+## Client effect interpolation
+
+Pass the render partial tick unchanged to `LivingRef::effect_blend_factor(host, effect, partial)`
+for the local player's client effect blend. The read does not clamp it. An unknown effect,
+stale handle or non-local entity returns `None`; a known but absent effect returns `Some(0.0)`.
+
+An ordinary blended addition starts at 0 before its first effect tick, then interpolates each
+tick to the post-countdown target (1 while active, 0 once expired). An effect that expires on
+its first tick never rises; an infinite effect also interpolates on addition. An unblended
+addition starts at its target, and replacing an effect keeps its blend. Darkness and nausea
+have longer fades.
 
 ## Reading the tooltip preference
 
@@ -32,8 +45,152 @@ Use `Hooks::item_tooltip` for NeoForge's global `ItemTooltipEvent` moment: it
 receives every item's finished tooltip, including the parts' earlier lines,
 component lines and advanced information. No attached part is needed for a
 global listener, so this is also how a mod edits vanilla or other mods' tooltips.
-The global event supplies the stack, display settings, player IDs, and the
-request's `advanced` and `creative` flags.
+The global event lends `stack: ItemStackView<'_>` (call `project()` to copy
+components), `display: &TooltipDisplay<'_>`, and live `lines: TooltipLines<'_>`
+validated per edit with `TextFormError` (one invalid edit leaves all other lines
+intact), alongside player IDs and the request's `advanced` and `creative` flags.
+
+## Custom tooltip components and render hooks
+
+Custom tooltip components follow vanilla's `TooltipComponent` / `ClientTooltipComponent`
+and NeoForge's `RegisterClientTooltipComponentFactoriesEvent`, `RenderTooltipEvent.GatherComponents`,
+`RenderTooltipEvent.Pre`, and `RenderTooltipEvent.Texture`:
+
+1. **Define a data payload and client renderer.** Implement `TooltipComponentData` on your
+   payload type and `ClientTooltipComponent` on the client component that measures and draws it:
+
+```rust,ignore
+use mod_api::{
+    ClientTooltipComponent, DrawContext, Text, TooltipComponentData, TooltipFont,
+};
+
+struct ChargeBarData {
+    filled: i32,
+    max: i32,
+}
+impl TooltipComponentData for ChargeBarData {}
+
+struct ChargeBarClient {
+    filled: i32,
+    max: i32,
+    label: Text,
+}
+
+impl ClientTooltipComponent for ChargeBarClient {
+    fn width(&self, font: &dyn TooltipFont) -> i32 {
+        font.width(&self.label).unwrap_or(0).max(60)
+    }
+
+    fn height(&self, font: &dyn TooltipFont) -> i32 {
+        font.line_height() + 6
+    }
+
+    fn draw_text(&self, font: &dyn TooltipFont, x: i32, y: i32, draw: &mut dyn DrawContext) {
+        let _ = draw.text_with_font(font.id(), &self.label, [x as f32, y as f32], 0xFFAA_AAAA, true);
+    }
+
+    fn draw_image(
+        &self,
+        font: &dyn TooltipFont,
+        x: i32,
+        y: i32,
+        width: i32,
+        _height: i32,
+        draw: &mut dyn DrawContext,
+    ) {
+        let bar_y = (y + font.line_height() + 1) as f32;
+        let fill_w = (width as f32) * (self.filled as f32 / self.max.max(1) as f32);
+        draw.fill([x as f32, bar_y, width as f32, 4.0], 0xFF33_3333);
+        draw.fill([x as f32, bar_y, fill_w, 4.0], 0xFF44_CCFF);
+    }
+}
+```
+
+2. **Register the client factory once at startup.** Implement
+   `Hooks::register_client_tooltip_component_factories` and bind the payload type to its
+   `ClientTooltipComponent`. A later registration for the same type replaces the earlier one.
+   If the registration listener panics, none of its factories replace or extend the table:
+
+```rust,ignore
+fn register_client_tooltip_component_factories(
+    &self,
+    _cx: &mod_api::RegistrationContext,
+    event: &mut mod_api::RegisterClientTooltipComponentFactoriesEvent<'_>,
+) {
+    event.factories.register::<ChargeBarData, ChargeBarClient>(|data| ChargeBarClient {
+        filled: data.filled,
+        max: data.max,
+        label: Text::literal(format!("{}/{}", data.filled, data.max)),
+    });
+}
+```
+
+3. **Supply the component for an item or globally.**
+   - For your own item, implement `ItemPart::tooltip_image` (vanilla's `Item.getTooltipImage`)
+     and return `Some(TooltipComponent::custom(ChargeBarData { filled, max }))` (or
+     `Some(TooltipComponent::bundle(stack))`). It is inserted right after the item's name line
+     before `render_tooltip_gather_components` runs. Return `None` to leave vanilla's component
+     unchanged.
+   - To add, reorder, replace or remove elements on any item's tooltip, implement
+     `Hooks::render_tooltip_gather_components` and push
+     `TooltipElement::Component(TooltipComponent::custom(data))` alongside `TooltipElement::Text`.
+     Text lines wrap automatically when the tooltip overflows both sides of the screen. Set
+     `event.max_width = width` with a positive `width` to tighten wrapping further. Return
+     `Flow::Cancel` to skip the tooltip (neither `render_tooltip_pre` nor
+     `render_tooltip_texture` runs).
+
+4. **Inspect prepared components, replace the font, move or cancel in `render_tooltip_pre`.**
+   After Gather wraps text and prepares every element into a `PreparedTooltipComponent`,
+   `Hooks::render_tooltip_pre` runs before measurement and drawing (for both item tooltips and
+   non-item tooltips where `event.stack` is `None`):
+
+```rust,ignore
+fn render_tooltip_pre(
+    &self,
+    _host: &dyn mod_api::ClientHost,
+    event: &mut mod_api::RenderTooltipPreEvent<'_>,
+) -> mod_api::Flow {
+    let _first_component_size = event.draw.with_tooltip_font(event.font, |font| {
+        let component = event.components.first()?;
+        Some([component.width(font)?, component.height(font)?])
+    });
+    // Replace the font used for measurement and drawing without rewrapping text lines:
+    *event.font = mod_api::Identifier::parse("minecraft:alt").unwrap();
+    mod_api::Flow::Continue
+}
+```
+
+   Supply dimensions in your `ClientTooltipComponent`'s `width` and `height`
+   implementations. To read a component's dimensions, use
+   `component.width(font)` and `component.height(font)` in Pre, as above (`None` means
+   measurement failed). Gather sees unprepared data, not dimensions. The `width` and `height`
+   passed to `draw_image` are for the entire tooltip's content box, not that component.
+
+   Custom components can be inspected with `component.downcast_ref::<ChargeBarClient>()`,
+   and built-in lines and bundles with `as_text()` and `as_bundle()`. Use `event.positioner`
+   to compute placement. Item and cursor tooltips use the default cursor positioner, while
+   widget tooltips can position relative to the widget. Set `event.place.x` / `event.place.y`
+   to move the anchor; a widget positioner may ignore it. The initial cursor anchor is
+   truncated to whole GUI pixels. Text lines wrap only when Gather runs: with no Gather
+   listener, Pre sees each line whole, as vanilla passes it. A stack that can't cross into
+   the API skips Gather and Pre, and the engine's tooltip is drawn as it is. The item font is queried before Gather's wrapping and again before Pre;
+   the second answer seeds `event.font` but never changes the lines. Return
+   `Flow::Cancel` to suppress the box, component passes and `render_tooltip_texture` (anything
+   drawn through `event.draw` stays visible).
+   Use `Hooks::render_tooltip_texture` to override the tooltip style sprites (`event.texture`)
+   or solid background/border colours.
+
+Every prepared component — including zero-width or zero-height components — participates in
+the two-pass draw order (`draw_text` for every component, then `draw_image` for every
+component, matching `GuiGraphicsExtractor.tooltip`). An unregistered custom payload aborts
+that tooltip before `render_tooltip_pre`, `render_tooltip_texture`, or painting with an error
+log (without affecting later tooltips). A failed measurement or component draw aborts that
+whole tooltip, including the background and any earlier component paint. Pre listener paint
+stays visible. A panic in a factory, component callback, or destructor for retained tooltip data,
+renderer, or factory captures disables the owning callback for the session, with a log entry
+and error toast naming the mod. The first publisher owns a retained payload: a Gather listener
+or an item-image provider. Reordering or cloning someone else's component does not transfer
+its ownership or disable a healthy provider when that payload panics on drop.
 
 ## Drawing a second world camera
 
@@ -80,11 +237,8 @@ Extra views also omit the sun, moon, stars, clouds and block outline. Translucen
 terrain uses the player camera's sorting. See the generated `world_views` hook notes
 for the rendering contract.
 
-Views draw the player's own level for now. The other levels a server opens for the
-client (viewed levels) are meshed only while a view names one, after the player's own
-level's work and on one worker at a time, and their meshes stay 5 seconds after no view
-names the level. Once views of a viewed level are drawn, such a view draws the sections
-meshed so far and nothing where a section is not meshed yet.
+Views draw only the player's own level. A request targeting another level is refused with
+`WorldViewRefusalReason::Level`.
 
 ## Muffling sounds
 

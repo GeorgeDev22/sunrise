@@ -330,12 +330,18 @@ impl Game<'_> {
             && level.dimension() == self.native_level_key())
         .then_some(&self.world)
     }
-    /// Find a loaded chunk in an open server level.
+    /// Find a loaded chunk in an open server level: `ServerChunkCache.getChunkNow`, which also
+    /// makes a FULL column one of the level's recent FULL lookups (`Streaming::note_full_read`).
     pub(super) fn chunk(&self, level: LevelRef, pos: [i32; 2]) -> Option<ChunkRef> {
-        self.native_level_world(level)?
-            .chunks
-            .contains_key(&(pos[0], pos[1]))
-            .then_some(mod_api::__private::game::chunk_ref(level, pos))
+        let world = self.native_level_world(level)?;
+        let key = (pos[0], pos[1]);
+        if !world.chunks.contains_key(&key) {
+            return None;
+        }
+        if let Some(streaming) = self.native_level_streaming(level) {
+            streaming.note_full_read(world, key);
+        }
+        Some(mod_api::__private::game::chunk_ref(level, pos))
     }
     /// Every loaded chunk of an open server level as handles, ordered by chunk x then z. None
     /// for a stale handle or on a client. Loads nothing.
@@ -369,6 +375,21 @@ impl Game<'_> {
     pub(super) fn level_chunk_ref(&self, level: LevelRef, pos: [i32; 2]) -> Option<ChunkRef> {
         self.native_level_world(level)?;
         chunk_in_world(pos).then_some(ChunkRef::new(level, pos))
+    }
+    /// `Level.getChunk(x, z)`: load or generate chunk `pos` to FULL, blocking the server tick
+    /// until it is there, under a one-tick `UNKNOWN` ticket (`Game::load_full_chunk`).
+    /// `Unloaded` for a stale handle, on a client, for a chunk past `ChunkPos.isValid`, and when
+    /// the level's generation is paused or stopped; `Failed` when a generation it needs panicked.
+    pub(super) fn level_load_chunk(
+        &mut self,
+        level: LevelRef,
+        pos: [i32; 2],
+    ) -> Result<(), mod_api::ChunkLoadError> {
+        if self.native_level_streaming(level).is_none() {
+            return Err(mod_api::ChunkLoadError::Unloaded);
+        }
+        let parked = (level.dimension() != self.dim.key()).then_some(level);
+        self.load_full_chunk(parked, (pos[0], pos[1]))
     }
     /// The streaming of the level a handle names now, or None for a stale or
     /// foreign one.
@@ -446,11 +467,10 @@ impl Game<'_> {
                 let (own, rest): (Vec<_>, Vec<_>) =
                     loaded.into_iter().partition(|t| t.controller == slot);
                 let mut validation =
-                    mod_api::world::mod_chunk_tickets::ControllerTickets::new(owner, own.clone());
+                    mod_api::world::mod_chunk_tickets::ControllerTickets::new(owner, own);
                 self.native_validate_tickets(dim.id(), controller, &mut validation);
-                let removed = validation.into_removed();
                 loaded = rest;
-                loaded.extend(own.into_iter().filter(|t| !removed.contains(t)));
+                loaded.extend(validation.into_loaded());
             }
         }
         if let Some(streaming) = self.mod_ticket_streaming_mut(dim) {
@@ -538,6 +558,26 @@ impl Game<'_> {
         forced.sort_unstable_by_key(|&(x, z)| ChunkPos::new(x, z).pack());
         Some(forced.into_iter().map(|(x, z)| [x, z]).collect())
     }
+    /// Borrow the resident site without lending any writable host to discovery.
+    pub(super) fn level_with_capability_site(
+        &self,
+        at: mod_api::BlockSide,
+        visit: &mut dyn FnMut(&dyn mod_api::LevelHost, mod_api::BlockCapabilitySite),
+    ) -> Result<(), mod_api::LevelReadError> {
+        if !self.level_in_place(at.level) {
+            return Err(mod_api::LevelReadError::Unavailable);
+        }
+        let view = super::native_level_signals::ReadLevel {
+            game: self,
+            level: at.level,
+        };
+        let Some(site) = view.capability_site(at) else {
+            return Err(mod_api::LevelReadError::Unavailable);
+        };
+        visit(&view, site);
+        Ok(())
+    }
+
     /// The block state ID at `pos` (`Level.getBlockState`), without formatting a string.
     /// None for a chunk that isn't loaded or a `y` outside the world. On a client, the state
     /// the server sent for a column the client holds, of its own level or a viewed one.
@@ -582,9 +622,10 @@ impl Game<'_> {
             return None;
         }
         let (offhand, sneaking) = match self.player_handle_read(player)? {
-            PlayerRead::Acting { .. } if self.dim.key() == level.dimension() => {
-                (self.offhand.as_ref(), self.keys.held(super::Mapping::Sneak))
-            }
+            PlayerRead::Acting { .. } if self.dim.key() == level.dimension() => (
+                self.offhand.as_ref(),
+                self.held_mapping(super::Mapping::Sneak),
+            ),
             PlayerRead::Guest(guest) if guest.dimension == level.dimension_id() => {
                 (guest.offhand.as_ref(), guest.sneaking)
             }
@@ -657,6 +698,25 @@ impl Game<'_> {
             .get(key)
             .cloned()
     }
+    pub(super) fn level_get_enchant_power_bonus(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+        state: BlockStateId,
+        table_pos: [i32; 3],
+    ) -> Result<f32, mod_api::LevelReadError> {
+        use mod_api::LevelReadError;
+        if self.native_level_view_world(level).is_none() {
+            return Err(if self.level_handle_current(level) {
+                LevelReadError::Unavailable
+            } else {
+                LevelReadError::Stale
+            });
+        }
+        self.enchant_power(Some(level), state, block_pos(pos), block_pos(table_pos))
+            .ok_or(LevelReadError::Unavailable)
+    }
+
     /// Read the mod-published connection group at `pos`, or `Ok(None)` when unset, unloaded, or
     /// out of height. Works on both server (including parked levels) and client (including viewed
     /// levels).
@@ -749,16 +809,43 @@ impl Game<'_> {
         self.native_level_read_world(level)
             .is_some_and(|w| w.is_loaded_at(pos[0], pos[1], pos[2]))
     }
-    /// The stored light of one layer at `pos` (`BlockAndLightGetter.getBrightness`), 0 to 15,
-    /// of the server's level or the one a client shows. None as for `block_state`: a position
-    /// that isn't loaded has no light to read.
+    pub(super) fn level_get_light_emission(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+        state: BlockStateId,
+    ) -> Result<u8, mod_api::LevelReadError> {
+        use mod_api::LevelReadError;
+        if self.native_level_read_world(level).is_none() {
+            return Err(if self.level_handle_current(level) {
+                LevelReadError::Unavailable
+            } else {
+                LevelReadError::Stale
+            });
+        }
+        let light = &self.pack.context.light;
+        if light.is_dynamic(state.0)
+            && let Some(answer) = self
+                .query_dynamic_light_emission(block_pos(pos), state, || {
+                    Self::light_emission_dimension(level)
+                })
+                .ok_or(LevelReadError::Unavailable)?
+        {
+            return Ok(answer);
+        }
+        Ok(light.emission(state.0))
+    }
+
+    /// The stored light of one layer at `pos` (`BlockAndLightGetter.getBrightness`), 0 to 15.
+    /// As with `block_state`, a client reads the named level, shown or open for viewing.
+    /// Returns None if the level is unavailable or the position isn't loaded.
     pub(super) fn level_brightness(
         &self,
         level: LevelRef,
         layer: LightLayer,
         pos: [i32; 3],
     ) -> Option<i32> {
-        let world = self.native_level_read_world(level)?;
+        let world = self.native_level_view_world(level)?;
         world
             .is_loaded_at(pos[0], pos[1], pos[2])
             .then(|| world_brightness(world, layer, pos))
@@ -2003,7 +2090,12 @@ mod tests {
             };
             let parked = LevelRef::new(level.epoch(), other.key());
             let host: &mut dyn ServerHost = game;
-            assert!(parked.random(&*host).is_none(), "not open yet");
+            assert!(
+                parked
+                    .with_random::<()>(host, |_| panic!("unopened level lent its random stream"))
+                    .is_none(),
+                "not open yet"
+            );
             let back = game.dim;
             game.enter_level(other).unwrap();
             game.enter_level(back).unwrap();
@@ -2034,6 +2126,121 @@ mod tests {
         });
     }
 
+    fn level_random_state(random: &sunrise_core::random::LegacyRandom) -> (u64, Option<u64>) {
+        let (seed, gaussian) = <(u64, Option<f64>)>::from(random);
+        (seed, gaussian.map(f64::to_bits))
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_level_rng_draws_survive_transaction_abort_on_active_and_parked_levels() {
+        use crate::game::journal_level_write::JournalLevelWrite;
+        use mod_api::ObjectiveRenderType;
+        use sunrise_client::text::Text;
+        use sunrise_core::random::{LegacyRandom, LevelRandom, RandomSource};
+
+        with_game(|game| {
+            let here = game.dim;
+            let other = if here == Dim::Nether {
+                Dim::End
+            } else {
+                Dim::Nether
+            };
+            game.enter_level(other).unwrap();
+            let parked = game.level(other.id()).unwrap();
+            game.enter_level(here).unwrap();
+            let active = game.level(here.id()).unwrap();
+
+            let mut expected_active = LegacyRandom::new(31);
+            let mut expected_parked = LegacyRandom::new(47);
+            expected_active.next_gaussian();
+            expected_parked.next_gaussian();
+            game.world.random = LevelRandom::for_level(expected_active.clone());
+            game.levels.parked_world_mut_of(other.id()).unwrap().random =
+                LevelRandom::for_level(expected_parked.clone());
+            let states = |game: &super::Game<'_>| {
+                [
+                    level_random_state(&game.world.random),
+                    level_random_state(&game.levels.parked_world_of(other.id()).unwrap().random),
+                ]
+            };
+            let draw = |rng: &mut dyn mod_api::RandomSource| {
+                (rng.next_gaussian().to_bits(), rng.next_long())
+            };
+
+            let advanced = game.storage_scope(|game, _| {
+                game.add_objective(
+                    "outer_discarded",
+                    "dummy",
+                    Text::literal("Outer"),
+                    ObjectiveRenderType::Integer,
+                )
+                .unwrap();
+                {
+                    let mut writer = JournalLevelWrite::new(game, active).unwrap();
+                    let host: &mut dyn mod_api::LevelWriteHost = &mut writer;
+                    assert_eq!(
+                        host.with_random(draw),
+                        Some((
+                            expected_active.next_gaussian().to_bits(),
+                            expected_active.next_long()
+                        )),
+                    );
+                }
+
+                let advanced = game.storage_scope(|game, _| {
+                    game.add_objective(
+                        "child_discarded",
+                        "dummy",
+                        Text::literal("Child"),
+                        ObjectiveRenderType::Integer,
+                    )
+                    .unwrap();
+                    for (level, expected) in [
+                        (active, &mut expected_active),
+                        (parked, &mut expected_parked),
+                    ] {
+                        assert_eq!(
+                            level.with_random(game, draw),
+                            Some((expected.next_gaussian().to_bits(), expected.next_long()))
+                        );
+                    }
+                    let advanced = [
+                        level_random_state(&expected_active),
+                        level_random_state(&expected_parked),
+                    ];
+                    assert_eq!(states(game), advanced);
+
+                    (advanced, false)
+                });
+                assert!(game.objective("child_discarded").is_none());
+                assert!(game.objective("outer_discarded").is_some());
+                assert_eq!(
+                    states(game),
+                    advanced,
+                    "child abort rolls back journaled state without rewinding active or parked RNG"
+                );
+
+                (advanced, false)
+            });
+            assert!(game.objective("outer_discarded").is_none());
+            assert_eq!(
+                states(game),
+                advanced,
+                "outer abort rolls back journaled state without rewinding active or parked RNG"
+            );
+            for (level, expected) in [
+                (active, &mut expected_active),
+                (parked, &mut expected_parked),
+            ] {
+                assert_eq!(
+                    level.with_random(game, draw),
+                    Some((expected.next_gaussian().to_bits(), expected.next_long())),
+                );
+            }
+        });
+    }
+
     fn in_mod(id: &'static str) -> mod_api::content::crash::ModGuard {
         mod_platform::content::crash::enter_native_mod(mod_api::content::crash::ModCall {
             id,
@@ -2043,8 +2250,8 @@ mod tests {
     }
 
     use mod_api::{
-        self, Hooks, ModEntry, Registrar, ServerHost, TicketController, ValidateTicketsEvent,
-        testing,
+        self, ChunkLoadError, Hooks, ModEntry, Registrar, ServerHost, TicketController,
+        ValidateTicketsEvent, testing,
     };
     use sunrise_client::mod_chunk_tickets::{ModTicket, TicketOwner};
 
@@ -2558,6 +2765,169 @@ mod tests {
         });
     }
 
+    /// Hears `chunk_load`, noting whether the chunk was resident when it heard it.
+    struct Loads;
+    #[mod_api::__subscriptions]
+    impl Hooks for Loads {
+        fn chunk_load(&self, host: &mut dyn ServerHost, event: &mut mod_api::ChunkLoadEvent<'_>) {
+            let resident = host
+                .level(event.dimension)
+                .and_then(|level| host.chunk(level, event.chunk))
+                .is_some();
+            HEARD.with_borrow_mut(|heard| {
+                heard.push((event.dimension.to_owned(), event.chunk, event.new, resident))
+            });
+        }
+    }
+    thread_local! {
+        /// Each `chunk_load` `Loads` heard: dimension, chunk, new, resident.
+        static HEARD: std::cell::RefCell<Vec<(String, [i32; 2], bool, bool)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// `Level.getChunk(x, z)` through `LevelRef::load_chunk` (#4550): a chunk never generated is
+    /// FULL when the call returns, lit (its open sky reads 15), with nothing forced, and the
+    /// mods heard `chunk_load` for it while it was resident, before the call returned. Its
+    /// `UNKNOWN` ticket keeps it through the next tick's unload sweep and expires at the one
+    /// after (a timeout of 1, removed below zero), whose sweep unloads it as any chunk with no
+    /// ticket. A parked level loads the same way, without switching levels.
+    #[test]
+    #[ignore = "daily"]
+    fn load_chunk_brings_a_lit_full_chunk_under_a_ticket_that_expires_after_a_tick() {
+        // The game fixture publishes process-wide worldgen tables, and `Loads` is installed
+        // as the process's mods: a child process of its own.
+        if run_fresh_cases(
+            concat!(
+                "game::native_level_refs::tests::",
+                "load_chunk_brings_a_lit_full_chunk_under_a_ticket_that_expires_after_a_tick"
+            ),
+            "SUNRISE_LOAD_CHUNK_CHILD",
+            &["load_chunk"],
+        ) {
+            return;
+        }
+        let mods: mod_api::Mods = vec![ModEntry::new("loads", Box::new(Loads))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_chunk_streaming(|game| {
+                let level = game.level(game.dim.id()).unwrap();
+                let far = ChunkRef::new(level, [40, -7]);
+                assert!(!game.chunk_loaded(far));
+                let host: &mut dyn ServerHost = game;
+                assert_eq!(level.load_chunk(host, [40, -7]), Ok(()));
+                // Lit when the call returns: open sky at the top of the world, none in the
+                // deepslate under it.
+                let sky = |host: &dyn ServerHost, y| {
+                    level.brightness(host, LightLayer::Sky, [645, y, -105])
+                };
+                assert_eq!(sky(&*host, 318), Some(15), "open sky");
+                assert_eq!(sky(&*host, -60), Some(0), "no sky light underground");
+                let heard = HEARD.with_borrow_mut(std::mem::take);
+                assert!(
+                    heard.contains(&(level.dimension_id().to_owned(), [40, -7], true, true)),
+                    "chunk_load heard while resident, before the call returned: {heard:?}"
+                );
+                assert_eq!(game.chunk_forced(far), Some(false));
+                assert!(!game.streaming.forced.contains(&(40, -7)));
+                let host: &mut dyn ServerHost = game;
+                assert_eq!(level.load_chunk(host, [40, -7]), Ok(()), "already full");
+                // A changed loaded area sweeps at once: the next tick's sweep keeps the chunk.
+                game.streaming.radius = 1;
+                game.tick_server(false).unwrap();
+                assert!(
+                    game.chunk_loaded(far),
+                    "the ticket holds through the next tick"
+                );
+                game.streaming.radius = 0;
+                game.tick_server(false).unwrap();
+                assert!(!game.chunk_loaded(far), "unloaded once the ticket expired");
+                // The first chunks past `ChunkPos.isValid`, on x and on z.
+                let host: &mut dyn ServerHost = game;
+                assert_eq!(
+                    level.load_chunk(&mut *host, [2_097_062, 0]),
+                    Err(ChunkLoadError::Unloaded)
+                );
+                assert_eq!(
+                    level.load_chunk(&mut *host, [0, -2_097_062]),
+                    Err(ChunkLoadError::Unloaded)
+                );
+                // A level the server has not opened, then the same level opened and parked.
+                let other = if game.dim == Dim::Nether {
+                    Dim::End
+                } else {
+                    Dim::Nether
+                };
+                let parked = mod_api::LevelRef::new(level.epoch(), other.key());
+                let host: &mut dyn ServerHost = game;
+                assert_eq!(
+                    parked.load_chunk(host, [3, 3]),
+                    Err(ChunkLoadError::Unloaded)
+                );
+                let back = game.dim;
+                game.enter_level(other).unwrap();
+                game.enter_level(back).unwrap();
+                HEARD.with_borrow_mut(Vec::clear);
+                let host: &mut dyn ServerHost = game;
+                assert_eq!(parked.load_chunk(host, [3, 3]), Ok(()));
+                assert_eq!(game.dim, back, "loading must not switch the acting level");
+                let parked_chunk =
+                    &game.levels.parked_world_of(other.id()).unwrap().chunks[&(3, 3)];
+                assert!(parked_chunk.lit, "the parked level's chunk is lit too");
+                let heard = HEARD.with_borrow_mut(std::mem::take);
+                assert!(
+                    heard.iter().any(|(d, chunk, _, resident)| d == other.id()
+                        && *chunk == [3, 3]
+                        && *resident),
+                    "the parked level's chunk_load came before the call returned: {heard:?}"
+                );
+            });
+        });
+    }
+
+    /// `ServerChunkCache.getChunkNow` (#4670): after the first purge, a resident read of the FULL
+    /// chunk makes it one of the level's recent FULL lookups, so a `load_chunk` that follows in
+    /// the same tick answers from them and leaves the `UNKNOWN` ticket as the first load placed
+    /// it: it expires at the second purge, whose sweep unloads the chunk. Without the read's entry
+    /// the second load would set the ticket again and the chunk would stay.
+    #[test]
+    #[ignore = "daily"]
+    fn a_resident_read_lets_load_chunk_answer_without_a_new_ticket() {
+        // The game fixture publishes process-wide worldgen tables: a child process of its own.
+        if run_fresh_cases(
+            concat!(
+                "game::native_level_refs::tests::",
+                "a_resident_read_lets_load_chunk_answer_without_a_new_ticket"
+            ),
+            "SUNRISE_LOAD_CHUNK_READ_CHILD",
+            &["resident_read"],
+        ) {
+            return;
+        }
+        mod_platform::testing::with_mods(Vec::new().into(), || {
+            with_chunk_streaming(|game| {
+                let level = game.level(game.dim.id()).unwrap();
+                let host: &mut dyn ServerHost = game;
+                assert_eq!(level.load_chunk(host, [40, -7]), Ok(()));
+                // A changed loaded area sweeps at once: the ticket, at 0 ticks left after this
+                // tick's purge, keeps the chunk, and the tick's end forgets the lookups.
+                game.streaming.radius = 1;
+                game.tick_server(false).unwrap();
+                assert!(
+                    game.world.chunks.contains_key(&(40, -7)),
+                    "kept by the ticket"
+                );
+                assert!(game.chunk(level, [40, -7]).is_some(), "the resident read");
+                let host: &mut dyn ServerHost = game;
+                assert_eq!(level.load_chunk(host, [40, -7]), Ok(()));
+                game.streaming.radius = 0;
+                game.tick_server(false).unwrap();
+                assert!(
+                    !game.world.chunks.contains_key(&(40, -7)),
+                    "the first load's ticket expired at the second purge"
+                );
+            });
+        });
+    }
+
     #[test]
     #[ignore = "daily"]
     fn forceload_query_lists_only_command_tickets() {
@@ -2911,7 +3281,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod environment_read_tests {
+pub(in crate::game) mod environment_read_tests {
     use crate::game::{Dim, native_entity_refs::tests::with_game};
     use mod_api::{BiomeSearch, LevelRef, WorldEpoch};
     use std::sync::Arc;
@@ -2933,6 +3303,11 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn biome_reads_follow_live_cells_parked_levels_and_client_login_without_loading() {
+        run_biome_reads_follow_live_cells_parked_levels_and_client_login_without_loading();
+    }
+
+    pub(in crate::game) fn run_biome_reads_follow_live_cells_parked_levels_and_client_login_without_loading()
+     {
         use crate::game::execution_role::ExecutionRole;
         use sunrise_protocol::connection::Pipe;
 
@@ -2997,6 +3372,10 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn floor_reads_real_collision_shapes_and_refuses_unloaded_positions() {
+        run_floor_reads_real_collision_shapes_and_refuses_unloaded_positions();
+    }
+
+    pub(in crate::game) fn run_floor_reads_real_collision_shapes_and_refuses_unloaded_positions() {
         with_game(|game| {
             game.world
                 .chunks
@@ -3040,6 +3419,10 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn sky_and_logical_height_read_the_named_dimension_and_client_state() {
+        run_sky_and_logical_height_read_the_named_dimension_and_client_state();
+    }
+
+    pub(in crate::game) fn run_sky_and_logical_height_read_the_named_dimension_and_client_state() {
         use crate::game::execution_role::ExecutionRole;
         use sunrise_client::chunk::LevelShape;
         use sunrise_protocol::connection::Pipe;
@@ -3119,6 +3502,11 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn closest_biome_uses_the_named_generator_without_loading_resident_chunks() {
+        run_closest_biome_uses_the_named_generator_without_loading_resident_chunks();
+    }
+
+    pub(in crate::game) fn run_closest_biome_uses_the_named_generator_without_loading_resident_chunks()
+     {
         use sunrise_client::vanillagen::{TerrainResources, VanillaTerrain};
 
         with_game(|game| {
@@ -3228,6 +3616,11 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn nearest_structure_uses_the_named_generator_without_loading_resident_chunks() {
+        run_nearest_structure_uses_the_named_generator_without_loading_resident_chunks();
+    }
+
+    pub(in crate::game) fn run_nearest_structure_uses_the_named_generator_without_loading_resident_chunks()
+     {
         use mod_api::StructureSearch;
         use sunrise_client::vanillagen::{TerrainResources, VanillaTerrain};
 
@@ -3325,6 +3718,10 @@ mod environment_read_tests {
     #[test]
     #[ignore = "daily"]
     fn level_environment_reads_match_vanilla_vectors() {
+        run_level_environment_reads_match_vanilla_vectors();
+    }
+
+    pub(in crate::game) fn run_level_environment_reads_match_vanilla_vectors() {
         use serde_json::{Value, json};
         use std::collections::HashMap;
         use sunrise_client::vanillagen::{TerrainResources, VanillaTerrain};

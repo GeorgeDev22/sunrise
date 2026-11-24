@@ -570,9 +570,21 @@ class StableModApiTests(unittest.TestCase):
                         self.assertRaisesRegex(SystemExit, "sdk.json has schema"):
                     nightly.stable_sdk_inputs(OLD, None)
 
+    def test_notes_name_a_target_whose_enclosing_impl_alone_changed(self):
+        # An impl header edit leaves the signature and the function's own source span as they were.
+        old = {"a::f": ("signature", "source", ("impl A", "body")), "a::g": ("signature", "source", None),
+               "a::h": ("signature", "source", ("impl A", "body"))}
+        new = {"a::f": ("signature", "source", ("impl<T> A", "body")), "a::g": ("signature", "source", ("d", "b")),
+               "a::h": ("signature", "source", ("impl A", "body"))}
+        nightly.append_mixin_notes(self.notes, "26.3-0.1.11", PREVIOUS, old, new)
+        notes = self.notes.read_text()
+        self.assertIn("- Changed: `a::f`", notes)
+        self.assertNotIn("a::g", notes)
+        self.assertNotIn("a::h", notes)
+
     def test_large_notes_keep_every_target_in_a_linked_file(self):
         target = "module::" + "x" * 125_000
-        nightly.append_mixin_notes(self.notes, "26.3-0.1.11", PREVIOUS, {}, {target: ("signature", "source")})
+        nightly.append_mixin_notes(self.notes, "26.3-0.1.11", PREVIOUS, {}, {target: ("signature", "source", None)})
         listing = self.notes.with_name("changed-mixin-targets.md")
         self.assertIn(f"- Added: `{target}`", listing.read_text())
         self.assertIn(f"/releases/download/26.3-0.1.11/{listing.name}", self.notes.read_text())

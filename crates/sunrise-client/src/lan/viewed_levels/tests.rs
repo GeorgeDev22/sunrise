@@ -10,8 +10,9 @@ use crate::lan::{
 };
 use crate::world::World;
 use std::sync::mpsc::Receiver;
+use sunrise_core::vanilla_bytes::Writer;
 use sunrise_protocol::{
-    buf::{Reader, Writer},
+    buf::Reader,
     ids::play::clientbound as ids,
     packets::play::Clientbound as C,
     viewed_levels::{self, Answer, CHANNEL, Level, Message, ScopedPacket},
@@ -178,7 +179,7 @@ fn in_ctx<R>(world: &mut World, f: impl FnOnce(&mut TickCtx) -> R) -> R {
 /// One level pass of the level in place.
 fn run_level(hub: &mut Hub, world: &mut World) {
     in_ctx(world, |ctx| {
-        let _ = hub.tick_level(ctx);
+        let _ = hub.tick_level(ctx, None);
     });
 }
 

@@ -4,9 +4,11 @@
 
 `LevelRef::dimension` returns a `DimensionKey`, a small `Copy` value that names the dimension
 for as long as the game runs, custom dimensions included. Compare it with another key or with
-`DimensionKey::OVERWORLD`, `NETHER` and `END`; `level.dimension().id(host)` gives the name
-(`minecraft:the_nether`). On a client, `host.level(name)` gives the level it shows under the
-name the server calls it, whether or not that is a vanilla dimension.
+`DimensionKey::OVERWORLD`, `NETHER` and `END`; `level.dimension().id(host)` borrows the name
+as `Option<&str>` (for example, `Some("minecraft:the_nether")`). It returns `None`
+without a backend or for an unissued slot. Copy the name only if you need to retain it
+beyond the host borrow. On a client, `host.level(name)` gives the level it shows under
+the name the server calls it, whether or not that is a vanilla dimension.
 
 ## Dimension shape
 
@@ -109,15 +111,18 @@ as `Entity.teleport` with a portal's transition. It works for a player, a mob, a
 trident, a firework and the thrown items and fireballs a chunk saves. The entity keeps its motion;
 set it first with `entity.set_velocity` to stop or turn it.
 
+Bind a [server command](../entities/server-commands.md) in `Hooks::register_commands`.
+This executor accepts a player source and returns `Ok(1)` when the move is queued:
+
 ```rust,ignore
-fn run_mod_command(&self, host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>) -> Flow {
-    let CommandSource::Player { player, .. } = event.source else {
-        return Flow::Continue;
+event.commands.push(Command::new("pocket").executes(|host, source, _| {
+    let CommandSource::Player { player, .. } = source else {
+        return Err(Text::translate("mymod.commands.player_required", vec![]).into());
     };
-    let entity = player.entity();
-    entity.teleport_to_level(host, "mymod:pocket", [8.5, 100.0, 8.5], None);
-    Flow::Cancel
-}
+    player.entity().teleport_to_level(host, "mymod:pocket", [8.5, 100.0, 8.5], None)
+        .then_some(1)
+        .ok_or_else(|| Text::translate("mymod.commands.teleport_failed", vec![]).into())
+}));
 ```
 
 `pos` is in the destination's own coordinates: nothing scales it by the level's
@@ -151,11 +156,24 @@ its sky, its spawning and its beds follow that clock, and `/time` in the level s
 `level.clock_marker_time(host, &marker)` gives the next time the level's own clock reaches a time marker, as
 `/time set <marker>` moves it. Only the Overworld's clock defines markers today, so any other clock answers None.
 
+To give a dimension a clock of its own, register a `WorldClock` with `r.register_world_clock("dungeon")` in
+`register` and name it in the dimension's settings, `DimensionSettings { clock: Some("mymod:dungeon".into()), .. }`:
+the dimension type takes it as its `default_clock` in place of `day_cycle`'s, and every level of that type follows it.
+A registered clock is an entry of the world's `minecraft:world_clock` registry, sent to players, and runs from the
+world's first tick like the vanilla clocks. `level.clock(host)` gives the level's clock as a `WorldClockRef`
+(`None` for a level without one), whose writes are `ServerClockManager`'s: `set_total_ticks(host, ticks)` sets its
+time, `set_rate(host, rate)` the ticks it counts each game tick, and `set_paused(host, paused)` stops or restarts it,
+so a paused clock gives the level a fixed time.
+
 When enough players have slept, `sleep_finished_time` hands its listeners a `ClockAdjustment` for the level's own
 clock: `Absolute(time)`, `Relative(ticks)` from the time now, or `Marker(id)`. It starts as vanilla's
 `Marker(minecraft:wake_up_from_sleep)`, a later mod reads what an earlier one set, and the game resolves it once
 after all of them. A time before now or past `i64::MAX`, or a marker the clock does not define, is refused and the
 clock moves to the morning instead; `new_time` is that morning, read only.
+
+Before any of that, `sleep_skip_night` is asked once each tick that enough players have slept, with the
+`players_sleeping_percentage` rule and how many players sleep and count. Canceling it keeps the night for that tick:
+the clock does not move, nobody is woken and the rain goes on, and `sleep_finished_time` is not asked.
 
 ## Which level a hook is in
 
@@ -175,10 +193,41 @@ position, not the position above it used by Pre.
 
 ## Players, structures and chunk watchers
 
-`level.online_players(host)` lists the real online players in that server level, including
-when it is parked. Obtain a chunk with `host.chunk(level, pos)`, then call
-`chunk.watchers(host)` to ask which players were sent it and have it inside their
-view distance; fake players watch nothing.
+`level.visit_online_players(host, &mut visit)` visits the real online players in that server
+level without building a list, even if the level is parked. In the active level the local
+or acting player comes first, then the placed guests in server order; a parked level has
+only its placed guests. Fake players and players displaced by a nested guest turn are skipped.
+The callback takes a `PlayerRef` and can make shared reads through the same host. Return
+`core::ops::ControlFlow::Break(())` to stop or `Continue(())` to keep going. The call returns
+`Ok(Break(()))` if you stopped it or `Ok(Continue(()))` if it finished, including when
+the level had no players. A stale level gives `Err(LevelReadError::Stale)`; a client or
+unavailable world access gives `Err(LevelReadError::Unavailable)`. Neither calls the visitor.
+
+If you need mutable host access, collect only the handles that will receive the effect.
+For example, select players above a world y-coordinate (`min_y: f64`) with a shared
+read, then send each a message. This example is from a context that can propagate
+both visit and send errors:
+
+```rust,ignore
+use core::ops::ControlFlow::Continue;
+
+let mut recipients = Vec::new();
+let _ = level.visit_online_players(host, &mut |player| {
+    if player.entity().position(host).is_some_and(|pos| pos[1] > min_y) {
+        recipients.push(player);
+    }
+    Continue(())
+})?;
+for player in recipients {
+    let _ = player.tell(host, message.clone())?;
+}
+```
+
+For typed payloads, `ToClient::send_in_level` and `ToClient::send_near` already handle
+collecting recipients before sending.
+
+Obtain a chunk with `host.chunk(level, pos)`, then call `chunk.watchers(host)` to ask which
+players were sent it and have it inside their view distance; fake players watch nothing.
 
 `level.find_nearest_structure(host, structure, StructureSearch::new(origin, radius))` searches
 for a structure id or `#tag` and returns its structure and locate position. This is a
@@ -212,16 +261,53 @@ pay only the empty-index guard, not a mod scan or callback.
 
 ## Saving a level
 
-`level.request_save(host)` asks the server to save a level, as the autosave and `/save-all` do, with its
-chunks on disk when it ends. The save runs at the start of the next server tick, not inside the call (a hook
-may be running in the tick that is saving), and a level asked for twice before then is saved once. The call
-answers whether the request was taken. `level_save` fires with the level's dimension once it was written; a
-save that fails fires nothing and is logged.
+`level.request_save(host)` asks the server to save a level, as the autosave and `/save-all` do. The
+save runs at the start of the next server tick, not inside the call; multiple requests before
+then save it once. The call answers whether the request was taken, not whether the save succeeded.
+`level_save` fires with the level's dimension after the save pass, even if an individual record
+could not be written. As in vanilla, those failures are logged but do not fail the pass. A failed
+awaited storage flush fails the pass and does not fire `level_save`.
 
 Inside a hook, use `level.request_save(host)`, not a synchronous `save-all` command.
 While an entity pass or held-out row is borrowed, synchronous saving refuses with vanilla's
 `commands.save.failed` feedback and a failed command result, without writing a partial snapshot.
 Requested saves wait for a settled start-of-tick boundary.
+
+## Resolve an entity by UUID
+
+In a server hook, wrap a saved `u128` in `EntityUuid` and ask the level that
+should hold the entity with `LevelRef::entity_by_uuid`. The level may be the one
+in place or a parked one; the lookup returns `None` if the entity is unloaded or
+in another level. To search every level, do as vanilla's
+`ServerLevel.getEntityInAnyDimension` does: ask the hook's own level first, then
+each other level `host.levels()` lists.
+
+```rust,ignore
+use mod_api::prelude::*;
+use mod_api::{EntityRef, EntityUuid, LevelRef, ServerHost};
+
+fn find_saved_entity(host: &dyn ServerHost, level: LevelRef, saved_uuid: u128) -> Option<EntityRef> {
+    level.entity_by_uuid(host, EntityUuid(saved_uuid))
+}
+
+fn find_in_any_level(host: &dyn ServerHost, own: LevelRef, saved_uuid: u128) -> Option<EntityRef> {
+    let uuid = EntityUuid(saved_uuid);
+    own.entity_by_uuid(host, uuid).or_else(|| {
+        let levels = host.levels().list_levels();
+        levels
+            .into_iter()
+            .filter(|level| *level != own)
+            .find_map(|level| level.entity_by_uuid(host, uuid))
+    })
+}
+
+fn entity_identity(host: &mut dyn ServerHost, entity: EntityRef) -> Option<EntityUuid> {
+    entity.uuid(host).map(EntityUuid)
+}
+```
+
+`EntityRef::uuid` returns the raw `u128`. Use `EntityUuid(raw_uuid)` to pass
+that value back into the lookup.
 
 ## Chunk generators
 

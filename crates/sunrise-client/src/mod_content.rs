@@ -142,7 +142,8 @@ pub fn menu_types(mods: &[ContentMod]) -> Vec<(&MenuType, &str)> {
 static FLUID_LOOKS: std::sync::RwLock<BTreeMap<String, FluidLook>> =
     std::sync::RwLock::new(BTreeMap::new());
 
-/// Remembers how the mods' fluids look (`data/<id>/sunrise/fluid/`), for what the client draws.
+/// Remembers how the mods' fluids look (`data/<id>/sunrise/fluid/`), for what the client draws,
+/// and their measures, for `FluidTypeProperties` on either side.
 pub fn set_fluid_looks(mods: &[ContentMod]) {
     let looks: BTreeMap<String, FluidLook> = mods
         .iter()
@@ -160,14 +161,15 @@ pub fn register_world_fluids(
 ) -> std::result::Result<Vec<String>, sunrise_world::fluid::ModFluidRegistrationError> {
     let mut names = Vec::new();
     for look in mods.iter().flat_map(|m| &m.content.fluids) {
-        let Some(world) = look.world else { continue };
+        let Some(world) = &look.world else { continue };
         let flowing_id = look.flowing_id();
         names.push(look.id.clone());
         names.push(flowing_id.clone());
         sunrise_world::fluid::register_mod_fluid(sunrise_world::fluid::ModFluidType {
             id: look.id.clone(),
             flowing_id,
-            bucket: look.bucket_id(),
+            // Only a bucket the game registers pours this fluid; one the mod names keeps its own.
+            bucket: look.bucket_id().filter(|_| world.bucket),
             rules: sunrise_world::fluid::ModFluidRules {
                 tick_delay: world.tick_delay,
                 drop_off: world.drop_off,
@@ -182,6 +184,25 @@ pub fn register_world_fluids(
 #[path = "mod_content_fluid_declarations.rs"]
 mod fluid_declarations;
 pub use fluid_declarations::{fluid_interactions, set_fluid_interactions};
+
+/// The temperature, density and viscosity a mod's fluid file states for `id`, copied without
+/// the rest of its look.
+pub fn fluid_measures(id: &str) -> Option<sunrise_mod_package::content::FluidMeasures> {
+    FLUID_LOOKS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)
+        .map(|look| look.measures)
+}
+
+/// The item a bucket of the mod fluid `id` is (`Fluid.getBucket`), a tank-only one's too.
+pub fn fluid_bucket(id: &str) -> Option<String> {
+    FLUID_LOOKS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)?
+        .bucket_id()
+}
 
 /// How the fluid `id` looks, when a mod declares it.
 pub fn fluid_look(id: &str) -> Option<FluidLook> {
@@ -1049,7 +1070,12 @@ pub fn accept_declared(
         // A file's fluid look still says how the code-declared fluid looks.
         for fluid in &batch.fluids {
             match target.fluids.iter_mut().find(|f| f.id == fluid.id) {
-                Some(look) => look.world = fluid.world,
+                Some(look) => {
+                    look.world.clone_from(&fluid.world);
+                    if fluid.bucket_item.is_some() {
+                        look.bucket_item.clone_from(&fluid.bucket_item);
+                    }
+                }
                 None => target.fluids.push(fluid.clone()),
             }
         }
@@ -3327,10 +3353,22 @@ pub fn biome_modifiers_over_packs(
             Err(_) => Ok(BTreeMap::new()),
         }
     };
+    let builtin_sounds = biomes::load_sound_events(root);
+    let registered_sound = |name: &str| {
+        builtin_sounds
+            .as_ref()
+            .is_some_and(|b| crate::music::registered_sound(b, name))
+    };
     let mut warnings = Vec::new();
     let mut modifiers = Vec::new();
     for [m, file, text] in saved.modifiers.iter().chain(declared) {
-        modifiers.extend(biomes::Modifier::read(m, file, text, &mut warnings)?);
+        modifiers.extend(biomes::Modifier::read(
+            m,
+            file,
+            text,
+            &registered_sound,
+            &mut warnings,
+        )?);
     }
     // What the generator reads without the modifiers over the packs.
     let packed = packs.apply("biomes", read(BIOMES)?);
@@ -3771,16 +3809,48 @@ fn load_layers<'a>(jar_store: &Path, mods: &'a [ContentMod]) -> Result<Vec<ModLa
             )?);
         }
         if !m.content.files.is_empty() {
-            let source = m.content.source().to_owned();
-            layers.push(ModLayer::new(
-                m.id.clone(),
+            use crate::packs::Source;
+            let source = if let Some(content) = m.content.admitted_source() {
+                use std::hash::{DefaultHasher, Hash, Hasher};
+                use sunrise_assets::resource_source::ResourceSource;
+                use sunrise_mod_package::content::ReadError;
+                let reader = content.clone();
+                Source::Opened(ResourceSource::fixed(
+                    content.names(),
+                    move |name, limit| {
+                        let reader = reader.reader();
+                        limit
+                            .map_or_else(|| reader.read(name), |max| reader.read_head(name, max))
+                            .map_err(|error| {
+                                let kind = match error {
+                                    ReadError::NotFound(_) => std::io::ErrorKind::NotFound,
+                                    ReadError::Other(_) => std::io::ErrorKind::InvalidData,
+                                };
+                                std::io::Error::new(kind, error)
+                            })
+                    },
+                    move |name| {
+                        let mut hash = DefaultHasher::new();
+                        if content.is_archive() {
+                            content.reader().read(name).ok()?.hash(&mut hash);
+                        } else {
+                            let path = content.reader().path(name).ok()??;
+                            let meta = fs::metadata(path).ok()?;
+                            meta.len().hash(&mut hash);
+                            meta.modified().ok()?.hash(&mut hash);
+                        }
+                        Some(hash.finish())
+                    },
+                ))
+            } else {
+                let source = m.content.source().to_owned();
                 if source.is_dir() {
-                    crate::packs::Source::Dir(source)
+                    Source::Dir(source)
                 } else {
-                    crate::packs::Source::Zip(source)
-                },
-                None,
-            )?);
+                    Source::Zip(source)
+                }
+            };
+            layers.push(ModLayer::new(m.id.clone(), source, None)?);
         }
         loaded.push(ModLayers { source: m, layers });
     }
@@ -3918,8 +3988,7 @@ pub fn resolved_resources(
 /// The root to load: `base` itself with no content, else the mods' overlay
 /// over it, built in `cache/mod-content/<stamp>`: one folder per mod set, so
 /// a running game keeps reading the root it was given while a switch builds
-/// another (docs/design/mod-hotload.md). Roots of other sets unused for a day
-/// are removed.
+/// another. Roots of other sets unused for a day are removed.
 ///
 /// The root is built once and kept: later starts with the same build, base
 /// and mod files reuse it. With ATM10's carried mods a build takes about
@@ -3962,10 +4031,10 @@ fn real_base(base: &Path) -> Result<PathBuf> {
     Ok(fs::canonicalize(base).map_err(|e| format!("{}: {e}", base.display()))?)
 }
 
-/// Whether turning a content mod on or off can apply in a running game
-/// (docs/design/mod-hotload.md): its assets and data can, through the
-/// resource reload and the server's data reload. What a world numbers or
-/// generates from cannot yet: then the translation key of why.
+/// Whether turning a content mod on or off can apply in a running game:
+/// its assets and data can, through the resource reload and the server's data
+/// reload. What a world numbers or generates from cannot yet: then the
+/// translation key of why.
 pub fn live_switch(content: &Content) -> std::result::Result<(), &'static str> {
     if !content.blocks.is_empty()
         || !content.items.is_empty()
@@ -4079,7 +4148,7 @@ fn stamp(
             .clone()?,
     };
     let mut parts = vec![
-        "sunrise mod content 8".to_owned(),
+        "sunrise mod content 10".to_owned(),
         serde_json::to_string(inventory)?,
     ];
     parts.push(exe);
@@ -4109,11 +4178,20 @@ fn stamp(
             "{:?} {:?} {:?}",
             m.content.blocks, m.content.items, m.content.block_entity_types
         ));
-        let source = m.content.source();
         if m.content.files.is_empty() {
             // Declared in code only: nothing to read.
-        } else if source.is_dir() {
-            for file in &m.content.files {
+            continue;
+        }
+        let source = m.content.source();
+        let admitted = m.content.admitted_source();
+        if let Some(content) = admitted.as_ref().filter(|content| content.is_archive()) {
+            let reader = content.reader();
+            for file in m.content.files.iter() {
+                let digest = Sha256::digest(reader.read(file)?);
+                parts.push(format!("{file} {digest:x}"));
+            }
+        } else if admitted.is_some() || source.is_dir() {
+            for file in m.content.files.iter() {
                 parts.push(format!("{file} {}", hash(&source.join(file))?));
             }
         } else {

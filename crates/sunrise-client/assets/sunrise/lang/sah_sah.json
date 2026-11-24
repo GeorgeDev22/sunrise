@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Саҥа чат строката бүтүннүү көстүбэккэ, умуллан турдаҕына, хаҥас өттүттэн киирэр.",
   "sunrise.extras.chat_indicator": "Сурук көрдөрүүтэ",
   "sunrise.extras.chat_indicator.tooltip": "Чат строкатын хаҥас өттүгэр баар өҥнөөх линия.",
-  "sunrise.extras.discord_presence": "Discord Баай баар буолуу",
-  "sunrise.extras.discord_presence.tooltip": "Discord үлэлии турдаҕына Discord профилгар Sunrise оонньууну көрдөрөр: менюлар, биир оонньооччу эбэтэр элбэх оонньооччу, кээмэй уонна оонньообут бириэмэ. Хаһан даҕаны аан дойду аата эбэтэр сервер аадырыһа суох.",
   "sunrise.extras.dynamic_lights": "Динамическай уоттар",
   "sunrise.extras.dynamic_lights.tooltip": "Факеллар уонна атын сырдык источниктара тутуллубуттар, түһэриллибиттэр эбэтэр умайбыттар тула блоктары сырдаталлар.",
   "sunrise.extras.fullbright": "Фуллбрайт",

@@ -511,6 +511,8 @@ pub fn date_millis(text: &str) -> Option<i64> {
 #[derive(Default, Clone)]
 pub struct Progress {
     pub criteria: BTreeMap<String, BTreeMap<String, String>>,
+    /// For packet progress, the requirements in force when the progress arrived.
+    remote_requirements: BTreeMap<String, Vec<Vec<String>>>,
 }
 impl Progress {
     pub fn has(&self, adv: &str, criterion: &str) -> bool {
@@ -527,12 +529,35 @@ impl Progress {
     }
     /// Completed requirement groups and their count (the screen's tooltip).
     pub fn counts(&self, a: &Advancement) -> (usize, usize) {
-        let done = a
-            .requirements
+        self.counts_for(&a.id, &a.requirements)
+    }
+    /// `AdvancementProgress.update`: bind the received progress to these
+    /// requirements, dropping criterion names that are not in them.
+    pub fn set_remote(&mut self, a: &Advancement, obtained: impl IntoIterator<Item = String>) {
+        let obtained = obtained
+            .into_iter()
+            .filter(|name| a.criteria.iter().any(|c| &c.name == name))
+            .map(|name| (name, String::new()))
+            .collect();
+        self.criteria.insert(a.id.clone(), obtained);
+        self.remote_requirements
+            .insert(a.id.clone(), a.requirements.clone());
+    }
+    /// `AdvancementProgress.getPercent` / `getProgressText`: a widget without
+    /// received progress, or without criteria in it, has no progress to show.
+    pub fn remote_counts(&self, id: &str) -> Option<(usize, usize)> {
+        let requirements = self.remote_requirements.get(id)?;
+        requirements
             .iter()
-            .filter(|g| g.iter().any(|c| self.has(&a.id, c)))
+            .any(|g| !g.is_empty())
+            .then(|| self.counts_for(id, requirements))
+    }
+    fn counts_for(&self, id: &str, requirements: &[Vec<String>]) -> (usize, usize) {
+        let done = requirements
+            .iter()
+            .filter(|g| g.iter().any(|c| self.has(id, c)))
             .count();
-        (done, a.requirements.len())
+        (done, requirements.len())
     }
     pub fn grant(&mut self, adv: &str, criterion: &str, date: &str) -> bool {
         let m = self.criteria.entry(adv.to_owned()).or_default();
@@ -590,6 +615,10 @@ pub trait World {
     fn structures(&self, pos: [i32; 3]) -> Vec<String>;
     /// Block name and properties.
     fn block(&self, pos: [i32; 3]) -> (String, BTreeMap<String, String>);
+    /// The registered state, when the world can borrow it without a snapshot.
+    fn block_state(&self, _pos: [i32; 3]) -> Option<&sunrise_world::chunk::BlockState> {
+        None
+    }
     /// Legal values of the actual registered property, unavailable without registry access.
     fn block_property_values(&self, _block: &str, _property: &str) -> Option<Vec<String>> {
         None
@@ -878,20 +907,30 @@ pub fn block(v: &Value, pos: [i32; 3], w: &dyn World) -> bool {
     if v.is_null() {
         return true;
     }
-    let (name, props) = w.block(pos);
-    if !id_matches(&v["blocks"], "block", &name, w) {
+    let borrowed = w.block_state(pos);
+    let owned = borrowed.is_none().then(|| w.block(pos));
+    let name = borrowed
+        .map(|state| state.name.as_str())
+        .or_else(|| owned.as_ref().map(|(name, _)| name.as_str()))
+        .unwrap_or_default();
+    if !id_matches(&v["blocks"], "block", name, w) {
         return false;
     }
     if let Some(state) = v["state"].as_object() {
         for (k, want) in state {
-            let have = props.get(k).cloned().unwrap_or_default();
+            let have = match borrowed {
+                Some(s) => s.properties.get(k),
+                None => owned.as_ref().and_then(|(_, props)| props.get(k)),
+            }
+            .map(String::as_str)
+            .unwrap_or_default();
             let ok = match want {
-                Value::String(s) => have == *s,
-                Value::Bool(b) => have == b.to_string(),
+                Value::String(s) => have == s,
+                Value::Bool(b) => have == if *b { "true" } else { "false" },
                 Value::Number(n) => have == n.to_string(),
                 Value::Object(bounds) => w
-                    .block_property_values(&name, k)
-                    .is_some_and(|domain| state_ranges::matches(bounds, &have, &domain)),
+                    .block_property_values(name, k)
+                    .is_some_and(|domain| state_ranges::matches(bounds, have, &domain)),
                 _ => false,
             };
             if !ok {
@@ -1495,55 +1534,55 @@ pub fn conditions(v: &Value, ctx: &Entities, w: &dyn World) -> bool {
 }
 
 /// Every named predicate `v` reaches is loaded, and none reaches itself.
+/// `Validatable.validateHolder` checks every typed reference before boolean
+/// short-circuiting; this is evaluation, not registry/startup admission.
 pub fn references_valid(v: &Value, w: &dyn World) -> bool {
-    predicate_references(v, w, &mut BTreeSet::new()).is_ok()
-}
-
-enum InvalidReference {
-    Missing,
-    Cycle,
-}
-
-/// `Validatable.validateHolder`'s active-name rule, as a defensive check on
-/// this evaluation context. Check every typed reference before boolean
-/// short-circuiting; this does not implement registry/startup admission.
-fn predicate_references(
-    v: &Value,
-    w: &dyn World,
-    active: &mut BTreeSet<String>,
-) -> Result<(), InvalidReference> {
-    match v {
-        Value::String(id) => {
-            let id = full(id).into_owned();
-            if !active.insert(id.clone()) {
-                return Err(InvalidReference::Cycle);
-            }
-            let result = w
-                .predicate(&id)
-                .ok_or(InvalidReference::Missing)
-                .and_then(|v| predicate_references(v, w, active));
-            active.remove(&id);
-            result
-        }
-        Value::Array(list) => list
-            .iter()
-            .try_for_each(|v| predicate_references(v, w, active)),
-        Value::Object(o) => {
-            let kind = o
-                .get("condition")
-                .or_else(|| o.get("type"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            match &*full(kind) {
-                "minecraft:inverted" => predicate_references(&v["term"], w, active),
-                "minecraft:all_of" | "minecraft:any_of" => terms(v)
-                    .iter()
-                    .try_for_each(|v| predicate_references(v, w, active)),
-                _ => Ok(()),
-            }
-        }
-        _ => Ok(()),
+    enum Visit<'v> {
+        Condition(&'v Value),
+        Leave(std::borrow::Cow<'v, str>),
     }
+    let mut active = BTreeSet::new();
+    let mut pending = Vec::new();
+    let mut first = Some(Visit::Condition(v));
+    while let Some(visit) = first.take().or_else(|| pending.pop()) {
+        let v = match visit {
+            Visit::Condition(v) => v,
+            Visit::Leave(id) => {
+                active.remove(&id);
+                continue;
+            }
+        };
+        match v {
+            Value::String(id) => {
+                let id = full(id);
+                let Some(definition) = w.predicate(&id) else {
+                    return false;
+                };
+                if !active.insert(id.clone()) {
+                    return false;
+                }
+                pending.push(Visit::Leave(id));
+                pending.push(Visit::Condition(definition));
+            }
+            Value::Array(list) => pending.extend(list.iter().rev().map(Visit::Condition)),
+            Value::Object(o) => {
+                let kind = o
+                    .get("condition")
+                    .or_else(|| o.get("type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                match &*full(kind) {
+                    "minecraft:inverted" => pending.push(Visit::Condition(&v["term"])),
+                    "minecraft:all_of" | "minecraft:any_of" => {
+                        pending.extend(terms(v).iter().rev().map(Visit::Condition));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 /// `terms` as `HolderSetCodec` reads it: a list, or one holder alone; a `#tag` is not expanded.
@@ -1599,7 +1638,7 @@ pub fn literal_random_chance(v: &Value, draw: &mut dyn FnMut() -> f32) -> Option
     Some(draw() < chance)
 }
 
-fn condition_leaf(v: &Value, ctx: &Entities, w: &dyn World) -> bool {
+pub(crate) fn condition_leaf(v: &Value, ctx: &Entities, w: &dyn World) -> bool {
     match v {
         Value::Object(o) if o.contains_key("condition") || o.contains_key("type") => {
             let ty = o

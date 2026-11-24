@@ -11,22 +11,18 @@ pub trait LevelWeatherBackend {
     /// `getThunderLevel` at partial tick 1.0): both 0 in a level with no weather.
     /// Reads any open server level or the client's current synchronized level;
     /// None for a stale handle, an unavailable level or a client not logged in.
-    #[access(WorldOnly)]
     fn level_weather(&self, level: LevelRef) -> Option<(f32, f32)>;
     /// Side: server.
     /// Whether it rains (`Level.isRaining`: a rain level above 0.2).
-    #[access(WorldOnly)]
     fn level_is_raining(&self, level: LevelRef) -> Option<bool>;
     /// Side: server.
     /// `Level.isRainingAt(pos)` in the level a handle names, the one in place or a parked one:
     /// it rains there and `pos` is under open sky in a biome that rains. None for a stale
     /// handle, on a client, and where `pos` is not loaded or outside the world's height; a
     /// read never loads a chunk.
-    #[access(WorldOnly)]
     fn level_is_raining_at(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool>;
     /// Side: server.
     /// Whether it thunders (`Level.isThundering`: a thunder level above 0.9).
-    #[access(WorldOnly)]
     fn level_is_thundering(&self, level: LevelRef) -> Option<bool>;
 }
 /// The handles' writes of the `level_weather` area, implemented by the game and reached through [`BackendMut`].
@@ -42,7 +38,6 @@ pub trait LevelWeatherBackendMut {
     /// all of it and `thunder_change` the thunder. The players see it after the next sync.
     /// False for a negative time, a call from inside `weather_change` or `thunder_change`, a
     /// parked level, a stale handle or a client.
-    #[access(WorldOnly)]
     fn level_set_weather(
         &mut self,
         level: LevelRef,
@@ -56,7 +51,6 @@ pub trait LevelWeatherBackendMut {
     /// each clamped to 0 to 1 and set without fading. They still drift toward the weather
     /// the level has (`set_weather`) by 0.01 a tick, as vanilla's do. False for a value that
     /// isn't finite, a parked level, a stale handle or a client.
-    #[access(WorldOnly)]
     fn level_set_weather_levels(&mut self, level: LevelRef, rain: f32, thunder: f32) -> bool;
     /// Side: server.
     /// `ServerLevel.findLightningTargetAround`: the closest lightning rod near the column at
@@ -64,7 +58,6 @@ pub trait LevelWeatherBackendMut {
     /// with the level random as vanilla does (so this moves later draws), else the top of the
     /// column. Strikes nothing. None for a refused level, a stale or parked handle, a client and
     /// an unloaded column.
-    #[access(WorldOnly)]
     fn level_lightning_target(&mut self, level: LevelRef, pos: [i32; 3]) -> Option<[i32; 3]>;
     /// Side: server.
     /// Strikes lightning at `at`, as summoning a `minecraft:lightning_bolt`
@@ -73,6 +66,5 @@ pub trait LevelWeatherBackendMut {
     /// `visual_only` it only flashes and sounds (`setVisualOnly`). The
     /// `lightning_strike` hook hears it first with the cause `mod` and may
     /// cancel it. False for a chunk that isn't loaded or a canceled strike.
-    #[access(WorldOnly)]
     fn level_strike_lightning(&mut self, level: LevelRef, at: [f64; 3], visual_only: bool) -> bool;
 }

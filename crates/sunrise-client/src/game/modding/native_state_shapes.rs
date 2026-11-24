@@ -144,24 +144,8 @@ impl Game<'_> {
         player_context: bool,
     ) -> impl Iterator<Item = [f64; 6]> + 'a {
         let (outline, offset) = self.selected_outline(world, state, anims, pos, player_context);
-        let base = std::array::from_fn::<_, 3, _>(|i| f64::from(pos[i]) + offset[i]);
-        let (voxel, dynamic, defaults) = match outline {
-            Outline::Published(shape) | Outline::Declared(shape, _) => {
-                (shape.boxes(), None, &[][..])
-            }
-            Outline::Dynamic(bounds) => (&[][..], Some(bounds), &[][..]),
-            Outline::Default(facts) => (&[][..], None, &facts.outline[..]),
-        };
-        voxel
-            .iter()
-            .map(|b| {
-                let min = b.min_position();
-                let max = b.max_position();
-                [min.x, min.y, min.z, max.x, max.y, max.z]
-            })
-            .chain(dynamic)
-            .chain(defaults.iter().copied())
-            .map(move |b| std::array::from_fn(|i| base[i % 3] + b[i]))
+        let base = std::array::from_fn(|i| f64::from(pos[i]) + offset[i]);
+        outline_boxes(outline, base)
     }
 
     pub(super) fn state_shape_boxes(
@@ -173,14 +157,34 @@ impl Game<'_> {
         kind: BlockShapeKind,
     ) -> Vec<[f64; 6]> {
         match kind {
-            BlockShapeKind::Outline => self
-                .outline_boxes_iter(world, state, anims, pos, false)
-                .map(|bounds| std::array::from_fn(|i| bounds[i] - f64::from(pos[i % 3])))
-                .collect(),
+            BlockShapeKind::Outline => {
+                let (outline, offset) = self.selected_outline(world, state, anims, pos, false);
+                // Stay block-local: adding world coordinates and subtracting them again
+                // would lose precision in offsets used to sample debris.
+                outline_boxes(outline, offset).collect()
+            }
             BlockShapeKind::Collision => collision_boxes(self.collision, world, state, pos),
             _ => unreachable!("BlockShapeKind: unhandled variant"),
         }
     }
+}
+
+fn outline_boxes(outline: Outline<'_>, base: [f64; 3]) -> impl Iterator<Item = [f64; 6]> + '_ {
+    let (voxel, dynamic, defaults) = match outline {
+        Outline::Published(shape) | Outline::Declared(shape, _) => (shape.boxes(), None, &[][..]),
+        Outline::Dynamic(bounds) => (&[][..], Some(bounds), &[][..]),
+        Outline::Default(facts) => (&[][..], None, &facts.outline[..]),
+    };
+    voxel
+        .iter()
+        .map(|b| {
+            let min = b.min_position();
+            let max = b.max_position();
+            [min.x, min.y, min.z, max.x, max.y, max.z]
+        })
+        .chain(dynamic)
+        .chain(defaults.iter().copied())
+        .map(move |b| std::array::from_fn(|i| base[i % 3] + b[i]))
 }
 
 #[cfg(test)]

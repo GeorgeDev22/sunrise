@@ -1,5 +1,5 @@
 use super::*;
-use crate::mobs::world::with_built_test_world;
+use crate::mobs::world::{with_built_contact_test_world, with_built_test_world};
 use std::sync::Arc;
 use sunrise_world::registry::BlockRegistry;
 
@@ -37,7 +37,7 @@ pub(super) fn enderman(types: &crate::mobs::MobTypes, seed: i64) -> Mob {
     let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
     register(&mut m);
     m.random = sunrise_core::random::LegacyRandom::new(seed);
-    m.on_ground = true;
+    m.ground.on_ground = true;
     m.stuck_multiplier = Vec3::ZERO;
     m
 }
@@ -425,7 +425,7 @@ fn freezing_cramming_and_a_mod_hurt_each_teleport_inside_the_hurt() {
         world.set(8, 64, 8, air).unwrap();
     };
     assert!(
-        with_built_test_world(&[], world, |w, types| {
+        with_built_contact_test_world(world, |w, types, generic| {
             let mut landed = [0; 3];
             for seed in 0..40 {
                 // Freezing: fully frozen in powder snow, on the 40-tick beat.
@@ -473,7 +473,7 @@ fn freezing_cramming_and_a_mod_hurt_each_teleport_inside_the_hurt() {
                     &mut crate::health::TestLevel::new(0).level(),
                     &mut Vec::new(),
                     mod_api::EntityWrite::Hurt {
-                        source: None,
+                        damage_type: generic,
                         amount: 2.0,
                     },
                 );
@@ -564,7 +564,7 @@ fn two_hurts_in_a_tick_each_teleport_inside_their_own_hurt() {
         world.set(8, 64, 8, air).unwrap();
     };
     assert!(
-        with_built_test_world(&[], world, |w, types| {
+        with_built_contact_test_world(world, |w, types, generic| {
             let pig = |id: u32, x: f64| {
                 let kind = std::sync::Arc::new(types.types["minecraft:pig"].clone());
                 let mut p = Mob::new(id, kind, Vec3::new(x, 64.0, 8.5), 0.0);
@@ -636,7 +636,7 @@ fn two_hurts_in_a_tick_each_teleport_inside_their_own_hurt() {
                     &mut level.level(),
                     &mut events,
                     mod_api::EntityWrite::Hurt {
-                        source: None,
+                        damage_type: generic,
                         amount: 2.0,
                     },
                 );

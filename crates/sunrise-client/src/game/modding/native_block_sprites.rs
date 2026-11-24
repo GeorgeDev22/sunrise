@@ -1,8 +1,9 @@
 //! Where blocks' textures are in the block sprite arrays, for a client mod drawing blocks with the player's own
 //! textures (resource packs included) in its own pass: with `WorldDrawn::block_sprites`, the arrays themselves.
 use super::Game;
-use mod_api::{AtlasRegion, Identifier};
+use mod_api::{AtlasRegion, ColorResolver, Identifier, LevelReadError};
 use sunrise_client::block_sprites::{BlockSprites, Lookup, SpriteRef};
+use sunrise_client::chunk::Chunk;
 use sunrise_world::registry::BlockStateId;
 
 impl Game<'_> {
@@ -28,34 +29,52 @@ impl Game<'_> {
     /// For a client mod: each texture's sprite by name (`minecraft:block/stone`, `block/stone`), none for one no
     /// model uses. API 380.
     pub(super) fn texture_sprites(&self, textures: &[&str]) -> Vec<Option<SpriteRef>> {
-        let lookup = self.native_sprite_lookup();
+        let atlas = self
+            .stitching_block_atlas
+            .as_ref()
+            .unwrap_or(&self.pack.render);
+        let split = self
+            .renderer
+            .as_ref()
+            .map_or(u32::MAX, |r| r.sprite_split());
         textures
             .iter()
-            .map(|texture| lookup.texture(texture))
+            .map(|name| sunrise_client::block_sprites::texture_at(atlas, split, name))
             .collect()
     }
+    /// `ClientLevel.getBlockTint(pos, resolver)`, without consulting block or fluid tint sources.
+    pub(super) fn biome_tint(
+        &self,
+        pos: [i32; 3],
+        resolver: ColorResolver,
+    ) -> Result<u32, LevelReadError> {
+        self.native_client_level()
+            .ok_or(LevelReadError::Unavailable)?;
+        Ok(sunrise_client::mesher::biome_tint(
+            pos,
+            resolver,
+            &self.tint_region(pos),
+            self.mesh_biomes(),
+            self.streaming.biome_zoom,
+            self.streaming.biome_blend,
+        ))
+    }
+
     /// For a client mod drawing a block's faces itself (a copycat drawing its material's, from
     /// `block_sprites`): the 0xRRGGBB colour a face of `state` with tint index `tint_index` is
     /// multiplied by at `pos`, as the chunk mesher tints it there (`MeshTables::block_tints`:
     /// `BlockColors`, biome blend included). None for an untinted face. A fluid's face
     /// (`block_sprites::fluid_faces`: water at tint index 0) takes the water colour the fluid
-    /// mesher gives it (`MeshTables::water_tint`, the packs' water colormap included). This client's copy of the
-    /// world: the chunks around `pos` it has, as break particles read them (`particle_sprite`).
+    /// mesher gives it (`MeshTables::water_tint`, the packs' water colormap included). Both read the
+    /// mesher's current biome colours, including after `refresh_biome_colors`.
     pub(super) fn block_tint_color(
         &self,
         state: BlockStateId,
         tint_index: i32,
         pos: [i32; 3],
     ) -> Option<u32> {
-        let (cx, cz) = (pos[0] >> 4, pos[2] >> 4);
-        let region: [[Option<&sunrise_client::chunk::Chunk>; 3]; 3] = std::array::from_fn(|dz| {
-            std::array::from_fn(|dx| {
-                self.world
-                    .chunks
-                    .get(&(cx + dx as i32 - 1, cz + dz as i32 - 1))
-                    .map(|c| &**c)
-            })
-        });
+        let region = self.tint_region(pos);
+        let biomes = self.mesh_biomes();
         let block = self
             .pack
             .context
@@ -68,7 +87,7 @@ impl Game<'_> {
                 self.pack.context.tables.water_tint(
                     pos,
                     &region,
-                    world_biomes!(self),
+                    biomes,
                     self.streaming.biome_zoom,
                     self.streaming.biome_blend,
                 )
@@ -78,17 +97,34 @@ impl Game<'_> {
             state,
             pos,
             &region,
-            world_biomes!(self),
+            biomes,
             self.streaming.biome_zoom,
             self.streaming.biome_blend,
             self.streaming.nether_shading,
         );
         tints(tint_index)
     }
+
+    /// The mesher's 3×3 chunk region centred on the chunk that contains `pos`.
+    fn tint_region(&self, [x, _, z]: [i32; 3]) -> [[Option<&Chunk>; 3]; 3] {
+        let (cx, cz) = (x >> 4, z >> 4);
+        std::array::from_fn(|dz| {
+            std::array::from_fn(|dx| {
+                self.world
+                    .chunks
+                    .get(&(cx + dx as i32 - 1, cz + dz as i32 - 1))
+                    .map(AsRef::as_ref)
+            })
+        })
+    }
+
     /// For a client mod: changes each time the resources load (a resource pack turned on or off can move every
     /// sprite): ask `block_sprites` again then. API 380.
     pub(super) fn block_sprites_version(&self) -> u64 {
-        self.pack.context.render.generation
+        self.stitching_block_atlas
+            .as_ref()
+            .unwrap_or(&self.pack.render)
+            .generation
     }
     /// For a client mod: where GUI sprite `sprite` lies in the GUI atlas and its size, none for one the atlas lacks
     /// or whose entry its definition removed (a server's metrics-only atlas lacks them all). The atlas names its
@@ -172,52 +208,47 @@ mod texture_atlas_stitched_tests {
             _: &mod_api::RegistrationContext,
             event: &mut mod_api::RegisterSpriteSourcesEvent<'_>,
         ) {
-            event.sources.push("marker:own".into());
-        }
-        fn sprite_source(
-            &self,
-            _: &mod_api::RegistrationContext,
-            event: &mut mod_api::SpriteSourceEvent<'_>,
-        ) {
-            if event.source != "marker:own" {
-                return;
-            }
-            let mut marker = self.0.lock().unwrap();
-            match event.atlas.to_string().as_str() {
-                "minecraft:blocks" => event.output.push(mod_api::SpriteSourceOutput::Pixels {
-                    sprite: id("marker:block/own"),
-                    width: 2,
-                    height: 2,
-                    rgba: [32, 64, 96, 255].repeat(4),
-                }),
-                "minecraft:gui" => {
-                    marker.gui_asks += 1;
-                    let width = 2 + marker.gui_asks;
-                    event.output.push(mod_api::SpriteSourceOutput::Pixels {
-                        sprite: id("marker:own"),
-                        width,
-                        height: 3,
-                        rgba: [64, 96, 32, 255].repeat((width * 3) as usize),
-                    });
-                    // A sprite the first load publishes and the reload no longer does.
-                    if marker.gui_asks == 1 {
-                        event.output.push(mod_api::SpriteSourceOutput::Pixels {
-                            sprite: id("marker:first_only"),
-                            width: 2,
-                            height: 2,
-                            rgba: [9, 9, 9, 255].repeat(4),
+            let marker = Arc::clone(&self.0);
+            event.register(id("marker:own"), move |input| {
+                let mut marker = marker.lock().unwrap();
+                let mut output = Vec::new();
+                match input.atlas.to_string().as_str() {
+                    "minecraft:blocks" => output.push(mod_api::SpriteSourceOutput::Pixels {
+                        sprite: id("marker:block/own"),
+                        width: 2,
+                        height: 2,
+                        rgba: [32, 64, 96, 255].repeat(4),
+                    }),
+                    "minecraft:gui" => {
+                        marker.gui_asks += 1;
+                        let width = 2 + marker.gui_asks;
+                        output.push(mod_api::SpriteSourceOutput::Pixels {
+                            sprite: id("marker:own"),
+                            width,
+                            height: 3,
+                            rgba: [64, 96, 32, 255].repeat((width * 3) as usize),
+                        });
+                        // A sprite the first load publishes and the reload no longer does.
+                        if marker.gui_asks == 1 {
+                            output.push(mod_api::SpriteSourceOutput::Pixels {
+                                sprite: id("marker:first_only"),
+                                width: 2,
+                                height: 2,
+                                rgba: [9, 9, 9, 255].repeat(4),
+                            });
+                        }
+                        // The replacement of a walked vanilla sprite, of another size.
+                        output.push(mod_api::SpriteSourceOutput::Pixels {
+                            sprite: id("container/slot"),
+                            width: 5,
+                            height: 5,
+                            rgba: [255, 0, 255, 255].repeat(25),
                         });
                     }
-                    // The replacement of a walked vanilla sprite, of another size.
-                    event.output.push(mod_api::SpriteSourceOutput::Pixels {
-                        sprite: id("container/slot"),
-                        width: 5,
-                        height: 5,
-                        rgba: [255, 0, 255, 255].repeat(25),
-                    });
+                    _ => {}
                 }
-                _ => {}
-            }
+                Ok(output)
+            });
         }
         fn texture_atlas_stitched(
             &self,
@@ -316,13 +347,13 @@ mod texture_atlas_stitched_tests {
         .into();
         with_mods(mods, || {
             let role = crate::game::execution_role::ExecutionRole::Client;
-            let mut types = Vec::new();
+            let mut sources = Vec::new();
             super::Game::native_register_sprite_sources(
                 &mod_api::RegistrationContext::new(),
-                &mut types,
+                &mut sources,
             );
             assert_eq!(
-                sunrise_client_render::mod_sprite_sources::register(types),
+                sunrise_client_render::mod_sprite_sources::register(sources),
                 ["marker:own"]
             );
             super::super::native_entity_refs::tests::with_game_role(
@@ -526,6 +557,105 @@ mod quad_on_tests {
                 "{uv:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod biome_tint_tests {
+    use super::Game;
+    use crate::game::native_entity_refs::tests::with_client_game;
+    use mod_api::{
+        Authority, BiomeColorsEvent, ClientHost, ColorResolver, Hooks, ModEntry,
+        prelude::BlockStatesHost,
+    };
+    use std::sync::Arc;
+    use sunrise_client::chunk::Chunk;
+
+    const GRASS: u32 = 0xAD_248B;
+    const FOLIAGE: u32 = 0x34_D1EF;
+    const WATER: u32 = 0xDA_5227;
+    const POS: [i32; 3] = [8, 64, 8]; // The whole blend square samples this plains chunk.
+
+    fn with_stock_client_biomes(test: impl FnOnce(&mut Game<'_>)) {
+        struct Seasons;
+        #[mod_api::__subscriptions]
+        impl Hooks for Seasons {
+            fn biome_colors(&self, _: &dyn ClientHost, event: &mut BiomeColorsEvent<'_>) {
+                if event.biome == "minecraft:plains" {
+                    event.colors.grass = GRASS;
+                    event.colors.foliage = FOLIAGE;
+                    event.colors.water = WATER;
+                }
+            }
+        }
+
+        let mods = vec![ModEntry::new("test_seasons", Box::new(Seasons))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_client_game(|game| {
+                // The replay fixture opens a client level without connecting to a server.
+                game.init_remote_for_replay().unwrap();
+                game.native_lifecycle.begin_open(Authority::RemoteClient);
+
+                let plains_id = game.res.biomes().id("minecraft:plains");
+                let mut chunk = Chunk::empty(0, 0);
+                for qy in 0..chunk.sections.len() as i32 * 4 {
+                    for qz in 0..4 {
+                        for qx in 0..4 {
+                            chunk.set_biome_cell(qx, qy, qz, plains_id);
+                        }
+                    }
+                }
+                game.world.chunks.insert((0, 0), Arc::new(chunk));
+                game.streaming.biome_blend = 1;
+
+                // Stock server biome definitions do not install a world-specific table.
+                assert!(game.world_biomes.is_none());
+                test(game);
+                assert!(game.world_biomes.is_none());
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn biome_tint_reads_refreshed_colours_with_stock_server_biomes() {
+        with_stock_client_biomes(|game| {
+            let host: &mut dyn ClientHost = game;
+            assert_ne!(
+                host.biome_tint(POS, ColorResolver::Grass),
+                Ok(0xFF00_0000 | GRASS)
+            );
+            host.refresh_biome_colors();
+            assert_eq!(
+                host.biome_tint(POS, ColorResolver::Grass),
+                Ok(0xFF00_0000 | GRASS)
+            );
+            assert_eq!(
+                host.biome_tint(POS, ColorResolver::Foliage),
+                Ok(0xFF00_0000 | FOLIAGE)
+            );
+
+            let worker = game.worker_context();
+            let plains = worker.biomes.get(worker.biomes.id("minecraft:plains"));
+            assert_eq!((plains.grass, plains.foliage), (GRASS, FOLIAGE));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn face_tints_read_refreshed_colours_with_stock_server_biomes() {
+        with_stock_client_biomes(|game| {
+            let grass = BlockStatesHost::block_state_id(game, "minecraft:grass_block").unwrap();
+            let water = BlockStatesHost::block_state_id(game, "minecraft:water").unwrap();
+            let host: &mut dyn ClientHost = game;
+            assert_ne!(host.block_tint_color(grass, 0, POS).unwrap(), GRASS);
+            assert_ne!(host.block_tint_color(water, 0, POS).unwrap(), WATER);
+
+            host.refresh_biome_colors();
+
+            assert_eq!(host.block_tint_color(grass, 0, POS), Some(GRASS));
+            assert_eq!(host.block_tint_color(water, 0, POS), Some(WATER));
+        });
     }
 }
 

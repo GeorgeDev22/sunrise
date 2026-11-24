@@ -1,11 +1,11 @@
 //! An entity's saved data, tags and name for native server mods, through an
-//! `EntityRef` (docs/modding/src/how-to/native-mods.md, "Entity and level handles", #7387): what
+//! `EntityRef` (docs/modding/src/concepts/parts/entity-parts-and-mob-goals.md, #7387): what
 //! `/data` and `/tag` read and change, its custom name, its type's category
 //! and whether it is in its level. They return `None` (or `false`) for a
 //! stale handle or on a client, which the server sends no saved data or tags;
 //! only the name reads there.
 use super::{Game, commands::Target};
-use mod_api::{EntityRef, MobCategory};
+use mod_api::{EntityRef, EntityTags, MobCategory};
 use sunrise_client::{entity_nbt::flag, scoreboard::json_to_tag, text::Text};
 use sunrise_core::nbt::{Compound, Tag};
 
@@ -29,12 +29,14 @@ impl Game<'_> {
             _ => None,
         }
     }
-    /// Merges `nbt` into the entity's data and loads the entity from it, as
-    /// `/data merge entity` does (`EntityDataAccessor.setData`): true when it
-    /// changed. False for a player (vanilla refuses them too), a kind Sunrise
-    /// can't reload yet (only mobs, dropped items, armor stands and item
-    /// frames), data nested too deep, or data that changes nothing. API
-    /// 386.
+    /// Merges `nbt` into the entity's data and loads the entity from it, as `/data merge
+    /// entity` does (`EntityDataAccessor.setData`): true when it changed. False for a player
+    /// (vanilla refuses them too), a kind Sunrise cannot reload yet (end crystals, the dragon
+    /// and its parts, cushions, ominous item spawners, area effect clouds, fishing hooks, leash
+    /// knots and general entity rows), data nested too deep, or data that changes nothing. An
+    /// arrow, spectral arrow or trident reloads as `AbstractArrow.readAdditionalSaveData` reads
+    /// it (`life`, `inGround`, `pickup`, ...); other projectiles take only their position,
+    /// motion, rotation and flags. API 386.
     pub(super) fn entity_merge_nbt(&mut self, entity: EntityRef, nbt: Compound) -> bool {
         if self.remote.is_some() {
             return false;
@@ -52,13 +54,13 @@ impl Game<'_> {
         let merged = sunrise_client::data_cmd::merged(&old, &nbt);
         merged != old && self.apply_entity_nbt(t, merged).is_ok()
     }
-    /// The entity's tags (`Entity.getTags`), as `/tag <entity> list` shows
-    /// them. API 386.
-    pub(super) fn entity_tags(&self, entity: EntityRef) -> Option<Vec<String>> {
+    /// Borrow the entity's scoreboard tags (`Entity.entityTags()`) without the
+    /// lossy conversion used by `/tag <entity> list`.
+    pub(super) fn entity_tags(&self, entity: EntityRef) -> Option<EntityTags<'_>> {
         if self.remote.is_some() {
             return None;
         }
-        Some(self.tags_of(self.native_entity_target(entity)?))
+        Some(self.saved_entity_tags(self.native_entity_target(entity)?))
     }
     /// Adds tag `tag` (`Entity.addTag`): false when it has it already, holds
     /// 1024, its kind can't store tags yet, or the handle is stale. API 386.
@@ -210,6 +212,7 @@ impl Game<'_> {
                 | Target::Other(_)
                 | Target::Fangs(_)
                 | Target::Cloud(_)
+                | Target::Bolt(_)
                 | Target::Spawner(_),
             ) => true,
             Some(_) => self
@@ -261,7 +264,8 @@ fn named_id(t: Target) -> Option<u32> {
         | Target::Cart(id)
         | Target::Other(id)
         | Target::Fangs(id)
-        | Target::Cloud(id) => Some(id),
+        | Target::Cloud(id)
+        | Target::Bolt(id) => Some(id),
         _ => None,
     }
 }
@@ -273,13 +277,47 @@ mod tests {
     use mod_api::{EntityRef, MobCategory};
     use sunrise_client::{entities::ArmorStand, mobs::Mob, text::Text};
     use sunrise_core::geometry::Vec3;
-    use sunrise_core::nbt::Tag;
+    use sunrise_core::nbt::{JavaString, Tag};
 
     fn push_mob(game: &mut super::Game<'_>, id: u32, kind: &str) -> EntityRef {
         let kind = game.res.mob_types().get(kind).unwrap().clone();
         game.mobs
             .push(Mob::new(id, kind, Vec3::new(0.5, 70.0, 0.5), 0.0));
         game.entity(id).unwrap()
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn live_entity_tags_lend_exact_utf16_without_changing_command_text() {
+        with_game(|game| {
+            let mob = push_mob(game, 11, "minecraft:zombie");
+            assert!(mob.tags(game).unwrap().iter_utf16().next().is_none());
+
+            game.put_saved(
+                mob.id(),
+                "Tags",
+                Some(Tag::List(vec![
+                    Tag::String("tag".into()),
+                    Tag::String("\u{1f680}".into()),
+                    Tag::Byte(7),
+                    Tag::String(JavaString(vec![0xD800])),
+                ])),
+            );
+
+            let tags = mob.tags(game).unwrap();
+            let expected: [&[u16]; 3] = [&[0x0074, 0x0061, 0x0067], &[0xD83D, 0xDE80], &[0xD800]];
+            assert_eq!(tags.iter_utf16().collect::<Vec<_>>(), expected);
+            assert!(tags.contains("tag"));
+            assert!(tags.contains("\u{1f680}"));
+            assert!(!tags.contains("\u{fffd}"));
+
+            // `/tag ... list` still receives the same strings, in the same order.
+            let target = game.native_entity_target(mob).unwrap();
+            assert_eq!(game.tags_of(target), ["tag", "\u{1f680}", "\u{fffd}"]);
+
+            assert!(mob.discard(game));
+            assert!(mob.tags(game).is_none());
+        });
     }
 
     #[test]

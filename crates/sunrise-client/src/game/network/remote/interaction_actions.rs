@@ -2,7 +2,10 @@ use super::*;
 
 impl Game<'_> {
     /// Runs one interaction and restores the caller's swing policy afterwards, on every return path.
-    fn with_interaction_swing_scope<R>(&mut self, action: impl FnOnce(&mut Self) -> R) -> R {
+    pub(super) fn with_interaction_swing_scope<R>(
+        &mut self,
+        action: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         let previous = self.remote.as_ref().map(|remote| remote.interaction_swing);
         let result = action(self);
         if let (Some(remote), Some(previous)) = (self.remote.as_mut(), previous) {
@@ -13,6 +16,10 @@ impl Game<'_> {
 
     /// Minecraft.startUseItem: use one crosshair target, then the item itself.
     fn remote_use_inner(&mut self, attempt: mod_api::InteractionAttempt) {
+        // Another queued press in the same input drain cannot restart a capture.
+        if self.client_item_use.is_some() {
+            return;
+        }
         // Minecraft.startUseItem returns before resetting rightClickDelay
         // while a survival block break is active.
         if self.remote.as_ref().is_some_and(|r| r.is_destroying) {
@@ -34,8 +41,8 @@ impl Game<'_> {
             }
             return;
         }
-        // An item a mod claims: its use is the mod's, and the server never hears of it.
-        if self.mod_use_start() {
+        // A registered client item behavior consumes the click before target handling.
+        if self.start_client_item_use() {
             return;
         }
         // Resolve the crosshair once. A passing entity interaction keeps
@@ -111,26 +118,12 @@ impl Game<'_> {
             return false;
         }
         let mut instant = false;
-        // A ghast's fireball or a wind charge nearer than any mob: the
-        // server turns it (game/items/deflect.rs).
-        if let Some((i, distance)) = self.redirectable_hit()
-            && self.mob_hit().is_none_or(|(_, d, _)| distance <= d)
-            && self.before_block(distance)
-            && self.creatures.projectiles[i].id != 0
-        {
-            self.remote_attack_entity(self.creatures.projectiles[i].id as i32, distance);
-        } else if let Some(hit) = self.remote_object_hit(true)
-            && self.mob_hit().is_none_or(|(_, d, _)| hit.distance < d)
-            && self.before_block(hit.distance)
-        {
-            self.remote_attack_entity(hit.id, hit.distance);
-        } else if let Some((i, distance, _)) = self.mob_hit()
-            && self.before_block(distance)
-        {
-            self.remote_attack_entity(self.mobs[i].id as i32, distance);
-        } else if !self.entity_targeted()
-            && let Some(hit) = self.pick()
-        {
+        if let Some(hit) = self.crosshair_entity_hit() {
+            // A range rejection is still an entity hit: skip the attack, but swing below.
+            if let Some(distance) = self.attack_hit_distance(hit.point) {
+                self.remote_attack_entity(hit.id, distance);
+            }
+        } else if let Some(hit) = self.pick() {
             // A block hit on air falls through to MISS. `instant` below reads the
             // block again after the dig, which may have broken it.
             if mod_api::__private::listened(mod_api::HookId::LeftClickEmpty)
@@ -149,12 +142,10 @@ impl Game<'_> {
                 .facts()
                 .is_air(self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]));
         } else {
-            if mod_api::__private::listened(mod_api::HookId::LeftClickEmpty)
-                && !self.entity_targeted()
-            {
+            if mod_api::__private::listened(mod_api::HookId::LeftClickEmpty) {
                 self.native_left_click_empty();
             }
-            if !self.creative {
+            if self.has_miss_time() {
                 self.clicks.miss_time = 10;
             }
             self.reset_attack_strength();
@@ -177,6 +168,7 @@ impl Game<'_> {
         // A piercing weapon neither breaks blocks nor swings on its own.
         if self.clicks.miss_time > 0
             || self.using.is_some()
+            || self.client_item_use.is_some()
             || self
                 .held()
                 .is_some_and(|s| sunrise_client::spear::Kinetic::of(&s.item).is_some())
@@ -241,7 +233,7 @@ impl Game<'_> {
     pub(super) fn hud_disconnected(&mut self) {
         self.tab_list.reset();
         self.boss_overlay.reset();
-        self.adv.toasts.clear();
+        self.toast_manager = Default::default();
         self.debug_charts.reset();
         self.titles.clear();
         self.titles.reset_times();
@@ -250,13 +242,15 @@ impl Game<'_> {
     /// hit (`CRIT`) or magic critical hit (`ENCHANTED_HIT`) emitter.
     pub(super) fn remote_animate(&mut self, id: i32, action: u8) {
         use sunrise_client::particles::{ParticleOptions, ParticleType};
-        let Some((target, body)) = self.remote_tracking_body(id) else {
-            return;
-        };
         let particle = match action {
             // Player.stopSleepInBed.
             0 => {
-                if target == TrackingTarget::LocalPlayer {
+                if self.player.is_some()
+                    && self
+                        .remote
+                        .as_ref()
+                        .is_some_and(|remote| remote.entity_id == id)
+                {
                     self.sleeping = None;
                     self.sleep_timer = 100;
                 }
@@ -265,6 +259,9 @@ impl Game<'_> {
             1 => ParticleType::Crit,
             2 => ParticleType::EnchantedHit,
             _ => return,
+        };
+        let Some((target, body)) = self.remote_tracking_body(id) else {
+            return;
         };
         self.particles
             .tracking_emitter(ParticleOptions::simple(particle), target, body);
@@ -363,7 +360,9 @@ impl Game<'_> {
                 })
             }
             "minecraft:pumpkin" => held
-                .is_some_and(|s| &*s.item == "minecraft:shears")
+                .is_some_and(|s| {
+                    self.stack_shears(s, super::super::item_abilities::ability::SHEARS_CARVE)
+                })
                 .then_some(InteractionResult::Success),
             "minecraft:copper_golem_statue" => held
                 .is_some_and(|s| self.item_in_tag("minecraft:axes", &s.item))
@@ -485,58 +484,19 @@ impl Game<'_> {
         let Some(r) = self.remote.as_mut() else {
             return;
         };
-        let mut input = r.input.take_queued();
         let stop = std::mem::take(&mut r.stop_mining);
-        // Minecraft.tick runs handleKeybinds only while `gui.screen() == null`: a
-        // book, a sign editor, a dialog or a prompt over the world (each a
-        // `Screen` in vanilla) stops the attack and use mappings from acting,
-        // and `KeyMapping.releaseAll` let go of the buttons when it opened
-        // (`track_toggle_screens`), so a dig held into a book ends (#9729).
-        let ready = r.loaded_sent
-            && self.screen == Screen::Playing
-            && self.sleeping.is_none()
-            && !self.screen_over_playing();
+        let ready = r.loaded_sent && self.sleeping.is_none() && !self.mod_mappings_screen_open();
         self.refresh_client_pick(1.0);
         if stop || !ready {
             self.stop_remote_mining();
         }
-        if !ready {
-            // A screen's opening released the keys (`KeyMapping.releaseAll`).
-            self.hotbar_presses
-                .iter_mut()
-                .for_each(sunrise_client::input_queue::ClickQueue::clear);
-            self.agent_attack_clicks_left(0);
-            return;
+        if ready {
+            sunrise_client::interaction_input::tick(&mut RemoteInputWorld(self));
         }
-        let (attack, use_item) = (self.left, self.right);
-        input.tick(&mut RemoteInputWorld(self), attack, use_item);
-        // An item in use drains the queues without acting on them.
-        self.agent_attack_clicks_left(
-            input.queued(sunrise_client::interaction_input::Button::Attack),
-        );
-        self.remote_count_miss_time();
-        if let Some(r) = self.remote.as_mut() {
-            input.merge_queued(std::mem::take(&mut r.input));
-            r.input = input;
+        self.finish_agent_attack_input(ready);
+        if ready && self.clicks.miss_time > 0 {
+            self.clicks.miss_time -= 1;
         }
-    }
-    /// `Minecraft.handleKeybinds`: a key that opens a screen runs
-    /// `Gui.setScreen`, whose `KeyMapping.releaseAll` clears the use key, and
-    /// the same invocation then releases an active use
-    /// (`player.isUsingItem() && !keyUse.isDown()` → `releaseUsingItem`).
-    /// Only the screens opened from those keybinds do this (inventory, chat,
-    /// advancements); the pause menu, server containers, mount inventories and
-    /// dialogs release on the first tick after closing instead, as vanilla
-    /// does.
-    pub(in crate::game) fn release_use_for_keybind_screen(&mut self) {
-        // Only a server's client holds a use to release.
-        if self.remote.is_none() {
-            return;
-        }
-        // `KeyMapping.releaseAll` clears key.use; without this the button still
-        // reads held and a use would start again on the first tick back.
-        self.right = false;
-        sunrise_client::interaction_input::release_on_screen_open(&mut RemoteInputWorld(self));
     }
     /// `MultiPlayerGameMode.releaseUsingItem`: sends `RELEASE_USE_ITEM` and
     /// runs the client half of `Item.releaseUsing` (a Riptide launch moves the

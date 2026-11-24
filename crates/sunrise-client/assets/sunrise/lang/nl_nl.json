@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Een nieuwe chatlijn schuift van links naar binnen terwijl deze invaagt, in plaats van geheel te lijken.",
   "sunrise.extras.chat_indicator": "Berichtindicator",
   "sunrise.extras.chat_indicator.tooltip": "De gekleurde balk links van een chatlijn.",
-  "sunrise.extras.discord_presence": "Onenigheid Rijke aanwezigheid",
-  "sunrise.extras.discord_presence.tooltip": "Toont 'Speelt Sunrise' op je Discord-profiel terwijl Discord actief is: menu's, singleplayer of multiplayer, de dimensie en de gespeelde tijd. Nooit een wereldnaam of een serveradres.",
   "sunrise.extras.dynamic_lights": "Dynamische lichten",
   "sunrise.extras.dynamic_lights.tooltip": "Fakkels en andere lichtbronnen die je vasthoudt, laat vallen of in brand steken, verlichten de blokken eromheen.",
   "sunrise.extras.fullbright": "Volledig helder",

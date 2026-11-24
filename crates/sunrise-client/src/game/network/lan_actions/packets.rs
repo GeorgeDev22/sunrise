@@ -184,11 +184,43 @@ impl Game<'_> {
         {
             return self.guest_passage_cross(conn, &p.data);
         }
+        use super::super::cauldron_prediction::{USE_CHANNEL, UseOnOutcome, use_result};
         let Some(host) = self.lan.as_ref() else {
             return;
         };
         let Some(gi) = host.hub.guests.iter().position(|g| g.conn == conn) else {
             return;
+        };
+        // An authoritative request is an ordinary UseItemOn with a receipt, not
+        // permission to use an item or to bypass the vanilla loaded/dead checks.
+        let (packet, receipt) = match packet {
+            S::CustomPayload(p) if p.channel == USE_CHANNEL => {
+                use sunrise_protocol::buf::{Codec, Reader};
+                let mut input = Reader::new(&p.data);
+                let decoded = (|| -> sunrise_protocol::Result<_> {
+                    let receipt = input.i64()?;
+                    let packet = play::UseItemOn::read(&mut input)?;
+                    if input.remaining() != 0 || packet.sequence < 0 {
+                        return Err(sunrise_protocol::Error::new("invalid block use request"));
+                    }
+                    Ok((receipt, packet))
+                })();
+                let (receipt, packet) = match decoded {
+                    Ok(request) => request,
+                    Err(error) => {
+                        log::warn!("authoritative block use from guest {conn} refused: {error}");
+                        return;
+                    }
+                };
+                let guest = &host.hub.guests[gi];
+                if !guest.client_loaded() {
+                    host.hub
+                        .send_to(conn, &use_result(receipt, UseOnOutcome::default()));
+                    return;
+                }
+                (S::UseItemOn(packet), Some(receipt))
+            }
+            packet => (packet, None),
         };
         // A dead player acts no more, but the death screen still respawns and chats: its
         // commands run as anyone's (ServerGamePacketListenerImpl.handleChatCommand doesn't
@@ -202,6 +234,10 @@ impl Game<'_> {
                     | S::CustomClickAction(_)
             )
         {
+            if let Some(receipt) = receipt {
+                host.hub
+                    .send_to(conn, &use_result(receipt, UseOnOutcome::default()));
+            }
             return;
         }
         // The window a packet names is the open one, as in vanilla's handlers. With no menu open
@@ -236,8 +272,6 @@ impl Game<'_> {
         };
         let spectator = host.hub.guests[gi].spectator();
         let permission = host.hub.guests[gi].permission;
-        let won_game = matches!(packet, S::ClientCommand(ref c) if c.action == 0)
-            && host.play.get(&conn).is_some_and(|p| p.won_game);
         match packet {
             S::PlayerAction(a) => match a.action {
                 0 => {
@@ -589,13 +623,22 @@ impl Game<'_> {
                 host.hub.ack(conn, p.sequence);
                 let hit = Hit::from_use_item_on(&p);
                 let hand = if p.hand == 1 { Hand::Off } else { Hand::Main };
-                let _ = self.guest_use_item_on(conn, gi, hit, hand);
+                let result = self.guest_use_item_on(conn, gi, hit, hand, receipt);
+                if result.is_err()
+                    && let Some(receipt) = receipt
+                    && let Some(host) = self.lan.as_ref()
+                {
+                    host.hub
+                        .send_to(conn, &use_result(receipt, UseOnOutcome::default()));
+                }
             }
             S::UseItem(p) => {
                 let Some(host) = self.lan.as_mut() else {
                     return;
                 };
                 host.hub.ack(conn, p.sequence);
+                let now = host.hub.ticks;
+                host.hub.guests.update(gi, |g| g.last_action_tick = now);
                 let hand = if p.hand == 1 { Hand::Off } else { Hand::Main };
                 let _ = self.guest_use_item(conn, gi, hand, Some((p.yaw, p.pitch)));
             }
@@ -603,6 +646,9 @@ impl Game<'_> {
                 let _ = self.guest_attack(conn, gi, p.id);
             }
             S::Interact(p) => {
+                self.lan.as_mut().unwrap().hub.guests.update(gi, |g| {
+                    g.sneaking = p.secondary;
+                });
                 let hand = if p.hand == 1 { Hand::Off } else { Hand::Main };
                 let _ = self.guest_interact(conn, gi, p.id, hand, p.location);
             }
@@ -816,10 +862,12 @@ impl Game<'_> {
                 if let Some(key) = vehicle {
                     self.close_guest_vehicle_menu(conn, key);
                 }
-                if let Some(carried) =
+                if let Some(closed) =
                     self.with_own_record(gi, |host, _| host.hub.container_closed(conn, p.container))
                 {
-                    self.lan_place_back(gi, vec![carried]);
+                    // A live close: a dead player's packets are not handled, and its menus
+                    // close on its tick as killed (`lan_containers_tick`).
+                    self.settle_closed_hub_menu(conn, closed, MenuRemoval::Live);
                 }
                 if closing {
                     self.player_menu_closing(conn);
@@ -1000,7 +1048,7 @@ impl Game<'_> {
                             }),
                         );
                     }
-                    self.send_admin_feedback(Some(conn));
+                    self.send_admin_feedback();
                 }
             }
             S::ChangeGameMode(p) => {
@@ -1066,14 +1114,7 @@ impl Game<'_> {
                 self.guest_try_suggestions(conn);
             }
             S::PlaceRecipe(p) => self.lan_place_recipe(conn, &p),
-            // handleClientCommand: PERFORM_RESPAWN after the poem leaves the End
-            // (the next server tick sends the player on).
-            S::ClientCommand(c) if c.action == 0 && won_game => {
-                let Some(host) = self.lan.as_mut() else {
-                    return;
-                };
-                host.play.entry(conn).or_default().respawn_requested = true;
-            }
+            // handleClientCommand: PERFORM_RESPAWN after the poem or on death.
             S::ClientCommand(c) if c.action == 0 => self.guest_respawn(conn),
             // ServerStatsCounter.sendStats.
             S::ClientCommand(c) if c.action == 1 => {
@@ -1112,14 +1153,16 @@ impl Game<'_> {
                     let stack = g.clone_stack(p.pos, include_data);
                     let state = g.world.block(p.pos[0], p.pos[1], p.pos[2]);
                     let mut replacement = None;
-                    g.native_clone_item_stack(
-                        g.dim.level(),
-                        sunrise_core::position::BlockPos::new(p.pos[0], p.pos[1], p.pos[2]),
-                        &g.res.facts().get(state).name,
-                        state,
-                        include_data,
-                        &mut replacement,
-                    );
+                    if let Some(player) = g.native_acting_player() {
+                        g.native_clone_item_stack(
+                            g.dim.level(),
+                            sunrise_core::position::BlockPos::new(p.pos[0], p.pos[1], p.pos[2]),
+                            state,
+                            include_data,
+                            player,
+                            &mut replacement,
+                        );
+                    }
                     let mut stack = replacement.or(stack)?;
                     if include_data {
                         g.add_block_data(p.pos, &mut stack);
@@ -1271,51 +1314,65 @@ impl Game<'_> {
         Some(out)
     }
 
-    /// `LivingEntity.tickDeath`: 20 ticks after dying the player is removed,
-    /// and `Player.remove`'s `inventoryMenu.removed` drops what the cursor
-    /// held (`dropOrPlaceInInventory` for a removed player). Respawning
-    /// sooner removes it too.
-    /// `ServerGamePacketListenerImpl.handleTeleportToEntityPacket` for a
-    /// player: the host's own, or a guest in the world.
+    /// `ServerGamePacketListenerImpl.handleTeleportToEntityPacket`: search the live levels in
+    /// server order, then teleport to the first matching entity's position and rotation.
     pub(super) fn guest_spectate_teleport(&mut self, gi: usize, uuid: u128) {
-        let Some(host) = self.lan.as_mut() else {
+        let Some(host) = self.lan.as_ref() else {
             return;
         };
-        let own = host.hub.guests[gi].conn;
-        let target = host
-            .hub
-            .guests
-            .iter()
-            .find(|g| g.placed && g.conn != own && g.uuid == uuid)
-            .map(|g| (g.position, g.yaw, g.pitch, Dim::from_id(&g.dimension)));
-        let Some((at, yaw, pitch, dim)) = target else {
+        let guest = &host.hub.guests[gi];
+        let (conn, from) = (guest.conn, Dim::from_id(&guest.dimension));
+        let uuid = sunrise_client::lan::playerdata::uuid_ints(uuid);
+        let Some((dim, target)) = Dim::all().into_iter().find_map(|dim| {
+            self.level_target_by_uuid(dim, uuid)
+                .map(|target| (dim, target))
+        }) else {
             return;
         };
-        if Dim::from_id(&host.hub.guests[gi].dimension) != dim {
+        // Only enter another level to read a found entity's pose, not to probe every level.
+        let back = if dim == self.dim {
+            None
+        } else if let Some(back) = self.enter_command_level(dim) {
+            Some(back)
+        } else {
+            return;
+        };
+        let at = self.target_position(target);
+        let [yaw, pitch] = self.target_rotation(target);
+        if let Some(back) = back
+            && self.enter_level(back).is_err()
+        {
+            return;
+        }
+        let Some(at) = at else {
+            return;
+        };
+        // ServerPlayer.teleportTo resets the spectator's camera before traveling.
+        self.guest_set_camera(gi, None);
+        if from != dim {
             if !self.server_player_travel_allowed(
-                own,
+                conn,
                 dim,
                 crate::game::server_travel::TravelCause::Teleport,
             ) {
                 return;
             }
-            self.level_teleports
-                .push(crate::game::server_travel::LevelTeleport {
-                    conn: own,
-                    dim,
-                    at,
-                    rotation: Some([yaw, pitch]),
-                    vehicle: None,
-                });
+            self.apply_direct_level_teleport(crate::game::server_travel::LevelTeleport {
+                conn,
+                dim,
+                at,
+                rotation: Some([yaw, pitch]),
+                vehicle: None,
+            });
             return;
         }
-        host.hub.guests.update(gi, |g| {
-            (g.yaw, g.pitch) = (yaw, pitch);
-            // A new body there: no fall distance or motion carried over, but the
-            // player's attributes (ServerPlayer.teleport keeps the entity).
-            g.new_body(true);
+        self.as_guest(conn, |game| {
+            game.place_player_teleport_in_level(
+                Vec3::new(at[0], at[1], at[2]),
+                Some([yaw, pitch]),
+                [false; 3],
+            )
         });
-        host.hub.teleport(gi, Some(at));
     }
 
     /// Ordinary click routing. A scoped override calls this inside its action on Continue;
@@ -1352,7 +1409,7 @@ impl Game<'_> {
         }
         if let Some(applied) = self
             .lan_owned_menu_click(conn, p)
-            .or_else(|| self.lan_mod_quick_move(conn, p))
+            .or_else(|| self.lan_mod_quick_move(conn, p, None))
         {
             return applied;
         }
@@ -1362,7 +1419,7 @@ impl Game<'_> {
         {
             return true;
         }
-        if let Some(applied) = self.lan_machine_click_asked(conn, p, Default::default()) {
+        if let Some(applied) = self.lan_machine_click(conn, p) {
             return applied;
         }
         if self.lan_station_click(conn, p)

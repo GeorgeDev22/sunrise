@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicI16, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use sunrise_core::nbt::{Compound, Tag};
 use sunrise_core::paletted::{PalettedContainer, Strategy};
-use sunrise_world::registry::BlockStateId;
+use sunrise_world::{heightmap::Heightmap, registry::BlockStateId};
 
 pub mod block_entity;
+mod packet_heightmap;
 
 /// The vanilla Overworld's column, which every dimension's chunks hold for
 /// now (`LevelShape::column`).
@@ -691,8 +692,11 @@ pub struct Chunk {
     /// the highest non-air block, or the column's minimum Y. Built on the first read; a
     /// `set` that can move a column's surface marks that column, found again on its next read.
     surface: Heights,
-    /// `Heightmap.Types.MOTION_BLOCKING` per column, kept like `surface`.
+    /// Block-derived MOTION_BLOCKING for locally built columns, kept like `surface`.
     motion_blocking: Heights,
+    /// A remote column's authoritative MOTION_BLOCKING data. Packet adoption and client
+    /// block writes maintain this map instead of re-deriving it from the whole column.
+    packet_motion_blocking: Option<Arc<Heightmap>>,
     pub lit: bool,
     /// Light read from a save with `isLightOn`: no light job is needed.
     pub light_loaded: bool,
@@ -733,6 +737,11 @@ pub struct Chunk {
     /// synced to Sunrise clients over `sunrise:connection_groups`; dropped with the chunk and
     /// never saved to disk.
     pub connection_groups: crate::fast_hash::FxHashMap<u32, u64>,
+    /// The standalone models a client mod draws as part of a cell's block
+    /// (`ClientRenderClientHost::set_block_extra_models`), by [`Self::dynamic_cell`]: the mesher
+    /// draws them after the block's own models. A change of the cell's state drops its list;
+    /// dropped with the chunk, never saved or sent.
+    pub extra_models: crate::fast_hash::FxHashMap<u32, Arc<[mod_api::ModelRef]>>,
 }
 impl Chunk {
     /// An all-air chunk in the current `layout`.
@@ -755,6 +764,7 @@ impl Chunk {
             light_support: crate::section_mask::SectionMask::EMPTY,
             surface: Heights::default(),
             motion_blocking: Heights::default(),
+            packet_motion_blocking: None,
             lit: false,
             light_loaded: false,
             fresh: false,
@@ -770,6 +780,7 @@ impl Chunk {
             dynamic_emission: Default::default(),
             dynamic_pending: false,
             connection_groups: Default::default(),
+            extra_models: Default::default(),
         }
     }
     /// The [`Self::dynamic_emission`] / [`Self::connection_groups`] key of the cell at `y`
@@ -912,9 +923,13 @@ impl Chunk {
         // move it. Any other change rebuilds that map on the next read.
         if previous != v {
             // A part's answer was for the state the cell held.
+            let cell = (s as u32) << 12 | index(x, y, z) as u32;
             if !self.dynamic_emission.is_empty() {
-                self.dynamic_emission
-                    .remove(&((s as u32) << 12 | index(x, y, z) as u32));
+                self.dynamic_emission.remove(&cell);
+            }
+            // So are the models a mod drew with it.
+            if !self.extra_models.is_empty() {
+                self.extra_models.remove(&cell);
             }
             for map in [&mut self.surface, &mut self.motion_blocking] {
                 map.write(column(x, z), y);
@@ -925,12 +940,14 @@ impl Chunk {
     /// Section `s`'s block states replaced whole (a bulk edit): its storage
     /// compacted, and the heightmaps built again on their next read.
     pub fn replace_blocks(&mut self, s: usize, values: &[u32; 4096]) {
-        // The parts' answers of the cells whose state changes go with it.
+        // The parts' answers and the mods' models of the cells whose state changes go with it.
         let old = &self.sections[s];
-        self.dynamic_emission.retain(|&cell, _| {
+        let kept = |&cell: &u32| {
             let i = (cell & 4095) as usize;
             cell >> 12 != s as u32 || old.get(i) == values[i]
-        });
+        };
+        self.dynamic_emission.retain(|cell, _| kept(cell));
+        self.extra_models.retain(|cell, _| kept(cell));
         let section = Arc::make_mut(&mut self.sections[s]);
         section.blocks = Section::from_blocks(values);
         section.compact();
@@ -944,12 +961,11 @@ impl Chunk {
     pub fn world_surface(&self, x: i32, z: i32, air: impl Fn(u32) -> bool) -> i32 {
         self.height(&self.surface, x, z, |v| !air(v))
     }
-    /// `getHeight(Heightmap.Types.MOTION_BLOCKING, x, z)` (`x`, `z` within
-    /// the chunk): one above the highest state where `blocks` (a motion
-    /// blocking block or a fluid), or the column's minimum Y. Kept as
-    /// `world_surface` is.
+    /// `getHeight(Heightmap.Types.MOTION_BLOCKING, x, z)`: use the remote column's map,
+    /// or derive it from motion-blocking blocks and fluids for a locally built column.
     pub fn motion_blocking(&self, x: i32, z: i32, blocks: impl Fn(u32) -> bool) -> i32 {
-        self.height(&self.motion_blocking, x, z, blocks)
+        self.packet_motion_blocking_height(x, z)
+            .unwrap_or_else(|| self.height(&self.motion_blocking, x, z, blocks))
     }
     /// One column's height in `map`: the whole map built on its first read, a column a write
     /// marked found again down that column alone.
@@ -1098,6 +1114,11 @@ impl Chunk {
             .filter(|map| map.heights.get().is_some())
             .count()
             * std::mem::size_of::<[i16; 256]>();
+        if let Some(map) = &self.packet_motion_blocking {
+            census.heightmap_bytes += std::mem::size_of::<Heightmap>()
+                + 2 * std::mem::size_of::<usize>()
+                + map.heap_bytes();
+        }
         for section in &self.sections {
             if !seen.insert(Arc::as_ptr(section)) {
                 continue;
@@ -1121,10 +1142,15 @@ impl Chunk {
     /// the quart y clamped to the column).
     #[inline]
     pub fn biome(&self, x: i32, y: i32, z: i32) -> u16 {
-        let qy = ((y - self.min_y) >> 2).clamp(0, self.sections.len() as i32 * 4 - 1);
+        self.biome_quart([x >> 2, y >> 2, z >> 2])
+    }
+    /// A biome at quart coordinates, with Y clamped before converting to a section index.
+    #[inline]
+    pub(crate) fn biome_quart(&self, [qx, qy, qz]: [i32; 3]) -> u16 {
+        let qy = (qy - (self.min_y >> 2)).clamp(0, self.sections.len() as i32 * 4 - 1);
         self.sections[(qy >> 2) as usize]
             .biomes
-            .get(((qy & 3) << 4 | ((z & 15) >> 2) << 2 | (x & 15) >> 2) as usize) as u16
+            .get(((qy & 3) << 4 | (qz & 3) << 2 | (qx & 3)) as usize) as u16
     }
     /// Sets the biome of one quart cell (`qy` counts from the column's bottom).
     pub fn set_biome_cell(&mut self, qx: i32, qy: i32, qz: i32, biome: u16) {

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use sunrise_client_core::nbt_value::{number, string, text};
 use sunrise_core::nbt::Tag;
+use sunrise_world::datafix::dynamic::{Number, as_number};
 
 /// The two measured saved forms of `BlockPredicate.CODEC`, and the `Identifier`s
 /// of `attribute_modifiers` written whole. Operate only on
@@ -85,19 +86,35 @@ pub fn encode_item(
 pub fn item_to_nbt(stack: &crate::items::ItemStack, items: &crate::items::Items) -> Tag {
     Tag::compound(encode_item(stack, items))
 }
-/// A stack from a command or data file: a `components` patch naming a transient
-/// component (`DataComponentPatch.PatchKey`'s codec) makes no stack.
+/// A stack from a command or data file, without legacy save handling. `ItemStack.CODEC`
+/// ignores unknown fields (including `Count`); `count` defaults to 1. A present count
+/// must be numeric and in 1 to 99 after Java's `Number.intValue`. A present `components`
+/// must be a compound (`DataComponentPatch.CODEC` reads a map, and `optionalFieldOf` fails
+/// on a present value it cannot read), and a patch naming a transient component makes no
+/// stack.
 pub fn item_from_persistent_nbt(tag: &Tag) -> Option<crate::items::ItemStack> {
-    if let Some(components) = tag.get("components") {
+    let count = match tag.get("count") {
+        Some(value) => as_number(value)
+            .map(Number::int_value)
+            .filter(|n| (1..=99).contains(n))? as u32,
+        None => 1,
+    };
+    let components = tag.get("components");
+    if let Some(components) = components {
+        if !matches!(components, Tag::Compound(_)) {
+            return None;
+        }
         sunrise_world::item_defaults::validate_component_map_tag(components).ok()?;
     }
-    item_from_nbt(tag)
+    let stack = decode_stack(tag, count, components, None)?;
+    (!stack.has_refused_consume_effects()).then_some(stack)
 }
 /// A stack read from a save. Earlier Sunrise saves can hold transient components
 /// (`creative_slot_lock`, `additional_trade_cost`, `map_post_processing`), so only
 /// those entries are dropped and the stack stays; commands and data files use
 /// [`item_from_persistent_nbt`]. Cost: one pass over the component keys; the
-/// patch is cloned only when it holds a transient entry.
+/// patch is cloned only when it holds a transient entry. A refused registered
+/// effect remains in the saved patch but isn't installed in the live stack.
 ///
 /// ItemStack.CODEC's count range is independent of the item's stack limit;
 /// an out-of-range count uses the field's default of one. The id is read as an
@@ -105,11 +122,13 @@ pub fn item_from_persistent_nbt(tag: &Tag) -> Option<crate::items::ItemStack> {
 /// command's NBT often leaves the namespace out), and an id that is no valid
 /// identifier makes no stack.
 pub fn item_from_nbt(tag: &Tag) -> Option<crate::items::ItemStack> {
-    let (namespace, path) = sunrise_world::datafix::identifier(&text(tag.get("id"))?)?;
-    let id = format!("{namespace}:{path}");
-    if id == "minecraft:air" {
-        return None;
-    }
+    item_from_nbt_with_effects(tag, None)
+}
+
+pub(crate) fn item_from_nbt_with_effects(
+    tag: &Tag,
+    effects: Option<&Arc<[sunrise_world::component_value::consume_effects::Admitted]>>,
+) -> Option<crate::items::ItemStack> {
     let count = number(tag.get("count"))
         .or_else(|| number(tag.get("Count")))
         .filter(|count| (1..=99).contains(count))
@@ -125,7 +144,24 @@ pub fn item_from_nbt(tag: &Tag) -> Option<crate::items::ItemStack> {
         }
         components => components,
     };
-    let (damage, extra) = crate::item_data::decode_components(components);
+    decode_stack(tag, count, components, effects)
+}
+
+fn decode_stack(
+    tag: &Tag,
+    count: u32,
+    components: Option<&Tag>,
+    effects: Option<&Arc<[sunrise_world::component_value::consume_effects::Admitted]>>,
+) -> Option<crate::items::ItemStack> {
+    let (namespace, path) = sunrise_world::datafix::identifier(&text(tag.get("id"))?)?;
+    let id = format!("{namespace}:{path}");
+    if id == "minecraft:air" {
+        return None;
+    }
+    let (damage, extra) = match effects {
+        Some(effects) => crate::item_data::decode_network_components(components, effects),
+        None => crate::item_data::decode_components(components),
+    };
     Some(crate::items::ItemStack {
         item: Arc::from(id.as_str()),
         count,
@@ -209,6 +245,36 @@ impl TryFrom<Tag> for crate::item_data::StackData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_count_checks_the_java_int_not_the_long() {
+        let (tag, _) = sunrise_core::nbt::parse_snbt(r#"{id:"stone",count:4294967301L}"#).unwrap();
+        assert_eq!(item_from_persistent_nbt(&tag).unwrap().count, 5);
+        assert_eq!(item_from_nbt(&tag).unwrap().count, 1);
+    }
+
+    /// `ItemStackTemplate.CODEC`'s `components` is `DataComponentPatch.CODEC.optionalFieldOf`:
+    /// absent is the empty patch, a present non-map value fails the stack.
+    #[test]
+    fn persistent_components_must_be_a_compound() {
+        let with = |components: Option<Tag>| {
+            let mut tag = Tag::compound([("id", string("minecraft:stone"))]);
+            if let (Tag::Compound(map), Some(components)) = (&mut tag, components) {
+                map.insert("components".into(), components);
+            }
+            item_from_persistent_nbt(&tag)
+        };
+        assert!(with(None).is_some());
+        assert!(
+            with(Some(Tag::compound([(
+                "minecraft:repair_cost",
+                Tag::Int(2)
+            )])))
+            .is_some()
+        );
+        assert!(with(Some(string("not-a-compound"))).is_none());
+        assert!(with(Some(Tag::Int(1))).is_none());
+    }
 
     #[test]
     fn nbt_count_defaults_to_one_outside_codec_range() {

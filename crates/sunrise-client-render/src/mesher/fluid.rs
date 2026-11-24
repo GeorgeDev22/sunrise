@@ -573,6 +573,7 @@ mod tests {
         })
         .unwrap();
         let air = Info {
+            air: true,
             solid: false,
             full: false,
             permeable: true,
@@ -604,6 +605,7 @@ mod tests {
                 air,
                 air,
                 Info {
+                    air: false,
                     overlay: true,
                     ..air
                 },
@@ -711,6 +713,7 @@ mod tests {
         use super::super::{Tint, mod_tint::ModTints};
         use sunrise_world::fluid::FluidState;
         let air = Info {
+            air: true,
             solid: false,
             full: false,
             permeable: true,
@@ -741,10 +744,12 @@ mod tests {
             info: vec![
                 air,
                 Info {
+                    air: false,
                     fluid: FluidState::new(FluidKind::Water, 8, true),
                     ..air
                 },
                 Info {
+                    air: false,
                     solid: true,
                     full: true,
                     model: true,

@@ -1,6 +1,4 @@
-//! The `living_travel` fixture: the isolated dispatch's per-listener output check
-//! (`output_validator`) — a refused pair is dropped alone, the preceding accepted pair
-//! stands for the next listener, and later listeners still run.
+//! The global cancel dispatcher's per-listener output check for `living_travel`.
 
 /// What a fixture listener heard of one travel: the input and velocity it was handed.
 type TravelHeard = Vec<([f64; 3], [f64; 3], bool)>;
@@ -79,15 +77,25 @@ fn a_refused_pair_rolls_back_its_cancel_and_later_listeners_hear_the_accepted_re
     let velocity = [3.0, 0.0, 0.0];
     for cancel in [Cancel::Flag, Cancel::Flow] {
         let (_, accepted) = setter("accepted", input, velocity, Cancel::None);
-        let (_, refused) = setter("refused", [2.0, 0.0, 0.0], [7.0, 0.0, 0.0], cancel);
+        let (refused_heard, refused) = setter("refused", [2.0, 0.0, 0.0], [7.0, 0.0, 0.0], cancel);
         let (later_heard, later) = setter("later", input, velocity, Cancel::None);
         install(vec![accepted, refused, later].into());
+        let refusals = capture_output_refusals(|| {
+            for _ in 0..2 {
+                assert_eq!(
+                    dispatch_travel([0.1, 0.0, 0.0], [1.0, 0.0, 0.0]),
+                    (input, velocity, false),
+                    "the accepted result stands; the refused one, cancellation included, is gone"
+                );
+            }
+        });
+        assert_eq!(refusals, [("refused", "living_travel", "input"); 2]);
+        assert!(!runtime::poisoned(HookId::LivingTravel, "refused"));
         assert_eq!(
-            dispatch_travel([0.1, 0.0, 0.0], [1.0, 0.0, 0.0]),
-            (input, velocity, false),
-            "the accepted result stands; the refused one, cancellation included, is gone"
+            *refused_heard.lock().unwrap(),
+            [(input, velocity, false); 2]
         );
-        assert_eq!(*later_heard.lock().unwrap(), vec![(input, velocity, false)]);
+        assert_eq!(*later_heard.lock().unwrap(), [(input, velocity, false); 2]);
     }
 }
 
@@ -131,20 +139,31 @@ fn a_no_op_listener_does_not_propose_the_games_out_of_budget_velocity() {
     }
 
     install(vec![ModEntry::new("observe", Box::new(Observe))].into());
-    assert_eq!(
-        dispatch_travel([0.0; 3], [65.0, 0.0, 0.0]),
-        ([0.0; 3], [65.0, 0.0, 0.0], false)
-    );
-    assert!(OUTPUT_REFUSALS.with(|refusals| refusals.borrow().is_empty()));
-}
-
-thread_local! {
-    static OUTPUT_REFUSALS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    let refusals = capture_output_refusals(|| {
+        assert_eq!(
+            dispatch_travel([0.0; 3], [65.0, 0.0, 0.0]),
+            ([0.0; 3], [65.0, 0.0, 0.0], false)
+        );
+    });
+    assert!(refusals.is_empty());
 }
 
 mod crate_root {
     mod entity {
         pub(crate) mod types {
+            pub(crate) fn refused_move_output(
+                accepted: &[f64; 3],
+                delta: &[f64; 3],
+            ) -> Result<(), &'static str> {
+                if accepted.map(f64::to_bits) != delta.map(f64::to_bits)
+                    && delta.iter().any(|v| !v.is_finite())
+                {
+                    Err("delta")
+                } else {
+                    Ok(())
+                }
+            }
+
             /// The fixture's validator: input.x past 1.0 or velocity.x past 64.0 is
             /// refused only on replacement. The real budgets are tested in the vocabulary crate.
             pub(crate) fn refused_travel_output(

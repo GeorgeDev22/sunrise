@@ -9,13 +9,20 @@ pub trait Hooks {
     /// `validation` holds that controller's tickets, block owners and entity
     /// owners apart; the mod that owns the controller removes the ones that no
     /// longer hold (a machine that is gone), and they stop forcing their
-    /// chunks. Server-side.
+    /// chunks. A callback's removals are visible to that callback immediately,
+    /// but are discarded if it panics or incurs a phase refusal. Server-side.
     #[hook(
+        dispatch = "flat",
         side = "server",
         contract = "listen",
+        staged_surface = "validation",
         neoforge = "LoadingValidationCallback",
         cancellable = false,
-        version = 2
+        version = 3
     )]
-    fn validate_tickets();
+    fn validate_tickets(
+        dimension: &str,
+        controller: TicketController,
+        validation: &mut dyn mod_api::TicketValidation,
+    );
 }

@@ -16,8 +16,9 @@ use std::{
     },
 };
 use sunrise_core::nbt::{Compound, Tag};
+use sunrise_core::vanilla_bytes::Writer;
 use sunrise_protocol::{
-    buf::{BitSet, Codec, List, Writer, check_network_nbt, set_bit},
+    buf::{BitSet, Codec, List, check_network_nbt, set_bit},
     chunk::{
         BIOMES, BLOCKS, BlockEntityInfo, ChunkData, Heightmaps, LightData, Paletted, Strategy,
     },
@@ -233,7 +234,7 @@ impl SectionCoder {
     /// LevelChunkSection.write, and its block entity blocks.
     fn wire(&self, section: &Section) -> (Arc<[u8]>, Entities) {
         let (encoded, entities) = self.section(section);
-        let mut w = sunrise_protocol::buf::Writer::new();
+        let mut w = ::sunrise_core::vanilla_bytes::Writer::new();
         encoded.write(&mut w);
         (w.data.into(), entities.into())
     }
@@ -1062,7 +1063,7 @@ impl ChunkEncoder {
     fn body(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
         around: SectionMask,
     ) -> Vec<u8> {
         self.prepare(chunk, block_entities, around).write()
@@ -1072,7 +1073,7 @@ impl ChunkEncoder {
     fn prepare(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
         around: SectionMask,
     ) -> Prepared {
         let (wires, entities) = self.blocks(chunk, block_entities);
@@ -1174,7 +1175,7 @@ impl ChunkEncoder {
     pub fn encode(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
     ) -> LevelChunkWithLight {
         let mut packet = self.encode_blocks(chunk, block_entities);
         packet.light = self.light_data(chunk, SectionMask::ALL);
@@ -1185,7 +1186,7 @@ impl ChunkEncoder {
     fn encode_blocks(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
     ) -> LevelChunkWithLight {
         let (wires, block_entities) = self.blocks(chunk, block_entities);
         LevelChunkWithLight {
@@ -1219,7 +1220,7 @@ impl ChunkEncoder {
     fn blocks(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
     ) -> (Vec<Arc<[u8]>>, Vec<BlockEntityInfo>) {
         let mut wires = Vec::with_capacity(self.sections.len());
         let mut entity_infos = Vec::new();
@@ -2152,7 +2153,7 @@ mod tests {
 
     /// The bytes on the wire for a section, encoded afresh.
     fn fresh(encoder: &ChunkEncoder, section: &Section) -> Vec<u8> {
-        let mut w = sunrise_protocol::buf::Writer::new();
+        let mut w = ::sunrise_core::vanilla_bytes::Writer::new();
         encoder.coder.section(section).0.write(&mut w);
         w.data
     }

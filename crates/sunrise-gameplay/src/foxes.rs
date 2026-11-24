@@ -213,6 +213,7 @@ mod tests {
 
     fn kind(id: &str, species: Species) -> Arc<MobType> {
         Arc::new(MobType {
+            type_key: Default::default(),
             shadow: None,
             id: id.into(),
             species,
@@ -251,6 +252,7 @@ mod tests {
                 pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
                 polygons: Vec::new(),
                 children: Vec::new(),
+                layer: None,
             }),
             layers: Default::default(),
             texture: String::new(),
@@ -267,6 +269,7 @@ mod tests {
     fn dropped(stack: ItemStack) -> ItemEntity {
         let at = Vec3::new(0.5, 64.0, 0.5);
         ItemEntity {
+            size_answer: None,
             random: sunrise_core::random::LegacyRandom::new(0),
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
@@ -282,9 +285,11 @@ mod tests {
             position: at,
             previous: at,
             velocity: Vec3::ZERO,
-            on_ground: true,
+            ground: sunrise_world::ground_support::GroundState {
+                on_ground: true,
+                ..Default::default()
+            },
             vertical_collision: false,
-            horizontal_collision: false,
             age: 0,
             pickup_delay: 0,
             bob_offset: 0.0,

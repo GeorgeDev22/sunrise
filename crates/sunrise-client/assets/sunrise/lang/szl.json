@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Nowo linijo czatu wsudzo sie z lewyj zajty, w czasie kej ôna blanknie, zamiast wydować sie cołko.",
   "sunrise.extras.chat_indicator": "Wskoźnik kōmunikatu",
   "sunrise.extras.chat_indicator.tooltip": "Farbisty pas po lewyj zajcie linije czatu.",
-  "sunrise.extras.discord_presence": "Discord Bogato Ôbecność",
-  "sunrise.extras.discord_presence.tooltip": "Pokazuje Granie Sunrise na twojim profilu Discord w czasie kej Discord je uruchomiōne: menu, jednogracz abo wielogracz, wymiar i czas ôdtworzōny. Nikej niy miano świata ani adresu serwera.",
   "sunrise.extras.dynamic_lights": "Światła dynamiczne",
   "sunrise.extras.dynamic_lights.tooltip": "Torchy i inksze zdrzōdła światła utrzimowane, ôpuszczōne abo w ôgniu ôświytlajōm bloki naôbkoło nich.",
   "sunrise.extras.fullbright": "Pełne ôświetlenie",

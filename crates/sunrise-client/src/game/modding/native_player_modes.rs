@@ -83,7 +83,12 @@ impl Game<'_> {
         self.player_handle_read(other)?;
         let attacker = self.native_target_team(self.native_entity_target(player.entity())?)?;
         let victim = self.native_target_team(self.native_entity_target(other.entity())?)?;
-        Some(self.player_may_harm(victim, attacker))
+        Some(self.player_may_harm(
+            player.entity().id() as i32,
+            other.entity().id() as i32,
+            attacker,
+            victim,
+        ))
     }
 }
 

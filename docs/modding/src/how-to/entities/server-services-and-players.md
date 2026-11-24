@@ -7,9 +7,9 @@ players.
 
 | Accessor | Operations |
 |---|---|
-| `host.commands()` | `run_command(line)` runs through the console command path with permission level 4. `feedback(text)` answers the command source. |
+| `host.commands()` | `run_command(line)` runs through the console command path with permission level 4. `feedback(text, broadcast_to_admins)` answers the command source and, broadcast, tells the other operators and the log (`sendSuccess(text, true)`). |
 | `host.messages()` | `broadcast(text)` fires the broadcast hook and writes to the server log. |
-| `host.players()` | `server_players()` returns `Vec<PlayerRef>` in join order. `acting_player()` returns the optional player whose state is active in the hook. `player_by_name(name)` finds a connected real player by case-insensitive account name, not nickname. |
+| `host.players()` | `server_players()` returns `Vec<PlayerRef>` in join order. `acting_player()` returns the optional player whose state is active in the hook. `player_by_name(name)` finds a connected real player by case-insensitive account name, not nickname. `singleplayer_profile()` is an integrated server's launch profile ([below](#identity-and-location)). |
 | `host.levels()` | `list_levels()` returns loaded server levels in vanilla dimension order, or an empty list before a server world opens. |
 
 The players list and name lookup include the single-player owner, even before
@@ -32,27 +32,96 @@ exceeding the boundary's size or nesting limits is refused before reaching the H
 ## Running a command as an entity
 
 `host.commands().run_command` runs as the console. To run a line as a player or another entity instead, at a level
-you choose, call `entity.run_command(host, line, PermissionLevel::Gamemasters)`: `@s` is that entity, `~` its
-position, and only a player is answered. It returns `false` for a line that fails, a stale or removed entity, and an
-entity outside the level in place (a player in another level included, since that level is parked while the hook
-runs). To run a command in another level, do it from a moment in that level or from a task scheduled there.
+you choose, call `entity.run_command(host, line, PermissionLevel::Gamemasters, false)`: `@s` is that entity and
+`~` its position. Pass `true` as the last argument to suppress the player's command feedback and operator
+notifications. Other entities already have a silent source. It returns `false` for a line that fails, a stale or
+removed entity, and an entity outside the level in place (a player in another level included, since that level is
+parked while the hook runs). To run a command in another level, do it from a moment in that level or from a task
+scheduled there.
 
 ## Identity and location
 
 Read identity through `player.uuid()`, `player.name(host)`,
 `player.permission_level(host)` and `player.address(host)`. The address is the
-connection IP without a port. An acting player without a known connection has
-an empty address.
+connection IP without a port. `player.client_brand(host)` reads the brand the
+client announced. Name, address and brand return `Option<&str>`: borrow them
+for comparisons, and use `.map(str::to_owned)` only to keep the text beyond the
+host borrow. A stale or unavailable player gives `None`; an acting player without
+a known connection gives `Some("")` for address and brand.
+
+`player.virtual_host(host)` returns `Option<&VirtualHost>` on the server. Its
+`host` and `port` are the destination sent in this connection's login handshake,
+not the peer IP, after any `player_handshake` listener's rewrite. The host keeps its original case and punctuation up to the
+first NUL; any suffix is discarded. A transfer uses the new login handshake.
+The value comes from the client, so it is not a verified name or necessarily
+what the player originally typed. Clone it only if you need it after the host
+borrow ends. The host may be empty. The window's own player on an integrated server
+reports its memory connection's handshake: the host `local`, standing for the local address, and port 0. It is `None`
+on a client, for stale or unavailable players, and for fake players.
+
+`player.announced_channels(host)` returns `Option<Arc<[String]>>` in announcement
+order. The snapshot includes `minecraft:register` minus `minecraft:unregister`
+from configuration and play. It can outlive the host borrow and does not change
+when the client updates its list. Read it with `.iter()` and keep the `Arc` if
+you need that exact list later; call the method again to see new announcements.
+An acting player without a known connection gets an empty snapshot; a stale or
+unavailable player returns `None`.
+
+On an integrated (single player) server, `host.players().singleplayer_profile()` is the profile the
+server was created with (`MinecraftServer.getSingleplayerProfile`): the owner's name, UUID and login
+properties, borrowed from the host. It is fixed when the server is created, so it reads the same from
+`server_about_to_start` and `server_starting` on, before the owner joins and after they leave.
+`player.is_singleplayer_owner(host)` says whether a player is that owner, compared as
+`IntegratedServer.isSingleplayerOwner` does: by name, ignoring case, not by UUID. Cheats, opening to
+LAN, join order and permission level don't change the answer. Use `player.permission_level(host)` to
+check for an operator. A dedicated server has no owner: `None` and `false`, and a stale handle is
+`false` too. Neither read grants anything or changes who may log in.
 
 `player.latency(host)` reads the ping the Tab list shows, in milliseconds: the keep-alive round
 trips averaged three parts old to one part new. It is 0 until the first keep-alive answer, for a fake
 player and for an acting player without a known connection. It refuses with `PlayerWorldRefusal::Client`
 on a client and `PlayerWorldRefusal::Stale` for a stale handle.
 
+`player.send_ping(host, id)` queues a play-phase ping to that player's current
+connection from a mutable `ServerHost`. The ID is a signed `i32`, and a vanilla
+client echoes it without a mod. Success means the packet was queued (or staged
+in the current transaction), not delivered or answered. `PlayerPingRefusal`
+distinguishes a stale handle, no open play connection, and a send failure.
+
+Listen to `player_pong` to observe `event.player`, `event.name` (the profile
+name) and `event.id`. This non-cancellable notice runs on the server thread at
+the packet's turn, before later input from that connection is applied. Match
+pongs by player and ID if you need to correlate them, but the ID is client
+supplied and unauthenticated: unsolicited and duplicate pongs are still
+reported. Configuration, login, status, and the separate play latency request
+do not fire this hook. Neither API changes keep-alive latency.
+
 The online list includes connected players during nested player turns. Name,
-permission and address reads work for connected players whose bodies are displaced
-by another player's turn; stale handles are refused. Entity and living handles
+permission, address and virtual-host reads work for connected players whose bodies
+are displaced by another player's turn; stale handles are refused. Entity and living handles
 provide world-state reads, which require a resolvable body.
+
+In `player_stat_award`, find the recipient with
+`host.players().player_by_name(event.name)` or use their retained `PlayerRef`.
+`player.stat(host, stat_type, key)` reads that player's count before the award,
+even if a nested turn has displaced them. This does not make displaced players
+available for statistic writes.
+
+On the server, `player.statistics(host)` takes `&dyn Host` and returns owned save
+JSON (`Option<String>`): namespaced statistic types and entries under `stats`,
+with the current `DataVersion`. An online player without counters has an empty
+map; a stale or unavailable player gives `None`, as does a client host.
+
+`player.set_statistics(host, snapshot)` takes `&mut dyn ServerHost` and borrowed
+JSON. It upgrades older saves, reports decode errors and keeps recoverable
+registered counters. An absent or empty `stats` map clears the counters. It
+returns `false` without changing the player for malformed JSON, a snapshot that
+cannot be decoded as a map, or a player unavailable for writes. A successful
+restore replaces rather than merges counters: omitted counters read as zero,
+and only changed statistic-criterion scores are updated. The next regular
+statistics request sends the changed counts, including zero for removals, and
+the normal player save persists the new map. Restoring does not fire
+`player_stat_award`.
 
 `player.level(host)` returns the authoritative `LevelRef`;
 `player.dimension(host)` returns its dimension `Identifier`, including registered
@@ -71,9 +140,9 @@ identities.
 | Method | Behavior |
 |---|---|
 | `set_nickname(host, nickname)` | Changes the name shown in chat and the Tab list; `None` restores the account name. Commands, selectors, logs and events use the real name. Validate the nickname's length, filtering and conflicts yourself. |
-| `nickname(host)` | Reads the nickname `set_nickname` set: `Ok(None)` when there is none. Refuses with `PlayerWorldRefusal::Client` on a client and `Stale` for a stale or offline player. |
+| `nickname(host)` | Borrows the nickname `set_nickname` set as `Result<Option<&str>, PlayerWorldRefusal>`: `Ok(None)` when there is none. Refuses with `Client` on a client and `Stale` for a stale or offline player. |
 | `set_sleep_ignored(host, ignored)` | Controls exclusion from the sleep count. |
-| `disconnect(host, reason)` | Disconnects the player with a `Text` reason, as `/kick` does, also inside their own hook or a payload handler (the connection closes after it). Answers `false` for a stale or unavailable handle, the single-player owner and a player already being disconnected (the first reason stands). A fake player's kick keeps the first reason and completes at the next hub poll through the shared leave path. A reason the `Text` form checks refuse returns `TextFormError` before anything changes. |
+| `disconnect(host, reason)` | Disconnects the player with a `Text` reason, as `/kick` does, also inside their own hook or a payload handler (the connection closes after it). Answers `false` for a stale or unavailable handle, the single-player owner and a player already being disconnected (the first reason stands). A fake player's kick keeps the first reason and completes at the next hub poll through the shared leave path. Invalid reason text returns `TextFormError` before anything changes. |
 | `hide(host, permission)` | Hides the player from players below the supplied permission level, starting next tick; `None` restores visibility. Hidden players disappear from the world and Tab list, and their join and leave messages are suppressed for those viewers. |
 | `hidden(host)` | Reads the level `hide` set: `Ok(None)` when the player is shown. A player who rejoined hidden reads it too, and a level set before the world is opened to others reads as stored. Refuses with `PlayerWorldRefusal::Client` on a client and `Stale` for a handle of an earlier open of the world. |
 
@@ -97,12 +166,47 @@ and also covers `/say` and `/me`. With no listener nothing is asked or allocated
 `chat_recipient` fails instead of reentering the hook or sending an unchecked line. The server's log keeps every
 broadcast line, hidden or not.
 
-`player.respawn(host)` presses the Respawn button for a dead player, as their client's does (`PERFORM_RESPAWN`): they
-are placed at their respawn point or the world spawn and `player_respawned` is heard. Call it outside every player's
-hook (from `server_tick`, say). It returns `Result<(), RespawnRefusal>`, and each refusal changes nothing, checked in
+`player.respawn(host)` makes the same request as the client's Respawn button (`PERFORM_RESPAWN`). Call it outside
+player hooks, for example from `server_tick`. `Ok(())` means the request was accepted, not that the replacement is
+already placed. In a transaction, the server begins the respawn only after the outermost scope commits. It may still
+wait for destination chunks. Use `player_respawned` to act on the placed replacement:
+
+```rust,ignore
+use mod_api::{Hooks, PlayerRespawnedEvent, ServerHost, Text};
+
+struct WelcomeBack;
+
+#[mod_api::sunrise_mod]
+impl Hooks for WelcomeBack {
+    fn player_respawned(&self, host: &mut dyn ServerHost, event: &mut PlayerRespawnedEvent<'_>) {
+        if event.end_conquered {
+            return; // This notice is only for a return after death.
+        }
+        if let Some(player) = host.player(event.player) {
+            player.tell(host, Text::translate("example.respawn.welcome_back", Vec::new()));
+        }
+    }
+}
+```
+
+`player_respawn_position` runs with the removed original before cloning. Use `event.from_end_fight` there and
+`event.end_conquered` in `player_respawned` to distinguish the return after the End credits from a death respawn.
+Both causes replace the player, so neither calls `entity_travel_to_dimension` or `player_changed_dimension`.
+An ordinary End portal exit teleports the same player and runs the travel hooks, not the respawn hooks.
+The player keeps ticking in the End while the destination is being resolved. The travel veto sees the final
+level, including the world spawn if the saved block is missing, and refusing it leaves the player in the End.
+An exit to a point in the End itself sends a position update with the usual pitch clamp; it does not fire
+`player_changed_dimension` or the command-only `player_teleported` hook.
+
+To change the saved point copied to the replacement, use `event.player.set_respawn_config(host, Some(config))`
+inside `player_respawn_position` and set `*event.copy_original_spawn_position = true`. This works even
+on the removed player after death. It does not change the destination of this respawn: edit the event's
+`level`, `position`, `yaw` and `pitch` for that.
+
+`player.respawn(host)` returns `Result<(), RespawnRefusal>`, and each refusal changes nothing, checked in
 this order: `Client`, `InPlayerHook` (a player's state is swapped in), `Stale` (no player on this server behind the
 handle), `NoConnection` (a fake player, or the world's own player in a single-player world, which respawns through its
-own screen) and `Alive` (health above 0 and the game not won: the case the button ignores; a player who has won the game and is watching the End poem is respawned even alive, on the next server tick, as the button does).
+own screen) and `Alive` (health above 0 and the game not won: the case the button ignores; a player who has won the game and is watching the End poem is respawned even alive, as the button does).
 
 ## Player rules and sleep
 
@@ -113,7 +217,7 @@ Reads accept `Host`; writes accept `ServerHost`.
 | `may_use_item_at(host, pos, face, stack)` | Applies `Player.mayUseItemAt`: builders may use the item; adventure and spectator players need matching `can_place_on`. |
 | `can_harm(host, other)` | Applies `ServerPlayer.canHarmPlayer`, including the `pvp` rule and teams. |
 | `respawn_config(host)` | Reads the respawn point; `Some(None)` means no point is set. |
-| `set_respawn_config(host, config)` | Sets the point as `/spawnpoint` does, including the `player_set_spawn` veto. Refuses stale, unavailable or dead players, unknown dimensions, non-finite yaw and canceled changes. |
+| `set_respawn_config(host, config)` | Sets the point as `/spawnpoint` does, including the `player_set_spawn` veto. Refuses stale, unavailable or dead players (except the original in `player_respawn_position`), unknown dimensions, non-finite yaw and canceled changes. |
 | `text_filtering(host)` | Reads the option announced by the player's client. |
 | `sleep_ignored(host)` | Reads the sleep-count exclusion setting. |
 | `counts_for_sleep(host)` | Reports whether the player counts toward the night skip. |
@@ -121,7 +225,7 @@ Reads accept `Host`; writes accept `ServerHost`.
 
 A second disconnect on a guest already leaving is a no-op and keeps the first reason.
 
-Vetoing a player's movement: the `player_move` hook hears each validated movement report whose position or rotation differs from the player's last reported location, after the server's own checks and before the report is committed, with the exact `from`, `to` and both rotations. The last reported location is kept on the player's connection, apart from the accepted position: it is the position given to the listener before it runs, and the destination of every server-side teleport (a join, a teleport in the level, a level change, a respawn, the resend of an unconfirmed teleport and the correction after a veto); `from` is that location. Set `cancel` and the report is not applied; the client is sent back to the accepted position and rotation. The report was already seen by the server's own checks before the hook, so what a violation of those would have done still happens. The engine applies no threshold, so a mod that wants to ignore small moves compares the two positions itself (`(to - from).length() < 1.0 / 16.0` skips anything under 1/16 of a block). A held report is ruled on in the same tick; that player's later packets (further reports, the end of the client tick, pongs) wait in order behind it, then go on in that tick, so each later report is heard from the one before. A report is out of time at its 21st tick, counting the tick it was held at as the first: it is dropped with the correction, never committed, even when a ruling arrives after that; a disconnect, teleport or level change drops it cleanly. Not heard: the first tick in a level (the tick after a join or a level change; the second is heard), a player riding something (`vehicle_moved` hears the vehicle), any teleport (its confirmation's own position is validated from the teleport's target and committed without the hook, and so is the veto's own correction; a report that arrives while a teleport is unconfirmed is not heard either) and a passage crossing (its caller reads the position at once, so the report is committed in place). The first report after a teleport that passed validation is heard, with the teleport's destination as its `from`. With no listener nothing is held or copied; with one, the cost is a held report for each moving player a tick. A native listener that never returns is out of scope: it blocks the game thread like any native code, and the 20-tick deadline covers only a report held pending across ticks.
+Vetoing a player's movement: the `player_move` hook hears each validated movement report whose position or rotation differs from the player's last reported location, after the server's own checks and before the report is committed, with the exact `from`, `to` and both rotations. The last reported location is kept on the player's connection, apart from the accepted position: it is the position given to the listener before it runs, and the destination of every server-side teleport (a join, a teleport in the level, a level change, a respawn, the resend of an unconfirmed teleport and the correction after a veto); `from` is that location. Set `cancel` and the report is not applied; the client is sent back to the accepted position and rotation. The report was already seen by the server's own checks before the hook, so what a violation of those would have done still happens. The engine applies no threshold, so a mod that wants to ignore small moves compares the two positions itself (`(to - from).length() < 1.0 / 16.0` skips anything under 1/16 of a block). A held report is ruled on in the same tick; that player's later packets (further reports, the end of the client tick, pongs) wait in order behind it, then go on in that tick, so each later report is heard from the one before. A report is out of time at its 21st tick, counting the tick it was held at as the first: it is dropped with the correction, never committed, even when a ruling arrives after that; a disconnect, teleport or level change drops it cleanly. Not heard: the first tick in a level (the tick after a join or a level change; the second is heard), a player riding something (`vehicle_moved` hears the vehicle), any teleport (its confirmation's own position is validated from the teleport's target and committed without the hook, and so is the veto's own correction; a report that arrives while a teleport is unconfirmed is not heard either) and a passage crossing (its caller reads the position at once, so the report is committed in place). The first report after a teleport that passed validation is heard, with the teleport's destination as its `from`. With or without a listener, accepted movement finishes its game effects before later packets run. Only a listening mod causes a validated report to be held before it commits. A native listener that never returns is out of scope: it blocks the game thread like any native code, and the 20-tick deadline covers only a report held pending across ticks.
 
 ## Text conversions
 
@@ -145,9 +249,16 @@ A translation's `fallback` and an `nbt` component's `interpret`, `plain` and
 key is `index` is refused, as in vanilla; Sunrise follows vanilla there. JSON
 escapes such as `\u0041` are decoded.
 
-`host.text_from_legacy("§cRed")` reads `§` formatting codes as
+`host.text_to_nbt(&text)` encodes the component as vanilla's `ComponentSerialization.CODEC`
+with `NbtOps`, without resolving translations or adding styles. It returns `Result<Tag, TextFormError>`.
+`host.text_from_nbt(&tag)` reads that form, returning `Result<Option<Text>, TextFormError>`.
+An unstyled literal without siblings encodes as an NBT string, and strings are read literally,
+including `§` codes. NBT flags are true for nonzero numeric tags, and custom click payloads
+keep their tag types. Both methods enforce vanilla's 512-container NBT depth limit.
+
+`host.text_from_legacy("§cRed")` instead reads `§` formatting codes as
 the font draws them; `&` codes are not read, so replace `&` with `§` first.
-Both work on either side.
+These conversions work on either side.
 
 ## Server clock, rules and distances
 
@@ -165,10 +276,27 @@ read the distances in chunks; `host.server_set_view_distance(d)` and
 dedicated server and return `false` otherwise. `server.properties` is not
 written.
 
+`host.server_is_published()` is `MinecraftServer.isPublished`: always true on a
+dedicated server, and on a single-player world's server only while the world is
+open to LAN, so it turns false again when the LAN closes (`/unpublish`). A rule
+meant for multiplayer only reads it when it applies, not once at start: no hook
+fires when a world is opened to LAN.
+
 `host.tick_rate_is_frozen()` is `TickRateManager.isFrozen` (`/tick freeze`): `Some(true)` while the server's
 ticking is frozen, `None` on a client. A frozen server still runs the ticks `/tick step` asks for, so
 `server_tick_start`'s `world_running` can be true while it is frozen; read this to tell a frozen server from a
 paused level.
+
+## Account profiles
+
+`host.profiles().resolve_name(name)` and `resolve_id(uuid)` look an account's profile up
+through the server's own resolver, the one `/fetchprofile` and dynamic player heads use, also on
+an offline-mode server. The first call starts the lookup and answers
+`ProfileResolution::Pending`; call again with the same name or UUID to poll it until it answers
+`Done`, with the `AccountProfile` (UUID, the account's own spelling of its name, and the signed
+properties such as `textures`) or `None`. As in vanilla, a failed request also answers `None`, and
+that answer is kept like any other: the same name or UUID answers `Done(None)` until the entry
+expires, ten minutes after its last lookup.
 
 ## Finding blocks in a chunk
 
@@ -179,6 +307,26 @@ palette keeps a state no block uses any more, and a section of more distinct sta
 named whenever the block exists. A mod that points at the nearest block of a kind asks it on `chunk_load` for
 blocks placed before it tracked them. `None` for a stale handle, on a client, or for a chunk that isn't
 loaded; it loads nothing.
+
+## Loading a chunk
+
+`level.load_chunk(host, [x, z])` is vanilla's `Level.getChunk(x, z)` (`ServerChunkCache.getChunk(x, z, FULL, true)`):
+it loads the chunk from the save, or generates it, to FULL, in any open server level, and returns `Ok(())` once it
+is there with its initial light done, so the level's block and light reads find it. To light it, the 8 chunks around
+it are loaded too (vanilla only generates them part of the way); they hold no ticket and unload with the next sweep. **It blocks the server tick until the chunk is loaded or
+generated**, as vanilla does, with no timeout; a chunk already full answers at once. Generating a new chunk takes
+long enough to be felt, so load ahead of time rather than many chunks in one tick. Like vanilla, the call leaves an
+`UNKNOWN` ticket on the chunk that keeps it loaded (not ticking) through the next ticket purge and expires at the one
+after, and the first purge can come in the same tick, depending on when the call runs; the chunk then unloads like
+any other. Loading a chunk of a parked level doesn't put the level in place: `set_block` and the other writes that
+need it in place still answer `LevelWriteError::Unavailable` there. To keep a chunk, force it (`chunk.set_forced`)
+or hold a ticket controller's
+ticket. The `chunk_load` listeners of each chunk the call brings in run during the call, while that chunk is loaded
+and before the call returns, as NeoForge's `ChunkEvent.Load` does inside `getChunk`. `Err(ChunkLoadError::Unloaded)`
+for a stale handle, a client, a level the server has not opened, a chunk past `ChunkPos.isValid`
+(`ChunkPyramid.MAX_CHUNK_COORDINATE_VALUE`, where vanilla's block reads and writes stop), and while the level's
+generation is paused or stopped; `Err(ChunkLoadError::Failed)` when a mod's chunk generator panicked for the chunk
+or one its generation needs, which the call reports instead of waiting forever.
 
 ## World mutation: chunks, blocks shown and placed as a player
 
@@ -208,25 +356,59 @@ sets how many players may be on. Server only.
 | `host.server_max_players()` / `host.server_set_max_players(n)` | Paper's `Server.getMaxPlayers` and `setMaxPlayers`: the live cap used for logins and shown in the server list. The read is `None` where no server is open to players. The write takes effect on the next login and ping; already-connected players stay, and operators flagged `bypassesPlayerLimit` on a dedicated server still bypass the cap. Zero refuses every login without the bypass. This call does not write `server.properties` (a restart restores its value; the management protocol's `max_players` setting does write it). Refuses without changing anything with `PlayerLimitRefusal::NotOpen` or `TooHigh { maximum }` for a limit above `i32::MAX`, vanilla's `int`. |
 ## Inventory, ender chest and saved data
 
-For mods that copy or edit a player whole (a player-data sync, `/invsee`, `/endersee`). Server only, online players only: a handle for an offline player, a stale one and a client answer `None` on a read and a named `PlayerDataRefusal` on a write.
+For mods that inspect or edit an online player's state (a player-data sync, `/invsee`, `/endersee`). Writes require a server host and refuse stale handles; reads that also have a client view are marked below.
 
 | Method | Behavior |
 |---|---|
-| `inventory_slots(host)` | The non-empty slots by `Inventory`'s numbers, lowest first: 0 to 35 the main inventory (0 to 8 the hotbar), 36 feet, 37 legs, 38 chest, 39 head, 40 off hand, 41 body, 42 saddle. `None` when no online player is behind the handle. On a client, reads only the local player's inventory menu (server slot packets plus local edits), not authoritative server state. |
-| `set_inventory_slot(host, slot, stack)` | `Inventory.setItem`: `None` empties the slot; there is no item check, so a worn slot takes any item. The client is sent the slot with the tick's inventory sync, and an open inventory menu shows the written stack. Returns `Result<(), PlayerDataRefusal>`; each refusal writes nothing: `Stale` (no online player), `Client`, `Dead`, `SlotOutOfRange { slot, last: 42 }` (never a panic) and `Stack(StackWriteError)` (a count or damage the item does not allow, an item the world lacks). |
-| `ender_chest(host)` / `set_ender_chest_slot(host, slot, stack)` | The same pair for the 27 ender chest slots, 0 to 26, with `SlotOutOfRange { last: 26 }`; an open ender chest menu shows the written stack. |
+| `with_inventory(host, read)` | Lends an `InventoryView` by `Inventory.getItem`'s numbers: 0 to 35 main (0 to 8 hotbar), 36 feet, 37 legs, 38 chest, 39 head, 40 offhand, 41 body, 42 saddle. On a client, reads only the local player's copy (server slot packets plus local edits), not authoritative server state. |
+| `set_inventory_slot(host, slot, stack)` | `Inventory.setItem`: `None` empties the slot; there is no item check, so a worn slot takes any item. The client is sent the slot with the tick's inventory sync, and an open inventory menu shows the written stack. Returns `Result<(), PlayerDataRefusal>`; each refusal writes nothing: `Stale` (no online player), `Client`, `Dead`, `SlotOutOfRange { slot, last: 42 }` (never a panic) and `Stack(StackWriteError)` (a count or component value the item does not allow, an item the world lacks). |
+| `with_ender_chest(host, read)` / `set_ender_chest_slot(host, slot, stack)` | Ender chest slots 0 to 26. The scoped read is server-only and reads the live slots when the chest is open. The setter refuses an out-of-range slot with `SlotOutOfRange { last: 26 }`; an open ender chest menu shows the written stack. |
 | `open_ender_chest(host, title)` | Opens the player's own ender chest with no block, as a satchel or a command would: `ChestMenu.threeRows` over `PlayerEnderChestContainer` with no active chest, titled `title`, so it stays valid wherever the player goes. The game moves the stacks for every click, shift-click, drag and the close, exactly as for an ender chest block's menu. It replaces the menu they had open, and `container_opened` may cancel it (`player_container_open` is the notice after it opened and cannot). Called inside a hook of the player's own action (`use_item`, `right_click_item`, `right_click_block`, their command), it opens when that action ends, as a block's menu does. `Ok(true)` inside an action means queued, and still subject to cancellation when the queue runs; outside one, it opened. `Ok(false)` is an immediate cancellation by a mod, `Err(PlayerUnavailable)` for a stale, dead or fake player or on a client, `Err(Title)` for a title that could not cross. |
-| `give_stack(host, stack)` | Gives one stack as `/give` does: matching stacks, then empty slots, and what does not fit is thrown from the player's eyes for that player alone, with no pickup delay. Refuses with `Stale`, `Client`, `Dead` or `Stack`, giving nothing. The `Ok` value is the part that was not given: `None` when it all went in or was thrown, which is always so for a player in the hook's level. For a player in another level it is `Some(rest)`, the part with no room, since nothing lands in the world there and no sound plays: it stays yours, to drop from a hook in their level or keep. |
-| `persistent_data(host)` / `set_persistent_data(host, data)` | The compound mods keep on a player (NeoForge's `getPersistentData`), saved with the player under `NeoForgeData`; an empty compound removes it. It is never sent to a client and a change raises no notification. On a death respawn and on the first exit from the End only its `PlayerPersisted` sub-compound is carried over, whatever its type, and every other key is lost; dimension changes, later End exits and teleports keep all of it. Refuses with `Stale`, `Client`, `Dead` and `TooDeep` (data 512 levels deep or more in the player's file). For ports; new mods use attachments. |
-| `host.item_from_snbt(snbt)` | The stack an SNBT item compound stands for, read as a saved item is: `{id:"minecraft:stone",count:3,components:{...}}` (`count` 1 when missing). Returns `None` for text that is not one compound (anything but whitespace after it included), a `count` outside 1 to 99 (refused, not clamped), air and an item the world lacks. It also refuses text over 2 MiB or nested past 512 levels: that is this API's own safety bound, the one place it differs from vanilla, whose SNBT parser has no size or depth limit (deep text overflows its stack); the figures are binary NBT's limits, taken so mod-supplied text cannot overflow the parser. |
+| `give_stack(host, stack)` | Gives one stack as `/give` does: matching stacks, then empty slots, and what does not fit is thrown from the player's eyes for that player alone, with no pickup delay. Refuses with `Stale`, `Client`, `Dead` or `Stack`, giving nothing. A stack that fits spawns the short-lived pickup visual and plays the pickup sound. These effects occur in the player's level, even when the hook runs in another one. `Ok(None)` means every item was accepted. The ordinary entity-join hook can still cancel the overflow drop. If the player's level is unavailable, returns the overflow as `Ok(Some(rest))`. |
+| `persistent_data(host)` | Borrows the player's `NeoForgeData` compound (NeoForge's `Entity.getPersistentData`) for the lifetime of the shared Host borrow. `None` for an absent compound, an unavailable player or a client; `Some` can hold an empty compound. Clone deliberately if you need an owned snapshot. |
+| `set_persistent_data_key(host, &key, value)` | Edits one literal `JavaString` key. `Some(&tag)` inserts or replaces it, creating the compound if needed; `None` removes just that key. Removing the last key leaves a present empty compound; removing a missing key does nothing. Returns `Result<(), PlayerPersistentDataError>`. |
+| `host.item_from_snbt(snbt)` | Decodes a saved-item compound from SNBT: `{id:"minecraft:stone",count:3,components:{...}}`. A missing `count` defaults to 1; unknown fields such as `Count` are ignored. Returns `None` for text that is not one compound with only whitespace around it, air, unknown items, and patches naming a transient component. A present `count` must be numeric and in 1 to 99 after Java's `Number.intValue` conversion. The text parser also enforces binary NBT's 2 MiB input and 512-level nesting bounds. |
 
-A stack in an inventory slot, the ender chest or `give_stack` keeps all its components. Mods that move inventories between servers can write back a stack read from a slot unchanged. `item_from_snbt` does not apply the item's stack or damage limits, so its result can still be refused on write with `Err(Stack(StackWriteError))`.
+Both scoped reads return `Some` of the callback's result even when the inventory is empty,
+or `None` without calling it when the player or inventory is unavailable. Inside the callback,
+`view.get(n)` reads slot `n`, not the `n`th occupied slot. It returns `None` for an empty,
+unreadable or out-of-range slot. `view.iter()` visits readable nonempty slots in ascending
+order without renumbering them. Read item, count and damage directly inside the callback:
+
+```rust,ignore
+let first_hotbar_count = player.with_inventory(host, |view| view.get(0).map(|stack| stack.count()));
+let main_item_count = player.with_inventory(host, |view| {
+    view.iter()
+        .take_while(|(slot, _)| *slot < 36)
+        .map(|(_, stack)| u64::from(stack.count()))
+        .sum::<u64>()
+});
+```
+
+To decode components or retain an owned `ItemStack`, project just the stack you need:
+
+```rust,ignore
+match player.with_ender_chest(host, |view| view.get(26).map(|stack| stack.project())) {
+    None => { /* the chest is unavailable */ }
+    Some(None) => { /* the slot is empty or unreadable */ }
+    Some(Some(None)) => { /* the stack cannot be projected */ }
+    Some(Some(Some(stack))) => { /* keep the owned stack or read its components */ }
+}
+```
+
+A projected stack carries its components, so mods can write it back when moving inventories.
+`item_from_snbt` does not apply the item's stack or component limits, so its result can still be
+refused on write with `Err(Stack(StackWriteError))`.
+
+Persistent data is for ports; new mods should use attachments. It is saved with the player, never sent to clients, and raises no notification. On death respawn and the first exit from the End, only the `PlayerPersisted` key is carried over, whatever its tag type; dimension changes, later End exits and teleports keep all keys.
+
+A key edit refuses without writing on `Stale` or `Client` (dead online players accept edits, matching NeoForge's `Entity.getPersistentData()` and `ServerPlayer.restoreFrom()`), and returns `TooDeep` if the new value would nest a list or compound at file depth 512 or more (including mixed-list wrappers). `InvalidNbt` means the entry has an `End` value, a key or string that does not fit the save's modified UTF-8 field, or a collection too long for the save's count field.
 
 Player inventory writes use vanilla numbers: 0 to 35 main (0 to 8 hotbar),
 36 to 39 armour feet to head, 40 offhand, 41 body, 42 saddle.
 `ItemPlace::PlayerSlot` uses 100 to 103 for armour and -106 for offhand.
 The inventory menu has no slot for body or saddle. All four player data writes
-(`set_inventory_slot`, `set_ender_chest_slot`, `give_stack`, `set_persistent_data`)
+(`set_inventory_slot`, `set_ender_chest_slot`, `give_stack`, `set_persistent_data_key`)
 are undone by an open transaction abort; equipment effects and overflow drops
 wait for the outermost commit.
 
@@ -236,7 +418,9 @@ wait for the outermost commit.
 local player's supported open menu, or the inventory menu when none is open; every other
 player returns `None`. `MenuRef::slot_count`, `slot` and `carried` read the client's view:
 server slot updates plus local prediction, not server authority. A menu ref becomes stale
-when that menu closes or another opens. The server retains its supported-menu restrictions.
+when that menu closes or another opens. `MenuRef::kind` returns `Some(Some(id))` for a supported
+registry-backed menu, `Some(None)` for the player's inventory menu or a mount's inventory on the client,
+and `None` for a stale, foreign or unavailable handle. The server retains its supported-menu restrictions.
 
 ## Local player reads on a client
 
@@ -251,6 +435,7 @@ kept body:
 | `on_ground` | The local player's own predicted flag; for another kept entity, its client copy's flag. |
 | `is_in_water` | The local player's own fluid state, or a kept entity's last client update. |
 | `is_swimming` | The local player's swimming flag, not the pose (crawling can share that pose). `None` for other players and other entity kinds. |
+| `main_arm` | `LivingEntity.getMainArm` for every living entity the client tracks, as the server last sent it: another player's or a mannequin's main hand, a mob's left-handed flag; the local player's own Main Hand option. `None` for an entity that isn't living. |
 
 Client reads are views, not server authority. Inventory access here is read-only;
 inventory and movement writes still require a server host.
@@ -265,3 +450,31 @@ server, but the crash save writes nothing for that player: their `players/data/<
 advancements stay as last saved, so an item taken but not yet placed is never duplicated or lost in the player's
 files. The world save does not roll back what the turn already changed in the world, and a vehicle that player rides
 alone stays in the world. The log names the turn with a warning. A panic your code caught does not count: the record ends with the server tick.
+
+## Custom statistics
+
+Declare custom statistic identities in `Hooks::register`, using `Registrar`:
+
+```rust,ignore
+fn register(&self, registrar: &mut dyn Registrar, _: &RegistrationContext) {
+    registrar.register_custom_stat("steps").unwrap();
+}
+```
+
+For a mod named `rewrite`, this declares `rewrite:steps` in
+`minecraft:custom_stat`. An explicit `rewrite:steps`, another manifest-owned
+namespace, or a namespace delegated to the mod through `served_by` (see
+[Declare content in code](../content-mods.md#declare-content-in-code)) is also accepted; `minecraft`, foreign namespaces, malformed IDs and
+duplicates are refused. Ignoring the returned `Result<(), DeclarationError>` does not
+bypass installation failure. A mod's explicit registration refusal rolls back
+its declarations, and the installed inventory freezes before worlds open.
+
+These declarations populate the integrated command/statistic inventory and
+append after vanilla's IDs in LAN and client built-in registry reads, preserving
+vanilla IDs. Servers declaring custom statistics require Sunrise clients with
+the same ordered statistic inventory; configuration rejects mismatches before
+play. Register the target before rewriting an award to it; an arbitrary
+identifier alone does not register a statistic.
+
+`/scoreboard objectives add steps minecraft.custom:rewrite.steps` creates an
+objective for this registered counter.

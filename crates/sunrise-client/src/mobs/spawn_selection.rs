@@ -25,7 +25,7 @@ use std::{
     path::Path,
 };
 use sunrise_core::{
-    geometry::{Aabb, Vec3},
+    geometry::{Aabb, ShapeOp, Vec3, VoxelShape},
     random::RandomSource,
 };
 
@@ -405,7 +405,8 @@ pub trait NaturalLevel: SpawnLevel {
     /// `noCollision(null, box)`: blocks under an empty collision context and
     /// entities that can be collided with.
     fn no_collision(&self, bounds: Aabb) -> bool;
-    /// `isUnobstructed(entity)`: no entity blocking building overlaps.
+    /// `isUnobstructed(entity)`: no entity blocking building overlaps, including
+    /// entities already accepted by this spawn pass.
     fn unobstructed(&self, bounds: Aabb) -> bool;
     /// The `spawn_mobs` game rule.
     fn spawn_mobs(&self) -> bool;
@@ -424,11 +425,23 @@ pub enum Heightmap {
     MotionBlockingNoLeaves,
 }
 impl Heightmap {
-    pub fn from_name(name: &str) -> Self {
-        match name {
+    pub(super) fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
             "WORLD_SURFACE" => Self::WorldSurface,
             "OCEAN_FLOOR" => Self::OceanFloor,
             "MOTION_BLOCKING" => Self::MotionBlocking,
+            "MOTION_BLOCKING_NO_LEAVES" => Self::MotionBlockingNoLeaves,
+            _ => return None,
+        })
+    }
+}
+
+impl From<mod_api::Heightmap> for Heightmap {
+    fn from(heightmap: mod_api::Heightmap) -> Self {
+        match heightmap {
+            mod_api::Heightmap::WorldSurface => Self::WorldSurface,
+            mod_api::Heightmap::OceanFloor => Self::OceanFloor,
+            mod_api::Heightmap::MotionBlocking => Self::MotionBlocking,
             _ => Self::MotionBlockingNoLeaves,
         }
     }
@@ -585,10 +598,13 @@ pub fn contains_any_liquid<L: SpawnLevel>(l: &L, b: Aabb) -> bool {
 }
 /// `EntityDimensions.makeBoundingBox`: the half width is a float.
 pub fn spawn_box(x: f64, y: f64, z: f64, width: f32, height: f32) -> Aabb {
-    let half = f64::from(width / 2.0);
+    spawn_box_at([x, y, z], f64::from(width / 2.0), f64::from(height))
+}
+
+pub(super) fn spawn_box_at([x, y, z]: [f64; 3], half_width: f64, height: f64) -> Aabb {
     Aabb::new(
-        Vec3::new(x - half, y, z - half),
-        Vec3::new(x + half, y + f64::from(height), z + half),
+        Vec3::new(x - half_width, y, z - half_width),
+        Vec3::new(x + half_width, y + height, z + half_width),
     )
 }
 /// `EntityType.spawnDimensionsScale`: cube mobs are checked for room at
@@ -600,14 +616,16 @@ fn spawn_dimensions_scale(s: Species) -> f32 {
         _ => 1.0,
     }
 }
+/// The half-width and height used by `EntityType.getSpawnAABB`.
+pub(super) fn spawn_extents(s: Option<Species>, width: f32, height: f32) -> (f64, f64) {
+    let scale = s.map_or(1.0, spawn_dimensions_scale);
+    (f64::from(scale * width / 2.0), f64::from(scale * height))
+}
+
 /// `EntityType.getSpawnAABB`.
 pub fn spawn_aabb(s: Species, x: f64, y: f64, z: f64, width: f32, height: f32) -> Aabb {
-    let scale = spawn_dimensions_scale(s);
-    let half = f64::from(scale * width / 2.0);
-    Aabb::new(
-        Vec3::new(x - half, y, z - half),
-        Vec3::new(x + half, y + f64::from(scale * height), z + half),
-    )
+    let (half, height) = spawn_extents(Some(s), width, height);
+    spawn_box_at([x, y, z], half, height)
 }
 /// The mob a position check is about, which the site has not created yet
 /// (vanilla creates it before the check).
@@ -642,27 +660,35 @@ pub fn position_ok<L: NaturalLevel>(
     }
     ok
 }
-/// `checkSpawnObstruction` of a freshly created mob with the given box, with
-/// the mobs already `spawned` in the way; None in a generation region, which
-/// has no entities (`WorldGenRegion.getEntities`).
+/// `EntityGetter.isUnobstructed`'s shape test after selecting an entity with
+/// `blocksBuilding`. A broad-phase AABB overlap alone is not an obstruction.
+pub fn blocks_spawn_shape(shape: &VoxelShape, query: Aabb, blocker: Aabb) -> bool {
+    blocker.intersects(query)
+        && VoxelShape::from_box(blocker).is_ok_and(|other| {
+            shape
+                .join_is_not_empty(&other, ShapeOp::AND)
+                .unwrap_or(false)
+        })
+}
+
+/// `checkSpawnObstruction` of a freshly created mob with the given box.
+/// Generation skips the entity query (`WorldGenRegion.getEntities` is empty).
 pub fn spawn_obstruction<L: NaturalLevel>(
     s: Species,
     l: &L,
     bounds: Aabb,
-    spawned: Option<&[Aabb]>,
+    check_entities: bool,
     x: i32,
     y: i32,
     z: i32,
 ) -> bool {
-    let unobstructed = |l: &L| {
-        spawned.is_none_or(|s| l.unobstructed(bounds) && !s.iter().any(|b| b.intersects(bounds)))
-    };
+    let unobstructed = || !check_entities || l.unobstructed(bounds);
     match obstruction(s) {
-        Obstruction::NoLiquidUnobstructed => !contains_any_liquid(l, bounds) && unobstructed(l),
-        Obstruction::Unobstructed => unobstructed(l),
+        Obstruction::NoLiquidUnobstructed => !contains_any_liquid(l, bounds) && unobstructed(),
+        Obstruction::Unobstructed => unobstructed(),
         Obstruction::NoLiquid => !contains_any_liquid(l, bounds),
         Obstruction::Ocelot => {
-            if unobstructed(l) && !contains_any_liquid(l, bounds) {
+            if unobstructed() && !contains_any_liquid(l, bounds) {
                 if y < l.sea_level() {
                     return false;
                 }
@@ -826,10 +852,10 @@ fn vanilla_mobs_at<L: NaturalLevel>(
         (monster && id == "minecraft:fortress") || overrides.get(id, category.name()).is_some()
     });
     if category == Category::Monster
-        && name_at(l, x, y - 1, z) == "minecraft:nether_bricks"
         && structures
             .iter()
             .any(|s| s.id == "minecraft:fortress" && s.in_bounds)
+        && name_at(l, x, y - 1, z) == "minecraft:nether_bricks"
     {
         return fortress_enemies();
     }
@@ -1251,8 +1277,8 @@ pub enum Event<'a> {
     /// A mob spawned.
     Spawn(&'a str, [f64; 3], f32),
 }
-/// A mob the spawner is about to add: the level runs `finalizeSpawn` and
-/// adds it, returning its finalized box and whether a tropical fish schools.
+/// A mob the spawner is about to add: the level runs `finalizeSpawn`,
+/// makes it visible to the pass's entity queries and returns its group data.
 #[derive(Clone, Debug)]
 pub struct SpawnRequest<'a> {
     pub entity: &'a str,
@@ -1265,7 +1291,6 @@ pub struct SpawnRequest<'a> {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Spawned {
-    pub bounds: Aabb,
     /// `TropicalFish.isSchool`.
     pub school: bool,
     /// The group's size limit the new mob's entity parts answered; `None` leaves
@@ -1275,7 +1300,7 @@ pub struct Spawned {
 
 /// `NaturalSpawner.spawnForChunk` for the categories already filtered.
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_for_chunk<L: NaturalLevel, R: RandomSource>(
+pub fn spawn_for_chunk<L: NaturalLevel, R: RandomSource + Clone>(
     l: &L,
     random: &mut R,
     state: &mut SpawnState,
@@ -1294,7 +1319,7 @@ pub fn spawn_for_chunk<L: NaturalLevel, R: RandomSource>(
 }
 /// `NaturalSpawner.spawnCategoryForChunk`: `getRandomPosWithin` (a column of
 /// the chunk, a height up to one above the world surface).
-pub fn spawn_category_for_chunk<L: NaturalLevel, R: RandomSource>(
+pub fn spawn_category_for_chunk<L: NaturalLevel, R: RandomSource + Clone>(
     l: &L,
     random: &mut R,
     state: &mut SpawnState,
@@ -1316,7 +1341,7 @@ pub fn spawn_category_for_chunk<L: NaturalLevel, R: RandomSource>(
 /// `NaturalSpawner.spawnCategoryForPosition` with the spawn state's
 /// `canSpawn` and `afterSpawn`.
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
+pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource + Clone>(
     l: &L,
     random: &mut R,
     state: &mut SpawnState,
@@ -1330,7 +1355,6 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
     if l.mob_data().state(l.state(x0, y, z0)).flags & super::data::REDSTONE_CONDUCTOR != 0 {
         return;
     }
-    let mut spawned: Vec<Aabb> = Vec::new();
     let mut cluster = 0u32;
     let mut nearest = Nearest::new(start, std::mem::take(&mut state.nearby));
     'groups: for _ in 0..3 {
@@ -1416,7 +1440,7 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
                     Pending { yaw, fresh: true },
                     || {
                         mob_spawn_rules(species, l, x, y, z)
-                            && spawn_obstruction(species, l, bounds, Some(&spawned), x, y, z)
+                            && spawn_obstruction(species, l, bounds, true, x, y, z)
                     },
                 )
             {
@@ -1435,7 +1459,6 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
             };
             attempt_count(1);
             group_index += 1;
-            spawned.push(result.bounds);
             cluster += 1;
             state.after_spawn(l, &entry.entity, type_category, [x, y, z]);
             trace(Event::Spawn(&entry.entity, [xx, f64::from(y), zz], yaw));
@@ -1576,7 +1599,7 @@ fn right_distance<L: NaturalLevel>(l: &L, chunk: (i32, i32), pos: [i32; 3], dist
 /// `isValidSpawnPostitionForType`, for the entry's type (`mob_type`).
 /// `listed`: the position is where the entry was picked from `mobsAt`.
 #[allow(clippy::too_many_arguments)]
-fn valid_position_for_type<L: NaturalLevel, R: RandomSource>(
+fn valid_position_for_type<L: NaturalLevel, R: RandomSource + Clone>(
     l: &L,
     random: &mut R,
     category: Category,
@@ -1616,7 +1639,7 @@ fn valid_position_for_type<L: NaturalLevel, R: RandomSource>(
     if !hooked && !listed && !in_list() {
         return false;
     }
-    if !spawn_rules::check_spawn_rules(kind, l, Reason::Natural, random, pos) {
+    if !spawn_rules::check_spawn_rules(kind.into(), l, Reason::Natural, random, pos) {
         return false;
     }
     l.no_collision(spawn_aabb(
@@ -1640,7 +1663,11 @@ pub enum GenEvent {
 /// the chunk's surface. `rules` is the region's random, which the spawn
 /// predicates and `spawn` (finalizeSpawn) draw from.
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_mobs_for_chunk_generation<L: NaturalLevel, R: RandomSource, Q: RandomSource>(
+pub fn spawn_mobs_for_chunk_generation<
+    L: NaturalLevel,
+    R: RandomSource,
+    Q: RandomSource + Clone,
+>(
     l: &L,
     source: [i32; 3],
     chunk: (i32, i32),
@@ -1705,7 +1732,7 @@ pub fn spawn_mobs_for_chunk_generation<L: NaturalLevel, R: RandomSource, Q: Rand
                     let (bx, bz) = (fx.floor() as i32, fz.floor() as i32);
                     if !l.no_collision(spawn_aabb(species, fx, fy, fz, width, height))
                         || !spawn_rules::check_spawn_rules(
-                            kind,
+                            kind.into(),
                             l,
                             Reason::ChunkGeneration,
                             rules,
@@ -1724,7 +1751,7 @@ pub fn spawn_mobs_for_chunk_generation<L: NaturalLevel, R: RandomSource, Q: Rand
                         Pending { yaw, fresh: false },
                         || {
                             mob_spawn_rules(species, l, bx, pos[1], bz)
-                                && spawn_obstruction(species, l, bounds, None, bx, pos[1], bz)
+                                && spawn_obstruction(species, l, bounds, false, bx, pos[1], bz)
                         },
                     ) {
                         let request = SpawnRequest {
@@ -1757,7 +1784,7 @@ pub fn spawn_mobs_for_chunk_generation<L: NaturalLevel, R: RandomSource, Q: Rand
 /// `getTopNonCollidingPos`: the type's heightmap, under the ceiling in
 /// dimensions that have one, then the placement type's adjustment.
 fn top_non_colliding<L: NaturalLevel>(l: &L, entity: &str, x: i32, z: i32) -> [i32; 3] {
-    let heightmap = Heightmap::from_name(l.mob_data().heightmap(entity));
+    let heightmap = l.mob_data().heightmap(entity);
     let mut y = l.heightmap(heightmap, x, z);
     if l.has_ceiling() {
         loop {

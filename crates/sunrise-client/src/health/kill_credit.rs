@@ -8,18 +8,20 @@ use crate::{
 /// A host's record of each mob's `LivingEntity.lastHurtByPlayer` UUID, by mob id.
 pub trait PlayerMemory {
     fn remembered(&self, mob: u32) -> Option<u128>;
+    fn forget(&mut self, mob: u32);
 }
 impl<T: Copy + Into<u128>> PlayerMemory for std::collections::HashMap<u32, T> {
     fn remembered(&self, mob: u32) -> Option<u128> {
         self.get(&mob).map(|&credit| credit.into())
     }
+    fn forget(&mut self, mob: u32) {
+        self.remove(&mob);
+    }
 }
 
-/// `EntityReference.getPlayer` for a remembered player: the player in place, else a guest placed
-/// in the level. A level built with none resolves no remembered player.
+/// `EntityReference.getPlayer`: the player in place, else a guest placed in the level.
 #[derive(Clone, Copy)]
 pub struct PlayerResolver<'a> {
-    pub memory: &'a dyn PlayerMemory,
     /// The acting player's UUID, when a player is in place.
     pub in_place: Option<[i32; 4]>,
     pub hub: Option<&'a crate::lan::hub::Hub>,
@@ -40,12 +42,6 @@ impl PlayerResolver<'_> {
             .find(|g| g.placed && g.uuid == uuid)
             .map(|g| Some(g.conn))
     }
-    /// Whether `mob`'s remembered player resolves now.
-    pub(super) fn remembered_resolves(&self, mob: u32) -> bool {
-        self.memory
-            .remembered(mob)
-            .is_some_and(|uuid| self.resolve(uuid).is_some())
-    }
 }
 
 /// Resolves the pushed entity's credit from its current hurt memories. Implemented by the
@@ -53,6 +49,8 @@ impl PlayerResolver<'_> {
 pub trait KnockbackCredit {
     /// Commit accepted-hit player responsibility before the default push.
     fn accepted_mob_hit(&mut self, mob: &mut Mob);
+    /// The canonical UUID of the living entity `source` names for villager gossip.
+    fn hurt_by_uuid(&self, source: &crate::mobs::Damage) -> Option<[i32; 4]>;
     /// `LivingEntity.resolvePlayerResponsibleForDamage`: commit this hit's
     /// player/tamed-wolf responsibility (if any) and report whether a live
     /// player is responsible while the 100-tick memory timer is active.

@@ -1,4 +1,4 @@
-//! Server-side player bots for mods (docs/native-mods.md, "Server hooks for plugin ports: player
+//! Server-side player bots for mods (docs/modding/src/how-to/native-mods.md, "Server hooks for plugin ports: player
 //! bots"): a mod that drives a server player itself (a fake client sending its own moves) asks
 //! where the player's movement code would take them in one tick, and which block shapes are in
 //! a box. Nothing runs unless a mod calls it, and neither changes the player or the level.
@@ -38,7 +38,6 @@ fn input_keys(input: &PlayerInput) -> Option<Keys> {
         shift: input.sneak,
         sprint: input.sprint,
         analog: (!key(forward) || !key(strafe)).then_some([strafe, forward]),
-        ..Keys::default()
     })
 }
 
@@ -91,7 +90,7 @@ impl Game<'_> {
         }
         let keys = input_keys(&input)?;
         self.player_name(player)?;
-        let mut body = self.native_bot_body(player.uuid())?;
+        let (mut body, unswapped) = self.native_bot_body(player.uuid())?;
         body.yaw = input.yaw;
         body.pitch = input.pitch.clamp(-90.0, 90.0);
         if let Some([x, y, z]) = input.velocity {
@@ -105,7 +104,11 @@ impl Game<'_> {
             self.level_suffocation(),
         );
         let sprinting = sprints(&input) && !body.item_use_slows_sprint;
-        let side = game_side!(self);
+        let mut side = game_side!(self);
+        if let Some(conn) = unswapped {
+            let guest = self.lan.as_ref()?.hub.guest(conn)?;
+            side.player_equipment = acting_equipment!(guest);
+        }
         MotionWorld {
             side: &side,
             entities: &[],
@@ -132,9 +135,9 @@ impl Game<'_> {
         Some(result)
     }
 
-    /// A copy of the body of server player `uuid` in the level in place, as it stands now: the
-    /// acting player's swapped in, or a guest's as `lan_actions` swaps it in.
-    fn native_bot_body(&self, uuid: u128) -> Option<PlayerMotion> {
+    /// A copy of server player `uuid`'s body in the level in place, and the connection to lend
+    /// equipment from if the guest's state has not been swapped into Game.
+    fn native_bot_body(&self, uuid: u128) -> Option<(PlayerMotion, Option<u32>)> {
         if self.lan_acting_uuid == Some(uuid) {
             self.lan_acting?;
             let p = self.player.as_ref()?;
@@ -144,7 +147,7 @@ impl Game<'_> {
             body.leather_boots = worn_boots::leather_boots(&self.armor);
             let using = self.using.and_then(|(slot, _)| self.stack_in(slot));
             self.set_bot_item_use(&mut body, using);
-            return Some(body);
+            return Some((body, None));
         }
         if self.lan_acting.is_some() {
             return None;
@@ -189,7 +192,7 @@ impl Game<'_> {
                 }
             });
         self.set_bot_item_use(&mut body, using);
-        Some(body)
+        Some((body, Some(g.conn)))
     }
 
     /// A simulated copy reads the current stack rather than inheriting an earlier use.
@@ -459,6 +462,82 @@ mod tests {
             let live = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
             assert!(!live.motion.as_ref().unwrap().fall_flying);
         });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn guest_movement_preview_uses_the_guests_damage_immunity() {
+        use crate::game::native_entity_refs::tests::with_game;
+        use crate::game::native_item_places::tests::{guest, open_to_lan};
+        use std::cell::Cell;
+        use sunrise_client::{chunk::Chunk, health::DamageHooks};
+
+        // The movement result doesn't expose health. Observe committed damage to the
+        // simulated body through its game-owned hook table, not through the live guest.
+        thread_local! {
+            static HITS: Cell<u32> = const { Cell::new(0) };
+        }
+        crate::game::in_own_process(
+            "game::native_bots::tests::guest_movement_preview_uses_the_guests_damage_immunity",
+            || {
+                with_game(|game| {
+                    open_to_lan(game);
+                    // The fixture hasn't opened a world to bind its item predicates to the
+                    // level's damage types yet.
+                    let mut items = world_items!(game).clone();
+                    std::sync::Arc::make_mut(&mut items.enchantments)
+                        .bind_damage_catalog(&game.health_resources.damage);
+                    game.server_items = Some(std::sync::Arc::new(items));
+                    game.streaming
+                        .insert_remote(&mut game.world, Chunk::empty(0, 0));
+                    let magma = game
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:magma_block")
+                        .unwrap();
+                    game.world.set(1, 63, 1, magma).unwrap();
+                    let at = Vec3::new(1.5, 64.0, 1.5);
+                    let mut guest = guest(1);
+                    guest.position = [at.x, at.y, at.z];
+                    guest.on_ground = true;
+                    guest.loaded = true;
+                    let mut body = PlayerMotion::new(game.motion, at).unwrap();
+                    body.entity_id = guest.entity_id;
+                    guest.motion = Some(Box::new(body));
+                    let uuid = guest.uuid;
+                    game.lan.as_mut().unwrap().hub.guests.push(guest);
+                    let player = game.player(uuid).unwrap();
+                    game.damage_hooks = DamageHooks {
+                        post: Some(|_, _, _| HITS.with(|hits| hits.set(hits.get() + 1))),
+                        ..DamageHooks::NONE
+                    };
+                    let preview = |game: &mut Game<'_>| {
+                        let mut falling = input(0.0, 0.0);
+                        falling.velocity = Some([0.0, -0.08, 0.0]);
+                        let preview = game.player_simulate_move(player, falling).unwrap();
+                        assert!(preview.on_ground);
+                        HITS.replace(0)
+                    };
+                    assert_eq!(preview(game), 1, "magma hurts the unprotected preview");
+
+                    let mut boots = ItemStack::new("minecraft:leather_boots", 1);
+                    boots.enchant("minecraft:frost_walker", 1);
+                    game.lan
+                        .as_mut()
+                        .unwrap()
+                        .hub
+                        .update_guest(1, |guest| guest.armor[3] = Some(boots))
+                        .unwrap();
+                    assert_eq!(game.lan_acting, None);
+                    assert_eq!(
+                        preview(game),
+                        0,
+                        "only the unswapped guest wears Frost Walker"
+                    );
+                })
+            },
+        );
     }
 
     #[test]

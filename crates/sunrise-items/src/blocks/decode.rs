@@ -188,6 +188,7 @@ object!(Entry<'a> {
     ignited_by_lava: bool = false => value(flag),
     push: Option<String> = None => value(text),
     render_shape: Option<String> = None => value(text),
+    spawn_terrain_particles: Option<bool> = None => value(|v: Value| v.as_bool()),
     no_destroy_overlay: bool = false => value(flag),
     full_collision: bool = false => value(flag),
     friction: f64 = 0.0 => value(number),

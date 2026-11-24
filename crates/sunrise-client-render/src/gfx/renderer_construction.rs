@@ -1386,24 +1386,40 @@ impl Renderer {
             fragment: "fs_entity_unmarked",
             write_mask: wgpu::ColorWrites::ALL,
         });
-        // RenderPipelines.TEXT_POLYGON_OFFSET: a text display's text and
-        // background win against the surface they lie on (bias 1, 10), from
-        // the front only.
+        // RenderPipelines.TEXT_POLYGON_OFFSET: a display's text/background or a sign's
+        // outlined fill wins against the surface it lies on (bias 1, 10), from the front only.
+        let text_bias = wgpu::DepthBiasState {
+            constant: 10,
+            slope_scale: 1.0,
+            clamp: 0.0,
+        };
         let text_polygon_offset_pipeline = entity_pipeline_with(EntityPipelineOptions {
             label: "Polygon offset text",
             cull_mode: Some(wgpu::Face::Back),
             depth_write: true,
             compare: wgpu::CompareFunction::GreaterEqual,
-            bias: wgpu::DepthBiasState {
-                constant: 10,
-                slope_scale: 1.0,
-                clamp: 0.0,
-            },
+            bias: text_bias,
             blend: alpha_blend,
             clouds: false,
             vertex: "vs_entity",
-            fragment: "fs_entity_unmarked",
+            fragment: "fs_entity_text",
             write_mask: wgpu::ColorWrites::ALL,
+        });
+        // Marked HDR targets store a glowing glyph's tier in alpha. Match the colour pass's
+        // exact depth, bias and culling in each mode so discarded or occluded glyphs never mark.
+        let text_mark_pipelines = [wgpu::DepthBiasState::default(), text_bias].map(|bias| {
+            entity_pipeline_with(EntityPipelineOptions {
+                label: "HDR text mark",
+                cull_mode: Some(wgpu::Face::Back),
+                depth_write: false,
+                compare: wgpu::CompareFunction::Equal,
+                bias,
+                blend: wgpu::BlendState::REPLACE,
+                clouds: false,
+                vertex: "vs_entity",
+                fragment: "fs_text_hdr_mark",
+                write_mask: wgpu::ColorWrites::ALPHA,
+            })
         });
         let world_text_pipeline = world_text::pipeline(
             &device,
@@ -1433,6 +1449,46 @@ impl Renderer {
             alpha_blend,
             false,
         );
+        // `RenderPipelines.BANNER_PATTERN`: blended without depth writes or alpha cutout.
+        let banner_pattern_pipeline = entity_pipeline_with(EntityPipelineOptions {
+            label: "Banner pattern",
+            cull_mode: None,
+            depth_write: false,
+            compare: wgpu::CompareFunction::GreaterEqual,
+            bias: entity_bias,
+            blend: alpha_blend,
+            clouds: false,
+            vertex: "vs_entity",
+            fragment: "fs_banner_pattern",
+            write_mask: wgpu::ColorWrites::ALL,
+        });
+        // `RenderPipelines.GLINT`: equal depth against the entity pass, no depth writes,
+        // `BlendFunction.GLINT` RGB addition (squared in `fs_glint`), dst alpha untouched.
+        let glint_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        let glint_only_pipeline = entity_pipeline_with(EntityPipelineOptions {
+            label: "Glint overlay",
+            cull_mode: None,
+            depth_write: false,
+            compare: wgpu::CompareFunction::Equal,
+            bias: entity_bias,
+            blend: glint_blend,
+            clouds: false,
+            vertex: "vs_entity",
+            fragment: "fs_glint",
+            write_mask: wgpu::ColorWrites::ALL,
+        });
+        let particle_pipelines = particle_draws::ParticlePipelines::new(entity_pipeline_with);
         // The hand as `entity_pipeline` draws it, in the overlays' format.
         let overlay_hand = (overlay_format != frame_format || linear_light).then(|| {
             entity_pipeline_factory(
@@ -1453,6 +1509,51 @@ impl Renderer {
                 clouds: false,
                 vertex: "vs_entity",
                 fragment: "fs_entity",
+                write_mask: wgpu::ColorWrites::ALL,
+            })
+        });
+        let overlay_hand_banner_pattern =
+            (overlay_format != frame_format || linear_light).then(|| {
+                entity_pipeline_factory(
+                    &kept,
+                    &entity_layout,
+                    &cloud_layout,
+                    &entity_shader,
+                    &entity_vertex,
+                    overlay_format,
+                    false,
+                )(EntityPipelineOptions {
+                    label: "First-person hand banner pattern",
+                    cull_mode: None,
+                    depth_write: false,
+                    compare: wgpu::CompareFunction::GreaterEqual,
+                    bias: entity_bias,
+                    blend: alpha_blend,
+                    clouds: false,
+                    vertex: "vs_entity",
+                    fragment: "fs_banner_pattern",
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            });
+        let overlay_hand_glint = (overlay_format != frame_format || linear_light).then(|| {
+            entity_pipeline_factory(
+                &kept,
+                &entity_layout,
+                &cloud_layout,
+                &entity_shader,
+                &entity_vertex,
+                overlay_format,
+                false,
+            )(EntityPipelineOptions {
+                label: "First-person hand glint",
+                cull_mode: None,
+                depth_write: false,
+                compare: wgpu::CompareFunction::Equal,
+                bias: entity_bias,
+                blend: glint_blend,
+                clouds: false,
+                vertex: "vs_entity",
+                fragment: "fs_glint",
                 write_mask: wgpu::ColorWrites::ALL,
             })
         });
@@ -1953,12 +2054,16 @@ impl Renderer {
         // Metal draws solid terrain in two passes (`split_solid`): meshes put all
         // their opaque quads first, so each pass draws its part in a run or two.
         crate::mesher::group_parts(adapter.get_info().backend == wgpu::Backend::Metal);
-        // Readable as storage where flat draws run: a shader pack's terrain program reads them.
+        // Readable as storage where flat draws run, or while a `shaders/` pack's terrain programs
+        // read them per section (`arena_storage`): it starts as for the picked pack, taken to
+        // read them, so the pack loading keeps it (`follow_arena_storage`).
+        let terrain_pages = flat::pages_readable(&adapter, &device);
+        let arena_storage = arena_storage(flat_wanted, pack_starts_wide && terrain_pages);
         let arena = arena::Arena::new(
             &device,
             std::mem::size_of::<TerrainVertex>() as u64,
             1 << 20,
-            flat_wanted,
+            arena_storage,
         );
         // Sections as one index list per frame where multi-draw is emulated.
         let mut flat = flat_wanted.then(|| {
@@ -2102,7 +2207,13 @@ impl Renderer {
             &device,
             std::mem::size_of::<TerrainVertex>() as u64,
             flat.is_some(),
-            translucent_split(translucent_batching, flat.is_some(), shader_pack, false),
+            translucent_split(
+                translucent_batching,
+                flat.is_some(),
+                pack_starts_wide && terrain_pages,
+                shader_pack,
+                false,
+            ),
         );
         if let (Some(flat), Some(arena)) = (&mut flat, &translucent_arena) {
             flat.set_translucent_page_vertices(arena.page_vertices());
@@ -2223,6 +2334,8 @@ impl Renderer {
             cull_on: cull.is_some(),
             sides_on: true,
             gpu_culling: None,
+            sourced: Default::default(),
+            gpu_sourced_frame: false,
             gpu_culling_offer,
             gpu_frame: false,
             #[cfg(debug_assertions)]
@@ -2250,6 +2363,8 @@ impl Renderer {
             debug_crosshair,
             overlay_crosshair,
             overlay_hand,
+            overlay_hand_banner_pattern,
+            overlay_hand_glint,
             debug_line_buffer,
             debug_line_capacity: 4096,
             crosshair_group,
@@ -2261,6 +2376,11 @@ impl Renderer {
             world_views: views,
             world_view_side: max_side,
             entity_pipeline,
+            banner_pattern_pipeline,
+            glint_only_pipeline,
+            particle_pipelines,
+            explicit_opaque_particles: Default::default(),
+            explicit_translucent_particles: Default::default(),
             static_entity_pipeline,
             hdr_mark_pipeline,
             hdr_entity_mark_pipeline,
@@ -2287,6 +2407,7 @@ impl Renderer {
             world_primitives,
             text_polygon_offset_pipeline,
             world_text_pipeline,
+            text_mark_pipelines,
             fluid_pipeline,
             terrain_model_pipelines,
             celestial,
@@ -2326,6 +2447,7 @@ impl Renderer {
             static_entity_indices,
             static_entity_index_quads,
             entity_batch: EntityBatch::default(),
+            entity_order: entity_skin::OrdinaryOrder::default(),
             entity_skin,
             group,
             fluid_group,
@@ -2369,6 +2491,7 @@ impl Renderer {
             depth,
             sections: resident::Resident::default(),
             lods: FxHashMap::default(),
+            lod_vertex_bytes: 0,
             lod_cells: lod::TileGrid::default(),
             lod_cull_free: Vec::new(),
             lod_cull_next: 0,
@@ -2392,6 +2515,7 @@ impl Renderer {
             multi_draw,
             visible: Vec::new(),
             visible_lods: Vec::new(),
+            translucent_lods: Vec::new(),
             shadow_visible: Vec::new(),
             translucent_draws: Vec::new(),
             translucent_tests: Vec::new(),
@@ -2446,6 +2570,10 @@ impl Renderer {
             pack_material_atlases: None,
             shared_material_maps: [None, None],
             pack_terrain_flat: false,
+            terrain_pages,
+            pack_terrain_pages: false,
+            pack_terrain_bindings: Default::default(),
+            arena_storage,
             separate_ao: false,
             pack_pages: Vec::new(),
             outline_edges_scratch: Vec::new(),
@@ -2470,6 +2598,7 @@ impl Renderer {
             section_draw_calls: 0,
             frame_serial: 0,
             stats_frame: 0,
+            stats_halves: Default::default(),
             uploaded_bytes: 0,
             started: Instant::now(),
             screenshot: None,

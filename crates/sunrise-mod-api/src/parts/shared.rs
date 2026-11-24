@@ -41,9 +41,15 @@ pub struct PartRegistrar {
     pub(crate) biome_modifiers: Vec<BiomeModifierDeclaration>,
     pub(crate) biome_regions: Vec<BiomeRegionDeclaration>,
     pub(crate) datapack_registries: Vec<crate::DatapackRegistryDeclaration>,
+    pub(crate) consume_effects: Vec<RegisteredConsumeEffect>,
+    pub(crate) menu_screen_factories: HashMap<String, MenuScreenRegistration>,
     pub(crate) menu_recipe_books: HashMap<String, MenuBookDeclaration>,
-    /// Loading warnings, by owning mod id, in registration order.
-    pub(crate) warnings: Vec<(String, crate::LoadingMessage)>,
+    /// Loading warnings for each owning mod, in registration order.
+    pub(crate) warnings: Vec<(&'static str, Vec<crate::LoadingMessage>)>,
+    /// Refusal reasons recorded for the mod currently running `Hooks::register`.
+    pub(crate) current_refusals: Vec<String>,
+    /// Loading warnings recorded for the mod currently running `Hooks::register`.
+    pub(crate) current_warnings: Vec<crate::LoadingMessage>,
     pub(crate) recipe_book_types: HashMap<String, String>,
     pub(crate) recipe_book_fields: HashMap<String, (String, String)>,
     pub(crate) recipe_book_filters: HashMap<String, crate::RecipeBookFilterLook>,
@@ -81,11 +87,13 @@ pub struct PartRegistrar {
     pub(crate) controllers: Vec<ControllerInfo>,
     pub(crate) arm_poses: Vec<PoseInfo>,
     pub(crate) structure_types: Vec<StructureTypeInfo>,
+    pub(crate) pool_element_types: Vec<PoolElementTypeInfo>,
     pub(crate) feature_types: Vec<FeatureTypeInfo>,
     pub(crate) loot_modifier_serializers: Vec<LootModifierSerializerInfo>,
     pub(crate) loot_function_types: Vec<LootFunctionTypeInfo>,
     pub(crate) loot_condition_types: Vec<LootConditionTypeInfo>,
     pub(crate) dimensions: Vec<DimensionInfo>,
+    pub(crate) world_clocks: Vec<Box<str>>,
     pub(crate) dimension_shape: fn(&crate::DimensionSettings) -> bool,
     pub(crate) chunk_generators: Vec<ChunkGeneratorInfo>,
     pub(crate) biome_sources: Vec<BiomeSourceInfo>,
@@ -98,11 +106,15 @@ impl PartRegistrar {
     pub(crate) fn new(mod_id: &'static str) -> Self {
         let _ = crate::__private::initialize();
         Self {
+            menu_screen_factories: HashMap::new(),
             menu_recipe_books: HashMap::new(),
             warnings: Vec::new(),
+            current_refusals: Vec::new(),
+            current_warnings: Vec::new(),
             biome_modifiers: Vec::new(),
             biome_regions: Vec::new(),
             datapack_registries: Vec::new(),
+            consume_effects: Vec::new(),
             recipe_book_types: HashMap::new(),
             recipe_book_fields: HashMap::new(),
             recipe_book_filters: HashMap::new(),
@@ -136,11 +148,13 @@ impl PartRegistrar {
             controllers: Vec::new(),
             arm_poses: Vec::new(),
             structure_types: Vec::new(),
+            pool_element_types: Vec::new(),
             feature_types: Vec::new(),
             loot_modifier_serializers: Vec::new(),
             loot_function_types: Vec::new(),
             loot_condition_types: Vec::new(),
             dimensions: Vec::new(),
+            world_clocks: Vec::new(),
             dimension_shape: |_| false,
             chunk_generators: Vec::new(),
             biome_sources: Vec::new(),
@@ -236,28 +250,44 @@ pub(crate) fn register_all(
         }
     }
     let _active = ActiveRegistration::enter();
-    // `register` runs in the registration phase and nowhere else: a declaration of a frozen registry
-    // (a general entity type) is refused after it. Production enters it already; a test thread's
-    // default phase is World.
-    let _phase = crate::__private::PhaseOwner::scope(crate::__private::ModPhase::Registration);
+    // `register` runs with startup registration open: a declaration of a frozen registry
+    // (a general entity type) is refused once it closes.
+    let _registration = crate::__private::RegistrationGuard::open();
     let _scope = RestoreKeys(REGISTERING_KEYS.replace(Some(registrar.registry_keys.clone())));
+    let context =
+        <RegistrationContext as mod_vocab::__private::game::RegistrationContextNew>::new();
     for (index, hooks) in mod_vocab::__private::entered_registration(mods, "register").enumerate() {
         registrar.mod_id = mod_vocab::__private::parts_installation::mod_entry_id(&mods[index]);
         registrar.mod_index = index;
-        let context = crate::RegistrationContext::new();
+        registrar.current_warnings.clear();
+        let first_refusal = registrar.refused.len();
         let rollback = registrar.registration_checkpoint();
-        hooks.register(&mut registrar, &context);
-        registrar.warnings.extend(
-            mod_vocab::__private::take_registration_warnings(&context)
-                .into_iter()
-                .map(|warning| (registrar.mod_id.to_owned(), warning)),
-        );
-        if let Some(reason) = mod_vocab::__private::take_registration_refusal(&context) {
+        let cx = mod_vocab::__private::game::bind_registration_context(&context, registrar.mod_id);
+        let completed = mod_vocab::__private::invoke_registration(registrar.mod_id, || {
+            hooks.register(&mut registrar, &cx);
+        });
+        let refusals = std::mem::take(&mut registrar.current_refusals);
+        if !completed {
+            // Report the failed batch's ordinary refusals without turning the contained
+            // panic into a fatal admission error for all the other registrations.
+            for reason in registrar.refused[first_refusal..].iter().chain(&refusals) {
+                log::warn!("mod {} hook register refused: {reason}", registrar.mod_id);
+            }
             rollback(&mut registrar);
-            registrar.refused.push(format!(
-                "mod {} refused registration: {reason}",
-                mod_vocab::__private::parts_installation::mod_entry_id(&mods[index])
-            ));
+            continue;
+        }
+        let warnings = std::mem::take(&mut registrar.current_warnings);
+        if !warnings.is_empty() {
+            registrar.warnings.push((registrar.mod_id, warnings));
+        }
+        if !refusals.is_empty() {
+            rollback(&mut registrar);
+            for reason in refusals {
+                registrar.refused.push(format!(
+                    "mod {} refused registration: {reason}",
+                    registrar.mod_id
+                ));
+            }
         }
     }
     registrar.expand_block_entity_parts();
@@ -283,12 +313,14 @@ pub(crate) fn install_registrar(
     if let Err(errors) = &slots {
         registrar.refused.extend(errors.iter().cloned());
     }
-    for (id, warning) in &registrar.warnings {
-        log::warn!(
-            "mod {id} loading warning: {} {:?}",
-            warning.key(),
-            warning.args()
-        );
+    for (id, warnings) in &registrar.warnings {
+        for warning in warnings {
+            log::warn!(
+                "mod {id} loading warning: {} {:?}",
+                warning.key(),
+                warning.args()
+            );
+        }
     }
     registrar.validate_recipe_types();
     registrar.skip_absent_effect_parts();
@@ -307,6 +339,8 @@ pub(crate) fn install_registrar(
             regions
         },
         datapack_registries: registrar.datapack_registries,
+        consume_effects: registrar.consume_effects,
+        menu_screen_factories: registrar.menu_screen_factories,
         menu_recipe_books: registrar.menu_recipe_books,
         recipe_book_types: registrar.recipe_book_types,
         recipe_book_fields: registrar.recipe_book_fields,
@@ -346,11 +380,13 @@ pub(crate) fn install_registrar(
         controllers: registrar.controllers,
         arm_poses: registrar.arm_poses,
         structure_types: registrar.structure_types,
+        pool_element_types: registrar.pool_element_types,
         feature_types: registrar.feature_types,
         loot_modifier_serializers: registrar.loot_modifier_serializers,
         loot_function_types: registrar.loot_function_types,
         loot_condition_types: registrar.loot_condition_types,
         dimensions: registrar.dimensions,
+        world_clocks: registrar.world_clocks,
         chunk_generators: registrar.chunk_generators,
         biome_sources: registrar.biome_sources,
         warnings: registrar.warnings,

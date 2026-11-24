@@ -53,6 +53,12 @@ fn a_pack_biome_is_sent_with_its_data_and_read_back_by_a_client() {
     let pack: Value = serde_json::from_str(r##"{"effects":{"grass_color":"#123456"}}"##).unwrap();
     let world = base.with_packs([("minecraft:tundra_x", &pack)]);
     let defaults = sunrise_world::item_defaults::read(&root).unwrap();
+    let items = sunrise_client::items::Items::catalog(
+        &root,
+        &sunrise_world::loot::PackOverlay::NONE,
+        &defaults,
+    )
+    .unwrap();
     let sync = SyncData::load_with(
         &root,
         &sunrise_world::loot::PackOverlay::NONE,
@@ -60,6 +66,7 @@ fn a_pack_biome_is_sent_with_its_data_and_read_back_by_a_client() {
         &defaults,
         &sunrise_client::crafting::ResolvedSources::load(
             &root,
+            &items,
             &sunrise_world::loot::PackOverlay::NONE,
             &server_load(),
         )
@@ -138,7 +145,7 @@ fn a_server_replacement_of_a_known_biome_keeps_its_id_and_changes_its_data() {
     let _scratch = Scratch(root.clone());
     let base = write_base(&root);
     let replaced: Value = serde_json::from_str(
-        r##"{"effects":{"water_color":"#112233"},"attributes":{"minecraft:visual/ambient_particles":{"argument":[{"particle":{"type":"minecraft:ash"},"probability":0.25}]}}}"##,
+        r##"{"effects":{"water_color":"#112233"},"attributes":{"minecraft:visual/ambient_particles":{"modifier":"override","argument":[{"particle":{"type":"minecraft:ash"},"probability":0.25}]}}}"##,
     )
     .unwrap();
     let received = vec![
@@ -149,9 +156,24 @@ fn a_server_replacement_of_a_known_biome_keeps_its_id_and_changes_its_data() {
     assert_eq!(client.id("minecraft:plains"), base.id("minecraft:plains"));
     let plains = client.get(client.id("minecraft:plains"));
     assert_eq!(plains.water, 0x112233);
-    assert_eq!(plains.ambient_particles.len(), 1);
-    assert_eq!(plains.ambient_particles[0].0.name(), "ash");
-    assert_eq!(plains.ambient_particles[0].1, 0.25);
+    let ambient_attr = sunrise_world::environment_attributes::attribute(
+        sunrise_world::environment_attributes::AMBIENT_PARTICLES,
+    )
+    .unwrap();
+    let Some(sunrise_world::environment_attributes::Entry::Override(
+        sunrise_world::environment_attributes::Value::AmbientParticles(particles),
+    )) = plains.attributes.get(ambient_attr)
+    else {
+        panic!("replaced plains must carry visual/ambient_particles");
+    };
+    assert_eq!(particles.len(), 1);
+    assert_eq!(
+        *particles[0].particle,
+        sunrise_world::particle_options::ParticleOptions::Simple(
+            sunrise_world::particle_type::ParticleType::Ash,
+        )
+    );
+    assert_eq!(particles[0].probability, 0.25);
     // The tables that read the biome's file see the replacement; river is untouched.
     assert!(client.pack_file("minecraft:plains").is_some());
     assert!(client.pack_file("minecraft:river").is_none());
@@ -174,12 +196,19 @@ fn a_biome_the_mods_modifiers_changed_is_sent_to_a_client_that_knows_the_vanilla
     )
     .unwrap();
     let defaults = sunrise_world::item_defaults::read(&root).unwrap();
+    let items = sunrise_client::items::Items::catalog(
+        &root,
+        &sunrise_world::loot::PackOverlay::NONE,
+        &defaults,
+    )
+    .unwrap();
     let sync = SyncData::load(
         &root,
         &sunrise_world::loot::PackOverlay::NONE,
         &defaults,
         &sunrise_client::crafting::ResolvedSources::load(
             &root,
+            &items,
             &sunrise_world::loot::PackOverlay::NONE,
             &server_load(),
         )

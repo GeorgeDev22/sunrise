@@ -11,14 +11,22 @@ pub trait Hooks {
     /// packages; duplicates across layers and declarations into a `side = "server"`
     /// package's namespace are refused.
     /// `register` returns a typed `DeclarationError` for invalid IDs or fields.
-    /// The game records the refusal and stops startup even if you ignore the error.
+    /// The game records the refusal and stops startup even if a returning listener ignores it.
+    /// A panic discards this listener's declarations and diagnostics without rejecting startup.
     #[hook(
+        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_items",
+        receiver = "associated",
+        dispatch = "flat",
         side = "both",
         contract = "collect",
         out = "items",
         context = "registration",
         neoforge = "RegisterEvent",
-        version = 3
+        version = 4
     )]
-    fn items();
+    fn items(
+        items: &mut dyn FnMut(
+            mod_api::Answered<mod_api::Item>,
+        ) -> Result<(), mod_api::DeclarationError>,
+    );
 }

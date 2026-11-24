@@ -15,8 +15,7 @@ interface; archive entries stay in their archives. Files vanilla reads as a reso
 Every loader reads that view; `game/world/packs/mod.rs` (`reload_packs`) prepares a new generation on a worker and
 publishes it after loading succeeds, as `Minecraft.reloadResourcePacks` does. Readers of the previous
 archive generation retain its open files. Prepared registry tables and disposable decoding caches have
-separate filesystem locations. [The older overlay measurements](reuse-pack-overlays.md) describe the
-previous materializing loader, not the current startup path.
+separate filesystem locations.
 
 Vanilla 26.3's reload listeners (`Minecraft.<init>`, `Gui`, `Hud`): languages, textures, shaders, sounds, atlases,
 fonts, grass / foliage / dry foliage colour maps, models (block states, block models, item definitions), equipment
@@ -55,7 +54,7 @@ harness named checks that loader against vanilla).
 | Atlases and sprite sources: `directory`, `single`, `filter`, `unstitch`, `paletted_permutations` | `atlases/` | works | `test_resource_pack_parity` (merged source lists), `atlas_sources.rs` tests |
 | GUI sprites | `textures/gui/sprites/` | works | `test_hud_parity`, `test_screen_layout_parity` |
 | GUI sprite scaling: `nine_slice` border | `*.png.mcmeta` `gui` | works | `ui.rs` reads the border; vanilla's buttons, sliders and frames use it |
-| GUI sprite scaling: `width`/`height`, `stretch_inner`, `tile`, `stretch` | `*.png.mcmeta` `gui` | partly | `ui.rs` reads a `nine_slice` sprite's size in GUI pixels and its `stretch_inner` (vanilla's tooltip frame); the `tile` and `stretch` scaling types aren't read |
+| GUI sprite scaling: `width`/`height`, `stretch_inner`, `tile`, `stretch`, and metadata that doesn't decode (the sprite draws as the missing one) | `*.png.mcmeta` `gui` | works | `test_gui_sprite_scaling_parity` (the codec and the tiled copies, against the client); `ui.rs` draws every whole GUI sprite through it, but the sub-region `blitSprite` overload still draws its region stretched |
 | Fonts: `bitmap`, `space`, `unihex`, `reference` | `font/*.json`, `textures/font/` | works | `test_resource_pack_parity` (merged provider lists) |
 | Fonts: `ttf` | `font/*.json` | works | `font.rs` rasterises them with `ab_glyph` (`TrueTypeGlyphProvider`) |
 | Fonts picked by text components (`"font": "..."`, custom fonts) | `font/` | works | `component.rs` reads the `font` key and `font.rs` (`glyph_styled`) draws with the font it names |
@@ -80,13 +79,13 @@ harness named checks that loader against vanilla).
 | Paintings, mob effect icons | `atlases/paintings.json`, `textures/mob_effect/` | works | loaded from the overlay |
 | Locator bar styles | `waypoint_style/` | works | `locator_bar.rs` loads `waypoint_style/*.json` (`WaypointStyleManager`); `game/locator_bar.rs` draws the bar |
 | Post effects (spectating a creeper, spider or enderman; glowing outlines) | `post_effect/`, `shaders/post/` | works | `post_chain.rs` reads `post_effect/*.json` and `post_glsl.rs` translates the `shaders/post/*.vsh`/`.fsh` with naga (their imports resolved as the core shaders' are), with depth inputs, persistent targets and `TextureInput`; a pass binds only what its stages read. One rule for a refused pass, whatever refuses it (more blocks, samplers or `uniform` keywords than the device binds to both stages, checked before any analysis; more than a stage's limit read; the translator; its configuration; or the device, for its modules, layout or pipeline): a pass naming vanilla's shaders runs on the built-in stand-ins, and any other refuses its effect, named in the log |
-| Core shaders | `shaders/core/`, `shaders/include/` | partly | `core/text` draws the GUI's text (HUDs moved by its vertex shader, text effects) and the world's text on vanilla's polygon-offset and see-through paths (text displays, name tags; other world text, Improved Transparency's depth-tested text and the native world text among them, draws with native shaders), `core/rendertype_lines` the block outline (both strokes of a high contrast one; hitboxes, chunk borders and other debug lines still draw natively), `core/sky` and `core/stars` the overworld's sky disc and stars, `core/lightmap` (with `core/screenquad`) the 16x16 light texture from `LightmapInfo`, and `core/clouds` the clouds from the faces `CloudRenderer.buildMesh` encodes (`CloudFaces`, read as a storage buffer) and `CloudInfo` (natively under Improved Transparency, a shader pack, or HDR output's cloud marks), both the pack's and the native clouds taking the layer's bottom from `EnvironmentAttributes.CLOUD_HEIGHT` probed at the camera each frame (`minecraft:visual/cloud_height`, 192.33 by default; on a server, the dimension type the server synchronized sets it, a data pack's Overworld included; the packs' Polytone dimension modifiers apply over it only for the three vanilla type IDs, `minecraft:overworld`, `minecraft:the_nether` and `minecraft:the_end`, each with its own file, and a mod's type is drawn without them); each of these but the clouds takes the packs' Polytone expression uniforms on its own shaders (`polytone/shader_modifiers`, `polytone_post.rs`, `gfx/expression_blocks.rs`), translated by naga (`sunrise-client-render` `core_shader.rs`, `hud/pack_text.rs`, `gfx/core_lines.rs`, `gfx/core_sky.rs`, `gfx/core_lightmap.rs`, `gfx/core_clouds.rs`, `gfx/core_text.rs`); the other core shaders aren't run (#13218) |
+| Core shaders | `shaders/core/`, `shaders/include/` | partly | `core/text` draws the GUI's text (HUDs moved by its vertex shader, text effects) and the world's text on vanilla's polygon-offset and see-through paths (text displays, name tags; other world text, Improved Transparency's depth-tested text and the native world text among them, draws with native shaders), `core/rendertype_lines` the block outline (both strokes of a high contrast one; hitboxes, chunk borders and other debug lines still draw natively), `core/sky` and `core/stars` the overworld's sky disc and stars, `core/lightmap` (with `core/screenquad`) the 16x16 light texture from `LightmapInfo`, and `core/clouds` the clouds from the faces `CloudRenderer.buildMesh` encodes (`CloudFaces`, read as a storage buffer) and `CloudInfo`, under Improved Transparency through `OIT_CLOUDS`' three stages with each stage's defines and samplers (natively under a shader pack or HDR output's cloud marks); a pack's `core/clouds` that any of these pipelines can't be made from fails the load as vanilla's `ShaderManager.apply` does, dropping every selected pack, and a pack replacing only an include the clouds use changes them, both the pack's and the native clouds taking the layer's bottom from `EnvironmentAttributes.CLOUD_HEIGHT` probed at the camera each frame (`minecraft:visual/cloud_height`, 192.33 by default; on a server, the dimension type the server synchronized sets it, a data pack's Overworld included; the packs' Polytone dimension modifiers apply over it only for the three vanilla type IDs, `minecraft:overworld`, `minecraft:the_nether` and `minecraft:the_end`, each with its own file, and a mod's type is drawn without them); each of these but the clouds takes the packs' Polytone expression uniforms on its own shaders (`polytone/shader_modifiers`, `polytone_post.rs`, `gfx/expression_blocks.rs`), translated by naga (`sunrise-client-render` `core_shader.rs`, `hud/pack_text.rs`, `gfx/core_lines.rs`, `gfx/core_sky.rs`, `gfx/core_lightmap.rs`, `gfx/core_clouds.rs`, `gfx/core_text.rs`); the other core shaders aren't run (#13218) |
 | OptiFine / CIT Resewn custom item textures (`type=item`: `texture`, `model`, `texture.<name>`, `model.<name>`; `type=armor`: `texture`, `texture.<layer>` with the pre-1.21.2 layer names such as `diamond_layer_1`, `leather_layer_2_overlay`; `type=elytra`: `texture`; `type=enchantment` layers on GUI items; `useGlint=false` in `cit.properties`, which removes vanilla's glint from items) | `optifine/cit/`, `mcpatcher/cit/`, `citresewn/cit/` | partly | `item_render/cit.rs`, `cit_armor.rs`, `cit_glint.rs` and `hud/cit_glint.rs` tests; enchantment layers on held, dropped, framed and worn items, and `anim/` glints, come later; special renderers (heads, shields, banners) keep their vanilla look; only players and armour stands wear CIT armour and elytra, other mobs keep vanilla's; worn trims are unchanged; armour textures above 1024x512 (16 times vanilla's 64x32) draw vanilla |
 | GPU warn list, regional compliance | `gpu_warnlist.json`, `regional_compliancies.json` | n/a | OpenGL driver warnings and play-time notices for some regions; not used |
 
-Summary: 50 rows; 42 work, 7 partly (OptiFine/EMF entity models, random entity textures, connected textures,
-emissive textures, CIT, GUI sprite scaling, core shaders), 1 doesn't apply. Every vanilla loader in the list above
-reads the pack; what is left is the GUI scaling types and the core shaders, plus the OptiFine-format extras.
+Summary: 50 rows; 43 work, 6 partly (OptiFine/EMF entity models, random entity textures, connected textures,
+emissive textures, CIT, core shaders), 1 doesn't apply. Every vanilla loader in the list above reads the pack; what
+is left is the core shaders, plus the OptiFine-format extras.
 
 ### Polytone expression uniforms on core shaders
 
@@ -102,8 +101,8 @@ its own shaders' files (`gfx/expression_blocks.rs`):
   programs). Only the lightmap uses two files: for a block read by both stages or defined in both files, it looks in
   the fragment shader's (`core/lightmap`) first, then in the vertex shader's (`core/screenquad`). Otherwise, it uses
   the file for the stage that reads the block. A block no stage reads is not bound, and a stage that only declares
-  it doesn't decide its shape. If a block a stage reads is not one float, or has no expression, the affected
-  pipeline uses its built-in shader (the light texture is computed natively, the text drawn natively).
+  it doesn't decide its shape. A float block with no expression reads zero. If a block a stage reads is not
+  one float, the affected pipeline uses its built-in shader.
 - Each block, vanilla's and `LightmapInfo` included, of each of these pipelines is bound only to the stages that read it, and counts against
   the device's limit of uniform blocks per stage (`max_uniform_buffers_per_shader_stage`, 12 by default) for those
   stages only: a shader over it in either stage is refused.
@@ -152,7 +151,6 @@ its own shaders' files (`gfx/expression_blocks.rs`):
 
 | Gap | Size | Where |
 | --- | --- | --- |
-| GUI scaling `tile`, `stretch` | small | `ui.rs` |
 | Core shaders but the text (GUI, polygon-offset world, see-through), the block outline, the sky, the stars, the lightmap and the clouds | large | [#13218](https://github.com/horizon-rust/horizon/issues/13218) |
 
 ## Testing a pack

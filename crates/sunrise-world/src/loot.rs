@@ -34,7 +34,10 @@ pub mod types;
 pub use fill::ContainerLootContext;
 #[path = "loot/tags.rs"]
 mod loot_tags;
-pub use loot_tags::LootTags;
+pub use loot_tags::{ItemTagNames, LootTags};
+
+/// Ordered tag bindings for a single registry, keyed by tag ID.
+pub type RegistryTags = HashMap<String, Vec<String>>;
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -298,6 +301,9 @@ pub struct LootData {
     support_answers: crate::enchantment_answers::AnswerTable,
     /// Bound tags by registry and tag ID.
     tags: loot_tags::BoundTags,
+    item_tag_names: Option<ItemTagNames>,
+    /// The bound damage type registry's names, sorted, for `LootTags::damage_type_in_tag`.
+    damage_types: Vec<String>,
     /// Smelting recipes in recipe id order: (ingredient, result, result count).
     smelting: Vec<(Value, String, i32)>,
 }
@@ -351,7 +357,7 @@ impl LootEntity {
     }
 }
 /// A `DamageSource`: its damage type and the entities behind it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct LootDamage {
     /// Damage type id (`minecraft:player_attack`).
     pub kind: String,
@@ -359,6 +365,8 @@ pub struct LootDamage {
     pub source: Option<LootEntity>,
     /// `getDirectEntity`: the projectile, or the attacker itself.
     pub direct: Option<LootEntity>,
+    /// `DamageSource.isDirect`: both handles named the same entity, or both were absent.
+    pub is_direct: bool,
 }
 /// The parameters of `LivingEntity.dropFromLootTable`.
 #[derive(Clone, Debug, Default)]
@@ -372,6 +380,24 @@ pub struct EntityLootParams {
     /// `ATTACKING_ENTITY` when the roll has no damage source to name it: a
     /// fishing hook's owner.
     pub attacker: Option<LootEntity>,
+}
+impl EntityLootParams {
+    /// The ENTITY parameters of `LivingEntity.dropFromLootTable`. The last damage player
+    /// supplies luck; the attacking and direct entities come from the damage source.
+    pub fn death(
+        this: LootEntity,
+        damage: Option<LootDamage>,
+        credit: Option<(LootEntity, f32)>,
+    ) -> Self {
+        let (player, luck) = credit.map_or((None, 0.0), |(player, luck)| (Some(player), luck));
+        Self {
+            this,
+            damage,
+            player,
+            luck,
+            attacker: None,
+        }
+    }
 }
 /// The most a table's read of an enchantment level counts as. A mod can answer
 /// any level, and what it answers drives loops: a stack of that size splits one
@@ -724,15 +750,16 @@ impl LootData {
         defaults: &crate::item_defaults::ItemDefaults,
         types: types::Types,
     ) -> io::Result<Self> {
-        Self::load_generation(root, overlay, defaults, types, None)
+        Self::load_generation(root, overlay, defaults, types, None, &[])
     }
 
-    /// Load server loot with the damage catalog already bound for this generation.
-    pub fn load_with_damage(
+    /// Load server loot with the registry tags already bound for this generation.
+    pub fn load_with_bound_tags(
         root: &Path,
         overlay: &PackOverlay,
         defaults: &crate::item_defaults::ItemDefaults,
         damage: &crate::damage_source::Catalog,
+        bound_tags: &[(&str, &RegistryTags)],
     ) -> io::Result<Self> {
         Self::load_generation(
             root,
@@ -740,6 +767,7 @@ impl LootData {
             defaults,
             types::Types::capture(),
             Some(damage),
+            bound_tags,
         )
     }
 
@@ -749,8 +777,10 @@ impl LootData {
         defaults: &crate::item_defaults::ItemDefaults,
         types: types::Types,
         damage: Option<&crate::damage_source::Catalog>,
+        bound_tags: &[(&str, &RegistryTags)],
     ) -> io::Result<Self> {
-        let mut loaded = Self::load_table_candidate(root, overlay, defaults, types, damage)?;
+        let mut loaded =
+            Self::load_table_candidate(root, overlay, defaults, types, damage, bound_tags)?;
         let mut recipes = HashMap::new();
         load_kind(&root.join("data"), "recipe", &mut recipes)?;
         overlay_map(overlay, "recipe", &mut recipes);
@@ -795,8 +825,14 @@ impl LootData {
         overlay: &PackOverlay,
         defaults: &crate::item_defaults::ItemDefaults,
     ) -> io::Result<Self> {
-        let mut loaded =
-            Self::load_table_candidate(root, overlay, defaults, types::Types::capture(), None)?;
+        let mut loaded = Self::load_table_candidate(
+            root,
+            overlay,
+            defaults,
+            types::Types::capture(),
+            None,
+            &[],
+        )?;
         loaded.prepare_types()?;
         Ok(loaded)
     }
@@ -807,6 +843,7 @@ impl LootData {
         defaults: &crate::item_defaults::ItemDefaults,
         types: types::Types,
         damage: Option<&crate::damage_source::Catalog>,
+        bound_tags: &[(&str, &RegistryTags)],
     ) -> io::Result<Self> {
         let all = root.join("data");
         let tables = shared_tables(root, overlay)?;
@@ -879,6 +916,11 @@ impl LootData {
                 &standalone_damage
             }
         };
+        let mut damage_types: Vec<_> = damage
+            .entries()
+            .map(|(_, definition)| definition.name.clone())
+            .collect();
+        damage_types.sort();
         let mut tags = HashMap::from([(
             "damage_type".to_owned(),
             damage
@@ -891,6 +933,11 @@ impl LootData {
                 })
                 .collect(),
         )]);
+        tags.extend(
+            bound_tags
+                .iter()
+                .map(|(kind, tags)| ((*kind).to_owned(), (*tags).clone())),
+        );
         for registry in [
             "item",
             "block",
@@ -903,6 +950,9 @@ impl LootData {
             // What `location_check`'s `biomes` names.
             "worldgen/biome",
         ] {
+            if tags.contains_key(registry) {
+                continue;
+            }
             let raw = crate::tag_layers::layers(root, registry, overlay)?;
             if matches!(registry, "predicate" | "item_modifier") {
                 loot_tags::check_cycles(registry, &raw)?;
@@ -940,7 +990,9 @@ impl LootData {
             enchantments,
             primary_answers: Default::default(),
             support_answers: Default::default(),
+            item_tag_names: tags.get("item").map(ItemTagNames::bind),
             tags,
+            damage_types,
             smelting: Vec::new(),
         };
         binding.snapshot(&mut loaded)?;
@@ -1503,14 +1555,9 @@ impl<R: RandomSource> Context<'_, R> {
                             || self.entity_matches(&p["direct_entity"], damage.direct.as_ref()))
                         && (p["source_entity"].is_null()
                             || self.entity_matches(&p["source_entity"], damage.source.as_ref()))
-                        && p["is_direct"].as_bool().is_none_or(|want| {
-                            let direct = match (&damage.source, &damage.direct) {
-                                (Some(a), Some(b)) => a.kind == b.kind,
-                                (None, None) => true,
-                                _ => false,
-                            };
-                            direct == want
-                        })
+                        && p["is_direct"]
+                            .as_bool()
+                            .is_none_or(|want| damage.is_direct == want)
                 }
                 "minecraft:random_chance" => {
                     let chance = self.float(&c["chance"]);
@@ -2410,11 +2457,14 @@ mod namespace_tests {
         // retains the damage registry and binds only these new tag files.
         let overlay = PackOverlay::new(&files);
         let damage = damage.reload_tags(&root, &overlay).unwrap();
-        let loot = LootData::load_with_damage(&root, &overlay, &defaults, &damage).unwrap();
+        let loot =
+            LootData::load_with_bound_tags(&root, &overlay, &defaults, &damage, &[]).unwrap();
         let params = EntityLootParams {
             damage: Some(LootDamage {
                 kind: "test:hit".into(),
-                ..LootDamage::default()
+                source: None,
+                direct: None,
+                is_direct: true,
             }),
             ..EntityLootParams::default()
         };
@@ -3412,6 +3462,36 @@ mod native_kinds_tests {
         let data = LootData::load(&root, &PackOverlay::NONE, &defaults).unwrap();
         let _ = std::fs::remove_dir_all(&root);
         data
+    }
+
+    #[test]
+    fn a_direct_damage_predicate_tests_identity_not_entity_type() {
+        let loot = table(
+            "direct_damage",
+            r#"{"pools":[{"rolls":1,"condition":{"type":"minecraft:damage_source_properties","predicate":{"is_direct":true}},"entries":[{"type":"minecraft:item","name":"minecraft:diamond"}]}]}"#,
+        );
+        let mut random = LegacyRandom::new(1);
+        let entity = LootEntity::new("minecraft:zombie");
+        for (source, direct, is_direct) in [
+            (Some(entity.clone()), Some(entity.clone()), false),
+            (Some(entity.clone()), Some(entity), true),
+            (None, None, true),
+        ] {
+            let params = EntityLootParams {
+                damage: Some(LootDamage {
+                    kind: "minecraft:mob_attack".into(),
+                    source,
+                    direct,
+                    is_direct,
+                }),
+                ..EntityLootParams::default()
+            };
+            assert_eq!(
+                loot.roll_entity("minecraft:test", &mut random, &params)
+                    .len(),
+                usize::from(is_direct)
+            );
+        }
     }
 
     #[test]

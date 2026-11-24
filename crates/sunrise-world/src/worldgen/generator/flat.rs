@@ -27,6 +27,11 @@ pub struct FlatSettings {
     pub lakes: bool,
 }
 impl OverworldGenerator {
+    /// `FlatLevelSource.getSpawnHeight`: the top of the expanded, height-limited layers.
+    pub fn flat_spawn_height(&self) -> Option<i32> {
+        self.pipeline.flat_spawn_height()
+    }
+
     /// A superflat overworld (`FlatLevelSource`): the layers where the terrain would be, a
     /// fixed biome, and the structure sets `structure_overrides` allows (every one when it
     /// names none) generating on the flat ground, with or without structures.
@@ -131,6 +136,7 @@ impl OverworldGenerator {
         Ok(Self {
             pipeline: Arc::new(pipeline),
             noise_clamped: None,
+            mod_biome_keys: Default::default(),
         })
     }
 }

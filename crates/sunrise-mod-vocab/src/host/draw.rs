@@ -7,7 +7,6 @@ pub trait DrawClientHost {
     /// Side: client.
     /// Fluid `fluid`'s name as the lang names it (`fluid_type.<mod>.<name>`, vanilla's by its block),
     /// else its path in words.
-    #[access(ClientSetup)]
     fn fluid_name(&self, fluid: &str) -> String;
     /// Side: client.
     /// Entity model layer `layer` baked into its `ModelPart` tree, each part
@@ -19,7 +18,6 @@ pub trait DrawClientHost {
     /// for a layer neither has. A vanilla layer no mob has (a player's, a
     /// chest's) is read from the resources each call, so slow. API
     /// @API:model_layers@.
-    #[access(ClientSetup)]
     fn bake_layer(&self, layer: &str) -> Option<ModelPart>;
 }
 /// What the HUD, screen and tooltip hooks draw with, in GUI pixels: one per hook call.
@@ -72,6 +70,28 @@ pub trait DrawContext {
     fn text(&mut self, text: &str, at: [f32; 2], argb: u32, shadow: bool) {
         unimplemented!("DrawContext::text")
     }
+    /// Draw formatted [`Text`] at `(x, y)` in GUI pixels, in `argb` (`0xAARRGGBB`) with optional
+    /// drop shadow. `font` applies where the text has no explicit font. An unknown font ID uses
+    /// missing glyphs, not `minecraft:default`. Returns the drawn width in GUI pixels, or
+    /// [`TextFormError`] if the text's component metadata cannot be represented. Local text
+    /// is not subject to serialization limits.
+    fn text_with_font(
+        &mut self,
+        font: &Identifier,
+        text: &Text,
+        at: [f32; 2],
+        argb: u32,
+        shadow: bool,
+    ) -> Result<f32, TextFormError> {
+        unimplemented!("DrawContext::text_with_font")
+    }
+    /// Borrow the tooltip font `font` for measurement or splitting through an object-safe
+    /// callback; callers use [`DrawContext::with_tooltip_font`].
+    // hidden: object-safe backing method for `impl dyn DrawContext::with_tooltip_font`.
+    #[doc(hidden)]
+    fn with_tooltip_font_raw(&self, font: &Identifier, f: &mut dyn FnMut(&dyn TooltipFont)) {
+        unimplemented!("DrawContext::with_tooltip_font_raw")
+    }
     /// `text` scaled by `scale` about `at`, its top-left corner: what a GUI pose of translate,
     /// scale and translate back around `text` draws (`PoseStack.scale` in vanilla's HUD), without
     /// a `gui_paint` buffer. `0.5` is the half-size line under a widget's label.
@@ -89,8 +109,8 @@ pub trait DrawContext {
     /// Paint GUI extraction calls through this window's atlas, including player faces, under
     /// their poses: every op, an `Item` as vanilla's `item` then `itemDecorations` (the stack of
     /// the local player's hotbar slot, scaled about its pivot, then its decorations unscaled) and
-    /// a `Blit` of every [`Blend`](crate::client::hud_layout::Blend). An op it cannot draw (text
-    /// deeper than 512 component nodes, an unknown slot, texture or sprite) refuses the whole
+    /// a `Blit` of every [`Blend`](crate::client::hud_layout::Blend). An op it cannot draw (invalid
+    /// text metadata, an unknown slot, texture or sprite) refuses the whole
     /// buffer with a [`GuiPaintError`] naming the op, and nothing of it is drawn.
     fn gui_paint(&mut self, draws: &[GuiDraw]) -> Result<(), GuiPaintError> {
         unimplemented!("DrawContext::gui_paint")
@@ -99,8 +119,8 @@ pub trait DrawContext {
     fn gui_nine_slice(&mut self, sprite: &str, rect: [f32; 4], color: u32) {
         unimplemented!("DrawContext::gui_nine_slice")
     }
-    /// A vanilla tooltip at the cursor, in GUI pixels.
-    /// Refuses text deeper than 512 component nodes before applying any changes.
+    /// A vanilla tooltip at the cursor, in GUI pixels. This local draw has no serialization
+    /// depth cap, but unrepresentable component metadata refuses the tooltip before drawing.
     fn gui_tooltip(&mut self, lines: &[Text], at: [f32; 2]) -> Result<(), TextFormError> {
         unimplemented!("DrawContext::gui_tooltip")
     }
@@ -148,8 +168,8 @@ pub trait DrawContext {
     ///
     /// Refuses, answering no line at all (a [`TextLinesRefusal`], never a partial layout):
     /// a `max_width` that is not finite or that dividing by `scale` overflows, a `scale` that is
-    /// not finite or is zero or less, text that wraps into more than 512 lines, lines holding more
-    /// than 8192 characters together, and text deeper than 512 component nodes.
+    /// not finite or is zero or less, text that wraps into more than 512 lines, and lines holding
+    /// more than 8192 characters together. Component depth is not a layout limit.
     fn text_lines(
         &self,
         text: &Text,
@@ -175,8 +195,8 @@ pub trait DrawContext {
     /// world too, its `spin` parts turning with the game time. What lies
     /// outside the box is cut off, and the scene has a depth of its own, so
     /// it never covers the screen's other drawing or is covered by it but in
-    /// the order drawn. Draw it from a screen's drawing hook
-    /// (`screen_draw`). A client's call; on a server it is refused.
+    /// the order drawn. Draw it from a client screen callback such as
+    /// one installed with [`crate::MenuScreen::with_draw`].
     ///
     /// The scene may live too: entities standing in it (`scene.entities`, the
     /// descriptions [`entity`](Self::entity) takes, prepared and drawn by the same
@@ -222,8 +242,8 @@ pub trait DrawContext {
     /// its type's renderer as in the world (a mod's `register_entity_renderers`
     /// renderer and `register_entity_layers` layers included, else the vanilla
     /// model), full bright, lit by `Lighting.ENTITY_IN_UI`'s two lights, with a
-    /// depth of its own and cut off at the box. A client's call from a drawing
-    /// hook (`screen_draw`, `gui_render_post`); on a server it is refused.
+    /// depth of its own and cut off at the box. A client's call, available
+    /// with [`crate::MenuScreen::with_draw`] or `gui_render_post`.
     fn entity(&mut self, entity: &GuiEntity, view: GuiEntityView) -> Result<(), GuiEntityError> {
         Err(GuiEntityError::Unavailable)
     }
@@ -232,9 +252,10 @@ pub trait DrawContext {
     /// Create's symmetry wand screen draws its wand and its mirror. Orthographic, in the frame
     /// `x` right, `y` up, `z` towards the viewer.
     ///
-    /// - An item is drawn as a slot draws it (its model's `gui` display transform, then
-    ///   `view.transform`, lit with the GUI light that model asks for: flat items side lit,
-    ///   block-like items front lit); its count, damage bar and cooldown are not drawn.
+    /// - The item stack is borrowed for this call. The item is drawn as a slot draws it (its
+    ///   model's `gui` display transform, then `view.transform`, lit with the GUI light that
+    ///   model asks for: flat items side lit, block-like items front lit); its count, damage bar
+    ///   and cooldown are not drawn.
     /// - A model is drawn full bright and shaded by face, as the blocks of a scene are.
     /// - Both subjects have a depth of their own, so a draw never intersects what the screen
     ///   drew before or after it, and later drawing covers it in call order. An item's faces meet
@@ -243,10 +264,13 @@ pub trait DrawContext {
     ///   is no z input. Both are cut by the clips opened with [`DrawContext::push_clip`], as
     ///   `fill` is.
     ///
-    /// A client's call from a drawing hook (`screen_draw`, `gui_render_post`); on a server it is
-    /// refused. Per call it draws the subject's baked quads, the cached model a slot's item
-    /// uses, with nothing on the tick path.
-    fn model_3d(&mut self, subject: Gui3dSubject, view: Gui3dView) -> Result<(), Gui3dError> {
+    /// A client's call, available with [`crate::MenuScreen::with_draw`] or
+    /// `gui_render_post`. A `minecraft:air` stack returns `Ok(())` without using the view or
+    /// converting components.
+    /// A non-air item with an unreadable component override returns [`Gui3dError::InvalidStack`].
+    /// Per call it draws the subject's baked quads, the cached
+    /// model a slot's item uses, with nothing on the tick path.
+    fn model_3d(&mut self, subject: Gui3dSubject<'_>, view: Gui3dView) -> Result<(), Gui3dError> {
         Err(Gui3dError::Unavailable)
     }
     /// `Screen.renderMenuBackground`: draws the tiled menu background (32x32) across `rect`
@@ -266,34 +290,6 @@ pub trait DrawContext {
     /// Uses the same nonresident stack encoding as `item_stack`, not write validation.
     fn gui_draw_item_with(&mut self, stack: &ItemStack, at: [f32; 2], text: Option<&str>) {
         unimplemented!("DrawContext::gui_draw_item_with")
-    }
-    /// Draws a button and registers it for narration and controller focus like `AbstractButton`.
-    /// `rect` is `[x, y, w, h]` in GUI pixels. The label is centred, scrolls when it is too wide,
-    /// and is grey when inactive. [`crate::client::widgets::Widgets`] uses this to draw its buttons.
-    ///
-    /// `None` uses the vanilla nine-slice for the button's state. With [`ButtonSprites`] the
-    /// full custom sprite stretches into `rect`, and the label moves by `label_offset`. Inactive
-    /// takes precedence over highlighted. An omitted or unknown state id falls back to the custom
-    /// normal sprite, then to the vanilla nine-slice for the current state.
-    /// Refuses text deeper than 512 component nodes before applying any changes.
-    fn widget_button(
-        &mut self,
-        rect: [f32; 4],
-        label: &Text,
-        active: bool,
-        highlighted: bool,
-        sprites: Option<&ButtonSprites>,
-    ) -> Result<(), TextFormError> {
-        unimplemented!("DrawContext::widget_button")
-    }
-    /// A text field as the game's screens draw one (`EditBox`): its text from the first
-    /// character `field.scroll` shows, scrolled on to keep the cursor in view, the selection
-    /// highlighted, the caret, the suggestion, the `widget/text_field` sprite when bordered, and
-    /// a record for the narrator and a controller's focus. Answers the scroll it drew with and
-    /// the x of each shown character boundary, for the next press. What
-    /// [`crate::client::widgets::Widgets`] draws its fields with.
-    fn widget_text_field(&mut self, field: &TextFieldView) -> TextFieldLayout {
-        unimplemented!("DrawContext::widget_text_field")
     }
 }
 /// What a block entity, mob or player submit hook draws with, in blocks under a pose stack (`PoseStack`): one per hook call.
@@ -369,6 +365,19 @@ pub trait BlockEntityDrawContext {
     /// the light it was drawn with until the draw is invalidated.
     fn level_light(&mut self) {
         unimplemented!("BlockEntityDrawContext::draw_level_light")
+    }
+    /// While `on`, what is drawn next by `item`, `block`, `cube`, `quad`, `model` and
+    /// `model_part` skips directional face shading (brightness 1.0) and draws at full-bright
+    /// light (block and sky 15), whatever the light setting or [`Self::level_light`]. The
+    /// lightmap is still sampled there, so what changes its top cell (night, `darkness`,
+    /// coloured lights) still reaches it. Stands for NeoForge's unlit render types
+    /// (`NeoForgeRenderTypes.getItemCutoutUnlit`, `getItemTranslucentUnlit`, their glint
+    /// variants, `getEntityUnlitTranslucent`): a hologram, a glowing display, a projected item.
+    /// An item's enchantment glint still draws over it; `terrain_model` keeps its own
+    /// shading option and text its own `glowing`. Off by default; lasts until `unlit(false)`
+    /// or the end of the draw. A client's call.
+    fn unlit(&mut self, on: bool) {
+        unimplemented!("BlockEntityDrawContext::draw_unlit")
     }
     /// Draws a quad with `corners` in blocks under `draw`'s pose, in a model
     /// face's order (top left, bottom left, bottom right, top right as seen
@@ -481,8 +490,8 @@ pub trait BlockEntityDrawContext {
     /// drawn, in font pixels (`Font.width`): centre a line by starting it at minus half its
     /// width. Obfuscated glyphs change only when the block is drawn again: kept text stands
     /// still. Clamp text read from NBT, and widen `block_entity_render_bounding_box`
-    /// for a long line. API @API:draw_text@.
-    /// Refuses text deeper than 512 component nodes before applying any changes.
+    /// for a long line. Unrepresentable component metadata returns `TextFormError` before
+    /// drawing; the local component has no serialization depth cap. API @API:draw_text@.
     fn text(
         &mut self,
         text: &Text,
@@ -495,8 +504,7 @@ pub trait BlockEntityDrawContext {
     }
     /// The width of `text` in font pixels, as `text` draws it, styles included
     /// (`Font.width`), to lay a line out before drawing it.
-    /// Refuses text deeper than 512 component nodes.
-    fn text_width(&self, text: &Text) -> Result<f32, TextFormError> {
+    fn text_width(&self, text: &Text) -> f32 {
         unimplemented!("BlockEntityDrawContext::draw_text_width")
     }
     /// Draws model part `part` and the parts under it under `draw`'s pose, as
@@ -536,8 +544,8 @@ pub trait BlockEntityDrawContext {
         unimplemented!("BlockEntityDrawContext::draw_fluid_box")
     }
 }
-/// What `block_screen_effect_draw` draws with, one per hook call: quads in camera space, in
-/// blocks, with `+x` right, `+y` up and the camera at the origin looking down `-z`. It is the
+/// What a [`BlockScreenEffectRenderer`](crate::BlockScreenEffectRenderer) draws with: quads in
+/// camera space, in blocks, with `+x` right, `+y` up and the camera at the origin looking down `-z`. It is the
 /// space of `ScreenEffectRenderer`'s own quads, whose whole-view quad has corners at `(±1, ±1, -0.5)`,
 /// under the first-person hand's projection. Quads draw in the order given, after the level and
 /// the hand and before the GUI, alpha-blended with no depth test; give corners in order round the quad.
@@ -598,8 +606,8 @@ pub trait WorldDrawContext {
     /// world's name tags, far to near, whatever the stage. Each glyph and backdrop quad, both
     /// copies counted, takes one of the view's 4,096 quads shared with
     /// [`quads`](Self::quads) ([`usage`](Self::usage)).
-    /// Refuses a non-finite `at` ([`DrawError::NonFinite`]), text deeper than 512 component
-    /// nodes ([`DrawError::TextTooDeep`]) or otherwise refused ([`DrawError::TextRefused`]),
+    /// Refuses a non-finite `at` ([`DrawError::NonFinite`]), unrepresentable component metadata
+    /// ([`DrawError::TextRefused`]),
     /// and a label past the quads left ([`DrawError::CapacityExceeded`]); on `Err` nothing
     /// is drawn.
     fn name_tag(

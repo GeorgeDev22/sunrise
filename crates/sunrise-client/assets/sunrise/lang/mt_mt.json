@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Linja ta' chat ġdida tiżżerżaq 'il ġewwa mix-xellug waqt li tgħib, minflok tidher sħiħa.",
   "sunrise.extras.chat_indicator": "Indikatur tal-messaġġ",
   "sunrise.extras.chat_indicator.tooltip": "Il-bar ikkulurit fuq ix-xellug ta 'chat line.",
-  "sunrise.extras.discord_presence": "Discord Preżenza Sinjuri",
-  "sunrise.extras.discord_presence.tooltip": "Juri l-Ilgħab Sunrise fuq il-profil tiegħek Discord waqt li Discord jibda: menus, plejer wieħed jew multiplayer, id-dimensjoni u l-ħin li ntlagħbu. Qatt isem tad-dinja jew indirizz ta 'server.",
   "sunrise.extras.dynamic_lights": "Dwal dinamiċi",
   "sunrise.extras.dynamic_lights.tooltip": "Torċi u sorsi oħra tad-dawl miżmuma, waqgħu jew fuq nar jixegħlu l-blokki ta 'madwarhom.",
   "sunrise.extras.fullbright": "Fullbright",

@@ -426,7 +426,8 @@ pub struct Part {
     pub hash: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub doc: String,
-    /// The scoped hooks that call this kind's Parts: records of their own, outside the hash.
+    /// Hooks that call this kind's Parts, whether scoped to the kind or linked explicitly.
+    /// These hooks have records of their own and are outside the Part hash.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<String>,
     #[serde(flatten)]

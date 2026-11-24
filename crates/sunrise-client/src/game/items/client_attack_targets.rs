@@ -40,14 +40,15 @@ impl Game<'_> {
             | Target::DragonPart(_)
             | Target::Cushion(_) => true,
             Target::Other(id) => self.interactions.contains_key(&(id as i32)),
-            Target::Projectile(id) => self.creatures.projectiles.iter().any(|p| {
-                p.id == id
-                    && (super::deflect::redirectable(p)
-                        || matches!(
-                            p.kind,
-                            sunrise_client::projectiles::ProjectileKind::ShulkerBullet { .. }
-                        ))
-            }),
+            Target::Projectile(id) => self
+                .creatures
+                .projectiles
+                .iter()
+                .any(|p| p.id == id && self.projectile_is_pickable(p)),
+            Target::Trident(id) => self
+                .tridents
+                .iter()
+                .any(|t| t.id == id && self.trident_is_pickable(t)),
             _ => false,
         };
         if !attackable {
@@ -97,7 +98,11 @@ impl Game<'_> {
                 if let Some((_, point)) = selected.filter(|(selected, _)| *selected == entity) {
                     // This is the stored pick, not an independently requested batch target.
                     // Preserve its point and occlusion policy for this stored decision.
-                    (self.crosshair_target() == committed).then(|| self.pick_distance(point))
+                    if self.crosshair_target() == committed {
+                        self.attack_hit_distance(point)
+                    } else {
+                        None
+                    }
                 } else {
                     self.targeting_entity_hit(entity)
                         .map(|(_, distance)| distance)

@@ -14,6 +14,7 @@ use super::{
 use crate::blocks::Fluid;
 use crate::health::DamageLevel;
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use sunrise_core::{geometry::Vec3, random::RandomSource};
 
 // Nautilus state: `tame`/`owner`, the saddle, `head` the body armour,
@@ -173,7 +174,7 @@ pub(super) fn travel(
     input: Vec3,
     events: &mut Vec<MobEvent>,
     pause: bool,
-) -> Result<(), super::living::TravelTrample> {
+) -> ControlFlow<super::living::TravelPause> {
     let speed = m.ai.speed;
     m.move_relative(speed, input);
     m.travel_move(w, level, events, pause, |m, _, _, _| {
@@ -563,12 +564,13 @@ impl Goal for Charge {
         let amount = m.attrs.attack_damage;
         cx.events.push(match who {
             Who::Player => {
-                cx.w.route_player_event(MobEvent::AttackPlayer(amount, from))
+                cx.w.route_player_event(MobEvent::AttackPlayer(amount, from, None))
             }
             Who::Mob(id) => MobEvent::AttackMob {
                 target: id,
                 amount,
                 source: super::Damage::mob(m.id, from),
+                remember_target: false,
             },
         });
         let level = |e: &str| {

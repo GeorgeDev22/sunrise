@@ -58,12 +58,39 @@ impl Game<'_> {
         }) {
             return;
         }
-        self.menu_session(|menu, env, to_menu| {
-            let i = to_menu(internal)?;
-            let stack = menu.slot(i).cloned();
-            menu.set_slot(env, i, stack);
-            Some(true)
-        });
+        if self.station.as_ref().is_some_and(|s| s.kind == Kind::Anvil) {
+            self.anvil_menu_session(|game, menu, to_menu| {
+                let i = to_menu(internal)?;
+                let stack = menu.slot(i).cloned();
+                menu.track_results(true);
+                {
+                    let env = sunrise_client::menu::Env {
+                        enchantments: game.item_enchantments(),
+                        ..game.menu_env()
+                    };
+                    menu.set_slot(&env, i, stack);
+                }
+                loop {
+                    game.deliver_client_anvil_update(menu);
+                    let env = sunrise_client::menu::Env {
+                        enchantments: game.item_enchantments(),
+                        ..game.menu_env()
+                    };
+                    if !menu.advance_result_notification(&env) {
+                        break;
+                    }
+                }
+                menu.track_results(false);
+                Some(true)
+            });
+        } else {
+            self.menu_session(|menu, env, to_menu| {
+                let i = to_menu(internal)?;
+                let stack = menu.slot(i).cloned();
+                menu.set_slot(env, i, stack);
+                Some(true)
+            });
+        }
         if internal == super::stations::INPUT
             && let Some(s) = self
                 .station

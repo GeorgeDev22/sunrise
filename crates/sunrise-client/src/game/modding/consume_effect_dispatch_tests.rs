@@ -72,6 +72,7 @@ fn a_living_handle_dispatches_custom_kinds_with_same_kind_recursion_refused() {
                     .effects = vec![ConsumeEffect::Native {
                     kind: kind.to_owned(),
                     data: Arc::new(Tag::Compound(Default::default())),
+                    registered: None,
                 }];
             }
             game.server_items = Some(Arc::new(items));
@@ -145,6 +146,7 @@ fn consuming_player_is_supplied_outside_a_guest_action() {
                 consumable.effects = vec![ConsumeEffect::Native {
                     kind: "player_meal:effect".into(),
                     data: Arc::new(Tag::Compound(Default::default())),
+                    registered: None,
                 }];
                 game.creative = false;
                 game.inventory[game.selected] = Some(stack.clone());
@@ -325,6 +327,7 @@ fn a_foxs_later_custom_effect_keeps_the_original_user_and_stack_after_discard() 
             let custom = |kind: &str| ConsumeEffect::Native {
                 kind: kind.into(),
                 data: Arc::new(Tag::Compound(Default::default())),
+                registered: None,
             };
             effects.insert(0, custom("fox_meal:discard"));
             effects.push(ConsumeEffect::PlaySound("minecraft:entity.fox.eat".into()));
@@ -333,7 +336,7 @@ fn a_foxs_later_custom_effect_keeps_the_original_user_and_stack_after_discard() 
 
             let kind = game.res.mob_types().get("minecraft:fox").unwrap().clone();
             let mut fox = Mob::new(21, kind, Vec3::new(8.5, 64.0, 8.5), 0.0);
-            fox.on_ground = true;
+            fox.ground.on_ground = true;
             fox.extra.ints[1] = 601;
             let mut stack = ItemStack::new("minecraft:chorus_fruit", 7);
             stack

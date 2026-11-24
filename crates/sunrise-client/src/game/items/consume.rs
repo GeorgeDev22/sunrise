@@ -131,26 +131,21 @@ impl Game<'_> {
             return;
         }
         self.consume_held();
-        let remainder = sunrise_client::item_sync::use_remainder(stack, info.use_remainder.clone());
-        self.apply_use_remainder(remainder.as_deref(), stack.count);
+        self.apply_use_remainder(stack);
     }
     /// `ItemStack.applyAfterUseComponentSideEffects` uses the stack captured
     /// before the item handler, even when that handler changes the hand.
     pub(super) fn apply_after_use_components(&mut self, stack: &ItemStack) {
-        let remainder = self
-            .items()
-            .get(&stack.item)
-            .and_then(|info| info.use_remainder.clone());
-        let remainder = sunrise_client::item_sync::use_remainder(stack, remainder);
-        self.apply_use_remainder(remainder.as_deref(), stack.count);
+        self.apply_use_remainder(stack);
         self.apply_use_cooldown(stack);
     }
-    fn apply_use_remainder(&mut self, remainder: Option<&str>, count_before: u32) {
-        if self.creative || self.held().map_or(0, |stack| stack.count) >= count_before {
+    fn apply_use_remainder(&mut self, used: &ItemStack) {
+        if self.creative || self.held().map_or(0, |stack| stack.count) >= used.count {
             return;
         }
-        if let Some(remainder) = remainder {
-            let remainder = ItemStack::new(remainder, 1);
+        if let Some(remainder) =
+            sunrise_client::item_sync::use_remainder(used, self.items().get(&used.item))
+        {
             if self.held().is_none() {
                 *self.held_mut() = Some(remainder);
             } else if let Some(rest) = self.add_stack_to_inventory(remainder) {
@@ -192,17 +187,8 @@ impl Game<'_> {
         let Some(consumable) = self.consumable(&decision.stack) else {
             return false;
         };
-        let remainder = self
-            .items()
-            .get(&decision.stack.item)
-            .and_then(|info| info.use_remainder.as_deref())
-            .map(std::sync::Arc::<str>::from);
-        let remainder = sunrise_client::item_sync::use_remainder(
-            &decision.stack,
-            remainder.map(|value| value.to_string()),
-        )
-        .map(std::sync::Arc::<str>::from);
-        let result: Result<bool, ()> = mod_api::run_transaction(self, |game, _| {
+        let failures = mod_api::runtime::isolated_failures();
+        let result: Result<bool, ()> = self.storage_transaction(|game, _| {
             {
                 let mut mobs = game.mobs.lift();
                 if let Some(mob) = mobs.iter_mut().find(|m| m.id == decision.mob) {
@@ -216,7 +202,11 @@ impl Game<'_> {
                     game.mobs
                         .restore(mobs, sunrise_client::join_seq::RestoreOrder::SpawnsFirst);
                     if game.handle_mob_events(events).is_err() {
-                        return Ok(false);
+                        return if mod_api::runtime::isolated_failures() != failures {
+                            Err(())
+                        } else {
+                            Ok(false)
+                        };
                     }
                 } else {
                     game.mobs
@@ -228,6 +218,9 @@ impl Game<'_> {
                     &consumable.effects,
                     Some((consumer, MobConsumption::Fox(decision))),
                 );
+                if mod_api::runtime::isolated_failures() != failures {
+                    return Err(());
+                }
                 // A refusal (for example, a listener moved the fox under the
                 // pending teleport) still invalidates the original finish.
                 if !can_finish {
@@ -249,15 +242,23 @@ impl Game<'_> {
                         state: sunrise_world::registry::BlockStateId(0),
                     };
                     if game.handle_mob_events(vec![event]).is_err() {
-                        return Ok(false);
+                        return if mod_api::runtime::isolated_failures() != failures {
+                            Err(())
+                        } else {
+                            Ok(false)
+                        };
                     }
                 }
+            }
+            if mod_api::runtime::isolated_failures() != failures {
+                return Err(());
             }
             let Some(m) = game.mobs.iter_mut().find(|m| m.id == decision.mob) else {
                 return Ok(false);
             };
             let position = m.position;
-            Ok(decision.finish(m, position, remainder))
+            let info = game.res.items().get(&decision.stack.item);
+            Ok(decision.finish(m, position, info))
         });
         result.unwrap_or(false)
     }
@@ -309,15 +310,7 @@ impl Game<'_> {
                         .iter_mut()
                         .find(|m| m.id == id && m.alive() && !m.removed)
                     {
-                        mob.apply_consume_effect(
-                            crate::game::entity::damage_level_of!(
-                                self,
-                                &sunrise_client::health::NO_ATTACK,
-                                no_push,
-                                None
-                            ),
-                            effect,
-                        );
+                        mob.apply_consume_effect(effect);
                     }
                 }
             }
@@ -347,7 +340,8 @@ impl Game<'_> {
             return;
         };
         let consumable = self.consumable(stack);
-        let result: Result<(), ()> = mod_api::run_transaction(self, |game, _| {
+        let failures = mod_api::runtime::isolated_failures();
+        let result: Result<(), ()> = self.storage_transaction(|game, _| {
             if let Some(consumable) = &consumable
                 && !game.apply_consumable_effects(
                     stack,
@@ -355,7 +349,14 @@ impl Game<'_> {
                     Some((consumer, usage)),
                 )
             {
-                return Ok(());
+                return if mod_api::runtime::isolated_failures() != failures {
+                    Err(())
+                } else {
+                    Ok(())
+                };
+            }
+            if mod_api::runtime::isolated_failures() != failures {
+                return Err(());
             }
             if let Some(mob) = game
                 .mobs
@@ -927,7 +928,7 @@ impl TeleportConsumeWorld for MobTeleporter<'_, '_> {
 }
 
 #[cfg(test)]
-mod teleport_hook_tests {
+pub(in crate::game) mod teleport_hook_tests {
     use super::*;
     use crate::game::api_values::test_snapshot;
     use crate::game::native_entity_refs::tests::with_game;
@@ -993,6 +994,11 @@ mod teleport_hook_tests {
     #[test]
     #[ignore = "daily"]
     fn consumption_hook_keeps_the_stack_before_use_and_cancellation_stops_attempts() {
+        run_consumption_hook_keeps_the_stack_before_use_and_cancellation_stops_attempts();
+    }
+
+    pub(in crate::game) fn run_consumption_hook_keeps_the_stack_before_use_and_cancellation_stops_attempts()
+     {
         let heard = Arc::new(Mutex::new(Vec::new()));
         let moved = Arc::new(AtomicBool::new(false));
         let mods: mod_api::Mods = vec![ModEntry::new(
@@ -1081,7 +1087,7 @@ mod teleport_hook_tests {
 }
 
 #[cfg(test)]
-mod fox_consumption_hook_tests {
+pub(in crate::game) mod fox_consumption_hook_tests {
     use super::*;
     use crate::game::api_values::test_snapshot;
     use crate::game::native_entity_refs::tests::with_game;
@@ -1154,7 +1160,10 @@ mod fox_consumption_hook_tests {
                             let next = host.entity(201).unwrap();
                             assert_eq!(next.position(host), Some([11.5, 64.0, 8.5]));
                             let next_living = host.living(next).unwrap();
-                            assert_eq!(next_living.hand_item(host, Hand::Main).unwrap().count(), 7);
+                            assert_eq!(
+                                next_living.with_hand_item(host, Hand::Main, |stack| stack.count()),
+                                Some(7)
+                            );
                             assert!(
                                 next_living
                                     .set_hand_item(
@@ -1182,10 +1191,14 @@ mod fox_consumption_hook_tests {
                             // The earlier fox resumed before this one, and the
                             // listener's unrelated actor writes survived it.
                             let first = host.living(host.entity(200).unwrap()).unwrap();
-                            assert_eq!(first.hand_item(host, Hand::Main).unwrap().count(), 6);
+                            assert_eq!(
+                                first.with_hand_item(host, Hand::Main, |stack| stack.count()),
+                                Some(6)
+                            );
                             let next = host.living(host.entity(201).unwrap()).unwrap();
                             assert_eq!(
-                                next.hand_item(host, Hand::Main),
+                                next.with_hand_item(host, Hand::Main, |stack| stack.project())
+                                    .flatten(),
                                 Some(test_snapshot(&ItemStack::new("minecraft:stone", 1)))
                             );
                             assert!(host.entity(202).is_none());
@@ -1202,6 +1215,11 @@ mod fox_consumption_hook_tests {
     #[test]
     #[ignore = "daily"]
     fn fox_consumption_adapter_uses_full_host_and_preserves_listener_writes() {
+        run_fox_consumption_adapter_uses_full_host_and_preserves_listener_writes();
+    }
+
+    pub(in crate::game) fn run_fox_consumption_adapter_uses_full_host_and_preserves_listener_writes()
+     {
         let mode = Arc::new(AtomicU8::new(0));
         let heard = Arc::new(Mutex::new(Vec::new()));
         let mods: mod_api::Mods = vec![ModEntry::new(
@@ -1235,7 +1253,7 @@ mod fox_consumption_hook_tests {
                     let id = 60 + u32::from(action);
                     let from = Vec3::new(8.5, 64.0, 8.5);
                     let mut actor = Mob::new(id, ty.clone(), from, 0.0);
-                    actor.on_ground = true;
+                    actor.ground.on_ground = true;
                     actor.fall_distance = 9.0;
                     actor.extra.ints[1] = 600;
                     let mut stack = ItemStack::new("minecraft:chorus_fruit", 7);
@@ -1320,6 +1338,11 @@ mod fox_consumption_hook_tests {
     #[test]
     #[ignore = "daily"]
     fn fox_tick_pauses_before_movement_and_next_actor_and_preserves_full_host_writes() {
+        run_fox_tick_pauses_before_movement_and_next_actor_and_preserves_full_host_writes();
+    }
+
+    pub(in crate::game) fn run_fox_tick_pauses_before_movement_and_next_actor_and_preserves_full_host_writes()
+     {
         let heard = Arc::new(Mutex::new(Vec::new()));
         let spawned = Arc::new(Mutex::new(Vec::new()));
         let mods: mod_api::Mods = vec![ModEntry::new(
@@ -1355,7 +1378,7 @@ mod fox_consumption_hook_tests {
                 for (id, x) in [(200, 8.5), (201, 11.5), (202, 13.5), (204, 6.5)] {
                     let mut actor = Mob::new(id, ty.clone(), Vec3::new(x, 64.0, 8.5), 0.0);
                     actor.persistent = true;
-                    actor.on_ground = true;
+                    actor.ground.on_ground = true;
                     actor.extra.ints[1] = 600;
                     actor
                         .extra

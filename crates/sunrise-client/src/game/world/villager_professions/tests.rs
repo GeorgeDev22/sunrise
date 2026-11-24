@@ -378,7 +378,7 @@ fn assert_engineer_acquisition(game: &mut Game<'_>) {
     let mut mob =
         sunrise_client::entity_nbt::mob_from_nbt(&raw, game.res.mob_types(), 901, Some(registry))
             .unwrap();
-    mob.on_ground = true;
+    mob.ground.on_ground = true;
     let mut world = game.mob_world_base(&[]);
     let mut damage = sunrise_client::health::TestLevel::new(1);
     let mut level = damage.level();

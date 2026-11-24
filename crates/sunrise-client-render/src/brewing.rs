@@ -213,6 +213,17 @@ pub struct PotionIngredient {
     pub potions: Option<HashSet<String>>,
 }
 impl PotionIngredient {
+    pub fn parse_potions(v: &Value) -> Option<HashSet<String>> {
+        match &v["potion_contents"]["potions"] {
+            Value::String(s) => Some([s.clone()].into_iter().collect()),
+            Value::Array(a) => Some(
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
     fn parse(v: &Value, items: &Items) -> Self {
         let mut set = HashSet::new();
         let add = |s: &str, set: &mut HashSet<String>| match s.strip_prefix('#') {
@@ -229,18 +240,9 @@ impl PotionIngredient {
                 .for_each(|s| add(s, &mut set)),
             _ => {}
         }
-        let potions = match &v["potion_contents"]["potions"] {
-            Value::String(s) => Some([s.clone()].into_iter().collect()),
-            Value::Array(a) => Some(
-                a.iter()
-                    .filter_map(|x| x.as_str().map(str::to_owned))
-                    .collect(),
-            ),
-            _ => None,
-        };
         Self {
             items: set,
-            potions,
+            potions: Self::parse_potions(v),
         }
     }
     pub fn test(&self, stack: &ItemStack) -> bool {
@@ -305,17 +307,29 @@ pub struct Brewing {
     pub inputs: HashSet<String>,
 }
 impl Brewing {
+    /// Build live brewing tables from already-decoded `minecraft:brewing` recipes.
+    pub fn from_recipes(recipes: Vec<BrewingRecipe>) -> Self {
+        let reagents = recipes
+            .iter()
+            .flat_map(|r| r.reagent.items.iter().cloned())
+            .collect();
+        let inputs = recipes
+            .iter()
+            .flat_map(|r| r.input.items.iter().cloned())
+            .chain(std::iter::once("minecraft:glass_bottle".to_owned()))
+            .collect();
+        Self {
+            recipes,
+            reagents,
+            inputs,
+        }
+    }
     pub fn load(root: &Path, items: &Items, overlay: &PackOverlay) -> Self {
         let mut sources =
             sunrise_items::recipe_sources::sources(root, overlay).unwrap_or_else(|e| {
                 log::warn!("Sunrise: brewing recipes not loaded: {e}");
                 Vec::new()
             });
-        sources.retain(|(id, _)| {
-            let path = id.split_once(':').map_or(id.as_str(), |(_, path)| path);
-            path.strip_prefix("brewing/")
-                .is_some_and(|name| !name.contains('/'))
-        });
         for (id, _) in &mut sources {
             *id = sunrise_items::recipe_sources::qualified(id);
         }
@@ -347,20 +361,7 @@ impl Brewing {
                 output,
             });
         }
-        let reagents = recipes
-            .iter()
-            .flat_map(|r| r.reagent.items.iter().cloned())
-            .collect();
-        let inputs = recipes
-            .iter()
-            .flat_map(|r| r.input.items.iter().cloned())
-            .chain(std::iter::once("minecraft:glass_bottle".to_owned()))
-            .collect();
-        Self {
-            recipes,
-            reagents,
-            inputs,
-        }
+        Self::from_recipes(recipes)
     }
     pub fn find(&self, input: &ItemStack, reagent: &ItemStack) -> Option<&BrewingRecipe> {
         self.recipes

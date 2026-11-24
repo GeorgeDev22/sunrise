@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Baris obrolan baru meluncur dari kiri sambil memudar, alih-alih langsung muncul seutuhnya.",
   "sunrise.extras.chat_indicator": "Indikator pesan",
   "sunrise.extras.chat_indicator.tooltip": "Bilah berwarna di sebelah kiri baris obrolan.",
-  "sunrise.extras.discord_presence": "Discord Rich Presence",
-  "sunrise.extras.discord_presence.tooltip": "Menampilkan 'Playing Sunrise' di profil Discord Anda saat Discord berjalan: menu, pemain tunggal atau multiplayer, dimensi, dan durasi bermain. Tidak pernah menampilkan nama dunia atau alamat server.",
   "sunrise.extras.dynamic_lights": "Lampu Dinamis",
   "sunrise.extras.dynamic_lights.tooltip": "Obor dan sumber cahaya lain yang dipegang, dijatuhkan, atau terbakar akan menerangi blok di sekitarnya.",
   "sunrise.extras.fullbright": "Fullbright",

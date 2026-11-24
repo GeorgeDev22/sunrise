@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Khadka sheekeysiga cusub ayaa bidixda ka soo galaya inta uu ku sii dhacayo, halkii uu ka muuqan lahaa isagoo dhan.",
   "sunrise.extras.chat_indicator": "Tilmaamaha fariinta",
   "sunrise.extras.chat_indicator.tooltip": "Bar midabka leh ee dhanka bidix ee khadka sheekeysiga",
-  "sunrise.extras.discord_presence": "Joogitaanka hodanka ah ee Discord",
-  "sunrise.extras.discord_presence.tooltip": "Ku muuji ciyaarta Sunrise ee profile kaaga Discord halka Discord uu wado: menus, hal ciyaaryahan ama ciyaartoy badan, cabbirka iyo waqtiga la ciyaaray. Waligaa magac adduun ama ciwaanka serverka.",
   "sunrise.extras.dynamic_lights": "Nalalka firfircoon",
   "sunrise.extras.dynamic_lights.tooltip": "Toosh iyo ilo kale oo iftiin ah oo la hayo, la tuuray ama dab shiday ayaa shidmaya hareeraha hareerahooda.",
   "sunrise.extras.fullbright": "Iftiin buuxa",

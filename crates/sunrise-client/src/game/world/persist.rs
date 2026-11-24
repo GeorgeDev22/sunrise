@@ -8,6 +8,9 @@ pub(super) use sunrise_gameplay::entity_uuids::EntityUuids;
 mod loaded_pass;
 #[path = "persist/object_memory.rs"]
 mod object_memory;
+#[path = "persist/spawn_tree.rs"]
+mod spawn_tree;
+pub(super) use spawn_tree::SpawnTree;
 #[path = "persist/unload_sweep.rs"]
 mod unload_sweep;
 
@@ -18,7 +21,7 @@ mod anger_tests;
 mod hurt_by_refs;
 #[cfg(test)]
 #[path = "persist/lookup_order_tests.rs"]
-mod lookup_order_tests;
+pub(in crate::game) mod lookup_order_tests;
 
 use super::{FallingBlock, Game};
 
@@ -149,14 +152,20 @@ pub(super) fn write_static_entity_fields(tag: &mut Tag) {
 
     let int = |key, default| tag.get(key).and_then(int_value).unwrap_or(default);
     let motion = entity_nbt::loaded_motion(tag);
-    let double = |value: f64| Tag::Double(if value == 0.0 { 0 } else { value.to_bits() });
     let fall_distance = float(tag.get("fall_distance")).unwrap_or(0.0);
     let values = [
         (
             "Motion",
-            Tag::List([motion.x, motion.y, motion.z].map(double).to_vec()),
+            sunrise_client::save::doubles(&[motion.x, motion.y, motion.z]),
         ),
-        ("fall_distance", double(fall_distance)),
+        (
+            "fall_distance",
+            Tag::Double(if fall_distance == 0.0 {
+                0
+            } else {
+                fall_distance.to_bits()
+            }),
+        ),
         ("Fire", Tag::Short(int("Fire", 0) as i16)),
         ("Air", Tag::Short(int("Air", 300) as i16)),
         (
@@ -209,6 +218,8 @@ pub struct EntityMemory {
     pub(super) preparing_vehicle_removals: HashSet<super::commands::Target>,
     /// Vehicle destruction is logically visible before its passenger callbacks.
     pub(super) destroying_vehicles: HashSet<super::commands::Target>,
+    /// Bodies that set `Entity.syncPosition` this tick, cleared after tracking.
+    pub(super) sync_body_position: HashSet<u32>,
     /// Synched entity-data entries dirtied by forced writes since the last sync.
     pub(super) forced_meta: HashMap<u32, [u64; 4]>,
     /// `Entity.noPhysics` a native mod wrote for a kind whose own struct keeps
@@ -348,6 +359,7 @@ const UNLISTED_KINDS: &[&str] = &[
     "minecraft:glow_item_frame",
     "minecraft:cushion",
     "minecraft:painting",
+    "minecraft:lightning_bolt",
 ];
 
 /// Queue `tag` with the chunk loads as a fresh add.
@@ -397,15 +409,23 @@ fn anon_key(kind: &str, p: Vec3) -> (String, [u64; 3]) {
 }
 /// The loaded compound underneath the fields Sunrise models: what the entity was
 /// loaded with, with every key of `modelled` replacing its loaded value.
-pub(super) fn with_raw(mut modelled: Tag, raw: Option<&Tag>) -> Tag {
+pub(super) fn with_raw(modelled: Tag, raw: Option<&Tag>) -> Tag {
+    with_raw_over(modelled, raw, &[])
+}
+/// The orb saves ticked Fire and stored (not ticked) Air over the loaded compound.
+pub(in crate::game) const ORB_LIVE: &[&str] = &["Fire", "Air"];
+/// [`with_raw`] for a writer that simulates some of the fields Sunrise
+/// otherwise invents: the keys in `live` keep the writer's value.
+pub(in crate::game) fn with_raw_over(mut modelled: Tag, raw: Option<&Tag>, live: &[&str]) -> Tag {
     if let (Some(Tag::Compound(raw)), Tag::Compound(fields)) = (raw, &modelled) {
         let mut out = raw.clone();
         for (key, value) in fields {
             // Defaults Sunrise invents for fields it does not simulate give way to the save.
+            let key_text = key.to_string_lossy();
             let invented = matches!(
-                key.to_string_lossy().as_str(),
+                key_text.as_ref(),
                 "Fire" | "Air" | "Invulnerable" | "PortalCooldown" | "HasBeenShot"
-            );
+            ) && !live.contains(&key_text.as_ref());
             if !(invented && out.contains_key(key)) {
                 out.insert(key.clone(), value.clone());
             }
@@ -545,18 +565,20 @@ fn transformation_tag(
     scale: [f32; 3],
     right_rotation: [f32; 4],
 ) -> Tag {
-    let floats = |v: &[f32]| {
-        Tag::List(
-            v.iter()
-                .map(|x| Tag::Float(if *x == 0.0 { 0 } else { x.to_bits() }))
-                .collect(),
-        )
-    };
     let mut t = sunrise_core::nbt::Compound::new();
-    t.insert("translation".into(), floats(&translation));
-    t.insert("left_rotation".into(), floats(&left_rotation));
-    t.insert("scale".into(), floats(&scale));
-    t.insert("right_rotation".into(), floats(&right_rotation));
+    t.insert(
+        "translation".into(),
+        sunrise_client::save::floats(&translation),
+    );
+    t.insert(
+        "left_rotation".into(),
+        sunrise_client::save::floats(&left_rotation),
+    );
+    t.insert("scale".into(), sunrise_client::save::floats(&scale));
+    t.insert(
+        "right_rotation".into(),
+        sunrise_client::save::floats(&right_rotation),
+    );
     Tag::Compound(t)
 }
 
@@ -867,10 +889,19 @@ impl Game<'_> {
                     self.insert_fangs(
                         id,
                         [at.x, at.y, at.z],
-                        entity_nbt::rotation(&tag)[0],
+                        entity_nbt::loaded_rotation(&tag)[0],
                         delay,
                         owner,
                     );
+                    let last = self.fangs.list.len() - 1;
+                    let motion = entity_nbt::loaded_motion(&tag);
+                    let fire = entity_nbt::fire_ticks_from_nbt(&tag);
+                    let has_visual_fire = entity_nbt::flag(&tag, "HasVisualFire");
+                    self.fangs.list.update(last, |f| {
+                        f.motion = motion;
+                        f.fire_ticks = fire;
+                        f.has_visual_fire = has_visual_fire;
+                    });
                     let uuid = with_constructor_uuid(uuid);
                     self.remember(id, uuid, tag);
                 }
@@ -916,6 +947,9 @@ impl Game<'_> {
                 } else {
                     self.load_painting(tag, uuid, key);
                 }
+            }
+            "minecraft:lightning_bolt" => {
+                let _ = self.load_bolt(tag, None, false);
             }
             _ => return Err(tag),
         }
@@ -1069,6 +1103,7 @@ impl Game<'_> {
             if let Some(state) = transferred {
                 self.adopt_transferred_entity_state(d.id, state);
             }
+            let uuid = with_constructor_uuid(uuid);
             self.remember_tags(d.id, &tag);
             self.remember_uuid(d.id, uuid, &tag);
             d.join = sunrise_client::join_seq::JoinSeq::next();
@@ -1097,8 +1132,7 @@ impl Game<'_> {
             if let Some(state) = transferred {
                 self.adopt_transferred_entity_state(c.id, state);
             }
-            self.remember_tags(c.id, &tag);
-            self.remember_uuid(c.id, uuid, &tag);
+            self.remember(c.id, uuid, tag);
             self.crystals.push(c);
         }
     }
@@ -1175,6 +1209,7 @@ impl Game<'_> {
                 pos,
                 facing,
                 variant: v.id,
+                asset: None,
                 width: v.width,
                 height: v.height,
                 check_interval: 0,
@@ -1218,6 +1253,7 @@ impl Game<'_> {
     fn loads_as_passenger(&self, kind: &str) -> bool {
         self.res.mob_types().contains_key(kind)
             || super::general::general_type_catalog().slot(kind).is_some()
+            || kind == "minecraft:lightning_bolt"
     }
 
     /// Install each supported passenger in list order. Raw records for an unavailable
@@ -1231,6 +1267,8 @@ impl Game<'_> {
                 {
                     mob.extra.rider.get_or_insert(id);
                 }
+            } else if entity_nbt::kind(&rider).as_deref() == Some("minecraft:lightning_bolt") {
+                let _ = self.load_bolt(rider, Some(vehicle), false);
             } else if self
                 .load_general_passenger(&rider, Some(vehicle), None)
                 .is_err()
@@ -1250,13 +1288,21 @@ impl Game<'_> {
     /// The UUIDs `spawn_entity_from_nbt` would add for `tag`, in
     /// `Entity.getSelfAndPassengers` order: the root's, then those of the
     /// riders its loader takes, read as the loaders read them (a malformed
-    /// UUID is none). Passengers the loaders keep unloaded have none here.
+    /// UUID is none). Passengers the loaders keep unloaded or that cannot
+    /// attach to a non-serializable vehicle have none here.
     pub(in crate::game) fn summon_tree_uuids(&self, tag: &Tag) -> Vec<[i32; 4]> {
-        let mut uuids: Vec<[i32; 4]> = entity_nbt::uuid(tag).into_iter().collect();
+        let mut uuids: Vec<[i32; 4]> = entity_nbt::entity_uuid(tag).into_iter().collect();
         let kind = entity_nbt::kind(tag).unwrap_or_default();
-        if (!UNLISTED_KINDS.contains(&kind.as_str()) && self.listed_kind_takes_riders(&kind))
+        let takes_riders = ((!UNLISTED_KINDS.contains(&kind.as_str())
+            && self.listed_kind_takes_riders(&kind))
+            || kind == "minecraft:armor_stand"
             || super::general::general_type_catalog().slot(&kind).is_some()
-        {
+            || (!UNLISTED_KINDS.contains(&kind.as_str())
+                && !self.listed_kind_takes_riders(&kind)
+                && Self::other_takes_passengers(&kind)))
+            && super::seats::could_accept_passenger(&kind)
+            && super::seats::saves_with_chunk(&kind);
+        if takes_riders {
             self.rider_uuids(tag, &mut uuids);
         }
         uuids
@@ -1267,8 +1313,13 @@ impl Game<'_> {
                 .iter()
                 .filter(|p| entity_nbt::kind(p).is_some_and(|kind| self.loads_as_passenger(&kind)))
             {
-                uuids.extend(entity_nbt::uuid(p));
-                self.rider_uuids(p, uuids);
+                uuids.extend(entity_nbt::entity_uuid(p));
+                let p_kind = entity_nbt::kind(p).unwrap_or_default();
+                if super::seats::could_accept_passenger(&p_kind)
+                    && super::seats::saves_with_chunk(&p_kind)
+                {
+                    self.rider_uuids(p, uuids);
+                }
             }
         }
     }
@@ -1362,9 +1413,10 @@ impl Game<'_> {
         vehicle_tree(root, &mounts)
     }
 
-    /// Read an unsimulated entity without assigning it a new identity.
+    /// Read an unsimulated entity without assigning it a new identity; an eye
+    /// of ender's `Item` is normalised in `tag`, which is what it saves.
     pub(super) fn other_from_nbt(
-        tag: &Tag,
+        tag: &mut Tag,
         id: u32,
         kind: &str,
     ) -> Option<super::commands::OtherEntity> {
@@ -1383,6 +1435,7 @@ impl Game<'_> {
             .then(|| super::interactions::InteractionState::from_tag(tag));
         let rotation = entity_nbt::rotation(tag);
         Some(super::commands::OtherEntity {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             join: Default::default(),
             id,
@@ -1393,8 +1446,7 @@ impl Game<'_> {
             item_transformation,
             interaction,
             knot_check,
-            eye: (kind == "minecraft:eye_of_ender")
-                .then(|| super::end::SummonedEye::load(&mut tag.clone())),
+            eye: (kind == "minecraft:eye_of_ender").then(|| super::end::SummonedEye::load(tag)),
         })
     }
 
@@ -1412,7 +1464,7 @@ impl Game<'_> {
         let quarantined = super::general::quarantined_kind(kind).then(|| tag.clone());
         strip_finalize(&mut tag);
         let id = self.next_entity + 1;
-        let other = Self::other_from_nbt(&tag, id, kind)?;
+        let other = Self::other_from_nbt(&mut tag, id, kind)?;
         let riders = if quarantined.is_none() && Self::other_takes_passengers(kind) {
             self.take_passengers(&mut tag)
         } else {
@@ -1494,18 +1546,11 @@ impl Game<'_> {
             }
             c.insert(
                 "Pos".into(),
-                Tag::List(
-                    [o.position.x, o.position.y, o.position.z]
-                        .map(|v| Tag::Double(v.to_bits()))
-                        .to_vec(),
-                ),
+                sunrise_client::save::doubles(&[o.position.x, o.position.y, o.position.z]),
             );
             c.insert(
                 "Rotation".into(),
-                Tag::List(vec![
-                    Tag::Float(o.yaw.to_bits()),
-                    Tag::Float(o.pitch.to_bits()),
-                ]),
+                sunrise_client::save::floats(&[o.yaw, o.pitch]),
             );
             c.insert("UUID".into(), Tag::IntArray(uuid.to_vec()));
         }
@@ -1526,9 +1571,9 @@ impl Game<'_> {
             let m = eye.motion;
             c.insert(
                 "Motion".into(),
-                Tag::List([m.x, m.y, m.z].map(|v| Tag::Double(v.to_bits())).to_vec()),
+                sunrise_client::save::doubles(&[m.x, m.y, m.z]),
             );
-            c.entry("Fire".into()).or_insert(Tag::Short(0));
+            c.insert("Fire".into(), Tag::Short(eye.fire_ticks as i16));
         }
         // LeashFenceKnotEntity and EyeOfEnder still use the common fields
         // of Entity.saveWithoutId, which their own saves leave out.
@@ -1593,12 +1638,14 @@ impl Game<'_> {
             self.cart_object(root)?
                 .to_nbt(uuid, self.persist.raw.get(&root), self.res.items())
         } else if let Some(stand) = self.armor_stands.iter().find(|a| a.id == root) {
-            entity_nbt::armor_stand_to_nbt(
+            let mut tag = entity_nbt::armor_stand_to_nbt(
                 stand,
                 uuid,
                 self.persist.raw.get(&root),
                 self.res.items(),
-            )
+            );
+            self.save_portal_cooldown(root, &mut tag);
+            tag
         } else {
             let other = self
                 .others
@@ -1780,10 +1827,11 @@ impl Game<'_> {
     pub(super) fn mob_own_nbt(&mut self, i: usize) -> Tag {
         self.mob_object_nbt(MobObject::Resident(i))
     }
-    /// Forget an entity that left the world (its UUID and loaded compound).
+    /// Forget the records of an entity that left the world.
     pub(super) fn forget_entity(&mut self, id: u32) {
         self.persist.transient.remove(&id);
         self.persist.uuids.remove(&id);
+        self.last_hurt_by_player.remove(&id);
         self.persist.score_destroyed.remove(&id);
         self.forget_entity_initialization(mod_api::Holder::Entity(id));
         self.entity_attachments.remove(&id);
@@ -1809,15 +1857,21 @@ impl Game<'_> {
     /// burning (`EndCrystal.tick`): the loaded `Fire` is reset to
     /// `-getFireImmuneTicks()`, which is 0.
     pub(super) fn clear_crystal_fire(&mut self) {
-        for c in &self.crystals {
-            let key = anon_key("minecraft:end_crystal", c.position);
-            if let Some((_, Tag::Compound(raw))) = self.persist.anon.get_mut(&key)
-                && let Some(fire) = raw.get_mut(&"Fire".into())
-            {
-                *fire = Tag::Short(0);
-            }
+        for crystal in &mut self.crystals {
+            crystal.fire = 0;
         }
     }
+
+    pub(super) fn crystal_nbt(&self, crystal: &super::dragon::Crystal) -> Tag {
+        let uuid = saved_uuid(&self.persist, crystal.id);
+        let raw = self
+            .persist
+            .raw
+            .get(&crystal.id)
+            .or_else(|| self.persist_anon("minecraft:end_crystal", crystal.position));
+        crystal.to_nbt(uuid, raw)
+    }
+
     /// The compound an entity was loaded with (and commands have edited).
     pub(super) fn persist_raw(&self, id: u32) -> Option<&Tag> {
         self.persist.raw.get(&id)
@@ -1844,7 +1898,9 @@ impl Game<'_> {
             "CustomName",
             "CustomNameVisible",
         ] {
-            if let Some(v) = tag.get(key) {
+            if let Some(v) = tag.get(key)
+                && (key != "CustomName" || entity_nbt::valid_custom_name_tag(v))
+            {
                 map.insert(key.into(), v.clone());
             }
         }
@@ -1871,13 +1927,14 @@ impl Game<'_> {
             self.remember_tags(id, tag);
         }
     }
-    fn remember(&mut self, id: u32, uuid: Option<[i32; 4]>, mut tag: Tag) {
+    pub(super) fn remember(&mut self, id: u32, uuid: Option<[i32; 4]>, mut tag: Tag) {
         self.restore_portal_cooldown(id, &tag);
         self.remember_uuid(id, uuid, &tag);
         // `Team` is read, never written: the team keeps its members itself.
         if let Tag::Compound(c) = &mut tag {
             c.remove(&"Team".into());
         }
+        entity_nbt::sanitize_custom_name(&mut tag);
         self.persist.raw.insert(id, tag);
     }
     /// The UUID entity `id` was loaded with, and the attachments `tag` saved under it.
@@ -1896,7 +1953,7 @@ impl Game<'_> {
         self.load_saved_collider(id, tag);
         self.join_saved_team(id, tag);
     }
-    fn join_saved_team(&mut self, id: u32, tag: &Tag) {
+    pub(in crate::game) fn join_saved_team(&mut self, id: u32, tag: &Tag) {
         if tag.get("Team").is_some() {
             let name = uuid_text(self.uuid_for(id));
             join_saved_team(&mut self.score.board, &name, tag);
@@ -2021,9 +2078,7 @@ impl Game<'_> {
         }
         for c in &self.crystals {
             if include(c.id, c.position) {
-                let raw = anon_raw(&self.persist, "minecraft:end_crystal", c.position);
-                let uuid = saved_uuid(&self.persist, c.id);
-                let mut tag = with_raw(c.to_nbt(uuid, raw.as_ref()), self.persist.raw.get(&c.id));
+                let mut tag = self.crystal_nbt(c);
                 write_attachments(&mut tag, c.id, &self.entity_attachments);
                 roots
                     .entry(chunk_of(c.position))
@@ -2038,6 +2093,7 @@ impl Game<'_> {
                     &s.item,
                     at,
                     s.spawn_item_after,
+                    s.fire_ticks,
                     self.persist.uuids.get(&s.id).copied().unwrap_or(s.uuid),
                     s.raw.as_deref(),
                     self.res.items(),
@@ -2230,6 +2286,15 @@ impl Game<'_> {
             self.score.board.entity_removed(&uuid_text(*uuid));
         }
     }
+    /// `ServerLevel.EntityCallbacks.onDestroyed` → `Scoreboard.entityRemoved`
+    /// for a non-player entity removed immediately (such as `Entity.kill`),
+    /// using its captured UUID so paths that call `forget_entity` still clear
+    /// its scores and team.
+    pub(super) fn score_destroyed_entity_once(&mut self, id: u32, uuid: [i32; 4]) {
+        if self.persist.score_destroyed.insert(id) {
+            self.score.board.entity_removed(&uuid_text(uuid));
+        }
+    }
 
     /// `ServerLevel.EntityCallbacks.onDestroyed` → `Scoreboard.entityRemoved`
     /// for every kind of entity: a mob's body once it is removed, an item
@@ -2324,7 +2389,7 @@ impl Game<'_> {
     }
 
     /// A loaded projectile's `Owner`: living hit credit and vehicle collision identity.
-    fn claim_owner(&self, p: &mut sunrise_client::projectiles::Projectile) {
+    pub(in crate::game) fn claim_owner(&self, p: &mut sunrise_client::projectiles::Projectile) {
         let Some(uuid) = p.owner_uuid else {
             return;
         };
@@ -2415,10 +2480,13 @@ impl Game<'_> {
         keys.contains(&chunk_of(o.position)).then(|| {
             let raw = anon_raw(&self.persist, "minecraft:experience_orb", o.position);
             let uuid = saved_uuid(&self.persist, o.id);
-            let tag = with_raw(
-                with_raw(entity_nbt::orb_to_nbt(o, uuid), raw.as_ref()),
+            // Entity.saveWithoutId: the live fire, air and portal cooldown.
+            let mut tag = with_raw_over(
+                with_raw_over(entity_nbt::orb_to_nbt(o, uuid), raw.as_ref(), ORB_LIVE),
                 self.persist.raw.get(&o.id),
+                ORB_LIVE,
             );
+            self.save_portal_cooldown(o.id, &mut tag);
             (chunk_of(o.position), tag)
         })
     }
@@ -2441,7 +2509,12 @@ impl Game<'_> {
             _ => None,
         };
         let owner = p.owner_uuid;
-        let raw = anon_raw(&self.persist, p.kind.id(), p.position);
+        // Throwables own their typed Item and use id-keyed memory, never a position-keyed entry.
+        let raw = if p.kind.is_throwable_item() {
+            self.persist.raw.get(&p.id).cloned()
+        } else {
+            anon_raw(&self.persist, p.kind.id(), p.position)
+        };
         let uuid = saved_uuid(&self.persist, p.id);
         let in_block = p
             .arrow
@@ -2459,12 +2532,18 @@ impl Game<'_> {
                 .or_else(|| {
                     entity_nbt::spit_or_bullet_to_nbt(p, uuid, owner, target, raw.as_ref())
                 })?;
-        // HasBeenShot is modeled for these projectiles. The generic raw
-        // overlay also serves entity types whose shot flag is still opaque.
+        // HasBeenShot and Fire are modeled for these projectiles. The generic raw
+        // overlay also serves entity types whose fields are still opaque.
         let shot = tag.get("HasBeenShot").cloned();
+        let fire = tag.get("Fire").cloned();
         let mut tag = with_raw(tag, self.persist.raw.get(&p.id));
-        if let (Some(shot), Tag::Compound(map)) = (shot, &mut tag) {
-            map.insert("HasBeenShot".into(), shot);
+        if let Tag::Compound(map) = &mut tag {
+            if let Some(shot) = shot {
+                map.insert("HasBeenShot".into(), shot);
+            }
+            if let Some(fire) = fire {
+                map.insert("Fire".into(), fire);
+            }
         }
         self.save_projectile_portal_cooldown(p, &mut tag);
         Some((chunk_of(p.position), tag))
@@ -2498,7 +2577,7 @@ impl Game<'_> {
             f.drop_item,
             f.damage,
             f.fall_distance,
-            f.on_ground,
+            f.ground.on_ground,
             f.rotation,
             uuid,
         );
@@ -2596,6 +2675,7 @@ impl Game<'_> {
         let mut tag =
             entity_nbt::armor_stand_to_nbt(a, uuid, self.persist.raw.get(&id), self.res.items());
         self.put_passengers(&mut tag, id);
+        self.save_portal_cooldown(id, &mut tag);
         Some((key, tag))
     }
     /// The UUID kept for `id`, or a new one that is not remembered (what a
@@ -2615,6 +2695,10 @@ impl Game<'_> {
 impl sunrise_client::mobs::WhoLookup for Game<'_> {
     fn who_by_uuid(&self, uuid: [i32; 4]) -> Option<Who> {
         Game::who_by_uuid(self, uuid)
+    }
+
+    fn mob_uuid(&self, id: u32) -> Option<[i32; 4]> {
+        self.persist.uuids.get(&id).copied()
     }
 }
 
@@ -2729,7 +2813,7 @@ fn join_saved_team(board: &mut Scoreboard, name: &str, tag: &Tag) -> bool {
 
 #[cfg(test)]
 #[path = "persist/tests.rs"]
-mod tests;
+pub(in crate::game) mod tests;
 #[cfg(test)]
 mod interaction_saved_defaults_tests {
     use super::*;
@@ -4307,6 +4391,10 @@ mod invalid_passenger_tests {
 #[cfg(test)]
 #[path = "persist/summon_uuid_conflict_tests.rs"]
 mod summon_uuid_conflict_tests;
+
+#[cfg(test)]
+#[path = "persist/thrown_item_tests.rs"]
+pub(in crate::game) mod thrown_item_tests;
 
 #[cfg(test)]
 mod h262_enderman_absolute_anger_tests {

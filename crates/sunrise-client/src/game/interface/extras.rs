@@ -91,22 +91,20 @@ impl Game<'_> {
     pub(super) fn zoom_turn_scale(&self) -> f64 {
         self.zoom_now().2
     }
-    /// The PvP HUD widgets and mods' corner panels, in the HUD layer (hidden with F1
-    /// by the caller).
-    pub(super) fn draw_extras(&mut self, batch: &mut HudBatch) {
-        let mut corners = Corners::new(batch.width, batch.height, self.effect_rows_height());
-        self.draw_pvp_hud(batch, &mut corners);
-        self.native_render_gui_post(batch, &mut corners);
+    /// The PvP HUD widgets and the engine's extra corner panels. The caller hides
+    /// these with F1, and hands the remaining corner space to the whole-HUD Post hook.
+    pub(super) fn draw_extras(&mut self, batch: &mut HudBatch, corners: &mut Corners) {
+        self.draw_pvp_hud(batch, corners);
         // The layers crates registered (`sunrise_hooks::hud`): none, no canvas.
         let layers = sunrise_hooks::hud::engine::all();
         if !layers.is_empty() {
             let shown = Corner::ALL.map(|corner| !(self.debug && corner == Corner::TopLeft));
-            extras_hud::draw_layers(layers, batch, &self.gui.atlas, &mut corners, shown);
+            extras_hud::draw_layers(layers, batch, &self.gui.atlas, corners, shown);
         }
     }
     /// The height the status effect icons take at the top right
     /// (`Hud.extractEffects`: beneficial at y 1, harmful at y 26).
-    fn effect_rows_height(&self) -> f32 {
+    pub(super) fn effect_rows_height(&self) -> f32 {
         let effects = &self.potions.effects.list;
         if effects.is_empty() || self.screen != Screen::Playing || self.pvp_effects_shown() {
             return 0.0;

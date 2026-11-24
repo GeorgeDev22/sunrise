@@ -4,7 +4,7 @@
 use super::Dim;
 use mod_api::{
     BlockCapabilityCache, CapabilityKey, Hooks, HostTransaction, ITEMS, ItemResource, Registrar,
-    ResourceHandler, ServerHost, Transaction,
+    ResourceHandler, ServerHost, TransactionContext,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -40,22 +40,22 @@ impl ResourceHandler<ItemResource> for Empty {
     fn insert_at(
         &self,
         _: &mut dyn ServerHost,
-        _: &Transaction,
+        _: &TransactionContext,
         _: usize,
         _: &ItemResource,
         _: u32,
-    ) -> u32 {
-        0
+    ) -> Result<u32, mod_api::TransactionError<mod_api::Overanswered>> {
+        Ok(0)
     }
     fn extract_at(
         &self,
         _: &mut dyn ServerHost,
-        _: &Transaction,
+        _: &TransactionContext,
         _: usize,
         _: &ItemResource,
         _: u32,
-    ) -> u32 {
-        0
+    ) -> Result<u32, mod_api::TransactionError<mod_api::Overanswered>> {
+        Ok(0)
     }
 }
 
@@ -64,17 +64,17 @@ struct CacheBench;
 impl Hooks for CacheBench {
     fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
         let kind = r.block_entity_type("holder").blocks(&[]).build();
-        r.block_entity_capability(&COUNTED, &kind, |_, _| {
+        r.block_entity_capability(&COUNTED, &kind, |_, _, _, _, offer| {
             ASKED.fetch_add(1, Ordering::Relaxed);
-            Some(Box::new(Empty(SLOTS.load(Ordering::Relaxed))))
+            offer.offer(|| Box::new(Empty(SLOTS.load(Ordering::Relaxed))));
         });
         // A block with no block entity, whose provider counts in the same way.
         let lodestone = r.block_key("minecraft:lodestone");
-        r.block_capability(&COUNTED, &lodestone, |_, _, _, entity| {
+        r.block_capability(&COUNTED, &lodestone, |_, _, _, entity, offer| {
             ASKED.fetch_add(1, Ordering::Relaxed);
-            entity
-                .is_none()
-                .then(|| Box::new(Empty(SLOTS.load(Ordering::Relaxed))) as _)
+            if entity.is_none() {
+                offer.offer(|| Box::new(Empty(SLOTS.load(Ordering::Relaxed))));
+            }
         });
     }
 }
@@ -417,7 +417,7 @@ fn moves_through_kept_handlers_conserve_every_item_when_some_abort() {
                 });
                 match result {
                     Ok(n) => moved += n,
-                    Err(n) if n > 0 => aborted += 1,
+                    Err(mod_api::TransactionError::Aborted(n)) if n > 0 => aborted += 1,
                     Err(_) => {}
                 }
                 assert_eq!(count(game), before, "round {round}");

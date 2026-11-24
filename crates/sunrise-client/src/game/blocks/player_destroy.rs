@@ -96,7 +96,7 @@ impl Game<'_> {
         // TripWireBlock.playerWillDestroy: shears disarm the string first (flags
         // 260), so taking it down does not trip the hook.
         if &*facts.name == "minecraft:tripwire"
-            && self.held().is_some_and(|s| &*s.item == "minecraft:shears")
+            && self.held_shears(super::item_abilities::ability::SHEARS_DISARM)
             && let Some(disarmed) = self.with_props(state, &[("disarmed", "true")])
         {
             let at = BlockPos::new(pos[0], pos[1], pos[2]);

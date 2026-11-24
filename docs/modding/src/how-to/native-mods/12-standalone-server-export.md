@@ -45,5 +45,15 @@ To inspect the running server, its authenticated
 `mods` lists loaded native and content package ids and versions in inventory order.
 `provenance` separately reports the configured program's build record, which may differ and is never
 used as an inventory fallback. A stopped or unreachable engine returns HTTP 409, not an empty list.
-The configuration handshake checks both-side mod IDs and versions; see [Multiplayer](11-multiplayer.md).
+The configuration handshake checks both-side mod IDs and versions (see [Multiplayer](#multiplayer) below).
 Native mods run unsandboxed: only build code you have read and trust.
+
+## Multiplayer
+
+- **Single player and LAN host:** the mods run in the host's game and its integrated server, so a server-side
+  hook applies to every player of the world.
+- **Joining a server:** client-side hooks run locally. The configuration handshake requires matching both-side mod IDs
+  and versions, and, for a mod whose package lists `[runtime]` files, a digest of their names and hashes; a refusal names
+  the missing, extra or different-version mods and the ones whose runtime files differ.
+- **Dedicated server:** native mods run in a standalone engine export built with `--server-output`, not in an
+  instance build (`--server-output` conflicts with `--instance` and needs an explicit mod `FOLDER`).

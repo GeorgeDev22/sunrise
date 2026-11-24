@@ -1,5 +1,5 @@
 //! Shared exception: dispatch infrastructure and cross-area fixture types/tests; no new hooks.
-use mod_api::mod_api::client::hud_layout::GuiDraw;
+use mod_api::mod_api::BlockEntityTypeKey;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use sunrise_core::game_mode::GameMode;
@@ -22,7 +22,11 @@ impl ItemStack {
     }
 }
 #[derive(Debug)]
-enum StackWriteError {}
+enum StackWriteError {
+    /// The engine's `CountExceeded { maximum }`, for a fixture validator to refuse an
+    /// overstacked edit with (the fixture never reads the maximum).
+    CountExceeded,
+}
 mod content {
     pub(super) mod crash {
         pub fn current_native_mod() -> Option<&'static str> {
@@ -41,9 +45,6 @@ mod content {
             _: super::super::BlockEntityTypeKey,
         ) -> Option<&'static str> {
             Some("test:counter")
-        }
-        pub(in crate::tests) fn entity_type_name(_: u32) -> Option<&'static str> {
-            Some("test:entity")
         }
         pub(in crate::tests) fn item_id(key: super::super::ItemKey<'_>) -> Option<&str> {
             Some(key.0)
@@ -65,8 +66,128 @@ enum Flow {
     Cancel,
 }
 trait Host {}
-trait ServerHost: Host {}
+trait ServerHost: Host {
+    fn transaction_refusal(
+        &mut self,
+    ) -> Option<item::transaction::TransactionError<core::convert::Infallible>> {
+        None
+    }
+}
 trait ClientHost: Host {}
+
+mod client {
+    pub(super) mod tooltip_components {
+        pub(in crate::tests) fn retain_gather_tooltip_payloads(
+            _: &'static str,
+            _: &[super::super::TooltipElement],
+        ) {
+        }
+        pub(in crate::tests) fn invoke_tooltip_image<P: ?Sized, R>(
+            part: &&P,
+            call: impl FnOnce(&P) -> Option<R>,
+        ) -> Option<R> {
+            let disabled = super::super::DISABLED_BLOCK_PART.get();
+            if disabled == Some(std::ptr::from_ref(*part).cast())
+                || super::super::runtime::poisoned(super::super::HookId::TooltipImage, "part")
+            {
+                return None;
+            }
+            super::super::runtime::invoke(
+                super::super::HookId::TooltipImage,
+                "tooltip_image",
+                "part",
+                || call(*part),
+            )
+            .flatten()
+        }
+    }
+}
+
+mod item {
+    pub(super) mod transaction {
+        use super::super::ServerHost;
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub(in crate::tests) enum TransactionError<E> {
+            Aborted(E),
+            Unavailable,
+            InvalidContext,
+            CommitRefused,
+        }
+
+        // The game exercises the actual journal; these fixtures have no world state.
+        pub(in crate::tests) trait HostTransaction {
+            fn transaction<T, E>(
+                &mut self,
+                call: impl FnOnce(&mut dyn ServerHost, &()) -> Result<T, E>,
+            ) -> Result<T, TransactionError<E>>;
+        }
+        impl HostTransaction for dyn ServerHost + '_ {
+            fn transaction<T, E>(
+                &mut self,
+                call: impl FnOnce(&mut dyn ServerHost, &()) -> Result<T, E>,
+            ) -> Result<T, TransactionError<E>> {
+                match self.transaction_refusal() {
+                    None => call(self, &()).map_err(TransactionError::Aborted),
+                    Some(TransactionError::Unavailable) => Err(TransactionError::Unavailable),
+                    Some(TransactionError::InvalidContext) => Err(TransactionError::InvalidContext),
+                    Some(TransactionError::CommitRefused) => {
+                        call(self, &()).map_err(TransactionError::Aborted)?;
+                        Err(TransactionError::CommitRefused)
+                    }
+                    Some(TransactionError::Aborted(never)) => match never {},
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn transaction_fixture_distinguishes_admission_and_settlement_refusal() {
+    use core::convert::Infallible;
+    use item::transaction::{HostTransaction, TransactionError};
+
+    struct RefusingHost(Option<TransactionError<Infallible>>);
+    impl Host for RefusingHost {}
+    impl ServerHost for RefusingHost {
+        fn transaction_refusal(&mut self) -> Option<TransactionError<Infallible>> {
+            self.0.take()
+        }
+    }
+
+    for (refusal, ran) in [
+        (TransactionError::Unavailable, false),
+        (TransactionError::InvalidContext, false),
+        (TransactionError::CommitRefused, true),
+    ] {
+        let mut host = RefusingHost(Some(refusal));
+        let mut called = false;
+        let result = (&mut host as &mut dyn ServerHost).transaction(|_, _| {
+            called = true;
+            Ok::<_, Infallible>(())
+        });
+        assert_eq!(result, Err(refusal));
+        assert_eq!(called, ran);
+    }
+}
+
+/// Owner, hook and field for one generated dispatch refusal.
+type OutputRefusal = (&'static str, &'static str, &'static str);
+thread_local! {
+    static OUTPUT_REFUSALS: std::cell::RefCell<Option<Vec<OutputRefusal>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn capture_output_refusals(call: impl FnOnce()) -> Vec<OutputRefusal> {
+    struct Restore(Option<Vec<OutputRefusal>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OUTPUT_REFUSALS.replace(self.0.take());
+        }
+    }
+    let _restore = Restore(OUTPUT_REFUSALS.replace(Some(Vec::new())));
+    call();
+    OUTPUT_REFUSALS.take().unwrap()
+}
 trait WorldDrawContext {}
 trait DrawContext {
     fn mark(&mut self, value: u32);
@@ -109,6 +230,18 @@ impl LevelSide<'_> {
         }
     }
 }
+enum LevelRandomSide<'a> {
+    Server(&'a mut dyn LevelRandomHost),
+    Client(&'a dyn LevelHost),
+}
+impl LevelRandomSide<'_> {
+    fn reborrow(&mut self) -> LevelRandomSide<'_> {
+        match self {
+            Self::Server(host) => LevelRandomSide::Server(&mut **host),
+            Self::Client(host) => LevelRandomSide::Client(*host),
+        }
+    }
+}
 struct TestHost;
 struct TestLevel;
 impl LevelHost for TestLevel {}
@@ -117,6 +250,20 @@ impl HitHost for TestLevel {}
 impl Host for TestHost {}
 impl ServerHost for TestHost {}
 impl ClientHost for TestHost {}
+
+#[test]
+fn level_random_dispatch_reborrows_the_active_side() {
+    let mut host = TestLevel;
+    assert!(matches!(
+        LevelRandomSide::Server(&mut host).reborrow(),
+        LevelRandomSide::Server(_)
+    ));
+    assert!(matches!(
+        LevelRandomSide::Client(&host).reborrow(),
+        LevelRandomSide::Client(_)
+    ));
+}
+
 #[allow(dead_code)]
 mod generated {
     pub(super) mod mod_api {
@@ -127,11 +274,11 @@ mod generated {
             pub id: String,
         }
         pub(super) use super::super::ItemStack;
-        // The generated standalone-model dispatch builds the stub `Answered` and names the type through this path.
+        // Generated registration dispatch builds the stub `Answered` through this path.
         pub(super) use super::super::Answered;
         pub(super) use super::super::{
-            Command, Config, DeclarationError, Dispensed, Hand, InteractionResult, MapDecoration,
-            MapInfo, Screen, Zoom,
+            Command, CommandRegistration, Config, Dispensed, InteractionResult, MapDecoration,
+            MapInfo, Zoom,
         };
         #[derive(Clone)]
         pub struct FluidModel;
@@ -141,9 +288,8 @@ mod generated {
     }
     include!(concat!(env!("OUT_DIR"), "/mod_api_generated.rs"));
     pub(super) use self::mod_api::InlineImageReplacement;
-    pub(super) use self::mod_api::{
-        BlockEntityTickReply, BlockFace, BlockKey, BlockState, CrosshairTarget,
-    };
+    use self::mod_api::StandaloneModelRegistration;
+    pub(super) use self::mod_api::{BlockFace, BlockKey, BlockState, CrosshairTarget};
     pub use sunrise_mod_api_macros::__subscriptions;
 }
 use generated::*;
@@ -188,23 +334,20 @@ fn receives_cancelled(hook: HookId) -> bool {
     MODS.get()
         .is_some_and(|installed| installed.subscribers.receives_cancelled(hook as usize))
 }
-fn entered(hook_id: HookId, hook: &'static str) -> impl Iterator<Item = &'static dyn Hooks> {
-    entered_with_id(hook_id, hook).map(|(_, hooks)| hooks)
-}
 fn entered_with_id(
     hook_id: HookId,
     hook: &'static str,
 ) -> impl Iterator<Item = (&'static str, &'static dyn Hooks)> {
-    listening(hook_id).map(move |(_, entry)| {
-        let ((), hooks) = enter_listener(entry, hook);
-        (entry.id, hooks)
-    })
+    runtime::entered_with_id_matching(hook_id, hook, |_| true)
 }
 fn listening(hook_id: HookId) -> impl Iterator<Item = (bool, &'static ModEntry)> {
     MODS.get().into_iter().flat_map(move |installed| {
         installed
             .subscribers
             .subscribers(hook_id as usize)
+            .filter(move |subscriber| {
+                !runtime::poisoned(hook_id, installed.mods[subscriber.index].id)
+            })
             .map(move |subscriber| {
                 (
                     subscriber.receives_cancelled,
@@ -333,7 +476,7 @@ impl Parts {
     fn menu<'k>(&self, _: impl FnOnce() -> Option<&'k str>) -> &[&'static dyn MenuPart] {
         &self.menus
     }
-    fn menu_screen(&self, _: &str, _: Option<&str>) -> &[&'static dyn MenuPart] {
+    fn menu_for_opener(&self, _: &str, _: Option<&str>) -> &[&'static dyn MenuPart] {
         &self.menus
     }
     fn fluid<'k>(&self, _: impl FnOnce() -> Option<&'k str>) -> &[&'static dyn FluidPart] {
@@ -365,14 +508,19 @@ fn any_mod_disabled() -> bool {
     DISABLED_BLOCK_PART.get().is_some()
 }
 fn entered_parts<'a, P: ?Sized>(
+    hook_id: HookId,
     parts: &'a [&'a P],
     _: &'static str,
-) -> impl Iterator<Item = &'a P> {
+) -> impl Iterator<Item = (&'static str, &'a P)> {
     let disabled = DISABLED_BLOCK_PART.get();
     parts
         .iter()
         .copied()
-        .filter(move |part| disabled != Some(std::ptr::from_ref(*part).cast()))
+        .filter(move |part| {
+            disabled != Some(std::ptr::from_ref(*part).cast())
+                && !runtime::poisoned(hook_id, "part")
+        })
+        .map(|part| ("part", part))
 }
 
 #[test]
@@ -384,7 +532,7 @@ fn a_disabled_owner_answers_only_at_its_dispatch_position() {
         }
         fn use_without_item(
             &self,
-            _: &mut dyn ServerHost,
+            _: HostSide<'_>,
             _: &mut UseWithoutItemEvent<'_>,
         ) -> Option<InteractionResult> {
             self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -410,7 +558,7 @@ fn a_disabled_owner_answers_only_at_its_dispatch_position() {
         });
         let mut answer = None;
         dispatch_use_without_item(
-            &mut TestHost,
+            HostSide::Server(&mut TestHost),
             BlockState::new(BlockKey::Test, 0),
             &BlockClick(&()),
             &mut answer,
@@ -576,16 +724,21 @@ impl MenuPart for Mod {
     fn menu_subscribed(&self) -> &'static [Option<HookId>] {
         &[]
     }
-    fn menu_button(&self, _: &mut dyn ServerHost, event: &mut MenuButtonEvent<'_>) {
+    fn menu_button(&self, event: &mut MenuButtonEvent<'_>) {
         assert_eq!(event.context.player, 123);
         assert_eq!(event.context.player_entity_id, 42);
         assert_eq!(event.context.id, 9);
-        if let Some(entity) = event.entity.as_mut() {
-            assert_eq!(event.context.pos, Some([1, 2, 3]));
-            assert_eq!(entity.id(), "machine");
-            entity.data.push(9);
-        } else {
-            assert_eq!(event.context.pos, None);
+        let pos = event.context.pos;
+        if event
+            .subject
+            .with_view(|entity| {
+                assert_eq!(pos, Some([1, 2, 3]));
+                assert_eq!(entity.id(), "machine");
+                entity.data.push(9);
+            })
+            .is_none()
+        {
+            assert_eq!(pos, None);
         }
         *event.carried = Some(ItemStack {
             item: "bucket".into(),
@@ -597,8 +750,9 @@ impl MenuPart for Mod {
         let context = event.context;
         assert_eq!((context.player, context.pos), (Some(7), Some([1, 2, 3])));
         assert_eq!(event.container, MenuContainer::Grid);
-        assert_eq!(context.slots.len(), 2);
-        assert!(context.slots[1][0].is_none() && context.slots[1][1].is_some());
+        assert!(context.slot(MenuContainer::Grid, 0).is_none());
+        let stack = context.slot(MenuContainer::Grid, 1).unwrap();
+        assert_eq!((stack.item.as_ref(), stack.count), ("planks", 4));
         event.may_place = false;
         event.max_stack = self.id;
     }
@@ -607,11 +761,7 @@ impl EntityPart for Mod {
     fn entity_subscribed(&self) -> &'static [Option<HookId>] {
         &[]
     }
-    fn general_entity_tick(
-        &self,
-        _host: &mut dyn ServerHost,
-        event: &mut GeneralEntityTickEvent<'_>,
-    ) {
+    fn general_entity_tick(&self, event: &mut GeneralEntityTickEvent<'_>) {
         assert_eq!(event.kind, "mymod:robot");
         self.calls.lock().unwrap().push(self.id);
     }
@@ -688,7 +838,7 @@ impl Hooks for Mod {
         _: &mut dyn HitHost,
         event: &mut LivingIncomingDamageEvent<'_>,
     ) -> Flow {
-        event.container.0 = event.container.0 * 2.0 + self.id as f32;
+        *event.container.0 = *event.container.0 * 2.0 + self.id as f32;
         if self.id == 2 {
             Flow::Cancel
         } else {
@@ -705,5 +855,22 @@ fn part(id: u32, calls: &Arc<Mutex<Vec<u32>>>) -> &'static Mod {
 
 mod stubs {
     pub(super) use super::generated::mod_api::LivingRef;
-    pub(super) use crate::tests::mod_api::mod_api::{BlockEntityTickReply, DamageContainer};
+    pub(super) use crate::tests::mod_api::mod_api::DamageContainer;
+}
+mod crate_root {
+    // Dispatch fixtures isolate ordering; the vocabulary's own tests cover what the client
+    // validators refuse. One module for every client hook's validator.
+    mod client {
+        pub(crate) mod render_pipeline {
+            pub(crate) fn validate_render_pipelines<T>(_: &str, _: &[T], _: &mut Vec<T>) {}
+        }
+        pub(crate) mod hud_layout {
+            pub(crate) fn validate_hotbar_attack_indicator_progress(
+                _: &f32,
+                _: &f32,
+            ) -> Result<(), &'static str> {
+                Ok(())
+            }
+        }
+    }
 }

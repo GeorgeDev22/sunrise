@@ -30,6 +30,36 @@ The selection affects the third-person avatar and its skin layers, first-person
 arms, and inventory and creative previews. It does not change the cape, tab
 list, or anyone else's view.
 
+To animate the avatar's arm separately from the item, use `RenderHandEvent`'s
+`HandDrawContext`. It starts in first-person view space under the hand sway,
+before the normal equip and swing transforms. `MainHand` here selects a
+physical arm; the callback's `Hand` selects a logical slot.
+
+```rust,ignore
+fn render_hand(&self, host: &dyn ClientHost, event: &mut RenderHandEvent<'_, '_>) -> Flow {
+    if event.render.hand != Hand::Main {
+        return Flow::Continue;
+    }
+    let side = if host.gui_options().main_hand_left { MainHand::Left } else { MainHand::Right };
+    let draw = &mut *event.draw;
+    draw.push();
+    draw.translate([0.3, -0.5, -0.7]);
+    draw.render_arm(side);
+    draw.pop();
+    if let Some(stack) = event.render.stack {
+        draw.push();
+        draw.translate([0.2, -0.3, -0.7]);
+        draw.item(stack, ItemDisplayContext::Fixed, None, 0);
+        draw.pop();
+    }
+    Flow::Cancel // replace this hand's default; Continue would add to it
+}
+```
+
+The arm uses the frame's selected skin and width, that side's sleeve setting,
+and the draw context's fixed light. Explicit draws do not fire `render_arm`.
+Cancelling defaults leaves these draws and the other hand intact.
+
 ## Third-person held items
 
 Attach an `ItemPart` with `Registrar::item_part` (or `item_part_tag`) to tint an
@@ -60,10 +90,31 @@ frames or dropped items. Keep the handler fast: it can run once for each held
 stack submitted during a frame. Rendering is not a source of combat state; see
 [Syncing remote item cooldowns](networking.md#syncing-remote-item-cooldowns).
 
+## Entity model layers
+
+At client startup, implement `Hooks::register_layer_definitions` and call
+`event.register("mymod:golem#main", create_golem_layer)`, where `create_golem_layer`
+returns a `LayerDefinition` built from a `MeshDefinition` and the texture size.
+The supplier is `Fn() -> LayerDefinition + Send + Sync + 'static`: capture owned
+inputs, not the event or its registration context. Use a `<namespace>:<path>#<layer>`
+ID matching vanilla's `ModelLayerLocation`. Include both separators even when a
+component is empty. Namespace and path follow vanilla's `Identifier` rules, and the
+layer can be any string. An exact collision with a vanilla layer key in
+`entity-models.json` fails client startup.
+
+When multiple registrations share an ID, the last registration wins and overwritten
+suppliers never run. The game calls each winning supplier once when it freezes the
+layer table, in registration order. The frozen table retains the definitions, not the
+suppliers. Call `ClientHost::bake_layer("mymod:golem#main")` during renderer setup,
+then keep the resulting `ModelPart` tree for posing and drawing. Baking again and
+reloading resources reuse the definition.
+
 ## Worn humanoid equipment
 
 An item attaches one `ClientItemExtensions` Part in
-`Hooks::register_client_item_extensions`, on the client at every resource load.
+`Hooks::register_client_item_extensions`, on the client at every resource load before any
+reload listener applies. The validated bindings are installed with the new models. A panic discards
+that mod's registration batch and disables its registration callback for the rest of the session.
 The event's `extensions: &mut dyn ClientItemExtensionsRegistrar` registers the
 models, textures and item providers together. There is no startup provider
 registration path: request your `ItemKey` during ordinary registration, then
@@ -86,7 +137,12 @@ Model names belong to a namespace owned by the registering mod (its manifest
 namespaces or a content package it serves via `served_by`). Duplicate model names,
 non-finite geometry or poses, an unknown texture, an unknown item and two
 providers for one item refuse the resource-load registration by name. A duplicate
-item diagnostic names both providers. Disabling the owning mod stops its Part.
+item diagnostic names both providers. A completed callback's registration error
+still refuses preparation even if it ignored the returned error. A
+[failed registration callback](../../concepts/load-phases.md#registration-and-setup)
+loses only its own models, textures and providers;
+other callbacks can still register. Do not keep model or texture references
+from a discarded registration. Disabling the owning mod stops its Part.
 A server-only package cannot declare this client registration hook.
 
 The worn stack must first pass the equippable component's asset and matching-slot
@@ -122,46 +178,58 @@ discards all of the piece's custom layers, draws the piece with vanilla behaviou
 and disables that provider until reload, with one diagnostic. A failure discards the custom drawing even if an earlier layer succeeded.
 Callbacks work with references and layer values, not geometry or rebakes.
 
-## Bake-time standalone forms
+## Standalone model bakers
 
-`standalone_models` contract version 2 keeps `event.models: &mut Vec<String>` for plain
-file ids and adds `event.forms: &mut Vec<StandaloneModelForm>`. Listeners receive `RegistrationContext`, not a runtime `Host`. Forms are attributed
-to the registering mod by dispatch:
+Implement `Hooks::standalone_models` on the client. It receives a `RegistrationContext`,
+not a runtime `Host`. Call `event.register_model(id)` to bake a file as-is. To build
+a result from one or more files, call `event.register(id, dependencies, baker)`:
 
 ```rust,ignore
-event.forms.push(StandaloneModelForm::Rotated {
-    id: "mymod:shaft_east".into(),
-    model: "mymod:block/shaft".into(),
-    turns: [0, 1, 0],
-    uvlock: true,
+event.register_model("mymod:block/shaft");
+
+event.register("mymod:shaft_east", ["mymod:block/shaft"], |bake| {
+    bake.append_dependency("mymod:block/shaft", [0, 1, 0], true)
 });
-event.forms.push(StandaloneModelForm::Combined {
-    id: "mymod:machine".into(),
-    parts: vec!["mymod:block/base".into(), "mymod:block/overlay".into()],
-});
+
+event.register(
+    "mymod:machine",
+    ["mymod:block/base", "mymod:block/overlay"],
+    |bake| {
+        bake.append_dependency("mymod:block/base", [0; 3], false)?;
+        bake.append_dependency("mymod:block/overlay", [0; 3], false)
+    },
+);
 ```
 
-`turns` are negative quarter-turn counts, modulo four, applied X then Y then Z
-about the block centre, exactly as blockstate baking. UV locking uses the inverse
-face transformation during baking; rotating a draw pose is not equivalent. For a
-Y quarter-turn a north wall becomes east but stays upright either way; a north-pointing
+The baker is `Send + Sync + 'static` and may run on a resource worker. Capture
+owned inputs, not the event or its registration context. The
+`StandaloneModelBakeContext` is borrowed only for that invocation and gives no
+`Host`. Return `Ok(())` to publish the assembly or
+`Err(StandaloneModelBakeError::Rejected(reason))` to leave it out.
+
+The quarter-turn counts are negative turns, modulo four, applied X then Y then Z
+about the block centre, exactly as in blockstate baking. UV locking uses the inverse
+face transformation during baking; rotating a draw pose is not equivalent. For a Y
+quarter-turn a north wall becomes east but stays upright either way; a north-pointing
 arrow on the top turns east without UV locking and retains its world orientation with it.
 
-Combined parts bake unturned in declaration order, retaining each part's positions,
-materials and quad metadata in one `ModelRef`. Their particle is the first available
-part particle and model-level ambient occlusion is enabled only if every part enables it.
-Dependencies, including parents and loader references, load through the normal model
-library; they are not implicitly registered as standalone results. If any dependency
-cannot load or bake, no part of that form is published and the warning names the
-registering mod, even when the result or source has a different namespace.
+Quads are appended in call order, retaining each part's positions, materials and quad
+metadata in one model. The particle is the first available part particle, and model-level
+ambient occlusion is enabled only if every appended part enables it. Declare all the model
+files the callback may append. Dependencies load through the normal model library; they are
+not automatically registered as results. As with blockstate and item models, a missing or rejected
+parent uses the missing model at that link, and the child's own geometry still wins. This also
+applies to files registered with `register_model`.
+An undeclared append, a missing or rejected declared file, a bake error or a refused callback
+discards the whole model and logs the registering mod. Ignoring an append error still discards it.
 
-Result ids follow the same rule as plain ids: a nonempty namespace and path are
-required; they need not equal the registering mod id. Plain ids win duplicate result
-ids, then the first successfully baked form wins. Registration runs once, but all
-forms rebake from current resources on every successful load. Resolve result ids in
-`model_baking_completed`; reload invalidates old handles and failed reloads retain them.
-This API bakes quads only, not a mod-defined baked result type.
-
+Result IDs and plain file IDs require a nonempty namespace and path, which need not equal
+the registering mod's ID. A successfully baked plain file wins over any baker for that ID;
+otherwise the first successful baker in registration order wins. Register once at
+startup; eligible bakers run against current files at each resource load. Registration
+does not expose earlier entries for editing. Resolve result IDs in
+`model_baking_completed`, after atlas publication and at the model manager's apply step before any listener ordered
+after it applies. Successful reloads invalidate old handles, while refused prepares retain them. The result is baked quads, not a mod-defined baked object.
 
 ## Colour, hidden faces and translucency of copies
 
@@ -226,6 +294,59 @@ draw.terrain_model(self.belt, options)?;
   `TerrainModelError::Refused` and nothing is drawn. That covers an unknown render type, a
   missing sprite, a pose that flattens the model, a ratio out of range, and a shift
   whose numbers aren't finite, whose sprites are unknown or whose source sprite no face uses.
+
+## Extra models in a block's mesh
+
+A block whose look depends on data a block state can't hold (a cable showing each side's
+channel count) gives the chunk mesher extra models to draw as part of it. On the client,
+`host.set_block_extra_models(pos, &models)` sets the resolved standalone models drawn at `pos`:
+
+```rust,ignore
+let parts = [self.core, self.side_counts[count]];
+host.set_block_extra_models(pos, &parts)?;
+```
+
+- The models are drawn after the block's own, unturned from its lower north-west corner (with its
+  offset), in its light and tints. Each quad keeps its render layer (solid, cut out,
+  translucent). A face with a cull direction is hidden by the neighbour there, as the block's
+  own faces are. On air they draw nothing.
+- A list replaces the position's last one; an empty list clears it. The section is meshed again
+  only when the list changes, so set it when the data changes, not each frame.
+- Native client mods set the list through the live client Host. `NotLoaded` means the position
+  is outside a resident column or the level height; `Model` means the handle is stale or is not a
+  registered standalone model. A refused call changes nothing.
+- After the block geometry, extra faces are drawn in block and list order. Drawing stops before
+  the next face whose worst-case expansion cannot fit the section's upload budget, so the last
+  model may be partially drawn.
+- The list is the client's own, never saved or sent. A resend of a resident column preserves
+  attachments at unchanged cells; unloading the column clears them. A block state or level
+  change also clears the affected lists. Set the list again from block entity data or the mod's
+  own client map, on `client_block_changed`, `client_chunk_load` or a payload. No block entity
+  is required.
+- Mod tint providers are asked before the mesh is scheduled, not by the attachment pass on the
+  worker. A provider that panics supplies white. A handle a resource reload made stale draws
+  nothing until you set the lists again from the new handles.
+
+The reload and setup contexts do not expose this setter. Resolve new handles in
+`client_resources_reloaded`, then set the lists again from a live client callback such as
+`client_tick_pre`:
+
+```rust,ignore
+fn client_resources_reloaded(&self, context: &dyn ClientReloadHost, _: &mut ClientResourcesReloadedEvent) {
+    let mut parts = self.parts.lock().unwrap();
+    parts.core = context.render_assets().model(&self.core_id).ok();
+    parts.reapply = true;
+}
+
+fn client_tick_pre(&self, host: &mut dyn ClientHost, _: &mut ClientTickPreEvent) {
+    let mut parts = self.parts.lock().unwrap();
+    if std::mem::take(&mut parts.reapply) {
+        for (&pos, cable) in &self.cables.lock().unwrap() {
+            let _ = host.set_block_extra_models(pos, &parts.models_for(cable));
+        }
+    }
+}
+```
 
 ## Persistent groups
 
@@ -306,14 +427,14 @@ draw.fluid_box(&tank.stack, [0.125, 0.0625, 0.125, 0.875, level, 0.875], options
 Each mob and player in view gets the render hook pair once a frame, NeoForge's
 `RenderLivingEvent` and `RenderPlayerEvent`:
 
-1. `render_player_pre(player, who, draw, hidden, canceled)`, for a player only (`who` is its
+1. `render_player_pre(player, who, draw, model, canceled)`, for a player only (`who` is its
    profile name and whether it is this window's own);
-2. `render_living_pre(entity, draw, hidden, canceled)`, before the entity's model;
+2. `render_living_pre(entity, draw, model, canceled)`, before the entity's model;
 3. the model and its vanilla layers, or in their place the renderer a mod registered for its type
    ([entity renderers](entity-renderers.md)), then the layers mods added to its type
    ([entity layers](entity-layers.md));
-4. `render_living_post(entity, parts, draw)`;
-5. `render_player_post(player, who, parts, draw)`, for a player only.
+4. `render_living_post(entity, model, draw)`;
+5. `render_player_post(player, who, model, draw)`, for a player only.
 
 This is the order within one entity. In the ordered body pass, the hooks run at each body's slot in
 level join order, interleaved with general entity renderer submissions. The local body is not
@@ -322,39 +443,58 @@ queries for mobs, players and dropped items also follow this pass's join order; 
 queried in a later pass. The ender dragon and end crystals draw at their slots without adding
 these hooks or outline queries.
 
-The order today: the model and the layers are drawn before the post hooks; the entity's name tag, leash, flames
-and shadow are drawn in the frame's later passes, after them. The reference draws the leash and the name tag
-before the post (and queues the flames and the shadow after it): tracked in #3915. A type with a registered
-renderer has the same order, the renderer in the model's place, so it changes with #3915 too.
+The model and layers draw before the post hooks. The entity's name tag, leash, flames and shadow draw
+in later passes of the same frame, after the post hooks. A post hook cannot see or replace the flames
+or shadow. A registered renderer draws in place of the model without changing the later passes.
 
 `draw` starts at the entity's feet, turned with its body (+z the way it faces, +x its left, +y up,
-in blocks), and keeps what each hook draws. Setting `canceled` in a pre hook skips everything else
-of that entity this frame: its model (or its type's registered renderer), its layers, its name tag,
-shadow, flames, leash and glowing outline, and the post hooks. A mod that draws one entity's model of
-its own draws it in `render_living_pre` and cancels; one that draws every entity of a type registers
-a renderer for the type instead; one that wants the name tag or the shadow then draws them itself, or doesn't cancel.
-Canceling only `render_living_pre` of a player still asks its `render_player_post`. An entity the
-frame culls gets neither hook. The game asks once a frame whether any mod listens to the four, and
-with none builds nothing for them.
+in blocks), and keeps what each hook draws. Setting `event.cancelled` in a Pre hook skips the
+entity's model (or its registered renderer), layers, name tag, leash and outline.
+The flames of a burning entity and its shadow aren't part of its drawing: the frame queues them
+after it, and a cancel leaves them. Canceling Player Pre skips all three remaining hooks.
+Canceling only Living Pre skips Living Post but still calls Player Post with `model: None`.
+A mod that replaces one entity's draw can submit its own model in Living Pre and cancel; to
+replace every entity of a type, register a renderer instead. A culled entity gets neither pair.
+The game checks once a frame whether any mod listens to the four hooks and builds nothing for
+them if no mod does.
 
-## A player's or humanoid's parts
+## Read the final body model
 
-`render_living_post` and `render_player_post` get a humanoid's parts as vanilla posed them this frame (`parts`,
-`HumanoidModel.setupAnim`), read-only, to attach geometry to an arm or the head without
-animating it again. Only `HumanoidMobRenderer`'s families have them (players, zombies and their
-kin, skeletons, piglins); every other mob gets `None`, a cow included, though its model has a
-head and a body. `PosedParts` is a fixed-size snapshot: `get(part)` or `iter()`. It is taken
-from the vanilla body's own draw, so a part `render_player_pre` hid (below) has `visible` false.
+A registered layer and both Post hooks get `Option<&dyn FrameModel>` for the callback. When
+present, it is the selected body's final pose after animation, with visibility after Skin
+Customization and Pre edits. It includes nonhumanoids, custom resource-pack models and a posed
+body that submitted only layers. `None` means no body pose was produced, for example when a
+registered replacement renderer drew instead.
 
-`render_player_pre` can hide single parts of the vanilla player model instead of replacing all of
-it: `hidden.hide(HumanoidPart::Head)`, as a mod drawing its own outer skin layer does.
-`render_living_pre` hides parts of any mob's vanilla model the same way, by their names in the model:
-`hidden.hide_named("nose")` leaves a villager's nose out, as a level of detail for a far crowd
-does. A frame holds at most `MAX_HIDDEN_PARTS` (8) names of at most `MAX_PART_NAME` (24) bytes;
-`hide_named` says `HideError::Full` or `HideError::BadName` past that. An unknown name refuses the draw at first use, reporting the mob type and part name.
-Typed humanoid parts have separate storage, so all twelve fit alongside the eight names.
+Use `model.part("head")` for the first exact depth-first name match, or start at `model.root()`
+and follow `first_child` and `next_sibling` with `model.part_at(index)` to walk the model. Names
+and links are resolved when the model is baked, but indices are local to this borrow: look up the
+part again on a later draw. A missing name or out-of-range index returns `None`. `part.pose()`
+gives a parent-relative `PartPose`: translation in texels, rotation in radians, and unitless scale.
+When attaching geometry, follow `parent` links and compose those transforms from the root down.
+Check `part.visible` to follow the body's visibility: it is false if the part or any ancestor is
+hidden. True permits traversal but doesn't guarantee any cubes were drawn.
 
-- Hiding happens after Skin Customization, for this frame only.
+## Hide parts before drawing
+
+`render_player_pre` and `render_living_pre` borrow the selected body as `event.model`, a
+`&mut dyn FrameModelEdit`. It has the same hierarchy lookups as [the final model](#read-the-final-body-model)
+but lends the bind pose, before animation and Skin Customization. Both Pre hooks share this
+view for the draw: Living Pre sees the hides made in Player Pre.
+
+Find a part by name (or follow the hierarchy) and pass its index to `hide`:
+
+```rust,ignore
+if let Some(index) = event.model.part("nose").map(|part| part.index) {
+    event.model.hide(index);
+}
+```
+
+This hides a villager's nose without replacing the model. Use `"head"` for the player's head or
+`part.model_name()` when starting from a `HumanoidPart`. A missing name returns `None`; an invalid
+index makes `hide` return `false` without changing anything. Neither refuses the draw.
+
+- The visibility edits apply after animation and Skin Customization, for this draw only.
 - A hidden part takes its children with it: the hat goes with the head, a sleeve with its arm.
 - The body loses the part, and so do the layers drawn on the body's own model, as vanilla's
   `getParentModel()` layers do: a villager's type, profession and level, a spider's eyes. The
@@ -365,8 +505,10 @@ Typed humanoid parts have separate storage, so all twelve fit alongside the eigh
 `BlockEntityDrawContext::text` draws a component under the current pose in font pixels,
 with its styles and the frame's light. Its RGB colour is opaque. Glowing text uses full
 light; `Some(0)` is a black outline, not an absent outline. `text` and `text_width`
-return the styled advance rounded up, as vanilla `Font.width` does. Use half that width
-to centre a line. Kept text retains its glyphs, including obfuscated glyph choices,
+report the styled advance, as vanilla `Font.width` does. Use half that width
+to centre a line. `text` returns `TextFormError` without drawing if the component
+has unrepresentable metadata; deep local text has no serialization depth cap.
+Kept text retains its glyphs, including obfuscated glyph choices,
 until it is drawn again. Resource reload invalidates kept geometry.
 
 Spinning parts use the client's animation clock: level-running texture ticks plus an
@@ -389,6 +531,13 @@ falls outside representable cell coordinates, the element uses its fixed light i
 Level-less scenes, previews and mob model frames also stay fixed. `light()` always reports the
 fixed setting; `set_light` returns subsequent draws to fixed light.
 
+For a hologram, a glowing display or a projected item, call `BlockEntityDrawContext::unlit(true)`:
+what `item`, `block`, `cube`, `quad`, `model` and `model_part` draw next skips directional face
+shading and draws at full-bright light whatever `set_light` or `level_light` say. The lightmap's
+top cell still applies, so night, `darkness` and coloured lights still tint it. An enchanted item
+keeps its glint. It lasts until `unlit(false)` or the end of the draw; `terrain_model` keeps its
+own shading option.
+
 ## Copycat faces
 
 Ask `block_sprites` for the material's side faces, then use each face's `texture` and
@@ -399,6 +548,7 @@ that cannot be represented by a rectangle; use another drawing route rather than
 substituting an upright texture.
 
 Multiply tinted faces by `block_tint_color(state, face.tint_index, pos)` at their world
-position. Untinted faces return `None`. Water faces use tint index 0 and the world's
-water colour, including resource-pack water colormaps; other water indices return
-`None`. This differs from `fluid_box`, whose colour comes from its fluid stack.
+position. Untinted faces return `None`. Both block and fluid faces use the mesher's current
+biome colours, including updates from `refresh_biome_colors`. Water faces use tint index 0
+and honour resource-pack water colormaps; other water indices return `None`. This differs
+from `fluid_box`, whose colour comes from its fluid stack.

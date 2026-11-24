@@ -94,6 +94,7 @@ fn every_ordinary_resident_family_binds_its_actual_owned_slot() {
         let id = game.ominous_spawners[0].id;
         bind(game, id, Kind::Spawner);
         summon!("area_effect_cloud", Cloud, breath_clouds);
+        summon!("lightning_bolt", Bolt, bolts);
         summon!("cushion", Cushion, cushions);
         let fence = [0, 70, 0];
         game.tie_knot(fence);
@@ -134,7 +135,7 @@ fn every_ordinary_resident_family_binds_its_actual_owned_slot() {
                 attachment_lifetime: Default::default(),
             });
         bind(game, 4242, Kind::General);
-        assert_eq!(maps.len(), 22);
-        assert_eq!(index.lock().unwrap().snapshot(&key).len(), 22);
+        assert_eq!(maps.len(), 23);
+        assert_eq!(index.lock().unwrap().snapshot(&key).len(), 23);
     });
 }

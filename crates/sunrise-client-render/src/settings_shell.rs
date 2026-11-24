@@ -1499,7 +1499,8 @@ pub(crate) trait Hosted {
         self.draw_contents(batch, atlas, cursor);
         phases(crate::screen_draw::RenderPhase::Foreground, batch);
     }
-    /// A press (or a drag with `drag`) at `at`.
+    /// Events a press (or drag with `drag`) produced, for widget tests.
+    #[cfg(test)]
     fn click(
         &mut self,
         s: &mut Settings,
@@ -1508,10 +1509,27 @@ pub(crate) trait Hosted {
         drag: bool,
         right: bool,
         shift: bool,
-    ) -> Vec<Output>;
-    /// Lets go of a slider or the scrollbar: for a slider (it plays its click), what its change
-    /// does now (`Screen::slider_released`).
-    fn release(&mut self) -> Option<Vec<Output>>;
+    ) -> Vec<Output> {
+        self.click_with_outcome(s, at, size, drag, right, shift).0
+    }
+    fn click_with_outcome(
+        &mut self,
+        s: &mut Settings,
+        at: (f32, f32),
+        size: (f32, f32),
+        drag: bool,
+        right: bool,
+        shift: bool,
+    ) -> (Vec<Output>, bool);
+    /// Drags an active slider or scrollbar; returns whether the shell took the drag and its outputs.
+    fn drag(&mut self, s: &mut Settings, at: (f32, f32), size: (f32, f32)) -> (bool, Vec<Output>);
+    /// Events a release produced, for widget tests.
+    #[cfg(test)]
+    fn release(&mut self) -> Option<Vec<Output>> {
+        self.release_with_outcome().0
+    }
+    /// Lets go of a slider or scrollbar; returns its events and whether it accepted the release.
+    fn release_with_outcome(&mut self) -> (Option<Vec<Output>>, bool);
     /// A controller's or the keyboard's focus is on the row at `rect`: if the list hides part of
     /// it, it scrolls all into view (`AbstractSelectionList.setSelected`). How far the row moved
     /// down, when it moved.
@@ -1523,7 +1541,7 @@ pub(crate) trait Hosted {
         size: (f32, f32),
         at: (f32, f32),
         amount: f32,
-    ) -> Vec<Output>;
+    ) -> (bool, Vec<Output>);
     /// The one way a list scrolls: the wheel, a right stick and a D-pad past the view's edge.
     fn scroll(&mut self, s: &Settings, size: (f32, f32), amount: f32);
     /// Typing in the search field, Tab and the arrows between controls, Left and Right on a
@@ -2442,7 +2460,7 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             foot_button(batch, atlas, rect, &label, cursor, flags, room);
         }
     }
-    fn click(
+    fn click_with_outcome(
         &mut self,
         s: &mut Settings,
         (x, y): (f32, f32),
@@ -2450,55 +2468,39 @@ impl<S: Screen + Default> Hosted for Shell<S> {
         drag: bool,
         right: bool,
         shift: bool,
-    ) -> Vec<Output> {
+    ) -> (Vec<Output>, bool) {
+        if drag {
+            let (handled, outputs) = self.drag(s, (x, y), size);
+            return (outputs, handled);
+        }
         self.keep(s);
         // A click of its own: the focus a page opened on is the mouse's now.
-        if !drag {
-            self.focus_opened = None;
-        }
+        self.focus_opened = None;
         let view = self.view(s, size);
         let cols = view.cols;
         let at = |[rx, ry, rw, rh]: [f32; 4]| ui::hovered((x, y), rx, ry, rw, rh);
-        if !drag {
-            self.keyed = false;
-        }
-        if drag {
-            if self.scroll.held() && !cols.scrolls() {
-                self.scroll.release();
-            }
-            if self.scroll.held() {
-                self.picked = None;
-                self.scroll.drag(y, cols.top, cols.bottom, view.content);
-                return Vec::new();
-            }
-            if let Some(row) = self.dragging {
-                self.screen.slide(s, row, cols.slider_at(x));
-                self.did(&[DRAGGED]);
-                return vec![DRAGGED];
-            }
-            return Vec::new();
-        }
+        self.keyed = false;
         // The right button presses nothing, as on vanilla's `CycleButton`.
         if right {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         if cols.scrolls()
             && self
                 .scroll
                 .press((x, y), cols.bar_x(), cols.top, cols.bottom, view.content)
         {
-            return Vec::new();
+            return (Vec::new(), true);
         }
         if at(cols.search()) {
             if !self.search.value.is_empty() && at(cols.clear()) {
                 self.search.set_value("");
                 self.searched();
-                return vec![CLICK];
+                return (vec![CLICK], true);
             }
             self.focus = Some(Target::Search);
             self.search.reset_blink();
             self.search.move_cursor_to_end(false);
-            return Vec::new();
+            return (Vec::new(), true);
         }
         if self.focus == Some(Target::Search) {
             self.focus = None;
@@ -2507,7 +2509,7 @@ impl<S: Screen + Default> Hosted for Shell<S> {
             if !at(rect) {
                 continue;
             }
-            return match target {
+            let outputs = match target {
                 // Undo goes away with the change it undid, and Apply with the changes it applied.
                 Target::Undo => {
                     self.focus = None;
@@ -2522,25 +2524,50 @@ impl<S: Screen + Default> Hosted for Shell<S> {
                     vec![CLICK, Output::Done]
                 }
             };
+            return (outputs, true);
         }
         for (page, rect, _) in self.places(&view).places {
             if at(rect) && self.has(page, &view) {
                 self.focus = Some(Target::Page(page));
                 self.pick(page, &view);
-                return vec![CLICK];
+                return (vec![CLICK], true);
             }
         }
         let Some((row, row_y)) = self.row_at(&view, (x, y)).filter(|(row, _)| row.live) else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
         self.focus = Some(Target::Row(row.id));
         if row.binding().is_some_and(|b| b.reset == Reset::Changed) && at(reset_rect(&cols, row_y))
         {
-            return self.reset(s, row.id);
+            return (self.reset(s, row.id), true);
         }
         // A press on the track sets the value there; on the name, only focuses.
         let track = (x >= cols.track().0).then(|| cols.slider_at(x));
-        self.activate(s, row, shift, track, self.clicks_step)
+        (self.activate(s, row, shift, track, self.clicks_step), true)
+    }
+    fn drag(
+        &mut self,
+        s: &mut Settings,
+        (x, y): (f32, f32),
+        size: (f32, f32),
+    ) -> (bool, Vec<Output>) {
+        self.keep(s);
+        let view = self.view(s, size);
+        let cols = view.cols;
+        if self.scroll.held() && !cols.scrolls() {
+            self.scroll.release();
+        }
+        if self.scroll.held() {
+            self.picked = None;
+            self.scroll.drag(y, cols.top, cols.bottom, view.content);
+            return (true, Vec::new());
+        }
+        if let Some(row) = self.dragging {
+            self.screen.slide(s, row, cols.slider_at(x));
+            self.did(&[DRAGGED]);
+            return (true, vec![DRAGGED]);
+        }
+        (false, Vec::new())
     }
     fn opened_focus(&self) -> Option<[f32; 4]> {
         self.focus_opened.map(|(_, rect)| rect)
@@ -2551,10 +2578,14 @@ impl<S: Screen + Default> Hosted for Shell<S> {
     fn clicks_step(&mut self, on: bool) {
         self.clicks_step = on;
     }
-    fn release(&mut self) -> Option<Vec<Output>> {
+    fn release_with_outcome(&mut self) -> (Option<Vec<Output>>, bool) {
+        let scrolled = self.scroll.held();
         self.scroll.release();
-        self.dragging.take()?;
-        Some(self.screen.slider_released())
+        if self.dragging.take().is_some() {
+            (Some(self.screen.slider_released()), true)
+        } else {
+            (None, scrolled)
+        }
     }
     fn reveal(&mut self, s: &Settings, size: (f32, f32), [x, y, w, h]: [f32; 4]) -> Option<f32> {
         let view = self.view(s, size);
@@ -2578,18 +2609,30 @@ impl<S: Screen + Default> Hosted for Shell<S> {
         size: (f32, f32),
         at: (f32, f32),
         amount: f32,
-    ) -> Vec<Output> {
+    ) -> (bool, Vec<Output>) {
         if amount != 0.0 && s.extras.wheel_cycles_settings {
             let view = self.view(s, size);
             if let Some((row, _)) = self.row_at(&view, at).filter(|(row, _)| row.live)
                 && let Some(outputs) = self.screen.wheel_step(s, row.id, amount > 0.0)
             {
                 self.did(&outputs);
-                return outputs;
+                return (true, outputs);
             }
         }
-        self.scroll(s, size, amount);
-        Vec::new()
+        let view = self.view(s, size);
+        let cols = &view.cols;
+        if ui::hovered(
+            at,
+            cols.list_x,
+            cols.top,
+            cols.list_w,
+            cols.bottom - cols.top,
+        ) {
+            self.scroll(s, size, amount);
+            (true, Vec::new())
+        } else {
+            (false, Vec::new())
+        }
     }
     fn scroll(&mut self, s: &Settings, size: (f32, f32), amount: f32) {
         let view = self.view(s, size);

@@ -228,7 +228,6 @@
   "sunrise.extras.chat_animation.tooltip": "Nova linija za ćaskanje klizi sa leve strane dok bledi, umesto da izgleda cela.",
   "sunrise.extras.chat_indicator": "Indikator poruke",
   "sunrise.extras.chat_indicator.tooltip": "Traka u boji levo od linije za ćaskanje.",
-  "sunrise.extras.discord_presence.tooltip": "Prikazuje „Igra Sunrise“ na vašem Discord profilu dok Discord radi: meniji, jedan ili više igrača, dimenzija i vreme igranja. Nikada ime sveta ili adresu servera.",
   "sunrise.extras.dynamic_lights": "Dinamička svetla",
   "sunrise.extras.dynamic_lights.tooltip": "Baklje i drugi izvori svetlosti koji su držani, ispušteni ili zapaljeni osvetljavaju blokove oko sebe.",
   "sunrise.extras.fullbright": "Fullbright",

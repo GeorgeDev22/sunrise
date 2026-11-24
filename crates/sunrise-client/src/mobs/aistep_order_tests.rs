@@ -177,7 +177,7 @@ fn a_zombie_out_of_powder_snow_since_last_tick_does_not_burn_yet() {
                         m.random = sunrise_core::random::LegacyRandom::new(seed);
                         m.no_ai = no_ai;
                         m.ai.ai_paused = !no_ai;
-                        m.on_ground = true;
+                        m.ground.on_ground = true;
                         let mut was = m.clone();
                         was.in_powder_snow = true;
                         let mut level = crate::health::TestLevel::new(0);

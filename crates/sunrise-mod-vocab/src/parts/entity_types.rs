@@ -77,6 +77,7 @@ pub struct GeneralEntityTypeDeclaration {
     /// How instances respond to a piston. The vanilla default is `PushPull`.
     pub piston_push_reaction: crate::PushReaction,
     /// Tracking distance in chunks, stored directly like vanilla's signed integer.
+    /// Zero keeps instances in server simulation without pairing them to clients.
     pub tracking_chunks: i32,
     /// Update interval in ticks, stored directly like vanilla's signed integer.
     /// `i32::MAX` is vanilla's no-update-interval value.
@@ -148,6 +149,8 @@ pub trait GeneralTypesRegistrar {
     /// finite `width` and `height` in blocks, its passenger attachment, its save and
     /// summon policy, whether it is pickable, its signed integer tracking distance and
     /// update interval, its payload schema version and the loaded mods it requires.
+    /// A `tracking_chunks` value of zero keeps instances in server simulation
+    /// without pairing them to clients.
     ///
     /// Pass `false` for vanilla's plain `Entity.isPickable` default. Pass `true`
     /// to let the player's crosshair target the declared box for use and attack.

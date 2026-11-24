@@ -555,13 +555,7 @@ pub(super) fn check_paths(source: &mut Source, found: &Found) -> Result<(), Stri
         }
 
         fn visit_expr(&mut self, expr: &'ast syn::Expr) {
-            use syn::Expr;
-            if !conditional(attrs!(Expr, expr;
-                Array, Assign, Async, Await, Binary, Block, Break, Call, Cast, Closure, Const,
-                Continue, Field, ForLoop, Group, If, Index, Infer, Let, Lit, Loop, Macro, Match,
-                MethodCall, Paren, Path, Range, RawAddr, Reference, Repeat, Return, Struct, Try,
-                TryBlock, Tuple, Unary, Unsafe, While, Yield,
-            )) {
+            if !conditional(crate::source::expr_attrs(expr)) {
                 syn::visit::visit_expr(self, expr);
             }
         }

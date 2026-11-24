@@ -17,6 +17,7 @@ use super::{
 use crate::blocks::Fluid;
 use mod_api::SoundSource;
 use std::fmt::Debug;
+use std::ops::ControlFlow;
 use sunrise_core::{
     geometry::Vec3,
     random::{LegacyRandom, RandomSource},
@@ -180,7 +181,7 @@ pub(super) fn travel(
     input: Vec3,
     events: &mut Vec<MobEvent>,
     pause: bool,
-) -> Result<(), super::living::TravelTrample> {
+) -> ControlFlow<super::living::TravelPause> {
     m.move_relative(m.ai.speed, input);
     m.travel_move(w, level, events, pause, |m, _, _, _| {
         m.velocity = m.velocity.scale(0.9);
@@ -241,7 +242,7 @@ impl Goal for Croak {
         // checkExtraStartConditions (standing), no walk target, and not in
         // a liquid (start does nothing there).
         m.extra.pose == sync::STANDING
-            && m.on_ground
+            && m.ground.on_ground
             && !m.fluids.in_water
             && !m.fluids.in_lava
             && m.ai.nav.is_done()
@@ -386,7 +387,7 @@ impl LaySpawn {
         }
     }
     fn lay(m: &mut Mob, cx: &mut Cx) {
-        if m.fluids.in_water || !m.on_ground {
+        if m.fluids.in_water || !m.ground.on_ground {
             return;
         }
         let below = [
@@ -859,7 +860,7 @@ impl LongJump {
     /// with `entity.frog.step`), or the end of a search.
     fn end(&mut self, m: &mut Mob, cx: &mut Cx) {
         if self.mid_jump {
-            if m.on_ground {
+            if m.ground.on_ground {
                 // multiply(0.1F, 1.0, 0.1F): the float widened.
                 let slow = f64::from(0.1_f32);
                 m.velocity = m.velocity.multiply(Vec3::new(slow, 1.0, slow));
@@ -949,7 +950,7 @@ impl Goal for LongJump {
             m.position.y.floor() as i32,
             m.position.z.floor() as i32,
         );
-        let can = m.on_ground
+        let can = m.ground.on_ground
             && !m.fluids.in_water
             && !m.fluids.in_lava
             && cx.w.block_name(x, y, z) != "minecraft:honey_block";
@@ -996,7 +997,7 @@ impl Goal for LongJump {
                 }
                 Some(t) => self.in_air = Some(t + 1),
             }
-            return !m.on_ground
+            return !m.ground.on_ground
                 && (m.species() == Species::Goat || !m.fluids.in_water)
                 && self.in_air.is_some_and(|t| t <= MID_JUMP_DURATION);
         }
@@ -1161,7 +1162,7 @@ mod tests {
                     let kind = std::sync::Arc::new(types.types["minecraft:frog"].clone());
                     let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
                     register(&mut m);
-                    m.on_ground = true;
+                    m.ground.on_ground = true;
                     m.extra.frog.nearest = Some(2);
                     let mut events = Vec::new();
                     let mut fixture = crate::health::TestLevel::new(0);
@@ -1374,7 +1375,7 @@ mod tests {
                 let kind = std::sync::Arc::new(types.types["minecraft:frog"].clone());
                 let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
                 register(&mut m);
-                m.on_ground = true;
+                m.ground.on_ground = true;
                 // An environmental hit inside the 40 tick panic window
                 // (`DamageTypeTags.PANIC_CAUSES`).
                 m.last_damage = Some((
@@ -1464,7 +1465,7 @@ mod tests {
             |w, _| {
                 let mut m = frog();
                 m.position = Vec3::new(8.5, 64.0, 8.5);
-                m.on_ground = true;
+                m.ground.on_ground = true;
                 set_pregnant(&mut m, true);
                 let mut lr = crate::health::TestLevel::new(3);
                 let mut events = Vec::new();

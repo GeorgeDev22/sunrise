@@ -44,10 +44,11 @@ impl Hooks for Observer {
         let living = host_ref
             .entity(id)
             .and_then(|entity| host_ref.living(entity));
-        let in_hand = event
-            .hand
-            .zip(living)
-            .and_then(|(hand, living)| living.hand_item(host_ref, hand));
+        let in_hand = event.hand.zip(living).and_then(|(hand, living)| {
+            living
+                .with_hand_item(host_ref, hand, |stack| stack.project())
+                .flatten()
+        });
         let mut seen = self.0.lock().unwrap();
         seen.mining_order.push("destroy");
         seen.notices.push(Notice {
@@ -66,7 +67,10 @@ impl Hooks for Observer {
             let (hand, stack) = match write {
                 HandWrite::Replace(hand, stack) => (hand, stack),
                 HandWrite::MoveBowAndReplace(stack) => {
-                    let bow = living.hand_item(host, Hand::Main).unwrap();
+                    let bow = living
+                        .with_hand_item(host, Hand::Main, |stack| stack.project())
+                        .flatten()
+                        .unwrap();
                     assert!(living.set_hand_item(host, Hand::Off, Some(bow)).unwrap());
                     (Hand::Main, stack)
                 }
@@ -95,7 +99,10 @@ impl Hooks for Observer {
             .entity(u32::try_from(event.click.player_entity_id).unwrap())
             .unwrap();
         let living = host.living(entity).unwrap();
-        let stack = living.hand_item(host, Hand::Main).unwrap();
+        let stack = living
+            .with_hand_item(host, Hand::Main, |stack| stack.project())
+            .flatten()
+            .unwrap();
         assert!(living.set_hand_item(host, Hand::Off, Some(stack)).unwrap());
         assert!(living.set_hand_item(host, Hand::Main, None).unwrap());
         *event.cancellation_result = mod_api::InteractionResult::Fail;
@@ -311,7 +318,11 @@ fn run_isolated() {
                     Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
                 const PLAYER: u128 = 0x0000_0001_0000_0002_0000_0003_0000_0004;
                 native_entity_refs::tests::bind_local_player(game, 71, PLAYER);
-                game.set_mode_id(0);
+                if client {
+                    game.set_local_mode(sunrise_client::command::args::GameMode::Survival);
+                } else {
+                    game.set_mode_id(0);
+                }
                 game.selected = 0;
                 game.screen = Screen::Playing;
                 game.world

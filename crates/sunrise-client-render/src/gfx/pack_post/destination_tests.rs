@@ -165,8 +165,7 @@ impl Fixture {
 
     /// [`Self::new`] with `features` turned on; `None` when the adapter lacks one.
     pub(super) fn with_features(features: wgpu::Features) -> Option<Self> {
-        let instance = crate::gfx::test_gpu::instance();
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+        let Some(adapter) = crate::gfx::test_gpu::adapter() else {
             eprintln!("Post destination test skipped: no GPU adapter");
             return None;
         };
@@ -349,6 +348,7 @@ impl Fixture {
 }
 
 #[test]
+#[ignore = "daily"]
 fn partial_writes_retain_the_alternate_with_flip_scale_and_mrt_controls() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };
@@ -407,6 +407,7 @@ fn partial_writes_retain_the_alternate_with_flip_scale_and_mrt_controls() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn frame_clear_and_retained_history_apply_before_partial_post_writes() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };
@@ -453,11 +454,13 @@ fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
         yaw: 0.0,
         pitch: 0.0,
         fov_degrees: 90.0,
+        cull_fov_degrees: 90.0,
         bob: glam::Mat4::IDENTITY,
         spin: glam::Mat4::IDENTITY,
         sky: crate::environment::Sky::default(),
         distance: 12.0,
         detail_distance: 12.0,
+        shadow_distance: None,
         depth_far: 1000.0,
         underwater: false,
         cave_culling: false,
@@ -483,6 +486,7 @@ fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
         glint_ticks: 0.0,
         nether_lighting: false,
         entities: &[],
+        explicit_particles: None,
         static_block_entities: &[],
         visible_static_block_entity_sections: &[],
         static_block_entity_stats: crate::block_entity_render::StaticCacheFrameStats::default(),
@@ -529,6 +533,7 @@ fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
 /// frame's clear. Where that first write discards, Iris 1.11.7 reads the clear value (a probe
 /// pack of our own with these three programs reads 0 there, not the previous frame's 0.25).
 #[test]
+#[ignore = "daily"]
 fn a_cleared_buffer_starts_every_frame_cleared_on_both_textures() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

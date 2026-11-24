@@ -252,7 +252,15 @@ impl Title {
             }
             Mode::Create {
                 creative, options, ..
-            } => create_world::buttons(w, h, *creative, options, self.preset_data.is_some()),
+            } => create_world::buttons(
+                w,
+                h,
+                *creative,
+                options,
+                self.preset_data
+                    .is_some()
+                    .then_some(self.preset_editors.as_ref()),
+            ),
             Mode::CreateFlat { flat, .. } => flat::buttons(w, h, flat),
             Mode::CreateBuffet { buffet, .. } => buffet::buttons(w, h, buffet),
             Mode::CreatePreset { .. } => vec![

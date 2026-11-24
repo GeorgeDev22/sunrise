@@ -189,7 +189,7 @@ impl Goal for TradeWithPlayer {
             && m.alive()
             && m.hurt_time <= 0
             && !m.fluids.in_water
-            && m.on_ground
+            && m.ground.on_ground
             && cx
                 .w
                 .selected_player()
@@ -443,7 +443,7 @@ mod trade_start_tests {
             ] {
                 let mut m = Mob::new(1, kind.clone(), Vec3::new(0.5, 64.0, 0.5), 0.0);
                 m.extra.flag2 = true;
-                m.on_ground = true;
+                m.ground.on_ground = true;
                 m.hurt_time = hurt_time;
                 m.ai.goals.add(1, TradeWithPlayer);
                 let mut world = w.clone();

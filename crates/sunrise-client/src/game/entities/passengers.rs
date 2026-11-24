@@ -345,7 +345,7 @@ impl Game<'_> {
                     m.previous = Vec3::new(before.x, before.y - offset, before.z);
                     m.velocity = Vec3::ZERO;
                     m.fall_distance = 0.0;
-                    m.on_ground = false;
+                    m.ground.on_ground = false;
                     m.extra.passenger = true;
                     m.ai.nav.stop();
                     continue;
@@ -374,9 +374,10 @@ impl Game<'_> {
                     vehicle,
                     rider,
                     vehicle.rider.is_some() || self.riding == Some(v),
-                    self.res
-                        .mob_data()
-                        .entity_has("minecraft:non_controlling_rider", &rider.kind.id),
+                    self.items().entity_type_tags.has_bit(
+                        rider.kind.flags.entity_tag_slot,
+                        sunrise_client::items::EntityTypeTags::NON_CONTROLLING_RIDER,
+                    ),
                 );
                 let takes_body = riders::takes_vehicle_body(vehicle, rider, controlling);
                 let vehicle_width = vehicle.width();
@@ -391,7 +392,7 @@ impl Game<'_> {
                 m.previous = riders::seat(attach, offset, prev, prev_yaw);
                 m.velocity = Vec3::ZERO;
                 m.fall_distance = 0.0;
-                m.on_ground = false;
+                m.ground.on_ground = false;
                 if takes_body {
                     m.body_yaw = body;
                     m.previous_body_yaw = prev_body;
@@ -433,9 +434,11 @@ impl Game<'_> {
                         .map(|at| (v, at))
                 })
                 .collect();
-            for display in self.text_displays.values_mut() {
+            let sections = self.client_pick.sections.get_mut();
+            for (&id, display) in &mut self.text_displays {
                 if let Some(at) = display.vehicle.and_then(|v| seats.get(&v)) {
                     display.ride(*at);
+                    sections.move_id(id as u32, display.position().to_array());
                 }
             }
             for interaction in self.interactions.values_mut() {
@@ -477,6 +480,7 @@ impl Game<'_> {
             stand.previous = before;
             stand.velocity = Vec3::ZERO;
         }
+        self.sync_seated_pick_sections();
     }
 
     /// Armor stands riding the local player, on the top of its box. Vanilla
@@ -1221,6 +1225,7 @@ mod off_level_tests {
 #[cfg(test)]
 mod nested_vehicle_discard_tests {
     use super::*;
+    use crate::game::native_entity_refs::tests::{collect_all_entities, collect_entities_in};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1699,6 +1704,16 @@ mod nested_vehicle_discard_tests {
             .unwrap();
     }
 
+    fn vehicle_attachment_count(host: &dyn mod_api::Host) -> usize {
+        let query = host
+            .attachment_query("vehicle_boundary", "value")
+            .unwrap()
+            .query(&VEHICLE_VALUE)
+            .unwrap();
+        let mut rows = query.iter();
+        std::iter::from_fn(|| rows.try_next().unwrap()).count()
+    }
+
     fn assert_vehicle_queries_hidden(host: &mut dyn mod_api::ServerHost, kind: &str) {
         assert!(host.entity(71).is_none());
         assert!(
@@ -1707,11 +1722,8 @@ mod nested_vehicle_discard_tests {
         );
         let level = host.level("minecraft:overworld").unwrap();
         for entities in [
-            level
-                .all_entities(host)
-                .expect("the level remains queryable"),
-            level
-                .entities_in(host, [-1000.0; 3], [1000.0; 3])
+            collect_all_entities(host, level).expect("the level remains queryable"),
+            collect_entities_in(host, level, [-1000.0; 3], [1000.0; 3])
                 .expect("spatial queries remain available"),
         ] {
             assert!(!entities.iter().any(|entity| entity.id() == 71));
@@ -1727,15 +1739,7 @@ mod nested_vehicle_discard_tests {
                 .commands()
                 .run_command("execute if entity 000000a0-0000-0000-0000-000000000047")
         );
-        assert_eq!(
-            host.attachment_query("vehicle_boundary", "value")
-                .unwrap()
-                .query(&VEHICLE_VALUE)
-                .unwrap()
-                .iter()
-                .count(),
-            0
-        );
+        assert_eq!(vehicle_attachment_count(host), 0);
     }
 
     struct RemovalBoundaryObserver {
@@ -2095,8 +2099,7 @@ mod nested_vehicle_discard_tests {
                     "execute if entity @e[type=minecraft:{}]",
                     self.kind
                 )));
-                let batch = host.attachment_query("vehicle_boundary", "value").unwrap();
-                assert_eq!(batch.query(&VEHICLE_VALUE).unwrap().iter().count(), 0);
+                assert_eq!(vehicle_attachment_count(host), 0);
                 return mod_api::Flow::Cancel;
             }
             mod_api::Flow::Continue
@@ -2124,15 +2127,7 @@ mod nested_vehicle_discard_tests {
                     game.build_registries();
                     game.set_allow_commands(true);
                     set_vehicle_test_attachment(game);
-                    assert_eq!(
-                        game.attachment_query("vehicle_boundary", "value")
-                            .unwrap()
-                            .query(&VEHICLE_VALUE)
-                            .unwrap()
-                            .iter()
-                            .count(),
-                        1
-                    );
+                    assert_eq!(vehicle_attachment_count(game), 1);
                     if cart {
                         game.hurt_cart(
                             0,
@@ -2175,8 +2170,7 @@ mod nested_vehicle_discard_tests {
                     let command = format!("execute if entity @e[type=minecraft:{kind}]");
                     assert!(game.run_command(&command));
                     set_vehicle_test_attachment(game);
-                    let batch = game.attachment_query("vehicle_boundary", "value").unwrap();
-                    assert_eq!(batch.query(&VEHICLE_VALUE).unwrap().iter().count(), 1);
+                    assert_eq!(vehicle_attachment_count(game), 1);
                     let vehicle = game.entity(71).unwrap();
                     if cart {
                         game.hurt_cart(
@@ -2194,8 +2188,7 @@ mod nested_vehicle_discard_tests {
                     assert!(game.native_entity_target(vehicle).is_none());
                     assert!(game.entity_passengers(vehicle).is_none());
                     assert!(!game.run_command(&command));
-                    let batch = game.attachment_query("vehicle_boundary", "value").unwrap();
-                    assert_eq!(batch.query(&VEHICLE_VALUE).unwrap().iter().count(), 0);
+                    assert_eq!(vehicle_attachment_count(game), 0);
                 });
             });
         }

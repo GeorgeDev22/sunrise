@@ -194,7 +194,7 @@ impl Server {
         let events = self.hub.tick(&mut ctx);
         for event in events {
             match event {
-                HostEvent::Joined(conn) => self.hub.place_new_player(conn, &mut ctx),
+                HostEvent::Joined(conn, _) => self.hub.place_new_player(conn, &mut ctx),
                 HostEvent::Packet(conn, packet) => {
                     if let S::UseItemOn(p) = *packet {
                         let at = [p.pos[0], p.pos[1] + 1, p.pos[2]];
@@ -217,6 +217,12 @@ fn server(resources: &Path) -> Server {
 
 fn server_with(resources: &Path, net: NetConfig) -> Server {
     let defaults = sunrise_world::item_defaults::read(resources).expect("item defaults");
+    let items = sunrise_client::items::Items::catalog(
+        resources,
+        &sunrise_world::loot::PackOverlay::NONE,
+        &defaults,
+    )
+    .expect("items");
     server_sync(
         Arc::new(
             SyncData::load(
@@ -225,6 +231,7 @@ fn server_with(resources: &Path, net: NetConfig) -> Server {
                 &defaults,
                 &sunrise_client::crafting::ResolvedSources::load(
                     resources,
+                    &items,
                     &sunrise_world::loot::PackOverlay::NONE,
                     &server_load(),
                 )
@@ -305,7 +312,7 @@ fn a_lan_guest_sees_the_signed_in_owners_skin() {
     let Some(resources) = resources() else {
         return;
     };
-    let textures = login::Property {
+    let textures = sunrise_core::profile::AccountProperty {
         name: "textures".into(),
         value: "e30=".into(),
         signature: Some("c2lnbmVk".into()),
@@ -430,7 +437,7 @@ fn recipe_settings_packets_update_only_the_players_book_and_survive_save() {
         }
     }
     for book_type in [-1, 4] {
-        let mut wire = sunrise_protocol::buf::Writer::new();
+        let mut wire = ::sunrise_core::vanilla_bytes::Writer::new();
         wire.varint(book_type);
         wire.bool(true);
         wire.bool(true);
@@ -498,14 +505,18 @@ fn neoforge_shapes_items_reach_two_guests() {
         ),
     ];
     let defaults = sunrise_world::item_defaults::read(&resources).expect("item defaults");
+    let overlay = sunrise_world::loot::PackOverlay::new(&packs);
+    let items =
+        sunrise_client::items::Items::catalog(&resources, &overlay, &defaults).expect("items");
     let sync = Arc::new(
         SyncData::load(
             &resources,
-            &sunrise_world::loot::PackOverlay::new(&packs),
+            &overlay,
             &defaults,
             &sunrise_client::crafting::ResolvedSources::load(
                 &resources,
-                &sunrise_world::loot::PackOverlay::new(&packs),
+                &items,
+                &overlay,
                 &server_load(),
             )
             .expect("recipe sources"),
@@ -769,6 +780,12 @@ fn a_signed_in_hosts_lan_authenticates_guests_but_not_its_own_player() {
         return;
     };
     let defaults = sunrise_world::item_defaults::read(&resources).expect("item defaults");
+    let items = sunrise_client::items::Items::catalog(
+        &resources,
+        &sunrise_world::loot::PackOverlay::NONE,
+        &defaults,
+    )
+    .expect("items");
     let sync = Arc::new(
         SyncData::load(
             &resources,
@@ -776,6 +793,7 @@ fn a_signed_in_hosts_lan_authenticates_guests_but_not_its_own_player() {
             &defaults,
             &sunrise_client::crafting::ResolvedSources::load(
                 &resources,
+                &items,
                 &sunrise_world::loot::PackOverlay::NONE,
                 &server_load(),
             )
@@ -1104,7 +1122,7 @@ fn guests_see_each_other_and_the_world_entities() {
         spectator: false,
         watching: false,
         hidden: None,
-        general: false,
+        general: None,
     };
     let first = thread::spawn(move || {
         let mut bot = connect(port, "Alex", false)?;
@@ -1207,9 +1225,8 @@ fn guests_see_each_other_and_the_world_entities() {
 /// A menu opened with extra data (a mod menu type's, NeoForge's `openMenu`
 /// with an extra-data writer) reaches the client as a `sunrise:menu_extra`
 /// payload naming the window and the block, right before that window's
-/// `OpenScreen`; a menu without it sends no payload. The bot answers no
-/// revision query, so the server serves it the legacy layout — the bytes a
-/// Sunrise client has always read for a block's menu.
+/// `OpenScreen`; a menu without it sends no payload. The server always sends
+/// the current `sunrise:menu_extra` wire layout.
 #[test]
 fn menu_extra_data_comes_right_before_its_menu() {
     use sunrise_client::{items::ItemStack, lan::menu::Slots};
@@ -1243,7 +1260,7 @@ fn menu_extra_data_comes_right_before_its_menu() {
         loop {
             match bot.recv_play()? {
                 C::CustomPayload(p) if p.channel == menu_extra::CHANNEL => {
-                    let message = menu_extra::decode_legacy(&p.data).map_err(|e| e.to_string())?;
+                    let message = menu_extra::decode(&p.data).map_err(|e| e.to_string())?;
                     extras.push((message, true));
                 }
                 C::OpenScreen(p) => return Ok((bot, extras, p.container)),
@@ -1701,7 +1718,7 @@ fn a_respawned_guest_is_immune_until_its_client_loads_the_world() {
         border: &border,
         streaming: None,
     };
-    s.hub.respawn(0, at, None, &ctx);
+    s.hub.respawn(0, at, None, false, &ctx);
     assert!(
         !s.hub.guests[0].client_loaded(),
         "a respawn unloads the client"

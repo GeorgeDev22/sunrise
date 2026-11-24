@@ -15,13 +15,15 @@
 //! - an integer texel buffer (26.3's clouds read `uniform isamplerBuffer CloudFaces;`) becomes a
 //!   read-only storage buffer of `int`s (`uint`s for `usamplerBuffer`), and `texelFetch` on it
 //!   reads one into the first channel of an `ivec4`: wgpu has no texel buffers. Like any block a
-//!   pipeline gives, it is bound at [`other_binding`], and refused when not given.
+//!   pipeline gives, it is bound at [`other_binding`], and refused when not given;
+//! - every program is compiled, and its includes chosen, with the backend's
+//!   [`DEPTH_ZERO_TO_ONE`] before its pipeline's defines, as `GlslCompiler` compiles it.
 
 use std::collections::HashSet;
 use std::fmt::Write;
 
 use naga::ShaderStage;
-use naga::front::glsl::{Frontend, Options};
+use naga::front::glsl::{Frontend, InterfaceLimits, Options};
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 mod glsl_fixups;
@@ -41,6 +43,15 @@ pub const SAMPLERS: [(&str, u32); 3] = [("Sampler0", 4), ("Sampler1", 6), ("Samp
 /// `#ifdef OIT`): fine while the preprocessor drops them, an error when a stage uses one.
 const OTHER_BINDINGS: u32 = 16;
 
+/// A device's stage interface limits, as naga's GLSL front end takes them: its
+/// `max_inter_stage_shader_variables` and `max_vertex_attributes`.
+pub fn interface_limits(limits: &wgpu::Limits) -> InterfaceLimits {
+    InterfaceLimits {
+        inter_stage_variables: limits.max_inter_stage_shader_variables,
+        vertex_attributes: limits.max_vertex_attributes,
+    }
+}
+
 /// What the caller's pipeline gives the pack's vertex shader.
 pub struct Glue<'a> {
     /// The inputs of the pipeline's vanilla vertex format: name and GLSL type.
@@ -53,6 +64,8 @@ pub struct Glue<'a> {
     pub finish: &'a str,
     /// The expression the pack's `gl_VertexID` and `gl_VertexIndex` read.
     pub vertex_id: &'a str,
+    /// The stage interface limits the stages are translated with ([`sunrise_shaders::DEVICELESS_INTERFACE_LIMITS`]).
+    pub interface: InterfaceLimits,
 }
 
 /// A pipeline's two stages, validated.
@@ -176,8 +189,8 @@ impl CoreProgram {
                         .as_ref()
                         .is_some_and(|b| b.group == 0 && b.binding == binding)
                 })
-                .all(|(_, g)| match &module.types[g.ty].inner {
-                    naga::TypeInner::Struct { members, .. } => {
+                .all(|(_, g)| match (g.space, &module.types[g.ty].inner) {
+                    (naga::AddressSpace::Uniform, naga::TypeInner::Struct { members, .. }) => {
                         matches!(
                             members.as_slice(),
                             [member] if matches!(
@@ -189,6 +202,12 @@ impl CoreProgram {
                     _ => false,
                 })
         })
+    }
+
+    /// The locations the fragment stage writes.
+    #[cfg(test)]
+    pub fn fragment_writes(&self) -> Vec<u32> {
+        locations(&self.fragment, false)
     }
 
     pub fn reads_binding(&self, binding: u32) -> bool {
@@ -313,9 +332,8 @@ pub fn translate_core_at(
         fragment,
     } = *sources;
     let stage = |text: &str| -> Result<String, String> {
-        let expanded = expand_imports(text, dir, read).map_err(|e| e.to_string())?;
-        let text = glsl_fixups::fixups(&strip_comments(&expanded));
-        Ok(texel_fetches(&text))
+        let expanded = expand_core_imports(text, dir, defines, read).map_err(|e| e.to_string())?;
+        Ok(texel_fetches(&glsl_fixups::fixups(&expanded)))
     };
     let (vertex_text, fragment_text) = (stage(vertex)?, stage(fragment)?);
     let mut names = Names::default();
@@ -323,14 +341,22 @@ pub fn translate_core_at(
         .map_err(|e| format!("vertex shader: {e}"))?;
     let fragment_code = rewrite(&fragment_text, ShaderStage::Fragment, glue, &mut names)
         .map_err(|e| format!("fragment shader: {e}"))?;
-    let vertex = compile(ShaderStage::Vertex, &vertex_code, defines, &names, provided)
-        .map_err(|e| format!("vertex shader: {e}"))?;
+    let vertex = compile(
+        ShaderStage::Vertex,
+        &vertex_code,
+        defines,
+        &names,
+        provided,
+        glue.interface,
+    )
+    .map_err(|e| format!("vertex shader: {e}"))?;
     let fragment = compile(
         ShaderStage::Fragment,
         &fragment_code,
         defines,
         &names,
         provided,
+        glue.interface,
     )
     .map_err(|e| format!("fragment shader: {e}"))?;
     let given = locations(&vertex.0, false);
@@ -357,6 +383,7 @@ const MAX_SCANNED: usize = 8 * MAX_EXPANDED;
 pub enum ImportRefusal {
     /// A target that is neither `<ns:path>` nor a quoted path from the including file's folder.
     Bad(String),
+    Directive(String),
     /// A file the packs haven't (its id).
     NotFound(String),
     /// A file the packs have and that can't be read: why, naming it.
@@ -374,6 +401,7 @@ pub enum ImportRefusal {
 impl std::fmt::Display for ImportRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Directive(why) => f.write_str(why),
             Self::Bad(target) => write!(f, "bad include {target}"),
             Self::NotFound(id) => write!(f, "{id} not found"),
             Self::Unreadable(why) => f.write_str(why),
@@ -414,24 +442,76 @@ pub(crate) fn expand_imports(
     dir: &str,
     read: &dyn Fn(&str) -> Result<Option<String>, String>,
 ) -> Result<String, ImportRefusal> {
+    expand_with(text, dir, read, None)
+}
+
+/// Resolve only includes reached by this core pipeline under its `defines` and the backend's
+/// ([`program_defines`]), as the compiler sees them. Macros defined by an included file also
+/// govern the rest of its caller. Post shaders keep their own preprocessing.
+pub(crate) fn expand_core_imports(
+    text: &str,
+    dir: &str,
+    defines: &[&str],
+    read: &dyn Fn(&str) -> Result<Option<String>, String>,
+) -> Result<String, ImportRefusal> {
+    expand_with(
+        text,
+        dir,
+        read,
+        Some(import_conditions::Conditions::new(&program_defines(
+            defines,
+        ))),
+    )
+}
+
+/// What `GlslCompiler.createBaseShaderOptions` defines for every program it compiles, core and
+/// post alike, on a backend whose depth runs from 0 to 1, as wgpu's does.
+pub(crate) const DEPTH_ZERO_TO_ONE: &str = "RENDERPEARL_DEPTH_IS_ZERO_TO_ONE";
+
+/// A program's defines as vanilla's compiler gives them: the backend's ([`DEPTH_ZERO_TO_ONE`]),
+/// then the pipeline's `defines` (`NAME` or `NAME value`).
+fn program_defines<'a>(defines: &[&'a str]) -> Vec<&'a str> {
+    std::iter::once(DEPTH_ZERO_TO_ONE)
+        .chain(defines.iter().copied())
+        .collect()
+}
+
+/// naga's options for one `stage` of a program with the pipeline's `defines`: the backend's
+/// first ([`program_defines`]), and the device's stage interface `limits`. The core shaders' and
+/// the post shaders' one way in.
+pub(crate) fn glsl_options(
+    stage: ShaderStage,
+    defines: &[&str],
+    limits: InterfaceLimits,
+) -> Options {
+    let mut options = Options {
+        interface_limits: limits,
+        ..Options::from(stage)
+    };
+    for define in program_defines(defines) {
+        let (name, value) = define.split_once(' ').unwrap_or((define, ""));
+        options.defines.insert(name.to_owned(), value.to_owned());
+    }
+    options
+}
+
+mod import_conditions;
+
+fn expand_with(
+    text: &str,
+    dir: &str,
+    read: &dyn Fn(&str) -> Result<Option<String>, String>,
+    conditions: Option<import_conditions::Conditions>,
+) -> Result<String, ImportRefusal> {
     struct Walk<'a> {
         read: &'a dyn Fn(&str) -> Result<Option<String>, String>,
+        conditions: Option<import_conditions::Conditions>,
         seen: HashSet<String>,
         pastes: u32,
         scanned: usize,
         out: String,
     }
     impl Walk<'_> {
-        fn file(&self, id: &str) -> Result<String, ImportRefusal> {
-            match (self.read)(id).map_err(ImportRefusal::Unreadable)? {
-                Some(text) => Ok(text),
-                None if sunrise_polytone::globals::is_include(id) => {
-                    Ok(sunrise_polytone::globals::GLSL.to_owned())
-                }
-                None => Err(ImportRefusal::NotFound(id.to_owned())),
-            }
-        }
-
         fn walk(&mut self, text: &str, dir: &str, depth: u32) -> Result<(), ImportRefusal> {
             if depth > 16 {
                 return Err(ImportRefusal::TooDeep);
@@ -440,43 +520,111 @@ pub(crate) fn expand_imports(
             if self.scanned > MAX_SCANNED {
                 return Err(ImportRefusal::TooMuchScanned);
             }
-            for line in text.lines() {
-                let directive = line.trim_start().strip_prefix('#').map(str::trim_start);
-                let target = directive.and_then(|d| {
-                    d.strip_prefix("include")
-                        .map(|t| (t.trim(), false))
-                        .or_else(|| d.strip_prefix("moj_import").map(|t| (t.trim(), true)))
-                });
-                if let Some((target, once)) = target {
-                    let id = include_id(target, dir)
-                        .ok_or_else(|| ImportRefusal::Bad(target.to_owned()))?;
-                    if self.seen.insert(id.clone()) || !once {
-                        self.pastes += 1;
-                        if self.pastes > MAX_PASTES {
-                            return Err(ImportRefusal::TooManyPastes);
-                        }
-                        let file = self.file(&id)?;
-                        let parent = &id[..id.rfind('/').map_or(id.len(), |i| i + 1)];
-                        self.walk(&file, parent, depth + 1)?;
+            let clean;
+            let mut physical = Vec::new();
+            let text = if self.conditions.is_some() {
+                // Splicing precedes comment removal. Remember the first physical line of
+                // each logical line, including in continued directives and line comments.
+                let mut joined = String::with_capacity(text.len());
+                physical.push(1u32);
+                for (n, line) in text.split_inclusive('\n').enumerate() {
+                    if let Some(part) = line
+                        .strip_suffix("\\\r\n")
+                        .or_else(|| line.strip_suffix("\\\n"))
+                    {
+                        joined.push_str(part);
+                    } else {
+                        joined.push_str(line);
+                        physical.push(n as u32 + 2);
                     }
-                    self.out.push('\n');
-                } else if directive
-                    .is_some_and(|d| d.starts_with("version") || d.starts_with("extension"))
-                {
-                    self.out.push('\n');
-                } else {
-                    self.out.push_str(line);
-                    self.out.push('\n');
                 }
+                clean = strip_comments(&joined);
+                &clean
+            } else {
+                text
+            };
+            let mut branches = sunrise_shaders::Conditionals::default();
+            let mut line_offset = 0i64;
+            for (n, line) in text.lines().enumerate() {
+                let directive = line.trim_start().strip_prefix('#').map(str::trim_start);
+                let (word, rest) = directive.map_or(("", ""), |d| {
+                    let i = d.find(|c| !is_ident(c)).unwrap_or(d.len());
+                    (&d[..i], d[i..].trim())
+                });
+                if let Some(state) = &mut self.conditions {
+                    let location =
+                        u32::try_from(i64::from(physical[n]) + line_offset).map_err(|_| {
+                            ImportRefusal::Directive("line number outside GLSL range".into())
+                        })?;
+                    if branches
+                        .apply_with(word, |kind| state.test(kind, rest, location))
+                        .map_err(ImportRefusal::Directive)?
+                        || !branches.active()
+                    {
+                        continue;
+                    }
+                    match word {
+                        "define" => state.define(rest),
+                        "undef" => state.undef(rest),
+                        "version" if depth == 0 => {
+                            state.define(&format!(
+                                "__VERSION__ {}",
+                                rest.split_whitespace().next().unwrap_or("110")
+                            ));
+                        }
+                        "line" => {
+                            let next = state
+                                .line(rest, location)
+                                .map_err(ImportRefusal::Directive)?;
+                            line_offset = i64::from(next)
+                                - i64::from(
+                                    physical.get(n + 1).copied().unwrap_or(physical[n] + 1),
+                                );
+                            continue;
+                        }
+                        "" if state.uses_line(line) => {
+                            writeln!(self.out, "#line {}", location.saturating_sub(1)).unwrap();
+                        }
+                        _ => {}
+                    }
+                }
+                match word {
+                    "include" | "moj_import" => {
+                        let id = include_id(rest, dir)
+                            .ok_or_else(|| ImportRefusal::Bad(rest.to_owned()))?;
+                        if self.seen.insert(id.clone()) || word == "include" {
+                            self.pastes += 1;
+                            if self.pastes > MAX_PASTES {
+                                return Err(ImportRefusal::TooManyPastes);
+                            }
+                            let file = (self.read)(&id)
+                                .map_err(ImportRefusal::Unreadable)?
+                                .or_else(|| {
+                                    sunrise_polytone::globals::is_include(&id)
+                                        .then(|| sunrise_polytone::globals::GLSL.to_owned())
+                                })
+                                .ok_or_else(|| ImportRefusal::NotFound(id.clone()))?;
+                            let parent = &id[..id.rfind('/').map_or(id.len(), |i| i + 1)];
+                            self.walk(&file, parent, depth + 1)?;
+                        }
+                    }
+                    "version" | "extension" => {}
+                    _ => self.out.push_str(line),
+                }
+                self.out.push('\n');
                 if self.out.len() > MAX_EXPANDED {
                     return Err(ImportRefusal::TooLarge);
                 }
+            }
+            if branches.open() {
+                return Err(ImportRefusal::Directive("#if without #endif".into()));
             }
             Ok(())
         }
     }
     let mut walk = Walk {
         read,
+        conditions,
         seen: HashSet::new(),
         pastes: 0,
         scanned: 0,
@@ -511,27 +659,35 @@ fn include_id(target: &str, dir: &str) -> Option<String> {
 /// Comments as spaces, line breaks kept.
 fn strip_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
+    // Keep comment bytes as spaces: a pasted file still counts toward the stage budget.
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match (c, chars.peek()) {
             ('/', Some('/')) => {
-                while chars.peek().is_some_and(|&c| c != '\n') {
+                out.push(' ');
+                while let Some(&c) = chars.peek() {
+                    if c == '\n' {
+                        break;
+                    }
+                    out.extend(std::iter::repeat_n(' ', c.len_utf8()));
                     chars.next();
                 }
             }
             ('/', Some('*')) => {
                 chars.next();
+                out.push_str("  ");
                 let mut last = ' ';
                 for c in chars.by_ref() {
                     if c == '\n' {
                         out.push('\n');
+                    } else {
+                        out.extend(std::iter::repeat_n(' ', c.len_utf8()));
                     }
                     if last == '*' && c == '/' {
                         break;
                     }
                     last = c;
                 }
-                out.push(' ');
             }
             _ => out.push(c),
         }
@@ -904,12 +1060,9 @@ fn compile(
     defines: &[&str],
     names: &Names,
     provided: &dyn Fn(&str) -> bool,
+    limits: InterfaceLimits,
 ) -> Result<(naga::Module, naga::valid::ModuleInfo), String> {
-    let mut options = Options::from(stage);
-    for define in defines {
-        let (name, value) = define.split_once(' ').unwrap_or((define, ""));
-        options.defines.insert(name.to_owned(), value.to_owned());
-    }
+    let options = glsl_options(stage, defines, limits);
     let module = Frontend::default().parse(&options, code).map_err(|e| {
         e.errors
             .iter()
@@ -1016,6 +1169,7 @@ mod tests {
         setup: "Position = vec3(hz_pos, 0.0); Color = hz_color; UV0 = hz_uv;",
         finish: "gl_Position.z = 0.5 * gl_Position.w;",
         vertex_id: "hz_vertex_id()",
+        interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
     };
 
     /// 26.3's `text.vsh` and `text.fsh` in shape: `#include`, explicit locations, an extension.
@@ -1330,6 +1484,33 @@ mod tests {
         assert_eq!(block_name("uniform sampler2D Sampler0;"), None);
     }
 
+    /// An array too large to lay out (#4134) is the shader's error at its line, not a panic.
+    #[test]
+    fn an_array_too_large_to_lay_out_is_an_error() {
+        let vsh = "#version 330\nout vec4 vertexColor;\nvoid main() { vertexColor = vec4(1.0); }\n";
+        let fsh = "#version 330\nin vec4 vertexColor;\nfloat big[0x7fffffff];\nout vec4 fragColor;\n\
+            void main() { fragColor = vertexColor; }\n";
+        let error = translate_core(vsh, fsh, &[], &include, &GLUE).unwrap_err();
+        assert!(error.starts_with("fragment shader: line "), "{error}");
+        assert!(error.contains("(float big[0x7fffffff];)"), "{error}");
+    }
+
+    /// An output array whose second element would take location 2^32 (#4912) is the shader's
+    /// error at its line, not an overflow.
+    #[test]
+    fn an_output_whose_locations_pass_u32_is_an_error() {
+        let vsh = "#version 330\nout vec4 vertexColor;\nvoid main() { vertexColor = vec4(1.0); }\n";
+        let fsh = "#version 330\nin vec4 vertexColor;\nout vec4 fragColor;\n\
+            layout(location = 4294967295u) out vec4 extra[2];\n\
+            void main() { fragColor = vertexColor; extra[0] = vertexColor; extra[1] = vertexColor; }\n";
+        let error = translate_core(vsh, fsh, &[], &include, &GLUE).unwrap_err();
+        assert!(error.starts_with("fragment shader: line "), "{error}");
+        assert!(
+            error.contains("(layout(location = 4294967295u) out vec4 extra[2];)"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn what_sunrise_does_not_provide_is_an_error() {
         let fsh = "#version 330\nin vec4 vertexColor;\nout vec4 fragColor;\nvoid main() { fragColor = vertexColor; }\n";
@@ -1346,12 +1527,123 @@ mod tests {
         let oit = "#version 330\n#ifdef OIT\nuniform sampler2D Coeff0;\n#endif\nout vec4 vertexColor;\n\
             void main() {\n#ifdef OIT\n    vertexColor = texelFetch(Coeff0, ivec2(0), 0);\n#endif\n}\n";
         translate_core(oit, fsh, &[], &include, &GLUE).unwrap();
-        let missing = "#version 330\n#moj_import <minecraft:nothing.glsl>\nvoid main() {}\n";
+        let missing = "#version 330\n#moj_import <minecraft:nothing.glsl>\n\
+            out vec4 vertexColor;\nvoid main() { vertexColor = vec4(1.0); }\n";
         let error = translate_core(missing, fsh, &[], &include, &GLUE).unwrap_err();
+        assert_eq!(error, "minecraft:shaders/include/nothing.glsl not found");
+        // An include the defines drop is never read, as shaderc preprocesses: missing, it is no
+        // error; kept by a define, it is.
+        let branch = "#version 330\n#ifdef WANTS\n#moj_import <minecraft:nothing.glsl>\n#endif\n\
+            out vec4 vertexColor;\nvoid main() { vertexColor = vec4(1.0); }\n";
+        translate_core(branch, fsh, &[], &include, &GLUE).unwrap();
+        let error = translate_core(branch, fsh, &["WANTS"], &include, &GLUE).unwrap_err();
+        assert_eq!(error, "minecraft:shaders/include/nothing.glsl not found");
+        let active_after_skipped =
+            branch.replace("#endif", "#endif\n#moj_import <minecraft:nothing.glsl>");
+        let error = translate_core(&active_after_skipped, fsh, &[], &include, &GLUE).unwrap_err();
+        assert_eq!(error, "minecraft:shaders/include/nothing.glsl not found");
+        let unreadable = |id: &str| -> Result<Option<String>, String> {
+            if id.ends_with("nothing.glsl") {
+                Err(format!("{id}: not text"))
+            } else {
+                Ok(include(id))
+            }
+        };
+        let stages = Stages {
+            dir: "minecraft:shaders/core/",
+            vertex: branch,
+            fragment: fsh,
+        };
+        translate_core_at(&stages, &[], &unreadable, &GLUE, &|_| false).unwrap();
+        let error =
+            translate_core_at(&stages, &["WANTS"], &unreadable, &GLUE, &|_| false).unwrap_err();
+        assert_eq!(error, "minecraft:shaders/include/nothing.glsl: not text");
+    }
+
+    #[test]
+    fn unconditional_imports_share_their_dependency() {
+        let large = " ".repeat(MAX_EXPANDED / 2 + 1);
+        let calls = std::cell::Cell::new(0);
+        let read = |id: &str| {
+            if id.ends_with("/shared") {
+                calls.set(calls.get() + 1);
+                Ok(Some(large.clone()))
+            } else {
+                Ok(Some("#moj_import <shared>".to_owned()))
+            }
+        };
+        expand_core_imports("#moj_import <left>\n#moj_import <right>", "", &[], &read).unwrap();
+        assert_eq!(calls.get(), 1);
+        calls.set(0);
+        expand_core_imports(
+            "#ifdef ENABLED\n#moj_import <left>\n#moj_import <right>\n#endif",
+            "",
+            &["ENABLED"],
+            &read,
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        let repeated = expand_core_imports("#include <shared>\n#include <shared>", "", &[], &read);
+        assert_eq!(repeated.unwrap_err(), ImportRefusal::TooLarge);
+    }
+
+    #[test]
+    fn includes_follow_glsl_line_numbers_and_macros_from_the_caller_and_child() {
+        let read = |id: &str| match id.rsplit('/').next() {
+            Some("switch") => Ok(Some("#define ENABLE(x) ((x) + 2)".into())),
+            Some("active") => Ok(Some("float kept;".into())),
+            _ => panic!("read skipped include {id}"),
+        };
+        let source = "#version 330\n#if __LINE__ == 2\n#include <switch>\n#endif\n#if __LINE__ == 5 && ENABLE(3) == 5\n#include <active>\n#else\n#include <skipped>\n#endif";
         assert!(
-            error.contains("minecraft:shaders/include/nothing.glsl not found"),
-            "{error}"
+            expand_core_imports(source, "", &[], &read)
+                .unwrap()
+                .contains("float kept;")
         );
+    }
+
+    #[test]
+    fn line_directives_and_continuations_keep_the_callers_include_location() {
+        let source = "#line 40\n#if defined(__LINE__) && \\\n__LINE__ == 41\n#include <inner>\n#endif\n#if __LINE__ == 46\n#include <wrong>\n#endif";
+        let read = |id: &str| {
+            assert!(id.ends_with("/inner"), "{id}");
+            Ok(Some("#if __LINE__ == 1\nfloat included;\n#endif".into()))
+        };
+        assert!(
+            expand_core_imports(source, "", &[], &read)
+                .unwrap()
+                .contains("float included;")
+        );
+    }
+
+    #[test]
+    fn independent_guards_do_not_replay_unrelated_definitions() {
+        let source = format!(
+            "#define UNUSED {}\n{}",
+            "a".repeat(50_000),
+            "#if 1\nfloat a;\n#endif\n".repeat(210)
+        );
+        assert_eq!(
+            expand_core_imports(&source, "", &[], &|_| Ok(None))
+                .unwrap()
+                .matches("float a;")
+                .count(),
+            210
+        );
+    }
+
+    #[test]
+    fn only_an_active_include_consumes_a_legacy_import() {
+        let fragment = "out vec4 fragColor;\nvoid main() { fragColor = vec4(1.0); }";
+        let include = |_: &str| Some("float imported() { return 1.0; }".to_owned());
+        let siblings = "#if 0\n#moj_import <a>\n#elif 0\n#moj_import <a>\n#else\n#moj_import <a>\n#endif\nvoid main() { gl_Position = vec4(imported()); }";
+        translate_core(siblings, fragment, &[], &include, &GLUE).unwrap();
+        for first in ["#include", "#moj_import"] {
+            let vertex = format!(
+                "#define hz_moj_import_0\n#if 0\n#moj_import <a>\n#endif\n{first} <a>\n#moj_import <a>\nvoid main() {{ gl_Position = vec4(imported()); }}"
+            );
+            translate_core(&vertex, fragment, &[], &include, &GLUE).unwrap();
+        }
     }
 
     #[test]

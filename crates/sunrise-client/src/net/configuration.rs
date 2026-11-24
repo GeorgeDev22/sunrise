@@ -16,14 +16,18 @@ pub(super) struct Configuration {
 struct Registries {
     data: Dynamic,
     dialog_snapshot: Option<Arc<Dynamic>>,
+    refusal: Option<String>,
+    packet_error: Option<Reason>,
 }
 
 pub(super) enum Action {
     Ping(cfg::Ping),
     SelectKnownPacks(cfg::SelectKnownPacks),
     RegistryData(cfg::RegistryData),
+    ConsumeEffectTypes(cfg::RegistryData),
     UpdateTags(cfg::UpdateTags),
     ShowDialog(cfg::ShowDialog),
+    PostEffects(Reason),
 }
 
 impl Configuration {
@@ -41,8 +45,16 @@ impl Configuration {
         .map_err(|error| Reason::plain(error.to_string()))
     }
 
-    pub(super) fn take_registries(&self) -> Dynamic {
-        std::mem::take(&mut self.registries.lock().unwrap().data)
+    pub(super) fn take_packet_error(&self) -> Option<Reason> {
+        self.registries.lock().unwrap().packet_error.take()
+    }
+
+    fn take_registries(&self) -> Result<Dynamic, String> {
+        let mut registries = self.registries.lock().unwrap();
+        if let Some(refusal) = registries.refusal.take() {
+            return Err(refusal);
+        }
+        Ok(std::mem::take(&mut registries.data))
     }
 }
 
@@ -58,9 +70,12 @@ impl ConfigurationTask {
             + match &self.action {
                 Action::Ping(_) => 0,
                 Action::SelectKnownPacks(p) => p.owned_heap_bytes(),
-                Action::RegistryData(p) => p.owned_heap_bytes(),
+                Action::RegistryData(p) | Action::ConsumeEffectTypes(p) => p.owned_heap_bytes(),
                 Action::UpdateTags(p) => p.owned_heap_bytes(),
                 Action::ShowDialog(p) => p.owned_heap_bytes(),
+                Action::PostEffects(r) => {
+                    r.text.capacity().saturating_add(r.key.owned_heap_bytes())
+                }
             }
     }
 
@@ -83,6 +98,16 @@ impl ConfigurationTask {
                 registries.data.add(p);
                 return None;
             }
+            Action::ConsumeEffectTypes(p) => {
+                let mut registries = self.listener.registries.lock().unwrap();
+                if let Err(error) = registries.data.add_consume_effects(p) {
+                    // FinishConfiguration refuses in order, without dropping earlier replies.
+                    registries.refusal.get_or_insert_with(|| {
+                        format!("{}: {error}", crate::content_identity::MISMATCH)
+                    });
+                }
+                return None;
+            }
             Action::UpdateTags(p) => {
                 let mut registries = self.listener.registries.lock().unwrap();
                 if p.registries
@@ -99,6 +124,7 @@ impl ConfigurationTask {
                 let Registries {
                     data,
                     dialog_snapshot,
+                    ..
                 } = &mut *registries;
                 let snapshot = dialog_snapshot.get_or_insert_with(|| {
                     // Copy only the dynamic dialog registry and its tags, so
@@ -117,6 +143,19 @@ impl ConfigurationTask {
                     dialog: p.dialog,
                     registries: snapshot.clone(),
                 });
+            }
+            Action::PostEffects(reason) => {
+                // ClientCommonPacketListenerImpl.handlePostEffects -> onPacketError in listener order.
+                {
+                    let mut registries = self.listener.registries.lock().unwrap();
+                    registries
+                        .packet_error
+                        .get_or_insert_with(|| reason.clone());
+                }
+                if let Some(writer) = self.io.writer.lock().unwrap().as_ref() {
+                    writer.close_after_pending();
+                }
+                return Some(reason.ended(false));
             }
         };
         if let Some(writer) = self.io.writer.lock().unwrap().as_ref() {
@@ -152,9 +191,16 @@ impl FinishConfiguration {
     }
 
     pub fn acknowledge(self) {
+        if let Some(reason) = self.listener.take_packet_error() {
+            if let Some(writer) = self.writer.lock().unwrap().as_ref() {
+                writer.close_after_pending();
+            }
+            let _ = self.resume.send(Err(reason));
+            return;
+        }
         let result = self.play.and_then(|play| {
+            let mut registries = self.listener.take_registries()?;
             crate::datapack_net::finish_transfer()?;
-            let mut registries = self.listener.take_registries();
             registries.custom_components = self.content_verified;
             registries.menu_extra_revision = self.menu_extra_revision;
             let publish = || {

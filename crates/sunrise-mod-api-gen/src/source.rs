@@ -2,13 +2,44 @@
 //! and the `cfg`s they are compiled under, following `mod` declarations, `#[path]`s and inline
 //! modules.
 
-use mod_source::modules::{ModuleFile, walk_module_files};
+use mod_source::modules::{ModuleFile, test_only, walk_module_files};
 use quote::ToTokens;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-use syn::Type;
+use syn::{Attribute, Expr, Item, Type};
+
+/// Production inline declarations of `name` inside the parent module's items.
+pub(crate) fn inline_module_items<'a>(
+    items: &'a [Item],
+    name: &'a str,
+) -> impl Iterator<Item = &'a [Item]> {
+    items.iter().filter_map(move |item| match item {
+        Item::Mod(module) if module.ident == name && !test_only(&module.attrs) => {
+            module.content.as_ref().map(|(_, items)| items.as_slice())
+        }
+        _ => None,
+    })
+}
+
+/// Syn puts attributes on the concrete expression nodes, not on the enclosing enum.
+pub(crate) fn expr_attrs(expr: &Expr) -> &[Attribute] {
+    macro_rules! attrs {
+        ($($variant:ident),+ $(,)?) => {
+            match expr {
+                $(Expr::$variant(node) => &node.attrs,)+
+                _ => &[],
+            }
+        };
+    }
+    attrs!(
+        Array, Assign, Async, Await, Binary, Block, Break, Call, Cast, Closure, Const, Continue,
+        Field, ForLoop, Group, If, Index, Infer, Let, Lit, Loop, Macro, Match, MethodCall, Paren,
+        Path, Range, RawAddr, Reference, Repeat, Return, Struct, Try, TryBlock, Tuple, Unary,
+        Unsafe, While, Yield,
+    )
+}
 
 /// The files of the game's module `module` ([`walk_module_files`]), each parsed with the game's
 /// generated module lists expanded. With `every_build`, the replaceable functions: those every
@@ -54,11 +85,29 @@ pub(crate) fn crate_root(root: &Path, krate: &str) -> Result<(PathBuf, PathBuf),
     Ok((package, lib))
 }
 
-/// The files of the crate `krate` that every build compiles.
+/// The files of the crate `krate` that every build compiles. Each must resolve inside `root`:
+/// the index never names a file the staged copy doesn't hold.
 pub(crate) fn crate_files(root: &Path, krate: &str) -> Result<Vec<ModuleFile>, String> {
     let (_, lib) = crate_root(root, krate)?;
     let dir = lib.parent().expect("a source file has a folder").to_owned();
-    module_files(krate.to_owned(), lib, dir, true)
+    let files = module_files(krate.to_owned(), lib, dir, true)?;
+    let canonical = root
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", root.display()))?;
+    for file in &files {
+        let physical = file
+            .path
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", file.path.display()))?;
+        if !physical.starts_with(&canonical) {
+            return Err(format!(
+                "{}: outside the source at {}",
+                file.path.display(),
+                root.display()
+            ));
+        }
+    }
+    Ok(files)
 }
 
 /// A path without generic arguments or spaces, as listed paths and found ones are compared.

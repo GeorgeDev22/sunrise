@@ -2,17 +2,38 @@
 //! completed bundle in one ordinary main-thread task.
 use super::{Cookie, Event, PlayIo, PlayIoAction, Reason, brand_event};
 use std::sync::Arc;
-use sunrise_protocol::packets::{custom_payload::CustomPayload, play::Clientbound as C};
+use sunrise_protocol::{
+    attachment_sync,
+    packets::{custom_payload::CustomPayload, play::Clientbound as C},
+};
 
 /// `BundlerInfo.BUNDLE_SIZE_LIMIT` counts decoded members, not delimiters or bytes.
 const BUNDLE_SIZE_LIMIT: usize = 4096;
 
+pub enum BundleMember {
+    Packet(C),
+    AttachmentSync(Box<attachment_sync::StagedMessage>),
+    /// Defer the logger fault, not the unusable array, until the bundle handles this member.
+    OversizedDebugSample,
+}
+
+impl BundleMember {
+    fn owned_heap_bytes(&self) -> usize {
+        match self {
+            Self::Packet(packet) => packet.owned_heap_bytes(),
+            Self::AttachmentSync(staged) => std::mem::size_of::<attachment_sync::StagedMessage>()
+                .saturating_add(staged.owned_heap_bytes()),
+            Self::OversizedDebugSample => 0,
+        }
+    }
+}
+
 #[derive(Default)]
-pub(super) struct PlayBundle(Option<Vec<C>>);
+pub(super) struct PlayBundle(Option<Vec<BundleMember>>);
 
 pub(super) enum PlayTurn {
-    Single(C),
-    Bundle(Vec<C>),
+    Single(BundleMember),
+    Bundle(Vec<BundleMember>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,13 +42,29 @@ pub(super) enum InvalidBundle {
     TooManyPackets,
 }
 
+impl std::fmt::Display for InvalidBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Terminal => {
+                "io.netty.handler.codec.DecoderException: Terminal message received in bundle"
+            }
+            Self::TooManyPackets => {
+                "io.netty.handler.codec.DecoderException: java.lang.IllegalStateException: Too many packets in a bundle"
+            }
+        })
+    }
+}
+
 impl PlayBundle {
     pub(super) fn assembling(&self) -> bool {
         self.0.is_some()
     }
 
-    pub(super) fn accept(&mut self, packet: C) -> Result<Option<PlayTurn>, InvalidBundle> {
-        if matches!(packet, C::BundleDelimiter(_)) {
+    pub(super) fn accept(
+        &mut self,
+        member: BundleMember,
+    ) -> Result<Option<PlayTurn>, InvalidBundle> {
+        if matches!(member, BundleMember::Packet(C::BundleDelimiter(_))) {
             return Ok(match self.0.take() {
                 Some(packets) => Some(PlayTurn::Bundle(packets)),
                 None => {
@@ -37,30 +74,37 @@ impl PlayBundle {
             });
         }
         let Some(packets) = &mut self.0 else {
-            return Ok(Some(PlayTurn::Single(packet)));
+            return Ok(Some(PlayTurn::Single(member)));
         };
-        if matches!(packet, C::StartConfiguration(_)) {
+        if matches!(member, BundleMember::Packet(C::StartConfiguration(_))) {
             return Err(InvalidBundle::Terminal);
         }
         // `BundlerInfo.addPacket` checks before retaining the next member.
         if packets.len() >= BUNDLE_SIZE_LIMIT {
             return Err(InvalidBundle::TooManyPackets);
         }
-        packets.push(packet);
+        packets.push(member);
         Ok(None)
     }
 }
 
 pub struct CompletedBundle {
-    pub packets: Vec<C>,
+    pub packets: Vec<BundleMember>,
     pub io: Arc<PlayIo>,
 }
 
 impl CompletedBundle {
     pub(super) fn owned_bytes(&self) -> usize {
-        self.packets.capacity() * std::mem::size_of::<C>()
-            + self.packets.iter().map(C::owned_heap_bytes).sum::<usize>()
-            + std::mem::size_of::<Self>()
+        self.packets
+            .capacity()
+            .saturating_mul(std::mem::size_of::<BundleMember>())
+            .saturating_add(
+                self.packets
+                    .iter()
+                    .map(BundleMember::owned_heap_bytes)
+                    .sum::<usize>(),
+            )
+            .saturating_add(std::mem::size_of::<Self>())
     }
 }
 
@@ -69,6 +113,7 @@ pub enum BundleStep {
     Payload(CustomPayload),
     Transfer(sunrise_protocol::packets::configuration::Transfer),
     Close(Event),
+    HandlerFailed,
     Continue,
 }
 
@@ -79,11 +124,23 @@ impl PlayIo {
         self.common.accepts_packets()
     }
 
+    /// `ClientCommonPacketListenerImpl.onPacketError`, after a main-thread handler fails.
+    pub fn packet_error(&self) -> Event {
+        Reason::keyed("disconnect.packetError", &self.lang).ended(false)
+    }
+
     pub fn incompatible_payload(&self, detail: &str) -> Event {
         Reason::keyed_arg("multiplayer.disconnect.incompatible", &self.lang, detail).ended(false)
     }
 
-    pub fn bundle_member(&self, packet: C) -> BundleStep {
+    pub fn bundle_member(&self, member: BundleMember) -> BundleStep {
+        let packet = match member {
+            BundleMember::Packet(packet) => packet,
+            BundleMember::AttachmentSync(staged) => {
+                return BundleStep::Event(Event::AttachmentSync(staged));
+            }
+            BundleMember::OversizedDebugSample => return BundleStep::HandlerFailed,
+        };
         let action = match packet {
             C::KeepAlive(p) => PlayIoAction::KeepAlive(p),
             C::ChunkBatchStart(_) => PlayIoAction::ChunkBatchStart,

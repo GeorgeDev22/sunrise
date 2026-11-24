@@ -218,6 +218,7 @@ fn expected_cube(
 fn primed(id: u32, fuse: i32) -> super::tnt::PrimedTnt {
     let at = Vec3::new(FEET[0], FEET[1], FEET[2]);
     super::tnt::PrimedTnt {
+        size_answer: None,
         attachment_lifetime: Default::default(),
         rotation: [90.0, -10.0],
         join: Default::default(),
@@ -227,7 +228,7 @@ fn primed(id: u32, fuse: i32) -> super::tnt::PrimedTnt {
         velocity: Vec3::ZERO,
         fuse,
         ticks: 0,
-        on_ground: false,
+        ground: Default::default(),
         fall_distance: 0.0,
         stuck: Vec3::ZERO,
         in_water: false,

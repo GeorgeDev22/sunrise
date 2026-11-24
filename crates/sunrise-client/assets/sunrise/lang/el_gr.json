@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Μια νέα γραμμή συνομιλίας ολισθαίνει από τα αριστερά ενώ σβήνει, αντί να εμφανίζεται ολόκληρη.",
   "sunrise.extras.chat_indicator": "Ένδειξη μηνύματος",
   "sunrise.extras.chat_indicator.tooltip": "Η έγχρωμη γραμμή στα αριστερά μιας γραμμής συνομιλίας.",
-  "sunrise.extras.discord_presence": "Discord Πλούσια Παρουσία",
-  "sunrise.extras.discord_presence.tooltip": "Εμφανίζει το Playing Sunrise στο προφίλ σας Discord ενώ εκτελείται το Discord: μενού, για έναν παίκτη ή για πολλούς παίκτες, τη διάσταση και την ώρα αναπαραγωγής. Ποτέ το όνομα ενός κόσμου ή η διεύθυνση ενός διακομιστή.",
   "sunrise.extras.dynamic_lights": "Δυναμικά φώτα",
   "sunrise.extras.dynamic_lights.tooltip": "Πυρσοί και άλλες πηγές φωτός που συγκρατούνται, πέφτουν ή καίγονται ανάβουν τα μπλοκ γύρω τους.",
   "sunrise.extras.fullbright": "Πλήρης φωτισμός",

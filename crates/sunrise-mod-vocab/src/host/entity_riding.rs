@@ -13,13 +13,11 @@ pub trait EntityRidingBackend {
     /// On a client, the vehicle the passenger has boarded from the server's list, if
     /// this window has a handle for it. Lists for unknown vehicles or entities that
     /// cannot accept passengers (markers and ominous item spawners) have no effect.
-    #[access(WorldOnly)]
     fn entity_vehicle(&self, entity: EntityRef) -> Option<EntityRef>;
     /// Side: both.
     /// Whether the entity rides another (`Entity.isPassenger`), including a retained
     /// off-level vehicle that cannot be returned by `vehicle`. On a client, whether the
     /// entity boarded from the server's passenger list. Stale or untracked handles return `None`.
-    #[access(WorldOnly)]
     fn entity_is_passenger(&self, entity: EntityRef) -> Option<bool>;
     /// Side: both.
     /// The lowest vehicle under the entity (`Entity.getRootVehicle`): the
@@ -28,7 +26,6 @@ pub trait EntityRidingBackend {
     /// is stale, or the relationship contains a cycle. Never substitutes a descendant.
     /// On a client, follows the server's passenger lists and returns the root only if
     /// this window has a handle for it.
-    #[access(WorldOnly)]
     fn entity_root_vehicle(&self, entity: EntityRef) -> Option<EntityRef>;
     /// Side: both.
     /// The entities riding this one (`Entity.getPassengers`), in `addPassenger`'s order: each
@@ -38,21 +35,18 @@ pub trait EntityRidingBackend {
     /// links that would form a cycle do not board. Returns their handles in packet order.
     /// Returns `None` for a stale or untracked vehicle, an empty list for one with no
     /// passengers whose handles can be returned.
-    #[access(WorldOnly)]
     fn entity_passengers(&self, entity: EntityRef) -> Option<Vec<EntityRef>>;
     /// Side: both.
     /// Whether anything rides the entity (`Entity.isVehicle`), including retained
     /// off-level passengers omitted from `passengers`. Dying is not removal.
     /// On a client, whether any passenger boarded from the server's list.
     /// Stale or untracked handles return `None`.
-    #[access(WorldOnly)]
     fn entity_is_vehicle(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
     /// Every entity riding this one, at any depth (`Entity.getIndirectPassengers`): each
     /// passenger in boarding order, followed by those riding it. Traverses retained
     /// off-level intermediaries, omitting only their handles from the result; resident
     /// descendants below them are still returned.
-    #[access(WorldOnly)]
     fn entity_indirect_passengers(&self, entity: EntityRef) -> Option<Vec<EntityRef>>;
     /// Side: server.
     /// The first passenger, when it steers the entity (`Entity.getControllingPassenger`): a
@@ -60,14 +54,12 @@ pub trait EntityRidingBackend {
     /// unless `#non_controlling_rider` names it. `None` when nothing steers it, or for a stale
     /// handle. The actual first passenger is chosen before filtering by residency:
     /// an off-level first passenger returns `None`, never a later resident substitute.
-    #[access(WorldOnly)]
     fn entity_controlling_passenger(&self, entity: EntityRef) -> Option<LivingRef>;
     /// Side: server.
     /// Whether both entities share a root vehicle (`Entity.isPassengerOfSameVehicle`): true for
     /// an entity and itself, false for two distinct entities riding nothing. Compares
     /// actual object roots even when they are retained off-level and have no handle.
     /// `None` for stale handles or a cycle with no root.
-    #[access(WorldOnly)]
     fn entity_is_passenger_of_same_vehicle(
         &self,
         entity: EntityRef,
@@ -85,7 +77,6 @@ pub trait EntityRidingBackend {
     /// there it is the top of the box. Reads only: no `mob_ride` or dismount veto is asked and
     /// the passenger's pose stays. `None` for a stale handle, a passenger other than a player
     /// or a mob, a player with no motion state, or a vehicle whose box Sunrise does not keep.
-    #[access(WorldOnly)]
     fn entity_dismount_location(
         &self,
         vehicle: EntityRef,
@@ -114,7 +105,6 @@ pub trait EntityRidingBackendMut {
     /// level before it reads `force`, and the player type is one, as a player's save keeps no
     /// passengers. `entity_mount` fires only after every other check passed, and its cancel is
     /// `StartRidingRefusal::Canceled`. Only `entity_ride_player` seats a mob on a player.
-    #[access(WorldOnly)]
     fn entity_start_riding(
         &mut self,
         entity: EntityRef,
@@ -137,7 +127,6 @@ pub trait EntityRidingBackendMut {
     /// `entity_mount` told, at every save of the level or its entities and when
     /// the player logs out, dies or changes level, so it is saved standing where
     /// it is: a player's save keeps no passengers.
-    #[access(WorldOnly)]
     fn entity_ride_player(
         &mut self,
         entity: EntityRef,
@@ -148,12 +137,10 @@ pub trait EntityRidingBackendMut {
     /// Gets the entity off its vehicle (`Entity.stopRiding`), where the
     /// vehicle lets it out, as `/ride ... dismount` does. False when it rode
     /// nothing, an `entity_mount` listener kept it on, or for a stale handle.
-    #[access(WorldOnly)]
     fn entity_stop_riding(&mut self, entity: EntityRef) -> bool;
     /// Side: server.
     /// Gets every passenger off the entity (`Entity.ejectPassengers`), last
     /// first as vanilla walks the list, so `mob_ride` hears them in its
     /// order. False when nothing rode it, or for a stale handle.
-    #[access(WorldOnly)]
     fn entity_eject_passengers(&mut self, entity: EntityRef) -> bool;
 }

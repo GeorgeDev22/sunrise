@@ -10,13 +10,9 @@ autoexamples = false
 autotests = false
 
 [build-dependencies]
-sunrise-game-discovery = { path = "../sunrise-game-discovery" }
 sunrise-mod-api-gen = { path = "../sunrise-mod-api-gen" }
-# The build script runs on the host, but embeds resources based on the target OS.
-winresource = "0.1"
 
 [dependencies]
-sunrise-guest-stack = { path = "../sunrise-guest-stack" }
 sunrise-hooks = { path = "../sunrise-hooks" }
 sunrise-mod-runtime = { path = "../sunrise-mod-runtime" }
 mod_api = { package = "sunrise-mod-vocab", path = "../sunrise-mod-vocab" }
@@ -163,7 +159,7 @@ workspace = true
 [dev-dependencies]
 sunrise-hooks = { path = "../sunrise-hooks", features = ["test-support"] }
 sunrise-client-core = { path = "../sunrise-client-core", features = ["test-language-publication"] }
-sunrise-client-lib = { path = "../sunrise-client-lib", default-features = false, features = ["test-menu-validity", "test-payload-probe", "test-publication-scope", "test-residency-observer", "test-dry-side"] }
+sunrise-client-lib = { path = "../sunrise-client-lib", default-features = false, features = ["test-menu-validity", "test-payload-probe", "test-publication-scope", "test-residency-observer", "test-dry-side", "test-tooltip-factories", "test-pack-feedback"] }
 tempfile = "3"
 sunrise-mod-runtime = { path = "../sunrise-mod-runtime", features = ["test-work-count"] }
 sunrise-threads = { path = "../sunrise-threads", features = ["test-allocation-count", "test-game-dir"] }
@@ -171,6 +167,7 @@ mod_platform = { package = "sunrise-mod-api", path = "../sunrise-mod-api", featu
 mod_api = { package = "sunrise-mod-vocab", path = "../sunrise-mod-vocab", features = ["testing"] }
 sunrise-client-render = { path = "../sunrise-client-render", features = ["test-support"] }
 sunrise-items = { path = "../sunrise-items", features = ["test-support"] }
+sunrise-world = { path = "../sunrise-world", features = ["test-support"] }
 sunrise-perf = { path = "../sunrise-perf" }
 # Every WGSL shader translated as wgpu's DirectX 12 backend does (gfx.rs tests).
 naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out", "msl-out", "spv-out"] }

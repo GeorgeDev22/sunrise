@@ -14,14 +14,12 @@ pub trait EntityAirFluidsBackend {
     /// `minecraft:water` and `minecraft:lava`, the ones the entity update tracks. Players and
     /// mobs; None for other kinds and stale handles. On a client, reads its own copy: predicted
     /// for the local player, the last client fluid update for entities the server showed it.
-    #[access(WorldOnly)]
     fn entity_fluid_heights(&self, entity: EntityRef) -> Option<Vec<(String, f64)>>;
     /// Side: both.
     /// The fluid at the entity's eyes from its last fluid update (NeoForge's
     /// `IEntityExtension.getFirstEyeInFluidType`; `isEyeInFluidType` compares it):
     /// `Some(None)` in air. Players and mobs; None for other kinds and stale handles. On a
     /// client, reads its own copy as `entity_fluid_heights` does.
-    #[access(WorldOnly)]
     fn entity_eye_fluid(&self, entity: EntityRef) -> Option<Option<String>>;
     /// Side: both.
     /// Whether the entity touched water at its last fluid update
@@ -29,11 +27,9 @@ pub trait EntityAirFluidsBackend {
     /// On a client, the local player's own fluid state, or a kept entity's (a tracked player
     /// or mob) last client update. None for a stale handle or an entity whose body the client
     /// doesn't keep.
-    #[access(WorldOnly)]
     fn entity_is_in_water(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
     /// Whether the entity is in lava (`Entity.isInLava`): players and mobs.
-    #[access(WorldOnly)]
     fn entity_is_in_lava(&self, entity: EntityRef) -> Option<bool>;
     /// Side: both.
     /// `Entity.isUnderWater`: the previous eye-in-water sample AND current water contact,
@@ -41,20 +37,17 @@ pub trait EntityAirFluidsBackend {
     /// `LocalPlayer.isUnderWater`: the saved eye sample alone, even without current water contact.
     /// Players and mobs, using the client's own cached state on a client.
     /// None for other kinds or stale handles.
-    #[access(WorldOnly)]
     fn entity_is_under_water(&self, entity: EntityRef) -> Option<bool>;
     /// Side: both.
     /// The entity's air (`Entity.getAirSupply`): players and mobs.
     /// On a client this is the last server-synced air, never predicted. None for a stale
     /// handle or an entity whose body the client doesn't keep.
-    #[access(WorldOnly)]
     fn entity_air_supply(&self, entity: EntityRef) -> Option<i32>;
     /// Side: both.
     /// The most air the entity holds (`Entity.getMaxAirSupply`): 300, a
     /// dolphin's 4800, an axolotl's 6000.
     /// On a client this is the maximum for its kept copy's kind, not a new server query.
     /// None for a stale handle or an entity whose body the client doesn't keep.
-    #[access(WorldOnly)]
     fn entity_max_air_supply(&self, entity: EntityRef) -> Option<i32>;
 }
 /// The handles' writes of the `entity_air_fluids` area, implemented by the game and reached through [`BackendMut`].
@@ -64,6 +57,5 @@ pub trait EntityAirFluidsBackend {
 pub trait EntityAirFluidsBackendMut {
     /// Side: server.
     /// Sets the entity's air (`Entity.setAirSupply`).
-    #[access(WorldOnly)]
     fn entity_set_air_supply(&mut self, entity: EntityRef, air: i32) -> bool;
 }

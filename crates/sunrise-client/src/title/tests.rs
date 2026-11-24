@@ -18,10 +18,9 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join("saves")).unwrap();
-        Self {
-            title: Title::new(root.join("saves"), &root, ""),
-            root,
-        }
+        let mut title = Title::new(root.join("saves"), &root, "");
+        title.set_preset_editor_factories(PresetEditorFactories::default());
+        Self { title, root }
     }
     pub(super) fn world(&self, folder: &str, name: &str) {
         let generated = self.root.join("generated").join(folder);
@@ -258,6 +257,7 @@ fn direct_connection_remembers_the_address_on_cancel_escape_and_join() {
         f.click("Join Server"),
         Action::Connect {
             address: "localhost:25569".into(),
+            name: None,
             lan: false,
             realm: false,
         }
@@ -661,37 +661,24 @@ fn backup_toast_slides_in_and_out_with_its_sounds() {
     f.click("Make Backup");
     f.title.poll_backup();
     f.finish_backup();
-    assert!(!f.title.has_toast(), "candidate waits for the game Host");
-    let candidate = f.title.take_pending_toast().unwrap();
-    f.title.apply_toast(candidate);
-    assert_eq!(f.title.update_toast(1.0), Some("minecraft:ui.toast.in"));
-    assert_eq!(f.title.update_toast(1.0), None);
-    let age = |f: &mut Fixture, ms: u64| {
-        let origin = f
-            .title
-            .toast
-            .as_mut()
-            .unwrap()
-            .slide
-            .origin
-            .as_mut()
-            .unwrap();
-        *origin -= std::time::Duration::from_millis(ms);
+    let mut toast = f.title.take_pending_toast().unwrap();
+    assert_eq!(toast.update(1.0), (Some(true), false));
+    assert_eq!(toast.update(1.0), (None, false));
+    let age = |toast: &mut crate::toasts::SystemToast, ms: u64| {
+        *toast.slide.origin.as_mut().unwrap() -= std::time::Duration::from_millis(ms);
     };
     // Half way in: (300 / 600)² of its width shows.
-    age(&mut f, 300);
-    assert_eq!(f.title.update_toast(1.0), None);
-    let portion = f.title.toast.as_ref().unwrap().slide.portion;
+    age(&mut toast, 300);
+    assert_eq!(toast.update(1.0), (None, false));
+    let portion = toast.slide.portion;
     assert!((portion - 0.25).abs() < 0.02, "{portion}");
     // Shown in full for the display time, then out.
-    age(&mut f, 300);
-    f.title.update_toast(1.0);
-    age(&mut f, 5100);
-    assert_eq!(f.title.update_toast(1.0), Some("minecraft:ui.toast.out"));
-    assert!(f.title.toast.is_some());
-    age(&mut f, 700);
-    assert_eq!(f.title.update_toast(1.0), None);
-    assert!(f.title.toast.is_none());
+    age(&mut toast, 300);
+    toast.update(1.0);
+    age(&mut toast, 5100);
+    assert_eq!(toast.update(1.0), (Some(false), false));
+    age(&mut toast, 700);
+    assert_eq!(toast.update(1.0), (None, true));
 }
 
 #[test]
@@ -813,7 +800,10 @@ fn only_the_vertical_wheel_cycles_a_create_world_button() {
             size.1,
             *creative,
             options,
-            f.title.preset_data.is_some(),
+            f.title
+                .preset_data
+                .is_some()
+                .then_some(f.title.preset_editors.as_ref()),
         )
     };
     let button = labels(&f)

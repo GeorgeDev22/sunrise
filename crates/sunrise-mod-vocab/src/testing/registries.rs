@@ -12,6 +12,7 @@ pub struct FakeRegistries {
     containers: HashMap<String, usize>,
     loaded: HashSet<String>,
     fluid_sounds: HashMap<String, (&'static str, &'static str)>,
+    fluid_buckets: HashMap<String, String>,
 }
 
 impl FakeRegistries {
@@ -71,6 +72,12 @@ impl FakeRegistries {
         self.fluid_sounds.insert(fluid.to_owned(), (pickup, empty));
         self
     }
+    /// Gives fluid `fluid` the bucket `item` the game registers for it, as `fluid_bucket`
+    /// answers and `bucket_fluid` answers back; a fluid not given one has none.
+    pub fn fluid_bucket(&mut self, fluid: &str, item: &str) -> &mut Self {
+        self.fluid_buckets.insert(fluid.to_owned(), item.to_owned());
+        self
+    }
     /// Marks mod `id` as loaded.
     pub fn loaded(&mut self, id: &str) -> &mut Self {
         self.loaded.insert(id.to_owned());
@@ -104,6 +111,19 @@ impl FakeRegistries {
         let (fill, empty) = self.fluid_sounds.get(fluid)?;
         Some(if pickup { fill } else { empty })
     }
+    /// The bucket `fluid` was given, resolved.
+    pub(super) fn bucket_of(&self, fluid: &str) -> Option<crate::ItemKey> {
+        crate::content::registry_keys::item_key(self.fluid_buckets.get(fluid)?)
+    }
+    /// The fluid whose bucket `bucket` was given as, resolved.
+    pub(super) fn fluid_of(&self, bucket: crate::ItemKey) -> Option<crate::FluidKey> {
+        let item = crate::content::registry_keys::item_id(bucket)?;
+        let (fluid, _) = self
+            .fluid_buckets
+            .iter()
+            .find(|(_, known)| *known == item)?;
+        crate::content::registry_keys::fluid_key(fluid)
+    }
     pub(super) fn is_loaded(&self, id: &str) -> bool {
         self.loaded.contains(id)
     }
@@ -117,6 +137,14 @@ impl crate::Tags for FakeRegistries {
     fn is_in_tag(&self, item: crate::ItemKey, _: crate::TagKey) -> Option<bool> {
         Self::resolved_item_id(item)?;
         Some(false)
+    }
+    fn item_tags(&self, item: crate::ItemKey) -> Option<Vec<crate::Identifier>> {
+        Self::resolved_item_id(item)?;
+        Some(Vec::new())
+    }
+    fn item_tag_names(&self) -> Option<Vec<crate::Identifier>> {
+        crate::parts::installed()?.resolved_items.get()?;
+        Some(Vec::new())
     }
     fn items(&self, _: crate::TagKey) -> crate::TagMembers<crate::ItemKey> {
         if crate::parts::installed()

@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Egy új csevegősor balról csúszik be, miközben elhalványul, ahelyett, hogy egészben jelenne meg.",
   "sunrise.extras.chat_indicator": "Üzenetjelző",
   "sunrise.extras.chat_indicator.tooltip": "A színes sáv a csevegősor bal oldalán.",
-  "sunrise.extras.discord_presence": "Discord gazdag jelenlét",
-  "sunrise.extras.discord_presence.tooltip": "Megjeleníti a Playing Sunriset a Discord-profilon, miközben a Discord fut: menük, egyjátékos vagy többjátékos, a dimenzió és a lejátszási idő. Soha nem egy világnév vagy egy szerver címe.",
   "sunrise.extras.dynamic_lights": "Dinamikus fények",
   "sunrise.extras.dynamic_lights.tooltip": "A fáklyák és más fényforrások megtartották, leejtették vagy lángra lobbantották a körülöttük lévő blokkokat.",
   "sunrise.extras.fullbright": "Teljes fényerő",

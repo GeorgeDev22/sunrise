@@ -517,9 +517,9 @@ mod tests {
 
     /// The service through a real game and the hooks' own dispatch: a mod
     /// saves its registered config from `config_loading` and keeps a file in
-    /// its folder, the reload poll hands the saved text back, and the same
-    /// call for another mod's file is refused. In a fresh process, run in a
-    /// scratch folder, since `config/` is beside the game's working folder.
+    /// its folder, the client frame poll hands the saved text back on the client
+    /// host, and a call for another mod's file is refused. A fresh process
+    /// gives the test its own working folder and `config/`.
     #[test]
     #[ignore = "daily"]
     fn a_mod_saves_its_config_through_the_game_and_the_reload_hears_it() {
@@ -541,24 +541,26 @@ mod tests {
         ) {
             return;
         }
-        fn files(host: &HostSide) -> &'static dyn ConfigFiles {
-            match host {
-                HostSide::Server(host) => host.config_files(),
-                HostSide::Client(host) => host.config_files(),
-            }
-        }
         struct Proof;
         #[mod_api::__subscriptions]
         impl Hooks for Proof {
-            fn register_configs(&self, _: HostSide, event: &mut RegisterConfigsEvent<'_>) {
+            fn register_configs(
+                &self,
+                _: &dyn mod_api::ConfigContext,
+                event: &mut RegisterConfigsEvent<'_>,
+            ) {
                 event.configs.push(mod_api::Config::new(
                     "proof",
                     mod_api::ConfigKind::Common,
                     "count = 0\n",
                 ));
             }
-            fn config_loading(&self, host: HostSide, event: &mut ConfigLoadingEvent<'_>) {
-                let files = files(&host);
+            fn config_loading(
+                &self,
+                context: &dyn mod_api::ConfigContext,
+                event: &mut ConfigLoadingEvent<'_>,
+            ) {
+                let files = context.config_files();
                 heard().push(format!("loading {}", event.config.text.trim()));
                 files
                     .write(&path("proof-common.toml"), b"count = 1\n")
@@ -569,15 +571,24 @@ mod tests {
                 assert_eq!(files.read(&other), Err(ConfigFileError::NotOwned));
                 assert_eq!(files.write(&other, b"x"), Err(ConfigFileError::NotOwned));
             }
-            fn config_reloading(&self, _: HostSide, event: &mut ConfigReloadingEvent<'_>) {
+            fn config_reloading(&self, host: HostSide<'_>, event: &mut ConfigReloadingEvent<'_>) {
+                let HostSide::Client(context) = host else {
+                    panic!("expected the client polling host");
+                };
+                assert!(
+                    context
+                        .config_files()
+                        .read(&path("proof/state.bin"))
+                        .is_ok()
+                );
                 heard().push(format!("reloading {}", event.config.text.trim()));
             }
         }
         let mods: Mods = vec![ModEntry::new("proof", Box::new(Proof))].into();
         mod_platform::testing::with_mods(mods, || {
-            super::super::native_entity_refs::tests::with_game(|game| {
+            super::super::native_entity_refs::tests::with_client_game(|game| {
                 game.native_configs_client_start();
-                game.native_configs_poll();
+                game.native_configs_tick_client();
             });
         });
         assert_eq!(*heard(), ["loading count = 0", "reloading count = 1"]);

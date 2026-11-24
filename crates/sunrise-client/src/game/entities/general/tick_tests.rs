@@ -66,21 +66,28 @@ struct Counter {
 
 #[mod_api::sunrise_part]
 impl EntityPart for Counter {
-    fn general_entity_tick(
-        &self,
-        host: &mut dyn ServerHost,
-        event: &mut GeneralEntityTickEvent<'_>,
-    ) {
-        let holder = Holder::Entity(event.entity.id());
+    fn general_entity_tick(&self, event: &mut GeneralEntityTickEvent<'_>) {
+        let entity = event
+            .subject
+            .with_view(|view| view.handle())
+            .expect("live resident general entity");
+        let host = event.subject.host();
+        let holder = Holder::Entity(entity.id());
         let value = COUNTER.get(host, holder).unwrap() + 1;
         COUNTER.set(host, holder, value).unwrap();
-        if self.panicking_on() == Some(event.entity.id())
+        if self.panicking_on() == Some(entity.id())
             && !self.fired.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
+            assert_eq!(
+                event
+                    .subject
+                    .with_view(|mut view| view.set_velocity([7.0, 8.0, 9.0])),
+                Some(true)
+            );
             panic!("general entity tick boom");
         }
         let action = std::mem::replace(&mut *self.action.lock().unwrap(), OnTick::Nothing);
-        let other = |id: u32| mod_api::EntityRef::new(event.entity.epoch(), id);
+        let other = |id: u32| mod_api::EntityRef::new(entity.epoch(), id);
         match action {
             OnTick::Nothing => {}
             OnTick::Remove(id) => {
@@ -90,11 +97,8 @@ impl EntityPart for Counter {
                 assert!(other(id).stop_riding(host));
             }
         }
-        self.events
-            .lock()
-            .unwrap()
-            .push((event.entity.id(), "tick"));
-        self.trace.lock().unwrap().push(event.entity.id());
+        self.events.lock().unwrap().push((entity.id(), "tick"));
+        self.trace.lock().unwrap().push(entity.id());
     }
 }
 
@@ -236,7 +240,7 @@ fn with_counter(test: impl FnOnce(&mut Game<'_>, Levers)) {
         pre_victim: declare.pre_victim.clone(),
     };
     mod_platform::__private::initialize().expect("test registration requires the mod API runtime");
-    let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::Registration);
+    let _phase = mod_platform::__private::RegistrationGuard::open();
     let mods: mod_api::Mods = vec![mod_api::ModEntry::new("mymod", Box::new(declare))].into();
     mod_platform::testing::with_mods(mods, || {
         with_game(|game| {
@@ -250,7 +254,6 @@ fn with_counter(test: impl FnOnce(&mut Game<'_>, Levers)) {
             // The registration phase ends before the test's own ticks: a
             // part's writes are storage writes, which only a world's phases
             // take, as the server's own tick runs in World.
-            let _world = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
             test(game, levers)
         })
     });
@@ -668,29 +671,50 @@ fn a_parked_level_holds_the_counter_until_it_returns() {
 }
 
 /// The containment row: a native panic in a row's tick rolls the row's
-/// writes back (the counter keeps its value), the later row ticks on, and
-/// the panicking row's own next tick proceeds. A subscriber is not
-/// auto-disabled.
+/// writes back (the counter keeps its value) and disables that mod's
+/// `general_entity_tick` for the rest of the session, so later rows and
+/// later ticks proceed without invoking the disabled callback again.
 #[test]
 #[ignore = "daily"]
 fn a_panicking_row_rolls_back_and_the_next_tick_proceeds() {
-    with_counter(|game, l| {
-        let first = seeded_row(game, [1, 2, 3, 4], 41);
-        let second = seeded_row(game, [5, 6, 7, 8], 7);
-        l.panic_on
-            .store(first, std::sync::atomic::Ordering::Relaxed);
-        tick(game);
-        assert_eq!(
-            *l.trace.lock().unwrap(),
-            [second],
-            "only the later row ticked"
-        );
-        assert_eq!(counter(game, first), 41, "the panic rolled the write back");
-        assert_eq!(counter(game, second), 8);
-        tick(game);
-        assert_eq!(*l.trace.lock().unwrap(), [second, first, second]);
-        assert_eq!(counter(game, first), 42);
-    });
+    crate::game::in_own_process(
+        "game::general::tick_tests::a_panicking_row_rolls_back_and_the_next_tick_proceeds",
+        || {
+            with_counter(|game, l| {
+                let first = seeded_row(game, [1, 2, 3, 4], 41);
+                let second = seeded_row(game, [5, 6, 7, 8], 7);
+                l.panic_on
+                    .store(first, std::sync::atomic::Ordering::Relaxed);
+                tick(game);
+                assert_eq!(
+                    mod_api::__private::take_hook_panics(),
+                    [mod_api::__private::HookPanicReport {
+                        mod_id: "mymod",
+                        hook: "general_entity_tick",
+                    }]
+                );
+                assert!(
+                    l.trace.lock().unwrap().is_empty(),
+                    "the panicking mod's general_entity_tick is disabled after its first panic"
+                );
+                assert_eq!(
+                    counter(game, first),
+                    41,
+                    "the panic rolled the Host write back"
+                );
+                assert_eq!(
+                    game.resident_entities.general.row(first).unwrap().velocity,
+                    sunrise_core::geometry::Vec3::ZERO,
+                    "the panic rolled the scoped subject write back"
+                );
+                assert_eq!(counter(game, second), 7);
+                tick(game);
+                assert!(l.trace.lock().unwrap().is_empty());
+                assert_eq!(counter(game, first), 41);
+                assert_eq!(counter(game, second), 7);
+            });
+        },
+    );
 }
 
 /// The ruling's flat order: the vehicle's Pre, tick and Post, then each

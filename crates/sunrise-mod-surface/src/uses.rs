@@ -114,13 +114,27 @@ pub enum Built {
     Full,
 }
 
+/// The split fingerprint of a declared game function or loop.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GameCode {
+    /// The loop's publication fields and slot trait hash, or none for a single function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_contract: Option<String>,
+    /// Digests by function path (both the entry and the generic function for a loop).
+    pub functions: BTreeMap<String, crate::build_data::FunctionDigests>,
+}
+
 /// One record a mod uses, as the table carries it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     pub id: String,
-    /// Its hash at the made-for build.
+    /// Its hash at the made-for build, also used if either game's function index lacks digests.
     pub hash: String,
+    /// For declared game functions or loops whose build data records separate digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_code: Option<GameCode>,
     /// A type's trait impls at the made-for build: the target must keep each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub impls: Vec<String>,
@@ -158,6 +172,7 @@ impl Entry {
         Self {
             id,
             hash,
+            game_code: None,
             impls: Vec::new(),
             built: None,
             fields_hash: None,
@@ -199,7 +214,7 @@ impl Uses {
     /// The table a package carries for a mod made for `made_for` (a build id).
     pub fn table(&self, made_for: impl Into<String>) -> UsesTable {
         UsesTable {
-            schema: USES_SCHEMA,
+            schema: PLAIN_SCHEMA,
             made_for: made_for.into(),
             entries: self.entries().cloned().collect(),
         }
@@ -2529,6 +2544,7 @@ fn list(
                     entry: Entry {
                         id: id.to_owned(),
                         hash: hashes[id].to_owned(),
+                        game_code: None,
                         impls: record.map(|t| t.impls.clone()).unwrap_or_default(),
                         fields_hash: (built == Some(Built::Full))
                             .then(|| record.and_then(|t| t.fields_hash.clone()))
@@ -2571,6 +2587,10 @@ pub enum Change {
     Refused { code: &'static str, why: String },
     /// The target's record has another hash.
     Changed,
+    /// A declared game function's declaration is unchanged but its body differs.
+    BodyChanged { function: String },
+    /// A declared game function's declaration differs, regardless of its body.
+    DeclarationChanged { function: String },
     /// The target's type no longer implements this trait.
     LostImpl(String),
     /// The struct's field set changed, and the mod builds it with a full literal at `at`: the
@@ -2603,6 +2623,12 @@ impl std::fmt::Display for Misfit {
             Change::Removed => write!(f, "{item} (removed)"),
             Change::Refused { code, why } => write!(f, "{item} (refused: {code}: {why})"),
             Change::Changed => write!(f, "{item} (changed)"),
+            Change::BodyChanged { function } => {
+                write!(f, "the game's function `{function}` (body changed)")
+            }
+            Change::DeclarationChanged { function } => {
+                write!(f, "the game's function `{function}` (declaration changed)")
+            }
             Change::LostImpl(name) => write!(f, "{item} no longer implements `{name}`"),
             Change::Fields { gained, at } => match &gained[..] {
                 [] => write!(
@@ -2889,11 +2915,16 @@ fn fit_report<'a>(
     }
 }
 
-/// The schema [`UsesTable`] writes.
-pub const USES_SCHEMA: u32 = 3;
+/// The newest schema [`UsesTable::read`] takes, which adds split game-code fingerprints. Only a
+/// list that holds one is written with it.
+pub const USES_SCHEMA: u32 = 4;
 
-/// The schema before it, which [`UsesTable::read`] still reads: published packages carry it. Its
-/// lists recorded a build wherever the scan was in doubt, with nothing to tell a doubt from a
+/// The schema of a list with no split fingerprint, so the tools of builds published before
+/// [`USES_SCHEMA`] still read it.
+pub const PLAIN_SCHEMA: u32 = 3;
+
+/// The first schema, which [`UsesTable::read`] still reads because published packages carry it.
+/// Its lists recorded a build wherever the scan was in doubt, with nothing to tell a doubt from a
 /// literal the scan had placed, so how they say a struct is built is not read and the compile
 /// judges it: a literal that no longer builds fails there, under the mod's name. They hold no
 /// hook versions either ([`Fit::Unversioned`]).
@@ -2977,6 +3008,10 @@ impl UsesTable {
         }
         let mut table: Self =
             serde_json::from_slice(bytes).map_err(|e| UsesError::Json(e.to_string()))?;
+        if table.schema < USES_SCHEMA && table.entries.iter().any(|entry| entry.game_code.is_some())
+        {
+            return Err(UsesError::Json("game_code requires uses schema 4".into()));
+        }
         if table.schema == DOUBTING_SCHEMA {
             for entry in &mut table.entries {
                 entry.built = entry.built.map(|_| Built::None);

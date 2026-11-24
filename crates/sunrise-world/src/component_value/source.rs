@@ -1,5 +1,8 @@
 //! Persistent component codecs, without protocol state or registry-number assumptions.
-use super::{Patch, Template, Value};
+use super::{
+    Patch, Template, Value,
+    consume_effects::{self, Admitted},
+};
 use sunrise_core::nbt::Tag;
 
 type Result<T, E = String> = std::result::Result<T, E>;
@@ -11,10 +14,14 @@ pub fn identifier(s: &str) -> Result<String> {
 /// The saved component codec's identifier admission without cloning qualified names.
 #[doc(hidden)]
 pub fn normalized_identifier(s: &str) -> Result<std::borrow::Cow<'_, str>> {
+    codec_identifier(s, false)
+}
+
+/// `Identifier.CODEC` checks the characters in each part, even for an empty path.
+fn codec_identifier(s: &str, allow_empty_path: bool) -> Result<std::borrow::Cow<'_, str>> {
     use std::borrow::Cow;
-    let (namespace, path) = s.split_once(':').unwrap_or(("minecraft", s));
-    if namespace.is_empty()
-        || path.is_empty()
+    let (namespace, path) = s.split_once(':').unwrap_or(("", s));
+    if (!allow_empty_path && path.is_empty())
         || !namespace
             .bytes()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"_.-".contains(&c))
@@ -24,10 +31,10 @@ pub fn normalized_identifier(s: &str) -> Result<std::borrow::Cow<'_, str>> {
     {
         return Err(format!("invalid identifier {s}"));
     }
-    Ok(if s.contains(':') {
-        Cow::Borrowed(s)
+    Ok(if namespace.is_empty() {
+        Cow::Owned(format!("minecraft:{path}"))
     } else {
-        Cow::Owned(format!("minecraft:{s}"))
+        Cow::Borrowed(s)
     })
 }
 
@@ -81,6 +88,12 @@ fn boolean(t: &Tag) -> Result<Value> {
 /// `ComponentSerialization.CODEC`: normalize the decoded contents and style before
 /// projection or hashing. A component list appends its tail to the first component.
 fn text(t: &Tag, source: Source) -> Result<Value> {
+    if let Some(project) = source.project_text {
+        let tag = project(t).ok_or("invalid text component")?;
+        let value = Value::from_nbt(&tag, &[]);
+        sunrise_core::nbt::discard_tag(tag);
+        return Ok(value);
+    }
     if let Tag::String(s) = t {
         return Ok(Value::String(s.0.clone()));
     }
@@ -221,7 +234,11 @@ fn text_contents(r: &mut Record<'_>, kind: &str, source: Source) -> Result<()> {
                 "storage" => r.required("storage", text_identifier)?,
                 _ => return Err("unknown text NBT source".into()),
             }
-            r.optional("separator", |v| text(v, source))
+            // NbtContents uses a lenient optional, unlike SelectorContents.
+            if let Some(separator) = t.get("separator").and_then(|v| text(v, source).ok()) {
+                r.fields.push((Value::string("separator"), separator));
+            }
+            Ok(())
         }
         "object" => {
             let atlas = |r: &mut Record<'_>| {
@@ -252,30 +269,7 @@ fn text_contents(r: &mut Record<'_>, kind: &str, source: Source) -> Result<()> {
 /// `Style.Serializer.MAP_CODEC`: known fields are strict optional fields.
 fn text_style(r: &mut Record<'_>, source: Source) -> Result<()> {
     r.optional("color", text_color)?;
-    r.optional("shadow_color", |t| {
-        if let Ok(color) = int(t) {
-            return Ok(color);
-        }
-        let value = list(t, float)?;
-        let Value::List(values) = &value else {
-            unreachable!()
-        };
-        let [
-            Value::Float(red),
-            Value::Float(green),
-            Value::Float(blue),
-            Value::Float(alpha),
-        ] = values.as_slice()
-        else {
-            return Err("expected four shadow color channels".into());
-        };
-        let color = [*alpha, *red, *green, *blue].map(|bits| {
-            let x = f32::from_bits(bits) * 255.0;
-            let n = x as i32;
-            (if x < n as f32 { n.wrapping_sub(1) } else { n }) as u8
-        });
-        Ok(Value::Int(i32::from_be_bytes(color)))
-    })?;
+    r.optional("shadow_color", |t| text_shadow_color(t).map(Value::Int))?;
     for key in [
         "bold",
         "italic",
@@ -291,14 +285,42 @@ fn text_style(r: &mut Record<'_>, source: Source) -> Result<()> {
     r.optional("hover_event", |v| hover_event(v, source))
 }
 
-fn text_identifier(t: &Tag) -> Result<Value> {
-    let id = sunrise_core::identifier::Identifier::parse(&string(t)?).map_err(|e| e.to_string())?;
-    Ok(Value::string(&id.to_string()))
+/// `ExtraCodecs.ARGB_COLOR_CODEC`: a packed int or four floats in RGBA order.
+pub fn text_shadow_color(t: &Tag) -> Result<i32> {
+    if let Ok(color) = integer(t) {
+        return Ok(color);
+    }
+    let value = list(t, float)?;
+    let Value::List(values) = &value else {
+        unreachable!()
+    };
+    let [
+        Value::Float(red),
+        Value::Float(green),
+        Value::Float(blue),
+        Value::Float(alpha),
+    ] = values.as_slice()
+    else {
+        return Err("expected four shadow color channels".into());
+    };
+    let color = [*alpha, *red, *green, *blue].map(|bits| {
+        let x = f32::from_bits(bits) * 255.0;
+        let n = x as i32;
+        (if x < n as f32 { n.wrapping_sub(1) } else { n }) as u8
+    });
+    Ok(i32::from_be_bytes(color))
 }
 
-/// `TextColor.parseColor`: named colors or a signed Java base-16 integer in RGB range.
+fn text_identifier(t: &Tag) -> Result<Value> {
+    Ok(Value::string(&codec_identifier(&string(t)?, true)?))
+}
+
 fn text_color(t: &Tag) -> Result<Value> {
-    let name = string(t)?;
+    Ok(Value::string(&text_color_name(&string(t)?)?))
+}
+
+/// `TextColor.parseColor` followed by `TextColor.serialize`.
+pub fn text_color_name(name: &str) -> Result<std::borrow::Cow<'_, str>> {
     if let Some(hex) = name.strip_prefix('#') {
         let negative = hex.starts_with('-');
         let hex = hex.strip_prefix(['+', '-']).unwrap_or(hex);
@@ -317,14 +339,11 @@ fn text_color(t: &Tag) -> Result<Value> {
         if negative && value != 0 {
             return Err(bad());
         }
-        return Ok(Value::string(&format!("#{value:06X}")));
+        return Ok(format!("#{value:06X}").into());
     }
-    match name.as_str() {
-        "black" | "dark_blue" | "dark_green" | "dark_aqua" | "dark_red" | "dark_purple"
-        | "gold" | "gray" | "dark_gray" | "blue" | "green" | "aqua" | "red" | "light_purple"
-        | "yellow" | "white" => Ok(Value::string(&name)),
-        _ => Err(format!("invalid text color {name}")),
-    }
+    sunrise_core::text::named_color(name)
+        .map(|_| name.into())
+        .ok_or_else(|| format!("invalid text color {name}"))
 }
 
 fn click_event(t: &Tag, source: Source) -> Result<Value> {
@@ -487,6 +506,8 @@ fn integer_list(t: &Tag) -> Result<Vec<i32>> {
     match t {
         Tag::IntArray(v) => Ok(v.clone()),
         Tag::List(v) => v.iter().map(integer).collect(),
+        Tag::ByteArray(v) => Ok(v.iter().map(|&value| i32::from(value as i8)).collect()),
+        Tag::LongArray(v) => Ok(v.iter().map(|&value| value as i32).collect()),
         _ => Err("expected list".into()),
     }
 }
@@ -642,11 +663,44 @@ fn effect_details(t: &Tag, with_id: bool) -> Result<Value> {
         })
     })
 }
-fn consume_effect(t: &Tag) -> Result<Value> {
+type AdmittedLookup<'a> = dyn Fn(&Tag) -> Option<Admitted> + 'a;
+type ProjectedEffect<'a> = dyn Fn(&Admitted) + 'a;
+
+#[derive(Clone, Copy)]
+struct EffectProjection<'a> {
+    retained: &'a AdmittedLookup<'a>,
+    projected: &'a ProjectedEffect<'a>,
+}
+
+fn consume_effect(t: &Tag, source: Source<'_>) -> Result<Option<Value>> {
     let kind = identifier(&string(
         t.get("type").ok_or("missing consume effect type")?,
     )?)?;
     validate_source(kind.strip_prefix("minecraft:").unwrap_or(&kind), t)?;
+    let Tag::Compound(fields) = t else {
+        return Err("consume effect is not a map".into());
+    };
+    let registered = if let Some(projection) = source.effects {
+        match (projection.retained)(t) {
+            None if source.deferred_template => {
+                // The registered codec reports any refusal. Keep the siblings of a
+                // refused effect when projecting a live template to the network.
+                let Ok(effect) = consume_effects::admit(&kind, fields) else {
+                    return Ok(None);
+                };
+                if let Some(effect) = &effect {
+                    (projection.projected)(effect);
+                }
+                effect
+            }
+            retained => retained,
+        }
+    } else {
+        consume_effects::admit(&kind, fields)?
+    };
+    if let Some(effect) = registered {
+        return Ok(Some(Value::RegisteredConsumeEffect(effect)));
+    }
     record(t, |r| {
         r.fields.push((Value::string("type"), Value::string(&kind)));
         match kind.as_str() {
@@ -661,10 +715,20 @@ fn consume_effect(t: &Tag) -> Result<Value> {
                 r.b("directional_particles", true)?;
             }
             "minecraft:play_sound" => r.required("sound", sound)?,
-            _ => return Err(format!("unknown consume effect {kind}")),
+            _ if kind.starts_with("minecraft:") => {
+                return Err(format!("unknown consume effect {kind}"));
+            }
+            _ => {
+                let type_key = "type".into();
+                r.fields
+                    .extend(fields.iter().filter(|(key, _)| *key != &type_key).map(
+                        |(key, value)| (Value::String(key.0.clone()), Value::from_nbt(value, &[])),
+                    ));
+            }
         }
         Ok(())
     })
+    .map(Some)
 }
 fn explosion(t: &Tag) -> Result<Value> {
     validate_source("firework_explosion", t)?;
@@ -730,15 +794,25 @@ fn resolvable(t: &Tag, f: impl Fn(&Tag) -> Result<Value>) -> Result<Value> {
     }
 }
 
+type TextProjection<'a> = dyn Fn(&Tag) -> Option<Tag> + 'a;
+
 #[derive(Clone, Copy)]
-struct Source {
+struct Source<'a> {
     upgraded: bool,
     is_native: fn(&str) -> bool,
+    has_item: Option<&'a dyn Fn(&str) -> bool>,
+    effects: Option<EffectProjection<'a>>,
+    project_text: Option<&'a TextProjection<'a>>,
+    deferred_template: bool,
 }
-impl Source {
+impl Source<'_> {
     const SAVED: Self = Self {
         upgraded: false,
         is_native: |_| false,
+        has_item: None,
+        effects: None,
+        project_text: None,
+        deferred_template: false,
     };
 
     fn component_type(self, id: &str) -> Result<()> {
@@ -768,6 +842,11 @@ fn template_tag(t: &Tag, source: Source) -> Result<Template> {
         if item == "minecraft:air" {
             return Err("air is not a template item".into());
         }
+        if let Some(has_item) = source.has_item
+            && !has_item(&item)
+        {
+            return Err(format!("unknown item {item}"));
+        }
         return Ok(Template {
             item,
             count: 1,
@@ -777,6 +856,11 @@ fn template_tag(t: &Tag, source: Source) -> Result<Template> {
     let item = identifier(&string(t.get("id").ok_or("missing template item")?)?)?;
     if item == "minecraft:air" {
         return Err("air is not a template item".into());
+    }
+    if let Some(has_item) = source.has_item
+        && !has_item(&item)
+    {
+        return Err(format!("unknown item {item}"));
     }
     let count = t
         .get("count")
@@ -793,34 +877,62 @@ fn template_tag(t: &Tag, source: Source) -> Result<Template> {
     } else {
         validate_template_count(count)?;
     }
-    let mut patch: Patch = vec![];
-    if let Some(c) = t.get("components") {
-        let Tag::Compound(c) = c else {
-            return Err("template components are not a map".into());
-        };
-        for (name, value) in c {
-            let name = name.to_string_lossy();
-            let (remove, name) = name
-                .strip_prefix('!')
-                .map_or((false, name.as_str()), |n| (true, n));
-            let name = identifier(name)?;
-            let value = if remove {
-                source.component_type(&name)?;
-                if !source.upgraded && !super::is_persistent(&name) {
-                    return Err(format!("{name} has no persistent codec"));
-                }
-                if !matches!(value, Tag::Compound(_)) {
-                    return Err(format!("{name}: removal payload must be a map"));
-                }
-                None
-            } else {
-                Some(component_tag(&name, value, source)?)
-            };
-            patch.push((name, value));
-        }
-        super::normalize_map(&mut patch, |(name, _)| name);
-    }
+    let patch = t
+        .get("components")
+        .map(|c| template_patch(c, source))
+        .transpose()?
+        .unwrap_or_default();
     Ok(Template { item, count, patch })
+}
+
+/// Decode a `DataComponentPatch` and encode its persistent form, as carried by `HoverEvent.ShowItem`.
+/// Resolve inner item and native component IDs against the caller's registries,
+/// and project embedded text through the caller's registry-aware component codec.
+pub fn normalize_template_patch(
+    tag: &Tag,
+    has_item: &dyn Fn(&str) -> bool,
+    is_native: fn(&str) -> bool,
+    project_text: &TextProjection<'_>,
+) -> Result<Option<Tag>> {
+    let patch = template_patch(
+        tag,
+        Source {
+            has_item: Some(has_item),
+            is_native,
+            project_text: Some(project_text),
+            ..Source::SAVED
+        },
+    )?;
+    super::template_patch_tag(&patch, super::Projection::Codec)
+}
+
+fn template_patch(tag: &Tag, source: Source<'_>) -> Result<Patch> {
+    let Tag::Compound(components) = tag else {
+        return Err("template components are not a map".into());
+    };
+    let mut patch = Vec::with_capacity(components.len());
+    for (name, value) in components {
+        let name = name.to_string_lossy();
+        let (remove, name) = name
+            .strip_prefix('!')
+            .map_or((false, name.as_str()), |n| (true, n));
+        let name = identifier(name)?;
+        let value = if remove {
+            source.component_type(&name)?;
+            if !source.upgraded && !super::is_persistent(&name) {
+                return Err(format!("{name} has no persistent codec"));
+            }
+            if !matches!(value, Tag::Compound(_)) {
+                return Err(format!("{name}: removal payload must be a map"));
+            }
+            None
+        } else {
+            Some(component_tag(&name, value, source)?)
+        };
+        patch.push((name, value));
+    }
+    super::normalize_map(&mut patch, |(name, _)| name);
+    Ok(patch)
 }
 fn template(t: &Tag, source: Source) -> Result<Value> {
     Ok(Value::Template(Box::new(template_tag(t, source)?)))
@@ -867,6 +979,75 @@ fn predicate(t: &Tag, source: Source) -> Result<Value> {
 pub fn from_component_tag(id: &str, t: &Tag) -> Result<Value> {
     from_component_tag_with(id, t, |_| false)
 }
+/// `ComponentSerialization.CODEC` over NBT, with the owning registry's item names.
+pub fn text_from_tag(t: &Tag, has_item: &dyn Fn(&str) -> bool) -> Result<Value> {
+    text(
+        t,
+        Source {
+            has_item: Some(has_item),
+            ..Source::SAVED
+        },
+    )
+}
+
+/// `Style.Serializer.CODEC` over NBT. Shares the field decoders used by `text_from_tag`.
+pub fn validate_text_style(t: &Tag, has_item: &dyn Fn(&str) -> bool) -> Result<()> {
+    let source = Source {
+        has_item: Some(has_item),
+        ..Source::SAVED
+    };
+    record(t, |r| text_style(r, source)).map(drop)
+}
+/// Project a live component, reusing its admitted effects and reporting any effects
+/// newly materialized from deferred templates to the caller.
+pub fn from_admitted_component_tag(
+    id: &str,
+    t: &Tag,
+    is_native: fn(&str) -> bool,
+    admitted: &AdmittedLookup<'_>,
+    projected: &ProjectedEffect<'_>,
+) -> Result<Value> {
+    component_tag(
+        &identifier(id)?,
+        t,
+        Source {
+            is_native,
+            effects: Some(EffectProjection {
+                retained: admitted,
+                projected,
+            }),
+            ..Source::SAVED
+        },
+    )
+}
+
+fn effect_component(t: &Tag, consumable: bool, source: Source<'_>) -> Result<Value> {
+    record(t, |r| {
+        let key = if consumable {
+            r.f("consume_seconds", 1.6)?;
+            r.id("animation", "eat", string_value)?;
+            r.id("sound", "minecraft:entity.generic.eat", sound)?;
+            r.b("has_consume_particles", true)?;
+            "on_consume_effects"
+        } else {
+            "death_effects"
+        };
+        r.default(key, Value::List(vec![]), |t| {
+            let effects = match t {
+                Tag::List(effects) => effects
+                    .iter()
+                    .filter_map(|effect| consume_effect(effect, source).transpose())
+                    .collect::<Result<_>>()?,
+                Tag::ByteArray(a) if a.is_empty() => vec![],
+                Tag::IntArray(a) if a.is_empty() => vec![],
+                Tag::LongArray(a) if a.is_empty() => vec![],
+                _ => return Err("expected consume effect list".into()),
+            };
+            Ok(Value::List(effects))
+        })
+    })
+}
+
 /// Decode against the pinned component registry plus the owning registry's native types.
 pub fn from_component_tag_with(id: &str, t: &Tag, is_native: fn(&str) -> bool) -> Result<Value> {
     component_tag(
@@ -903,7 +1084,13 @@ fn decode_component(id: &str, t: &Tag, source: Source) -> Result<Value> {
     // Recursive template and predicate paths do not carry the large leaf dispatcher's frame.
     Ok(match name {
         "lock" => item_predicate(t, source)?,
-        "use_remainder" | "sulfur_cube_content" => template(t, source)?,
+        "use_remainder" | "sulfur_cube_content" => template(
+            t,
+            Source {
+                deferred_template: true,
+                ..source
+            },
+        )?,
         "can_place_on" | "can_break" => {
             if let Tag::List(v) = t {
                 match v.len() {
@@ -1084,13 +1271,7 @@ fn component_leaf(name: &str, id: &str, t: &Tag, source: Source) -> Result<Value
             r.required("saturation", float)?;
             r.b("can_always_eat", false)
         })?,
-        "consumable" => record(t, |r| {
-            r.f("consume_seconds", 1.6)?;
-            r.id("animation", "eat", string_value)?;
-            r.id("sound", "minecraft:entity.generic.eat", sound)?;
-            r.b("has_consume_particles", true)?;
-            r.list("on_consume_effects", consume_effect)
-        })?,
+        "consumable" => effect_component(t, true, source)?,
         "use_cooldown" => record(t, |r| {
             r.required("seconds", float)?;
             r.optional("cooldown_group", ident)
@@ -1147,7 +1328,7 @@ fn component_leaf(name: &str, id: &str, t: &Tag, source: Source) -> Result<Value
             }
             r.id("shearing_sound", "minecraft:item.shears.snip", sound)
         })?,
-        "death_protection" => record(t, |r| r.list("death_effects", consume_effect))?,
+        "death_protection" => effect_component(t, false, source)?,
         "piercing_weapon" => record(t, |r| {
             r.b("deals_knockback", true)?;
             r.b("dismounts", false)?;
@@ -1331,8 +1512,14 @@ fn profile(t: &Tag) -> Result<Value> {
             let properties = if let Tag::Compound(entries) = properties {
                 let mut out = vec![];
                 for (k, values) in entries {
-                    let Tag::List(values) = values else {
-                        return Err("profile property values are not a list".into());
+                    // NbtOps exposes primitive arrays as lists too. Only an empty
+                    // primitive array can decode as a list of strings.
+                    let values = match values {
+                        Tag::List(values) => values.as_slice(),
+                        Tag::ByteArray(values) if values.is_empty() => &[],
+                        Tag::IntArray(values) if values.is_empty() => &[],
+                        Tag::LongArray(values) if values.is_empty() => &[],
+                        _ => return Err("profile property values are not a string list".into()),
                     };
                     for v in values {
                         out.push(Value::Map(vec![
@@ -2245,7 +2432,7 @@ mod tests {
             r#"color:7"#,
             r#"color:"reset""#,
             r##"color:"#1000000""##,
-            r#"font:"..:uniform""#,
+            r#"font:"UPPER:uniform""#,
             r#"font:{id:"uniform"}"#,
             r#"click_event:{action:"open_file",path:"x"}"#,
             r#"click_event:{action:"open_url",url:"https://example.org/%zz"}"#,
@@ -2265,6 +2452,47 @@ mod tests {
                     .to_component_tag("custom_name")
                     .is_err(),
                 "{style}"
+            );
+        }
+    }
+
+    #[test]
+    fn saved_nbt_component_drops_the_invalid_separator_but_selector_refuses_it() {
+        let nbt = parse(r#"{nbt:"foo",storage:"test:bar",separator:{text:1}}"#);
+        let no_separator = parse(r#"{nbt:"foo",storage:"test:bar"}"#);
+        let decoded = from_component_tag("custom_name", &nbt).unwrap();
+        assert_eq!(
+            decoded.to_component_tag("custom_name").unwrap(),
+            no_separator
+        );
+        assert_eq!(text_from_tag(&nbt, &|_| false).unwrap(), decoded);
+
+        let selector = parse(r#"{selector:"@s",separator:{text:1}}"#);
+        assert!(from_component_tag("custom_name", &selector).is_err());
+        assert!(text_from_tag(&selector, &|_| false).is_err());
+    }
+
+    #[test]
+    fn text_accepts_vanilla_codec_identifiers_and_primitive_array_lists() {
+        for (input, expected) in [
+            (r#"{text:"x",font:"..:"}"#, r#"{text:"x",font:"..:"}"#),
+            (
+                r#"{text:"x",hover_event:{action:"show_entity",id:"pig",uuid:[B;1b,2b,3b,4b]}}"#,
+                r#"{text:"x",hover_event:{action:"show_entity",id:"minecraft:pig",uuid:[I;1,2,3,4]}}"#,
+            ),
+            (
+                r#"{text:"x",hover_event:{action:"show_entity",id:"pig",uuid:[L;1L,2L,3L,4L]}}"#,
+                r#"{text:"x",hover_event:{action:"show_entity",id:"minecraft:pig",uuid:[I;1,2,3,4]}}"#,
+            ),
+            (
+                r#"{object:"player",player:{name:"Steve",properties:{unused:[I;]}}}"#,
+                r#"{player:{name:"Steve"}}"#,
+            ),
+        ] {
+            let value = text_from_tag(&parse(input), &|_| false).unwrap();
+            assert_eq!(
+                value.to_component_tag("custom_name").unwrap(),
+                parse(expected)
             );
         }
     }

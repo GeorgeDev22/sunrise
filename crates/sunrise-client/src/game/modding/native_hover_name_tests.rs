@@ -35,14 +35,8 @@ fn a_hover_name_is_a_component_each_viewer_renders_in_their_language() {
             [("block.minecraft.stone".to_owned(), "Piedra".to_owned())],
         );
         scoped(spanish, || {
-            assert_eq!(
-                TextHost::text_string(&*game, &stone).as_deref(),
-                Ok("Piedra")
-            );
-            assert_eq!(
-                TextHost::text_string(&*game, &name).as_deref(),
-                Ok("Hammer")
-            );
+            assert_eq!(TextHost::text_string(&*game, &stone), "Piedra");
+            assert_eq!(TextHost::text_string(&*game, &name), "Hammer");
         });
     });
 }

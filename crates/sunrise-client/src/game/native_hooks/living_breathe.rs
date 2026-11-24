@@ -52,14 +52,19 @@ impl Game<'_> {
         unchanged: impl FnOnce(&Self) -> bool,
     ) -> Option<sunrise_client::breathing::Breath> {
         let mut breath = vanilla;
-        let answered: Result<(), ()> = mod_api::run_transaction(self, |game, _| {
+        let failures = mod_api::runtime::isolated_failures();
+        let answered: Result<(), ()> = self.storage_transaction(|game, _| {
             game.native_living_breathe(
                 living,
                 &mut breath.can_breathe,
                 &mut breath.consume,
                 &mut breath.refill,
             );
-            if unchanged(game) { Ok(()) } else { Err(()) }
+            if mod_api::runtime::isolated_failures() == failures && unchanged(game) {
+                Ok(())
+            } else {
+                Err(())
+            }
         });
         answered.ok().map(|()| breath)
     }
@@ -89,6 +94,20 @@ impl Game<'_> {
             .and_then(|entity| self.living(entity))?;
         self.ask_breath(living, pause.step.vanilla, |game| {
             game.mobs.iter().any(|m| pause.still_valid(m))
+        })
+    }
+
+    /// A stand's breathing, as `ask_player_breath` does for a player.
+    pub(in crate::game) fn ask_stand_breath(
+        &mut self,
+        id: u32,
+        step: sunrise_client::breathing::AirStep,
+    ) -> Option<sunrise_client::breathing::Breath> {
+        let living = self.entity(id).and_then(|entity| self.living(entity))?;
+        self.ask_breath(living, step.vanilla, move |game| {
+            game.armor_stands
+                .iter()
+                .any(|a| a.id == id && a.health > 0.0 && a.air == step.air)
         })
     }
 }

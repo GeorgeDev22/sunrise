@@ -12,6 +12,14 @@ the normal save rules; neither call alters an existing snapshot, and both keep t
 would save with. To omit a vehicle and all its passengers, set the flag on the root vehicle, not on a rider.
 The flag follows the live entity across dimensions but is never saved. The setter returns `Ok(false)` for players, dragon parts and handles that do not resolve in the current level.
 
+`EntityRef::set_on_ground(host, grounded)` is a server write to a live body's ground flag. Passing `true`
+checks for a supporting block under the current footprint, without moving the entity. The first miss
+keeps its prior support; another miss clears it. Passing `false` clears support immediately. Use
+`entity.on_ground(host)` to read the flag and `entity.on_block(host)` to read the block position vanilla
+uses for contact. If the support check cannot finish, the call returns `Unavailable`: the new flag takes
+effect, but the previous supporting block stays recorded. This write does not apply landing effects or
+change velocity or fall distance.
+
 Use `EntityRef::hurt` on the server with the fully qualified id of a registered damage type, vanilla
 or modded. Hurt hooks see that exact id. The direct and causing entities are separate from the type:
 passing a player as the cause of `minecraft:explosion` does not turn it into `minecraft:player_explosion`.

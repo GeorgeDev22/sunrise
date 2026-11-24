@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "ஒரு புதிய அரட்டை வரி முழுவதுமாகத் தோன்றுவதற்குப் பதிலாக, மங்கும்போது இடதுபுறத்தில் இருந்து ஸ்லைடு செய்கிறது.",
   "sunrise.extras.chat_indicator": "செய்தி காட்டி",
   "sunrise.extras.chat_indicator.tooltip": "அரட்டை வரியின் இடதுபுறத்தில் வண்ணப் பட்டை.",
-  "sunrise.extras.discord_presence": "Discord செயல்பாட்டு நிலை",
-  "sunrise.extras.discord_presence.tooltip": "Discord இயங்கும்போது உங்கள் Discord சுயவிவரத்தில் “Playing Sunrise” என்பதைக் காட்டுகிறது: மெனுக்கள், சிங்கிள் பிளேயர் அல்லது மல்டிபிளேயர், பரிமாணம் மற்றும் விளையாடிய நேரம். உலகின் பெயரையோ சேவையகத்தின் முகவரியையோ ஒருபோதும் காட்டாது.",
   "sunrise.extras.dynamic_lights": "டைனமிக் விளக்குகள்",
   "sunrise.extras.dynamic_lights.tooltip": "தீப்பந்தங்கள் மற்றும் பிற ஒளி மூலங்கள் அவற்றைச் சுற்றியுள்ள தொகுதிகளை வைத்திருக்கின்றன, கைவிடப்படுகின்றன அல்லது தீயில் ஒளிரச் செய்கின்றன.",
   "sunrise.extras.fullbright": "முழு வெளிச்சம்",

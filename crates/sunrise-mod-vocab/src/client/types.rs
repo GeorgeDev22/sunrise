@@ -16,6 +16,70 @@ pub enum ToastKind {
     System,
     /// A toast without one of the above families, including now-playing music.
     Other,
+    /// A notification submitted through `ClientHost::add_toast`.
+    Mod,
+}
+
+/// The optional 16×16 GUI icon of a [`ModToast`].
+// no wire: part of a local ClientHost::add_toast argument, not a wire field.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum ToastIcon {
+    /// Draw this stack's item model, without a count or durability overlay.
+    Item(ItemStack),
+    /// Draw a sprite from the GUI atlas, identified by its resource name.
+    Sprite(Identifier),
+}
+
+/// A client mod notification submitted through `ClientHost::add_toast`.
+// no wire: local ClientHost::add_toast argument, not a wire field.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ModToast {
+    /// Title, drawn in yellow unless styled otherwise.
+    pub title: Text,
+    /// Optional text under the title.
+    pub description: Option<Text>,
+    /// Optional icon to the left of the text.
+    pub icon: Option<ToastIcon>,
+    /// An optional token for replacing a visible or queued mod toast. Use your mod's namespace.
+    /// Without a token, each accepted request is a separate toast.
+    pub kind: Option<Identifier>,
+    /// Milliseconds fully visible, before applying the user's Notification Time multiplier.
+    /// `None` uses vanilla `SystemToastId`'s default of 5000 ms.
+    pub display_ms: Option<u64>,
+}
+
+impl ModToast {
+    /// Create a notification with just a title and vanilla's default display time.
+    pub fn new(title: Text) -> Self {
+        Self {
+            title,
+            description: None,
+            icon: None,
+            kind: None,
+            display_ms: None,
+        }
+    }
+}
+
+/// Why a requested toast was not queued.
+// no wire: local refusal returned by ClientHost::add_toast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AddToastError {
+    /// The host cannot submit notifications to a client window.
+    Unavailable,
+    /// The title or description could not be represented as game text.
+    Text(TextFormError),
+    /// The item stack could not be represented as an icon.
+    Icon(StackWriteError),
+}
+
+impl NoBackend for AddToastError {
+    fn no_backend() -> Self {
+        Self::Unavailable
+    }
 }
 
 /// What a key did in an `input_key` event (GLFW's `action`: release 0, press 1, repeat 2).
@@ -65,49 +129,91 @@ impl ClientModifiers {
     }
 }
 
-/// A vanilla key mapping as the client holds it (`ClientHost::mapping`).
-#[derive(Clone, Debug)]
-// exhaustive: the game builds it with a literal; mods only read it
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct KeyMapping {
-    /// Whether it is held (`KeyMapping.isDown`).
-    pub down: bool,
-    /// The name of the key it is bound to, as Controls shows it (`KeyMapping.getTranslatedKeyMessage`).
-    pub label: Text,
+/// A resolved vanilla key mapping for one running client.
+///
+/// Resolve it with [`vanilla_key_mapping`](crate::prelude::ClientInputClientHost::vanilla_key_mapping)
+/// in `client_setup`. Keep it across rebinding, options replacement, and screen or world changes.
+/// A different client refuses it with [`MappingError::Stale`]; resolve the saved mapping name
+/// against that client. Persist the name, not this handle.
+// no wire: process-local client mapping handle
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VanillaKeyMappingRef {
+    pub(super) client_generation: std::num::NonZeroU64,
+    pub(super) slot: usize,
 }
 
-/// Why `ClientHost::set_mapping_down` or `ClientHost::click_mapping` refused a mapping.
+/// A resolved mod key mapping in the current client's registration roster.
+///
+/// Resolve it with [`mod_key_mapping`](crate::prelude::ClientInputClientHost::mod_key_mapping)
+/// after registration, usually in `client_setup`. Rebinding, resetting and changing screens do not
+/// invalidate it. If the client or its ordered registration roster is replaced, discard the stale
+/// handle and resolve again. Persist the owner and id, not this handle.
+// no wire: process-local registered key mapping handle
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ModKeyMappingRef {
+    pub(super) registry_generation: std::num::NonZeroU64,
+    pub(super) slot: usize,
+}
+
+/// Why resolving or using a vanilla key mapping, or reading a translated mod key label, was refused.
+// no wire: refusal of a process-local client mapping operation
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
 pub enum MappingError {
-    /// No player is in a world.
-    NoWorld,
-    /// No vanilla mapping has this name.
+    /// Resolution found no vanilla mapping with the given name.
     Unknown {
         /// The name asked for.
         key: String,
     },
-    /// A vanilla mapping a player does not play with: one outside the movement, gameplay and
-    /// inventory categories (`key.screenshot`, `key.fullscreen`, `key.chat`...).
-    NotGameplay {
-        /// The name asked for.
-        key: String,
-    },
-    /// The mapping accepts a click but has no held state (`key.pickItem`).
-    ClickOnly {
-        /// The name asked for.
-        key: String,
-    },
+    /// The handle does not belong to the current client or no longer identifies a mapping.
+    Stale,
+    /// No client mapping backend is available in this host or phase.
+    Unavailable,
+    /// The translated binding label could not be represented as API text.
+    Label(TextFormError),
+}
+
+impl NoBackend for MappingError {
+    fn no_backend() -> Self {
+        Self::Unavailable
+    }
+}
+
+impl From<TextFormError> for MappingError {
+    fn from(error: TextFormError) -> Self {
+        Self::Label(error)
+    }
+}
+
+impl std::fmt::Display for MappingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown { key } => write!(f, "unknown vanilla mapping {key:?}"),
+            Self::Stale => f.write_str("stale vanilla mapping handle"),
+            Self::Unavailable => f.write_str("client mappings are unavailable"),
+            Self::Label(error) => write!(f, "invalid mapping label: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for MappingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Label(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 /// The metadata of a server play packet observed by `Hooks::client_packet`.
 ///
 /// Fields beyond the type id are exposed only for custom payloads. This is
 /// plain mod API data, not the game's decoded protocol enum.
+// no wire: this is a local envelope for already-encoded vanilla packet bytes.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
 pub struct ClientPacket {
     /// The protocol type, such as `minecraft:ping` or `minecraft:custom_payload`.
     /// An id outside the protocol's packet table is reported as `sunrise:unknown`.
@@ -250,6 +356,10 @@ pub struct ClientGuiOptions {
     pub text_background_opacity: f32,
     /// Menu background blur radius.
     pub menu_blur: i32,
+    /// How far the camera tilts when the player is hurt, 0 (off) to 1 (`damageTiltStrength`,
+    /// the Damage Tilt accessibility option): the factor of vanilla's own hurt tilt, so a mod's
+    /// camera shake can scale with it as that tilt does.
+    pub damage_tilt_strength: f64,
 }
 
 /// A snapshot of the client's chat preferences.
@@ -772,39 +882,6 @@ pub enum SoundState {
     Stopped,
 }
 
-/// A file-backed standalone model baked on every resource load.
-// exhaustive: mods build every form with a struct literal and the game matches them without a wildcard
-#[derive(Clone, Debug, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
-pub enum StandaloneModelForm {
-    /// Bake one dependency with the blockstate baker's negative XYZ quarter-turns.
-    Rotated {
-        /// Namespaced identifier used to resolve the resulting `ModelRef`.
-        id: String,
-        /// Source model identifier, not the result identifier.
-        model: String,
-        /// Quarter-turn counts in X, Y, Z order, modulo four.
-        turns: [u8; 3],
-        /// Keep textures aligned to the resulting face's world basis.
-        uvlock: bool,
-    },
-    /// Bake all dependencies unturned and concatenate their quads into one model.
-    Combined {
-        /// Namespaced identifier used to resolve the resulting `ModelRef`.
-        id: String,
-        /// Source model identifiers, in quad concatenation order.
-        parts: Vec<String>,
-    },
-}
-
-impl StandaloneModelForm {
-    /// The resulting model's identifier.
-    pub fn id(&self) -> &str {
-        match self {
-            Self::Rotated { id, .. } | Self::Combined { id, .. } => id,
-        }
-    }
-}
-
 // no wire: dispatch result retains a static owning-mod identity; not an owned transport record.
 /// A replace hook's answer, or a collect hook's entry, with the mod that gave it: the dispatch
 /// fills in `mod_id` (the answering mod's `[mod] id`), so no mod can answer for another.
@@ -876,13 +953,13 @@ pub enum ScreenTarget {
     DirectConnect,
 }
 
+// no wire: toggle geometry is chosen by the client screen factory.
 /// Where a mod menu's recipe-book toggle sits: `x` GUI pixels right of the menu's left edge and
 /// `y` below the line `from` names. Vanilla screens place theirs either way:
 /// `leftPos + 5, topPos + 34` is `x: 5.0, y: 34.0, from: Menu`, and
 /// `leftPos + 5, height / 2 - 49` is `x: 5.0, y: -49.0, from: ScreenCentre`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 // exhaustive: mods build it with a literal and the game reads every field
-#[derive(sunrise_mod_api_macros::Wire)]
 pub struct RecipeBookToggle {
     /// Pixels right of the menu's left edge.
     pub x: f32,
@@ -892,10 +969,10 @@ pub struct RecipeBookToggle {
     pub from: ToggleOrigin,
 }
 
+// no wire: the toggle's coordinate origin is used only by client layout.
 /// The line a recipe-book toggle's `y` counts from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 // exhaustive: the two lines vanilla's screens measure from, matched without a wildcard
-#[derive(sunrise_mod_api_macros::Wire)]
 pub enum ToggleOrigin {
     /// The menu's top edge.
     #[default]
@@ -925,6 +1002,43 @@ pub struct SignEditView {
     pub front: bool,
 }
 
+/// What a [`ScreenRegion`] is: one of the parts vanilla 26.3 draws outside a container screen's panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum ScreenRegionKind {
+    /// The open recipe book's panel (`RecipeBookComponent`, 147 x 166, left of the container's window).
+    RecipeBook,
+    /// The open recipe book's column of category tabs (`RecipeBookTabButton`s at `xPosTab`, 35 x 27 each, 27 apart),
+    /// left of its panel; as tall as the tabs the book shows.
+    RecipeBookTabs,
+    /// One tab of the creative inventory (`CreativeModeInventoryScreen.extractTabButton`, 26 x 32),
+    /// above or below its panel: one region per tab drawn.
+    CreativeTab,
+    /// The active effects beside the inventory (`EffectsInInventory`), as wide and tall as they draw (compact or
+    /// full rows), after `render_inventory_mob_effects` moved or resized them.
+    Effects,
+}
+
+/// A region of the open screen that the game itself draws outside its container panel ([`ScreenView::rect`]), in
+/// GUI pixels from the window's top left, as `[x, y, width, height]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub struct ScreenRegion {
+    /// What the game draws there.
+    pub kind: ScreenRegionKind,
+    /// Where: `[x, y, width, height]` in GUI pixels.
+    pub rect: [f32; 4],
+}
+
+impl ScreenRegion {
+    /// A region of `kind` at `rect` (`[x, y, width, height]` in GUI pixels).
+    pub const fn new(kind: ScreenRegionKind, rect: [f32; 4]) -> Self {
+        Self { kind, rect }
+    }
+}
+
 // no wire: borrowed call-scoped view; transport uses owned snapshots rather than serializing references.
 /// The open screen, for the screen hooks (`screen_render_post`, the
 /// mouse ones `screen_mouse_button_pressed_pre`, `..._released_pre` and
@@ -945,6 +1059,15 @@ pub struct ScreenView<'a> {
     /// `multiplayer`, `add_server`, `direct_connect`…, with no menu, no title
     /// and no slots.
     pub id: &'static str,
+    /// The mod whose own screen this view represents when `id == "mod"`, or
+    /// `None` for vanilla, title, and overlay screens.
+    ///
+    /// Carries the owning mod id of the receiving screen snapshot even if a
+    /// handler closed it or opened another mod's screen before a Post or
+    /// Closing hook ran. Prefer `event.screen.mod_screen` over live
+    /// [`crate::ClientHost::mod_screen`] when identifying the screen an event
+    /// targeted.
+    pub mod_screen: Option<&'a str>,
     /// The type id of the menu the server opened for this screen
     /// (`minecraft:generic_9x3`, `minecraft:furnace`, a mod's own id; a mount's
     /// inventory is `sunrise:mount<n>`). None on a screen without one (the
@@ -972,6 +1095,13 @@ pub struct ScreenView<'a> {
     /// This frame's partial tick (`getGameTimeDeltaPartialTick(false)`, 0 to
     /// 1): what the screen draws animation against.
     pub partial_tick: f32,
+    /// What the game draws outside `rect`: the book panel and tabs, creative tabs,
+    /// and inventory effects. Render.Post sees the current draw, or an empty slice if
+    /// Pre canceled it. Input and the earlier render phases see the last published draw
+    /// for the screen. Opening, closing, init, screen room and the inventory-effects
+    /// layout hook see an empty slice. Hidden regions and areas drawn by other mods
+    /// are not included.
+    pub regions: &'a [ScreenRegion],
 }
 
 /// A camera-local visual light, with no gameplay light or shadow writes.
@@ -1001,21 +1131,25 @@ impl ColoredLight {
     }
 }
 
-/// A menu type's screen, a mod's (`screen`): its size, where
-/// each of the container's slots is (`Slot.x`, `Slot.y`; none hides the
-/// slot, and so do slots past the list; for a block's menu the server's menu
-/// does not have a hidden slot either, so clicks and shift-clicks skip it), and the player inventory's first
-/// row (vanilla's is 84; the hotbar is 58 below it) and left column, from
-/// its top left.
+// no wire: screen geometry is constructed and consumed in the client window.
+/// Layout for a window's [`crate::MenuScreen`]: its size, where
+/// each of the container's slots is (`Slot.x`, `Slot.y`), and the player
+/// inventory's first row (vanilla's is 84; the hotbar is 58 below it) and
+/// left column, from its top left. The screen controls client presentation
+/// and per-slot active/visibility state (`Slot.isActive()`); server-side
+/// placement and pickup rules belong to the menu and its `MenuPart`.
 #[derive(Clone, Debug, Default, PartialEq)]
 // exhaustive: mods build it with a literal and the game reads every field
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct Screen {
-    /// Vanilla's container screens are 176 wide.
+pub struct MenuScreenLayout {
+    /// Positive finite width in GUI pixels. Vanilla's container screens are 176 wide.
     pub width: f32,
-    /// The screen's height in GUI pixels; vanilla's is 166.
+    /// Positive finite height in GUI pixels; vanilla's is 166.
     pub height: f32,
-    /// Each menu slot's top-left (x, y), or `None` to hide it.
+    /// Slot geometry at its original backing index. `Some(slot)` shows the slot
+    /// initially; `None` (including omitted trailing entries) marks an initially
+    /// inactive/hidden slot (`Slot.isActive()`) that can be activated later with
+    /// [`crate::prelude::ScreensClientHost::set_screen_slot`]. Don't compact this
+    /// list; there are no entries past the backing.
     pub slots: Vec<Option<ScreenSlot>>,
     /// The y of the player inventory's first row; vanilla's is 84.
     pub inventory_y: f32,
@@ -1028,15 +1162,15 @@ pub struct Screen {
     /// `None` uses `[8, height - 94]`, independently of inventory slot positions.
     /// Ignored when `own_labels` is true.
     pub inventory_label: Option<[f32; 2]>,
-    /// The mod draws the title and the "Inventory" label itself
-    /// (`screen_draw`); Sunrise leaves them out.
+    /// Sunrise leaves the title and inventory label for the screen's draw callback.
     pub own_labels: bool,
-    /// The mod draws its own background (`screen_draw`), so Sunrise
-    /// leaves out the plain panel and the slot frames.
+    /// Leave the background to the screen's draw callback, omitting the
+    /// default panel and slot frames.
     pub own_background: bool,
     /// The registered recipe book hosted beside this menu. Its declarations must
     /// target this menu; no panel is enabled until authoritative settings arrive.
-    /// Leaving this unset keeps the screen without a recipe book.
+    /// If the menu declares a book with `MenusRegistrar::menu_recipe_book`, this
+    /// field must name that book. Otherwise the book is optional and display-only.
     pub recipe_book: Option<crate::RecipeBookTypeKey>,
     /// Optional 20 × 18 recipe-book toggle position, from this menu's left and, per
     /// [`RecipeBookToggle::from`], its top or the window's centre.
@@ -1050,16 +1184,18 @@ pub struct Screen {
     pub recipe_book_big_result: bool,
 }
 
+// no wire: a slot's coordinates and empty icon are local screen presentation.
 /// One visible container slot, including vanilla's `Slot.getNoItemIcon`.
+/// Its index in [`MenuScreenLayout::slots`] is the menu's backing index.
 #[derive(Clone, Debug, Default, PartialEq)]
 // exhaustive: mods declare both geometry and the optional empty-slot sprite
-#[derive(sunrise_mod_api_macros::Wire)]
 pub struct ScreenSlot {
     /// Top-left in GUI pixels relative to the screen.
     pub position: [f32; 2],
     /// GUI sprite identifier, such as `minecraft:container/slot/ingot`.
     /// Drawn at 16 × 16 only when the displayed stack is empty, including
-    /// quick-craft previews. Unknown sprites refuse the client screen at open.
+    /// quick-craft previews. Unknown sprites draw the missing texture,
+    /// matching vanilla's `Slot.getNoItemIcon`.
     pub no_item_icon: Option<String>,
 }
 
@@ -1111,7 +1247,9 @@ pub enum PanelStyle {
 #[derive(sunrise_mod_api_macros::Wire)]
 pub enum PanelEvent {
     /// A click on an item of the panel, by its index in
-    /// `panel_items`' list.
+    /// `panel_items`' list: a right click as it goes down, a left click as
+    /// it comes up without having become a drag (`Dropped`), or as it goes
+    /// down while a stack is carried.
     Clicked {
         /// The item's index in the panel's list.
         index: u32,
@@ -1156,6 +1294,27 @@ pub enum PanelEvent {
     /// The player picked the tab at this index of the `panel_recipes` page's
     /// `tabs`.
     Tab(u32),
+    /// The player dragged an item off the panel's `panel_items` list and let
+    /// go of it outside the panel, over the open screen (JEI's ghost
+    /// ingredient drag). A drag starts once the pointer moves 4 GUI pixels
+    /// with the left button held on an item; until then the press is a
+    /// click, which comes as `Clicked` on its release while the list still
+    /// has that item at its index. The press belongs to the menu open when it
+    /// went down: dropping it back on the panel, Escape, the window losing
+    /// focus, and that menu closing or being replaced cancel it, and a
+    /// screen hook that cancels the release drops it; none of these sends
+    /// anything. The game moves nothing and no screen hears the release:
+    /// the mod decides what the drop does (a filter slot of a menu it knows,
+    /// say) and checks it on its own server.
+    Dropped {
+        /// The dragged item, as the mod sent it.
+        stack: Stack,
+        /// Where it was let go, in GUI pixels from the window's top left
+        /// (`Screen.mouseX`, as `ScreenView::mouse` gives it).
+        x: f32,
+        /// As `x`, down from the top.
+        y: f32,
+    },
 }
 
 /// The zoom a native mod asks for (`zoom`): the factor (1 is none), eased through the

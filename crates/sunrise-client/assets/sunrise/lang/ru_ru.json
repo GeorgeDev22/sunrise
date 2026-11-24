@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Новая строка чата выезжает слева, пока проявляется, а не появляется целиком.",
   "sunrise.extras.chat_indicator": "Индикатор сообщения",
   "sunrise.extras.chat_indicator.tooltip": "Цветная полоса слева от строки чата.",
-  "sunrise.extras.discord_presence": "Discord Rich Presence",
-  "sunrise.extras.discord_presence.tooltip": "Показывает «Играет в Sunrise» в профиле Discord, пока Discord запущен: меню, одиночная или сетевая игра, измерение и время игры. Никогда название мира или адрес сервера.",
   "sunrise.extras.dynamic_lights": "Динамический свет",
   "sunrise.extras.dynamic_lights.tooltip": "Факелы и другие источники света в руках, на земле или в огне освещают блоки вокруг.",
   "sunrise.extras.fullbright": "Полная яркость",

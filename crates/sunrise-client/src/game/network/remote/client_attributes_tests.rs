@@ -35,11 +35,18 @@ fn update_attributes_answers_the_local_players_living_reads() {
             crate::game::remote::Tracked {
                 kind: "minecraft:zombie".into(),
                 position: [0.0; 3],
+                previous: [0.0; 3],
+                yaw: 0.0,
+                pitch: 0.0,
+                previous_yaw: 0.0,
+                previous_pitch: 0.0,
                 codec_base: [0.0; 3],
                 on_fire: false,
                 mod_fire_immune: false,
                 silent: false,
                 vehicle: None,
+                tick_count: 0,
+                size_answer: None,
             },
         );
 

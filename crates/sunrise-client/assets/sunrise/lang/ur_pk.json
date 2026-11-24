@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "ایک نئی چیٹ لائن پوری طرح ظاہر ہونے کے بجائے مدہم ہوتے ہوئے بائیں طرف سے سلائیڈ کرتی ہے۔",
   "sunrise.extras.chat_indicator": "پیغام کا اشارہ",
   "sunrise.extras.chat_indicator.tooltip": "چیٹ لائن کے بائیں طرف رنگین پٹی۔",
-  "sunrise.extras.discord_presence": "ڈسکارڈ رچ پریزینس",
-  "sunrise.extras.discord_presence.tooltip": "ڈسکارڈ چلنے کے دوران آپ کے ڈسکارڈ پروفائل پر Playing Sunrise دکھاتا ہے: مینو، سنگل پلیئر یا ملٹی پلیئر، ڈائمینشن اور کھیلا گیا وقت۔ کبھی دنیا کا نام یا سرور کا ایڈریس نہیں۔",
   "sunrise.extras.dynamic_lights": "ڈائنامک لائٹس",
   "sunrise.extras.dynamic_lights.tooltip": "مشاریں اور دیگر روشنی کے ذرائع جو پکڑے گئے ہیں، گرائے گئے ہیں یا آگ پر ہیں، اپنے اردگرد کے بلاکس کو روشن کرتے ہیں۔",
   "sunrise.extras.fullbright": "فل برائٹ",

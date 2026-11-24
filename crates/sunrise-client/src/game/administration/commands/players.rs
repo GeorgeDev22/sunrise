@@ -14,6 +14,11 @@ impl Target {
     pub(in crate::game) fn is_player(self) -> bool {
         matches!(self, Target::Player | Target::Guest(_))
     }
+
+    /// A target with a `LivingEntity` body.
+    pub(in crate::game) fn is_living(self) -> bool {
+        self.is_player() || matches!(self, Self::Mob(_) | Self::Stand(_) | Self::Dragon(_))
+    }
 }
 
 /// GameType.getName for a guest's game mode id.
@@ -242,7 +247,12 @@ impl Game<'_> {
         {
             log::error!("could not open {}: {e}", dim.id());
         }
-        let Some(swap) = self.enter_guest_in_dimension(conn, back) else {
+        let Some((out, told)) = self.with_guest_swap(conn, back, |game| {
+            let source = game.chat_capture.replace(Vec::new());
+            let out = f(game);
+            let told = std::mem::replace(&mut game.chat_capture, source).unwrap_or_default();
+            (out, told)
+        }) else {
             if self.dim != back
                 && let Err(e) = self.enter_level(back)
             {
@@ -250,10 +260,6 @@ impl Game<'_> {
             }
             return None;
         };
-        let source = self.chat_capture.replace(Vec::new());
-        let out = f(self);
-        let told = std::mem::replace(&mut self.chat_capture, source).unwrap_or_default();
-        self.leave_guest(swap);
         for line in told {
             self.lan.as_ref()?.hub.send_to(
                 conn,

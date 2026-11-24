@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Nova vrstica za klepet zdrsne z leve, medtem ko zbledi, namesto da bi bila videti cela.",
   "sunrise.extras.chat_indicator": "Indikator sporočila",
   "sunrise.extras.chat_indicator.tooltip": "Barvna vrstica na levi strani vrstice za klepet.",
-  "sunrise.extras.discord_presence": "Discord Rich Presence",
-  "sunrise.extras.discord_presence.tooltip": "Prikazuje Playing Sunrise v vašem profilu Discord, medtem ko Discord teče: meniji, igra za enega ali več igralcev, dimenzija in čas igranja. Nikoli svetovnega imena ali naslova strežnika.",
   "sunrise.extras.dynamic_lights": "Dinamične luči",
   "sunrise.extras.dynamic_lights.tooltip": "Bakle in drugi viri svetlobe, ki jih držijo, odvržejo ali prižgejo, prižgejo bloke okoli njih.",
   "sunrise.extras.fullbright": "Polna svetlost",

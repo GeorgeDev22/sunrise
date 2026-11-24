@@ -4,11 +4,13 @@
 use super::ChatTypeBound;
 use crate::{
     Result,
-    buf::{Byte, BytesN, Codec, List, Long, Nbt, Opt, Reader, Str, StrN, Uuid, VarInt, Writer},
+    buf::{
+        Byte, BytesN, Codec, List, Long, Opt, Reader, Str, StrN, TrustedComponent, Uuid, VarInt,
+    },
     packet,
-    packets::login::Property,
+    packets::login::PropertyCodec,
 };
-use sunrise_core::nbt::Tag;
+use sunrise_core::{nbt::Tag, profile::AccountProperty, vanilla_bytes::Writer};
 
 /// MessageSignature.Packed: an index into the last-seen cache or a full signature.
 pub struct PackedSignature;
@@ -68,7 +70,7 @@ packet!(PlayerChat {
     timestamp: i64 => Long,
     salt: i64 => Long,
     last_seen: Vec<(i32, Option<Vec<u8>>)> => List<PackedSignature>,
-    unsigned_content: Option<Tag> => Opt<Nbt>,
+    unsigned_content: Option<Tag> => Opt<TrustedComponent>,
     filter: (i32, Vec<i64>) => FilterMask,
     chat_type: ChatTypeBound => ChatTypeBound,
 });
@@ -84,7 +86,7 @@ packet!(PlayerInfoRemove { uuids: Vec<u128> => List<Uuid> });
 pub struct PlayerInfo {
     pub uuid: u128,
     pub name: Option<String>,
-    pub properties: Vec<Property>,
+    pub properties: Vec<AccountProperty>,
     /// RemoteChatSession.Data: session id, key expiry, key, key signature.
     pub chat_session: Option<(u128, i64, Vec<u8>, Vec<u8>)>,
     pub game_mode: Option<i32>,
@@ -115,7 +117,7 @@ impl Codec<PlayerInfoUpdate> for PlayerInfoUpdate {
                 e.name = Some(r.string(16)?);
                 let count = r.count(16)?;
                 e.properties = (0..count)
-                    .map(|_| Property::read(r))
+                    .map(|_| PropertyCodec::read(r))
                     .collect::<Result<_>>()?;
             }
             if actions & 2 != 0 && r.bool()? {
@@ -132,7 +134,7 @@ impl Codec<PlayerInfoUpdate> for PlayerInfoUpdate {
                 e.latency = Some(r.varint()?);
             }
             if actions & 32 != 0 {
-                e.display_name = Some(if r.bool()? { Some(r.nbt()?) } else { None });
+                e.display_name = Some(Opt::<TrustedComponent>::read(r)?);
             }
             if actions & 64 != 0 {
                 e.list_order = Some(r.varint()?);
@@ -152,7 +154,7 @@ impl Codec<PlayerInfoUpdate> for PlayerInfoUpdate {
             if v.actions & 1 != 0 {
                 w.string(e.name.as_deref().unwrap_or(""));
                 w.varint(e.properties.len() as i32);
-                e.properties.iter().for_each(|p| Property::write(p, w));
+                e.properties.iter().for_each(|p| PropertyCodec::write(p, w));
             }
             if v.actions & 2 != 0 {
                 w.bool(e.chat_session.is_some());

@@ -89,3 +89,16 @@ against the release signature. Offline, a build whose SDK files are already kept
 files are missing says so, with the size to download. What a release holds and how it is checked:
 [The mod SDK](../../reference/sdk/01-release.md); the fit rule in full:
 [Fitting another build](../../reference/sdk/04-fit.md).
+
+## Rebuilds, updates and toolchain isolation
+
+A native build uses the instance's pinned Sunrise commit. Editing or disabling a mod rebuilds
+the mods against that same prebuilt SDK; building never repins a mod.
+
+`native-build --update` selects a newer installed release or Nightly and checks every mod against
+it. A build without a published SDK says it has no mod tools yet; use a build that has them.
+
+The launcher uses its pinned Rust toolchain, not the player's Rust installation. It isolates
+compiler flags, Cargo configuration and target settings from the player's environment. Build
+inputs and outputs stay in managed launcher storage. On Windows the build tools require paths
+the linker can open; the launcher chooses a managed ASCII path when necessary.

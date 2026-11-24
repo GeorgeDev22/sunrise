@@ -409,7 +409,7 @@ impl Game<'_> {
                 if body {
                     g.attack_ticks = g.attack_ticks.saturating_add(1);
                 }
-                g.right = g.using.is_some();
+                g.set_mapping_held("key.use", g.using.is_some());
                 g.tick_using();
                 g.stab_players = outer;
                 if g.use_delay > 0 {
@@ -473,6 +473,8 @@ impl Game<'_> {
         // armor, experience and level objectives follow the guest.
         let mut recorded = std::mem::take(&mut host.play.entry(conn).or_default().score_recorded);
         let _ = self.as_guest_at(gi, conn, |g| {
+            // Exercise a panic in a normal borrowed tick, not in player placement.
+            crate::game::dedicated::crash_fixture("guest", || true);
             g.tick_fishing();
             // Player.aiStep's Inventory.tick and doTick's statistics are the body's.
             if body {

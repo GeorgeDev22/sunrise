@@ -188,6 +188,18 @@ impl SignalAccess for ReadLevel<'_, '_> {
     }
 }
 
+impl ReadLevel<'_, '_> {
+    pub(super) fn capability_site(
+        &self,
+        at: mod_api::BlockSide,
+    ) -> Option<mod_api::BlockCapabilitySite> {
+        let [x, y, z] = at.pos;
+        self.game
+            .containers()
+            .capability_site(at, self.game.world.block(x, y, z), false)
+    }
+}
+
 impl LevelHost for ReadLevel<'_, '_> {
     fn block_states(&self) -> mod_api::BlockStates<'_> {
         mod_api::BlockStates::of(self.game)
@@ -206,6 +218,14 @@ impl LevelHost for ReadLevel<'_, '_> {
     }
     fn block_entity(&self, pos: [i32; 3]) -> Option<mod_api::BlockEntityRef> {
         self.game.block_entity(self.level, pos)
+    }
+    fn has_item_capability(&self, pos: [i32; 3], side: Option<Direction>) -> Option<bool> {
+        let site = self.capability_site(mod_api::BlockSide {
+            level: self.level,
+            pos,
+            side,
+        })?;
+        Some(mod_api::__private::item_capability_present(self, site))
     }
     fn container_size(&self, at: mod_api::BlockSide) -> Option<usize> {
         if at.level != self.level
@@ -229,6 +249,9 @@ impl LevelHost for ReadLevel<'_, '_> {
         }
         self.game.container_stack(at, slot)?.try_into_api().ok()
     }
+    fn attachment_read_scope(&self) -> mod_api::AttachmentReadScope<'_> {
+        self.game.attachment_frame_borrow()
+    }
     fn block_entity_part_snapshot(
         &self,
         entity: mod_api::BlockEntityRef,
@@ -240,9 +263,9 @@ impl LevelHost for ReadLevel<'_, '_> {
             Some(self.level),
             self.game.native_authoritative(),
             self.game.attachment_indexes.get(&self.game.dim),
+            &self.game.transactions.attachment_query_scopes,
             entity,
-            namespace,
-            name,
+            (namespace, name),
         )
     }
     fn block_entity_data(&self, entity: mod_api::BlockEntityRef) -> Option<mod_api::Compound> {

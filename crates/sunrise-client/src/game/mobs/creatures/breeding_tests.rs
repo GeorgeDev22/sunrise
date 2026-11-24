@@ -510,7 +510,15 @@ fn first_chicken_breed_matches_without_mods_and_with_an_empty_mod() {
 #[test]
 #[ignore = "daily"]
 fn empty_mod_never_defers_breeding_xp() {
+    use crate::game::native_entity_refs::tests::run_fresh_cases;
     use mod_api::{self, Hooks};
+    if run_fresh_cases(
+        "game::creatures::breeding_tests::empty_mod_never_defers_breeding_xp",
+        "SUNRISE_EMPTY_BREED_CHILD",
+        &["empty"],
+    ) {
+        return;
+    }
     struct Empty;
     #[mod_api::__subscriptions]
     impl Hooks for Empty {}
@@ -534,8 +542,9 @@ fn empty_mod_never_defers_breeding_xp() {
                         cancel,
                     });
                 },
+                |_, _| (),
             );
-            assert!(kept.is_empty());
+            assert!(kept.is_none());
             assert!(!game.mob_world_base(&[]).asks_baby_spawn);
         });
     });

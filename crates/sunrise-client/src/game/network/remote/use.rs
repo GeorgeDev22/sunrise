@@ -232,10 +232,26 @@ impl Game<'_> {
     /// `Minecraft.startUseItem`'s block turn for `hand`: a use that swung drops
     /// the hand (`LocalPlayer.itemUsed`) when it spent the held item or the
     /// player has infinite materials.
-    pub(in crate::game) fn remote_use_block(&mut self, hand: Hand) -> bool {
+    pub(in crate::game) fn remote_use_block(
+        &mut self,
+        hand: Hand,
+        attempt: mod_api::InteractionAttempt,
+        hit: Option<Hit>,
+    ) -> bool {
         let before = self.with_hand(hand, |g| g.held().map(|s| s.count));
         let swings = self.swings_started;
-        let done = self.remote_use_item_on(hand);
+        let done = self.remote_use_item_on(hand, attempt, hit);
+        self.finish_remote_use_block(hand, before, swings, done);
+        done
+    }
+
+    pub(super) fn finish_remote_use_block(
+        &mut self,
+        hand: Hand,
+        before: Option<u32>,
+        swings: u32,
+        done: bool,
+    ) {
         if done
             && self.swings_started != swings
             && let Some(after) = self.with_hand(hand, |g| g.held().map(|s| s.count))
@@ -243,7 +259,6 @@ impl Game<'_> {
         {
             self.heights.item_used(hand);
         }
-        done
     }
 
     /// Whether the block hit takes a main-hand right click with `held`
@@ -258,21 +273,36 @@ impl Game<'_> {
         held: Option<&ItemStack>,
         asks_mods: bool,
     ) -> (InteractionResult, DryUse) {
+        if let Some(reacts) = self.remote_block_shortcut(hit, held) {
+            return reacts;
+        }
+        let [x, y, z] = hit.pos;
+        let state = self.world.block(x, y, z);
+        let (result, changes) = self.remote_block_template(hit, state, held, None, asks_mods);
+        (result.unwrap_or(InteractionResult::Pass), changes)
+    }
+
+    /// Main-hand client `useItemOn` branches handled outside the dry level.
+    pub(in crate::game) fn remote_block_shortcut(
+        &mut self,
+        hit: &crate::game::Hit,
+        held: Option<&ItemStack>,
+    ) -> Option<(InteractionResult, DryUse)> {
         // AbstractCauldronBlock.useItemOn (CauldronInteractions): a bucket,
         // bottle or dye the cauldron takes fills or lowers it, and the click
         // ends there instead of falling through to Item.use (which would
         // empty a water bucket into the face of the cauldron).
         if let Some(reacts) = self.remote_cauldron_reacts(hit, held) {
-            return reacts;
+            return Some(reacts);
         }
         if self.jukebox_takes(hit.pos, held) {
-            return (InteractionResult::Success, DryUse::default());
+            return Some((InteractionResult::Success, DryUse::default()));
         }
         // RespawnAnchorBlock.useItemOn: PASS when the off hand's glowstone is to
         // charge the anchor, so useWithoutItem doesn't run and the off hand's turn
         // comes (glowstone in this hand charges it in `use_item_on`).
         if !self.anchor_takes(hit.pos, held) && self.anchor_takes(hit.pos, self.offhand.as_ref()) {
-            return (InteractionResult::Pass, DryUse::default());
+            return Some((InteractionResult::Pass, DryUse::default()));
         }
         // BeehiveBlock.useItemOn: a glass bottle on a full hive (honey level 5)
         // is SUCCESS, so the click ends after UseItemOn and no UseItem follows.
@@ -283,28 +313,31 @@ impl Game<'_> {
                 .hive_state(hit.pos)
                 .is_some_and(|(honey, _)| honey == Some(5))
         {
-            return (InteractionResult::Success, DryUse::default());
+            return Some((InteractionResult::Success, DryUse::default()));
         }
         // ComposterBlock.useItemOn: a compostable item on a composter below
         // level 8 is SUCCESS on the client too (only the server adds the
         // layer), so the other hand (a torch) is never tried.
         if self.composter_takes(hit.pos, held) {
-            return (InteractionResult::Success, DryUse::default());
+            return Some((InteractionResult::Success, DryUse::default()));
         }
-        if let Some(result) = self.client_block_answer(hit, held) {
-            return (result, DryUse::default());
-        }
-        self.remote_block_template(hit, held, false, asks_mods)
+        self.client_block_answer(hit, held)
+            .map(|result| (result, DryUse::default()))
     }
 
+    /// Run a selected block method on a dry level (or both for a preview).
+    /// ItemOn returns None for TryWithEmptyHand, with no dry changes, so the
+    /// clicking client can ask the fallback Part at that boundary.
     pub(in crate::game) fn remote_block_template(
         &mut self,
         hit: &crate::game::Hit,
+        state: BlockStateId,
         held: Option<&ItemStack>,
-        without_item: bool,
+        branch: Option<sunrise_world::level::UseBranch>,
         asks_mods: bool,
-    ) -> (InteractionResult, DryUse) {
+    ) -> (Option<InteractionResult>, DryUse) {
         use sunrise_core::geometry::Direction;
+        use sunrise_world::level::UseBranch;
         let face = match hit.face {
             [0, 1, 0] => Direction::Up,
             [0, -1, 0] => Direction::Down,
@@ -329,12 +362,18 @@ impl Game<'_> {
                 inside: hit.inside,
             };
             let mut ticks = sunrise_world::level::Ticks::default();
-            let result = if without_item {
-                use sunrise_world::level::LevelAccess as _;
-                let state = level.block_state(hit.block);
-                b.use_without_item(&mut level, &mut ticks, state, hit, player)
-            } else {
-                b.use_item_on(&mut level, &mut ticks, hit, player, held.map(|s| &*s.item))
+            let item = held.map(|s| &*s.item);
+            let result = match branch {
+                Some(UseBranch::ItemOn) => {
+                    b.block_use_item_on(&mut level, &mut ticks, state, hit, player, item)
+                }
+                Some(UseBranch::WithoutItem) => {
+                    Some(b.use_without_item(&mut level, &mut ticks, state, hit, player))
+                }
+                None => Some(
+                    b.use_item_on_branch(&mut level, &mut ticks, state, hit, player, item)
+                        .0,
+                ),
             };
             (result, (level.changed.into_iter().collect(), level.sounds))
         })
@@ -354,9 +393,11 @@ impl Game<'_> {
             face: sunrise_core::geometry::Direction::ALL[face_direction(hit.face) as usize],
             hit: Vec3::new(hit.point[0], hit.point[1], hit.point[2]),
             inside: hit.inside,
-            yaw: self.yaw,
-            pitch: self.pitch,
-            sneaking: self.remote_shift_down(),
+            source: sunrise_world::level::PlacementSource::Player {
+                yaw: self.yaw,
+                pitch: self.pitch,
+                sneaking: self.remote_shift_down(),
+            },
             item: stack.item.to_string(),
             can_use_game_master_blocks: self.can_use_game_master_blocks(),
         };
@@ -536,20 +577,29 @@ impl Game<'_> {
         }
     }
 
-    /// The rest of Minecraft.startUseItem once the main hand's target passed:
-    /// the main hand's item, then the off hand's turn (its block, its item).
-    /// The server does each packet's part with that packet's hand only.
-    pub(in crate::game) fn remote_use_hands(&mut self, attempt: mod_api::InteractionAttempt) {
+    /// Continue Minecraft.startUseItem after this hand's target passed:
+    /// its item, then the off hand's target and item if this is the main hand.
+    /// When resumed after a server answer, use the original block hit.
+    pub(in crate::game) fn remote_use_hands(
+        &mut self,
+        hand: Hand,
+        attempt: mod_api::InteractionAttempt,
+        block_hit: Option<Hit>,
+    ) {
         // Nothing in the crosshair: an empty hand's click is heard, by mods only.
-        let miss = mod_api::__private::listened(mod_api::HookId::RightClickEmpty)
+        let miss = block_hit.is_none()
+            && mod_api::__private::listened(mod_api::HookId::RightClickEmpty)
             && !self.entity_targeted()
             && self.pick().is_none();
-        if miss && self.held().is_none() {
-            self.native_right_click_empty(Hand::Main);
+        if miss && self.with_hand(hand, |g| g.held().is_none()) {
+            self.native_right_click_empty(hand);
         }
         // A successful Item.use always drops the hand (LocalPlayer.itemUsed).
-        if self.remote_use_item(Hand::Main) {
-            self.heights.item_used(Hand::Main);
+        if self.remote_use_item(hand) {
+            self.heights.item_used(hand);
+            return;
+        }
+        if hand == Hand::Off {
             return;
         }
         // The off hand's turn: the event again, then the entity or the block.
@@ -562,10 +612,10 @@ impl Game<'_> {
             }
             return;
         }
-        let off_target = if self.remote_use_targets_entity() {
+        let off_target = if block_hit.is_none() && self.remote_use_targets_entity() {
             self.remote_use_entity(Hand::Off)
         } else {
-            self.remote_use_block(Hand::Off)
+            self.remote_use_block(Hand::Off, attempt, block_hit)
         };
         if off_target {
             return;
@@ -613,17 +663,17 @@ impl Game<'_> {
     }
 
     /// A container click: the server answers with the authoritative slots.
-    pub(in crate::game) fn remote_click(&mut self, right: bool) {
+    pub(in crate::game) fn remote_click(&mut self, right: bool) -> bool {
         let Some(size) = self
             .renderer
             .as_ref()
             .map(|r| [r.config.width, r.config.height])
         else {
-            return;
+            return false;
         };
         let batch = HudBatch::new(size, self.settings.gui_scale_inputs());
         let Some(internal) = self.slot_at(&batch, self.cursor.0, self.cursor.1) else {
-            return;
+            return false;
         };
         let input = if self.has_shift_down() {
             Input::QuickMove
@@ -636,8 +686,9 @@ impl Game<'_> {
             // changed (SetCreativeModeSlot). No ContainerClick: a server holding the carried
             // stack would give it back after the Destroy Item slot cleared it (#3307).
             self.click_open_inventory(Some(internal), i32::from(right), input);
-            return;
+            return true;
         }
         self.remote_menu_ops(&[(Some(internal), i32::from(right), input)]);
+        true
     }
 }

@@ -943,7 +943,7 @@ mod tests {
                     Vec3::new(0.5, 1.0, 0.5),
                     0.0,
                 );
-                m.on_ground = true;
+                m.ground.on_ground = true;
                 m.extra.raider = Some(Box::default());
                 let s = state_mut(&mut m);
                 s.active_raid = true;

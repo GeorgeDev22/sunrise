@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Жаңы чат сызыгы сол жактан жылдырып, ал толугу менен көрүнбөй, өчүп калат.",
   "sunrise.extras.chat_indicator": "Билдирүү көрсөткүчү",
   "sunrise.extras.chat_indicator.tooltip": "Чат сызыгынын сол жагындагы түстүү тилке.",
-  "sunrise.extras.discord_presence": "Discord'догу статус",
-  "sunrise.extras.discord_presence.tooltip": "Discord иштеп жатканда Discord профилиңизде Sunrise ойнолуп жатканын көрсөтөт: менюлар, бир оюнчу же көп оюнчу, өлчөм жана ойноо убактысы. Эч качан дүйнөнүн аталышы же сервердин дареги.",
   "sunrise.extras.dynamic_lights": "Динамикалык жарыктар",
   "sunrise.extras.dynamic_lights.tooltip": "Факелдер жана башка жарык булактары алардын айланасындагы блокторду кармап турган, түшүрүлгөн же күйгүзүп күйгүзөт.",
   "sunrise.extras.fullbright": "Толук жарык",

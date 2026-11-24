@@ -356,6 +356,9 @@ mod tests {
                 id: 0,
                 at: [0.0; 3],
                 motion: [0.0; 3],
+                fall_distance: 0.0,
+                fire_ticks: 0,
+                first_tick: true,
                 radius: 5.0,
                 age: 0,
                 duration: 200,
@@ -454,7 +457,9 @@ mod tests {
                 ])
             );
             assert_eq!(
-                game.entity_kind(*part).map(|kind| kind.id(game)).as_deref(),
+                game.entity_kind(*part)
+                    .and_then(|kind| kind.id(game))
+                    .as_deref(),
                 Some("minecraft:ender_dragon")
             );
             assert_eq!(game.entity_rotation(*part), Some([0.0, 0.0]));

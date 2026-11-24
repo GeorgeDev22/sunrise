@@ -157,8 +157,15 @@ fn object_style<'a>(
     child: &mut dyn FnMut(&'a Value) -> Text,
     origin: Origin,
     decoded_clicks: Option<&[crate::text::ClickEvent]>,
+    local_styles: bool,
 ) -> Style {
     let mut style = Style::default();
+    if local_styles {
+        style.opaque_style_id = o
+            .get("__sunrise_local_style_id")
+            .and_then(Value::as_u64)
+            .and_then(|id| usize::try_from(id).ok());
+    }
     if let Some(c) = o.get("color").and_then(Value::as_str) {
         style.color = parse_color(c);
     }
@@ -261,6 +268,7 @@ pub fn to_text_with(
         &|_| Origin::Remote,
         None,
         None,
+        false,
     )
     .unwrap_or_default()
 }
@@ -276,6 +284,24 @@ pub fn text_with_decoded_clicks(v: &Value, clicks: &[crate::text::ClickEvent]) -
         &|_| Origin::Remote,
         None,
         Some(clicks),
+        false,
+    )
+    .unwrap_or_default()
+}
+
+/// Render the engine-generated local layout projection, which omits user metadata.
+/// Only that projection's internally assigned style indices are used, and its
+/// objects are not retained as a serialized source.
+pub fn text_with_local_styles(v: &Value) -> Text {
+    build(
+        v,
+        &mut |s| Text::literal(s),
+        &mut |_| None,
+        Sourced(false, Origin::Local),
+        &|_| Origin::Local,
+        None,
+        None,
+        true,
     )
     .unwrap_or_default()
 }
@@ -314,6 +340,7 @@ fn build_source(
         origin,
         language,
         None,
+        false,
     )
 }
 
@@ -616,6 +643,7 @@ fn build(
     origin: &dyn Fn(&Value) -> Origin,
     language: Option<&crate::lang::Language>,
     decoded_clicks: Option<&[crate::text::ClickEvent]>,
+    local_styles: bool,
 ) -> Option<Text> {
     enum Content<'a> {
         Decode(Option<Text>),
@@ -676,8 +704,13 @@ fn build(
                 let Value::Object(o) = value else {
                     unreachable!()
                 };
-                let style =
-                    object_style(o, &mut |v| done.take_text(v), origin(value), decoded_clicks);
+                let style = object_style(
+                    o,
+                    &mut |v| done.take_text(v),
+                    origin(value),
+                    decoded_clicks,
+                    local_styles,
+                );
                 let overridden = if hover { None } else { contents(o) };
                 let needs_content = overridden.is_none();
                 let translation = o.get("translate").and_then(Value::as_str).filter(|_| {
@@ -1002,6 +1035,114 @@ pub fn name_text(tag: &Tag) -> Text {
     match tag {
         Tag::String(s) => Text::untrusted_legacy(&s.to_string_lossy()),
         t => crate::scoreboard::comp_text(&crate::scoreboard::tag_to_json(t)),
+    }
+}
+
+/// `ComponentSerialization.CODEC`: validate an NBT text component and collapse
+/// a plain `{text: "..."}` compound to a string, returning `None` for invalid
+/// inputs such as numbers (`123`), empty lists (`[]`), or empty compounds (`{}`).
+pub fn validated_component(tag: &Tag) -> Option<Tag> {
+    if !is_valid_component_tag(tag, 0) {
+        return None;
+    }
+    match tag {
+        Tag::Compound(map)
+            if map.len() == 1 && matches!(map.get(&"text".into()), Some(Tag::String(_))) =>
+        {
+            map.get(&"text".into()).cloned()
+        }
+        Tag::List(items) if items.len() == 1 => validated_component(&items[0]),
+        _ => Some(tag.clone()),
+    }
+}
+
+fn is_valid_component_tag(tag: &Tag, depth: usize) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    match tag {
+        Tag::String(_) => true,
+        Tag::List(items) => {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| is_valid_component_tag(item, depth + 1))
+        }
+        Tag::Compound(map) => {
+            let is_str = |key: &str| matches!(map.get(&key.into()), Some(Tag::String(_)));
+            let is_num = |t: &Tag| {
+                matches!(
+                    t,
+                    Tag::Byte(_)
+                        | Tag::Short(_)
+                        | Tag::Int(_)
+                        | Tag::Long(_)
+                        | Tag::Float(_)
+                        | Tag::Double(_)
+                )
+            };
+            let valid_content = match map.get(&"type".into()) {
+                Some(Tag::String(ty)) => match ty.to_string_lossy().as_ref() {
+                    "text" => is_str("text"),
+                    "translatable" => is_str("translate"),
+                    "keybind" => is_str("keybind"),
+                    "score" => matches!(map.get(&"score".into()), Some(Tag::Compound(_))),
+                    "selector" => is_str("selector"),
+                    "nbt" => is_str("nbt"),
+                    "object" => map.contains_key(&"player".into()) || is_str("sprite"),
+                    _ => false,
+                },
+                Some(_) => false,
+                None => {
+                    is_str("text")
+                        || is_str("translate")
+                        || is_str("keybind")
+                        || matches!(map.get(&"score".into()), Some(Tag::Compound(_)))
+                        || is_str("selector")
+                        || is_str("nbt")
+                        || map.contains_key(&"player".into())
+                        || is_str("sprite")
+                }
+            };
+            if !valid_content {
+                return false;
+            }
+            if let Some(extra) = map.get(&"extra".into()) {
+                let Tag::List(items) = extra else {
+                    return false;
+                };
+                if items.is_empty()
+                    || !items
+                        .iter()
+                        .all(|item| is_valid_component_tag(item, depth + 1))
+                {
+                    return false;
+                }
+            }
+            if let Some(color) = map.get(&"color".into()) {
+                let Tag::String(s) = color else {
+                    return false;
+                };
+                if parse_color(&s.to_string_lossy()).is_none() {
+                    return false;
+                }
+            }
+            for flag in [
+                "bold",
+                "italic",
+                "underlined",
+                "strikethrough",
+                "obfuscated",
+            ] {
+                if let Some(v) = map.get(&flag.into())
+                    && !is_num(v)
+                {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
     }
 }
 

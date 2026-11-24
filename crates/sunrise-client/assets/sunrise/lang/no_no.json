@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "En ny chat-linje glir inn fra venstre mens den toner inn, i stedet for å virke hel.",
   "sunrise.extras.chat_indicator": "Meldingsindikator",
   "sunrise.extras.chat_indicator.tooltip": "Den fargede linjen til venstre for en chattelinje.",
-  "sunrise.extras.discord_presence": "Discord Rik tilstedeværelse",
-  "sunrise.extras.discord_presence.tooltip": "Viser Playing Sunrise på Discord-profilen din mens Discord kjører: menyer, enkeltspiller eller flerspiller, dimensjonen og spilletiden. Aldri et verdensnavn eller en serveradresse.",
   "sunrise.extras.dynamic_lights": "Dynamiske lys",
   "sunrise.extras.dynamic_lights.tooltip": "Fakler og andre lyskilder som holdes, slippes eller brenner tenner blokkene rundt dem.",
   "sunrise.extras.fullbright": "Fullt lys",

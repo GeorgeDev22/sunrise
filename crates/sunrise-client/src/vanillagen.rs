@@ -446,6 +446,11 @@ impl VanillaTerrain {
     pub fn set_mob_maps(&self, snapshot: &Arc<crate::neoforge_mob_maps::NeoForgeMobMaps>) {
         self.structure_mobs.set_mob_maps(snapshot);
     }
+    /// Publish this world's biome keys to the mod features its chunks decorate with
+    /// (`FeatureContext::biome`), from the next decoration on.
+    pub fn set_biome_keys(&self, keys: &Arc<mod_api::__private::BiomeKeys>) {
+        self.generator.mod_biome_keys().publish(Arc::clone(keys));
+    }
     /// Reads what generated mobs are finalized with on a thread of its own
     /// (`StructureMobFinalizer::load_behind`).
     pub fn load_structure_mobs_behind(&self) {
@@ -810,7 +815,8 @@ impl VanillaTerrain {
         const QUIET: u64 = 2_000;
         const LATEST: u64 = 60_000;
         let terrain = Arc::downgrade(self);
-        let spawned = sunrise_guest_stack::builder()
+        let spawned = std::thread::Builder::new()
+            .stack_size(sunrise_threads::GAME_THREAD_STACK_BYTES)
             .name("Ring search".into())
             .spawn(move || {
                 sunrise_threads::idle_current();
@@ -953,6 +959,9 @@ pub fn shared_data_with(
 }
 impl ChunkGenerator for VanillaTerrain {
     type Worker = GeneratorWorker;
+    fn spawn_height(&self) -> i32 {
+        self.generator.flat_spawn_height().unwrap_or(64)
+    }
     fn set_saved_starts(
         &self,
         source: Arc<sunrise_world::worldgen::generator::SavedStructureStarts>,

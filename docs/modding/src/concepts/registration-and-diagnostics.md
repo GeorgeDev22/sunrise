@@ -18,8 +18,11 @@ may conflict with another declaration's generated block item. A refusal is fatal
 even if the caller ignores the error. The startup error and log identify the submitting mod,
 declaration kind, ID, and reason.
 
-If your `Hooks::register` bootstrap cannot complete, call `cx.refuse("reason")` and return.
-The registration error path reports the refusal without panicking or exiting from the hook.
+If your `Hooks::register` bootstrap cannot complete, call `r.refuse("reason")` on the
+`Registrar` and return. Sunrise records the refusal directly against the mod whose `register`
+hook is running. It does not panic or exit the hook for you. Because `refuse` and `warn` live
+on `Registrar` (via `DiagnosticsRegistrar`), they are available only in `Hooks::register`.
+These reports are separate from the native block and item declaration errors described above.
 
 ## Registration refusal
 
@@ -27,16 +30,19 @@ The registration error path reports the refusal without panicking or exiting fro
 - All declarations from that registration are discarded, including declarations made before
   or after the call. Later declarations do not add secondary validation errors.
 - Other mods' declarations are unchanged.
-- The first reason wins, including an empty reason. Reasons are preserved verbatim up to
-  4096 UTF-8 bytes; longer reasons are truncated at a character boundary.
+- Every refusal reason recorded during the callback is preserved verbatim and reported,
+  including an empty reason. If the callback later panics, Sunrise logs those reasons and
+  any already-recorded registration errors with the mod's ID before discarding its pending batch.
 
 ## Loading warnings
 
 For log locations and filtering, see [Find your mod's diagnostics](../how-to/read-the-game-log.md).
 
 A problem that should not stop your mod, such as a missing optional integration or a setting it
-corrected, is a warning: `cx.warn("mymod.warn.no_jei", &["jei"])` inside `Hooks::register`
-(NeoForge's `ModLoadingIssue.warning`).
+corrected, is a warning: `r.warn("mymod.warn.no_jei", &["jei"])` on the `Registrar` inside
+`Hooks::register`. Like NeoForge's `ModLoader.addLoadingIssue` with
+`ModLoadingIssue.withAffectedMod`, the registration records the warning against the mod that
+reported it.
 
 - The key is a translation key in your mod's own `lang/` files; the arguments fill its `%s` in
   order.
@@ -45,8 +51,8 @@ corrected, is a warning: `cx.warn("mymod.warn.no_jei", &["jei"])` inside `Hooks:
 - The log names the mod, the key and the arguments at warn level. The Mods screen shows the mod's
   first warning under its row in the player's language, or the key when no language has it; the
   row is not marked failed.
-- A mod keeps its first 16 warnings; later ones are dropped. The key and each argument are cut as
-  refusal reasons are, to 4096 UTF-8 bytes at a character boundary.
+- Warnings are kept in call order with no per-mod limit, and each key and argument is stored
+  verbatim.
 
 ## Native startup and hook panics
 
@@ -60,9 +66,12 @@ Game source without the required template is refused before mod staging with:
 “This game source has no native inventory entry template. Update Sunrise and rebuild the mods
 against this game.”
 
-A native hook panic stops the game. Its crash report and server-thread log identify
-`in native mod <id>, hook <hook>`, using the `sunrise-mod.toml` ID. Parts retain their registering
-mod's ID for startup errors and hook panics.
+A panic in `Hooks::register` disables that mod's registration callback for the session. The
+[shared panic report](hooks-and-the-host.md#failures-and-panics) names the mod and hook in the
+log and client error toast. Sunrise discards the callback's pending registrations, including
+biome modifiers, datapack registries, and attribute widenings, without undoing live writes outside
+a transaction. A panic while dropping a rejected Part uses the same report and does not stop
+the next mod from registering.
 
 ## Crash-report callbacks
 

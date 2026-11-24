@@ -158,7 +158,7 @@ impl Game<'_> {
         for m in &mut mobs {
             if m.species() == Species::Panda
                 && !m.is_baby()
-                && m.on_ground
+                && m.ground.on_ground
                 && !m.fluids.in_water
                 && panda::can_perform_action(m, panda::scared(m))
                 && area.intersects(m.bounds())

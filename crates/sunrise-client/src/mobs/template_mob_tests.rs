@@ -70,7 +70,7 @@ fn arena(
 
 fn mob(types: &MobTypes, id: &str, at: Vec3) -> Mob {
     let mut mob = Mob::new(1, Arc::new(types.types[id].clone()), at, 0.0);
-    mob.on_ground = true;
+    mob.ground.on_ground = true;
     mob
 }
 
@@ -178,7 +178,7 @@ fn a_mod_type_on_the_drowned_swims_and_fights_in_water() {
             w.player = Some(test_player(player));
             let run = |id: &str| {
                 let mut m = mob(types, id, Vec3::new(5.5, 58.0, 5.5));
-                m.on_ground = false;
+                m.ground.on_ground = false;
                 let mut test_level = crate::health::TestLevel::new(0);
                 let level = &mut test_level.level();
                 let mut swam = false;

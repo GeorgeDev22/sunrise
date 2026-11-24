@@ -4,6 +4,8 @@ use mod_api::{
     DatapackField, DatapackFieldKind, DatapackRegistrySync, DatapackValue, Registrar,
     RegistrationContext,
 };
+use sunrise_core::nbt::Tag;
+
 struct RegistryMod;
 #[mod_api::__subscriptions]
 impl Hooks for RegistryMod {
@@ -109,14 +111,11 @@ fn recipe_priority_layer_is_named_and_applied_through_reload() {
 
 fn power(game: &crate::game::Game<'_>) -> DatapackValue {
     let set = game.mods.datapack_registries.as_ref().unwrap();
-    set.get(
-        &set.handle("registry_test:spell", "registry_test:fire")
-            .unwrap(),
-    )
-    .unwrap()
-    .get("power")
-    .unwrap()
-    .clone()
+    set.get("registry_test:spell", "registry_test:fire")
+        .unwrap()
+        .get("power")
+        .unwrap()
+        .clone()
 }
 #[test]
 #[ignore = "daily"]
@@ -179,17 +178,6 @@ fn datapack_game_open_reload_and_exhaustion_are_atomic() {
                         .unwrap(),
                     ["registry_test:fire"]
                 );
-                let first = game
-                    .mods
-                    .datapack_registries
-                    .as_ref()
-                    .unwrap()
-                    .handle("registry_test:spell", "registry_test:fire")
-                    .unwrap();
-                assert_eq!(
-                    game.mods.datapack_registries.as_ref().unwrap().generation(),
-                    1
-                );
                 let old = game.mods.datapack_registries.as_ref().unwrap().clone();
                 write(
                     &winning,
@@ -240,12 +228,23 @@ fn datapack_game_open_reload_and_exhaustion_are_atomic() {
                     &old
                 ));
                 assert_eq!(power(game), DatapackValue::Int(7));
+                let old_files = game
+                    .world_tables
+                    .as_ref()
+                    .map(|tables| tables.files.clone());
                 write(&winning, "{bad");
+                write(&tag, r#"{"values":["minecraft:dirt"]}"#);
                 assert!(!game.run_command("reload"));
                 assert_eq!(power(game), DatapackValue::Int(7));
+                assert!(std::sync::Arc::ptr_eq(
+                    game.mods.datapack_registries.as_ref().unwrap(),
+                    &old
+                ));
                 assert_eq!(
-                    game.mods.datapack_registries.as_ref().unwrap().generation(),
-                    1
+                    game.world_tables
+                        .as_ref()
+                        .map(|tables| tables.files.clone()),
+                    old_files
                 );
                 write(&winning, r#"{"power":9}"#);
                 assert!(game.run_command("reload"));
@@ -254,72 +253,22 @@ fn datapack_game_open_reload_and_exhaustion_are_atomic() {
                     sunrise_client::datapack_net::served(),
                     game.mods.datapack_registries
                 );
-                assert_eq!(
-                    game.mods.datapack_registries.as_ref().unwrap().generation(),
-                    2
-                );
                 assert!(game.run_command("reload"));
-                assert_eq!(
-                    game.mods.datapack_registries.as_ref().unwrap().generation(),
-                    3
-                );
+                assert_eq!(power(game), DatapackValue::Int(9));
                 let features = game.level.enabled_features.clone();
                 game.reload_datapacks(true, &features).unwrap();
-                assert_eq!(
-                    game.mods.datapack_registries.as_ref().unwrap().generation(),
-                    4
-                );
+                assert_eq!(power(game), DatapackValue::Int(9));
                 assert!(game.run_command("datapack disable \"file/override\""));
                 assert_eq!(power(game), DatapackValue::Int(3));
-                assert_eq!(
-                    game.mods.datapack_registries.as_ref().unwrap().generation(),
-                    5
-                );
                 assert!(game.run_command("datapack enable \"file/override\" last"));
                 assert_eq!(power(game), DatapackValue::Int(9));
-                assert_eq!(
-                    game.mods.datapack_registries.as_ref().unwrap().generation(),
-                    6
-                );
-                // `reload_datapacks(false)` is the world-open path: it installs the world's tables
-                // and starts a new registry session (61ce0afada1), so the generation starts again.
                 game.reload_datapacks(false, &features).unwrap();
-                assert_eq!(
-                    game.mods.datapack_registries.as_ref().unwrap().generation(),
-                    1
-                );
-                std::sync::Arc::make_mut(game.mods.datapack_registries.as_mut().unwrap())
-                    .exhaust_generation_for_testing();
-                let old_set = game.mods.datapack_registries.clone();
-                let old_files = game
-                    .world_tables
-                    .as_ref()
-                    .map(|tables| tables.files.clone());
-                write(&winning, r#"{"power":11}"#);
-                write(&tag, r#"{"values":["minecraft:dirt"]}"#);
-                assert!(
-                    !game.run_command("reload"),
-                    "generation exhaustion must refuse the whole publication"
-                );
-                assert_eq!(game.mods.datapack_registries, old_set);
-                assert_eq!(
-                    sunrise_client::datapack_net::served().unwrap().generation(),
-                    1
-                );
-                assert_eq!(
-                    game.world_tables
-                        .as_ref()
-                        .map(|tables| tables.files.clone()),
-                    old_files
-                );
+                assert_eq!(power(game), DatapackValue::Int(9));
                 game.finish_close_world().unwrap();
                 game.options.execution_role =
                     crate::game::execution_role::ExecutionRole::DedicatedServer;
                 game.load_world(request(root)).unwrap();
-                assert_eq!(
-                    game.mods.datapack_registries.as_ref().unwrap().get(&first),
-                    Err(mod_api::DatapackReadError::WrongSession)
-                );
+                assert_eq!(power(game), DatapackValue::Int(9));
             });
         },
     );
@@ -328,8 +277,17 @@ fn datapack_game_open_reload_and_exhaustion_are_atomic() {
 #[test]
 #[ignore = "daily"]
 fn world_open_and_wire_use_the_pack_biome_instead_of_the_bundled_file() {
-    use crate::game::native_entity_refs::tests::{fixture_root, with_game_at};
+    use crate::game::native_entity_refs::tests::{fixture_root, run_fresh_cases, with_game_at};
     use sunrise_client::lan::data::BIOME_REGISTRY;
+
+    // World open replaces the process-wide wire snapshot for the session.
+    if run_fresh_cases(
+        "game::server_reload::tests::datapack_publication_tests::world_open_and_wire_use_the_pack_biome_instead_of_the_bundled_file",
+        "SUNRISE_PACK_BIOME_WIRE_CASE",
+        &["world-open"],
+    ) {
+        return;
+    }
 
     fn copy_tree(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();
@@ -453,10 +411,8 @@ fn refused_reload_names_the_pack_and_keeps_the_old_generation() {
             with_game(|game| {
                 game.load_world(request(root)).unwrap();
                 let features = game.level.enabled_features.clone();
-                let generation = |game: &crate::game::Game<'_>| {
-                    game.mods.datapack_registries.as_ref().unwrap().generation()
-                };
-                assert_eq!(generation(game), 1);
+                let initial = game.mods.datapack_registries.as_ref().unwrap().clone();
+                assert_eq!(power(game), DatapackValue::Int(7));
                 let over = format!(
                     r#"{{"power":7{}}}"#,
                     " ".repeat(mod_api::MAX_DATAPACK_ENTRY_BYTES)
@@ -475,7 +431,10 @@ fn refused_reload_names_the_pack_and_keeps_the_old_generation() {
                         "{message}"
                     );
                     assert_eq!(power(game), DatapackValue::Int(7));
-                    assert_eq!(generation(game), 1);
+                    assert!(std::sync::Arc::ptr_eq(
+                        game.mods.datapack_registries.as_ref().unwrap(),
+                        &initial
+                    ));
                     assert_eq!(
                         sunrise_client::datapack_net::served(),
                         game.mods.datapack_registries
@@ -484,7 +443,6 @@ fn refused_reload_names_the_pack_and_keeps_the_old_generation() {
                 write(&winning, r#"{"power":9}"#);
                 assert!(game.run_command("reload"));
                 assert_eq!(power(game), DatapackValue::Int(9));
-                assert_eq!(generation(game), 2);
             });
         },
     );
@@ -532,14 +490,13 @@ fn with_membership_fixture(run: impl FnOnce(&mut crate::game::Game<'_>, &Path)) 
         },
     );
 }
-fn weights(game: &crate::game::Game<'_>) -> Vec<(String, serde_json::Value)> {
+fn weights<'game>(game: &'game crate::game::Game<'_>) -> &'game [(String, Tag)] {
     game.world_tables
         .as_ref()
         .unwrap()
         .data_maps
-        .json_values("registry_test:spell", "registry_test:weights")
-        .map(|(id, value)| (id.to_owned(), value.clone()))
-        .collect()
+        .entries("registry_test:spell", "registry_test:weights")
+        .unwrap()
 }
 #[test]
 #[ignore = "daily"]
@@ -547,7 +504,7 @@ fn data_map_first_open_uses_staged_membership() {
     with_membership_fixture(|game, _| {
         assert_eq!(
             weights(game),
-            vec![("registry_test:fire".into(), serde_json::json!(11))]
+            &[("registry_test:fire".to_owned(), Tag::Int(11))]
         );
     });
 }
@@ -562,9 +519,9 @@ fn data_map_reload_add_uses_staged_membership() {
         assert!(game.run_command("reload"));
         assert_eq!(
             weights(game),
-            vec![
-                ("registry_test:fire".into(), serde_json::json!(11)),
-                ("registry_test:ice".into(), serde_json::json!(17))
+            &[
+                ("registry_test:fire".to_owned(), Tag::Int(11)),
+                ("registry_test:ice".to_owned(), Tag::Int(17)),
             ]
         );
     });
@@ -578,7 +535,7 @@ fn data_map_reload_remove_uses_staged_membership() {
         )
         .unwrap();
         assert!(game.run_command("reload"));
-        assert_eq!(weights(game), vec![]);
+        assert!(weights(game).is_empty());
     });
 }
 #[test]
@@ -588,9 +545,9 @@ fn data_map_later_enabled_layer_uses_staged_membership() {
         assert!(game.run_command("datapack enable \"file/later\" last"));
         assert_eq!(
             weights(game),
-            vec![
-                ("registry_test:fire".into(), serde_json::json!(11)),
-                ("registry_test:ice".into(), serde_json::json!(17))
+            &[
+                ("registry_test:fire".to_owned(), Tag::Int(11)),
+                ("registry_test:ice".to_owned(), Tag::Int(17)),
             ]
         );
     });

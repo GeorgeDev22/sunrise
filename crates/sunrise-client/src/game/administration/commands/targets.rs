@@ -114,6 +114,7 @@ impl Game<'_> {
                 .find(|r| r.id == id)
                 .map(|r| [r.position.x, r.position.y, r.position.z]),
             Target::Cloud(id) => self.breath_clouds.iter().find(|c| c.id == id).map(|c| c.at),
+            Target::Bolt(id) => self.bolts.iter().find(|b| b.id == id).map(|b| b.at),
             Target::Hook(id) => self.fishing_hook_by_id(id).map(|(h, _)| {
                 let p = h.position;
                 [p.x, p.y, p.z]
@@ -138,7 +139,12 @@ impl Game<'_> {
                 .general
                 .row(id)
                 .map(|row| [row.position.x, row.position.y, row.position.z])
-                .or_else(|| self.shown_remote_general(id as i32).map(|row| row.position)),
+                .or_else(|| {
+                    self.remote
+                        .as_ref()
+                        .and_then(|r| r.general.rows.get(&(id as i32)))
+                        .map(|row| row.position)
+                }),
         }
     }
     pub(in crate::game) fn target_type(&self, t: Target) -> String {
@@ -197,6 +203,7 @@ impl Game<'_> {
             Target::Fangs(_) => "minecraft:evoker_fangs".into(),
             Target::Spawner(_) => "minecraft:ominous_item_spawner".into(),
             Target::Cloud(_) => "minecraft:area_effect_cloud".into(),
+            Target::Bolt(_) => "minecraft:lightning_bolt".into(),
             Target::Hook(_) => "minecraft:fishing_bobber".into(),
             Target::Knot(_) => "minecraft:leash_knot".into(),
         }
@@ -226,6 +233,7 @@ pub(super) fn non_player_entity_id(t: Target) -> Option<i32> {
     | Target::Trident(id)
     | Target::Spawner(id)
     | Target::Cloud(id)
+    | Target::Bolt(id)
     | Target::Hook(id)
     | Target::General(id)
     | Target::Knot(id)) = t

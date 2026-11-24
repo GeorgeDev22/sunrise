@@ -114,6 +114,8 @@ pub struct Frame<'a> {
     pub yaw: f32,
     pub pitch: f32,
     pub fov_degrees: f32,
+    /// `Camera.createProjectionMatrixForCulling`: `max(fov_degrees, option_fov)`.
+    pub cull_fov_degrees: f32,
     /// The camera entity's eye and view rotation (yaw, pitch): the camera's own except in a
     /// third-person view.
     pub eye: DVec3,
@@ -136,6 +138,9 @@ pub struct Frame<'a> {
     pub distance: f32,
     /// Full-detail terrain distance in blocks; distant LODs bypass the cave graph.
     pub detail_distance: f32,
+    /// Shadow caster selection distance in blocks; defaults to the effective eye distance
+    /// (`detail_distance`) when `None`.
+    pub shadow_distance: Option<f32>,
     /// `Camera.depthFar`: the far plane (`crate::camera::depth_far`).
     pub depth_far: f32,
     pub underwater: bool,
@@ -193,6 +198,8 @@ pub struct Frame<'a> {
     pub nether_lighting: bool,
     /// Camera-relative entity geometry textured from the shared atlas.
     pub entities: &'a [Vertex],
+    /// Explicit world particle-atlas geometry, drawn outside the combined entity buffer.
+    pub explicit_particles: Option<&'a crate::particles::ParticleQuads>,
     /// Per-section cacheable block-entity models. Positions are section-local.
     pub static_block_entities: &'a [StaticSectionSnapshot],
     /// Sections currently intersecting the coarse camera frustum.

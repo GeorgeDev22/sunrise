@@ -2,10 +2,11 @@
 //! particle, its sprite set, interpolation, rendering and total count limits.
 use super::{Particle, ParticleLevel, ParticleOptions};
 use mod_api::{
-    BlockState, LightLayer, ModParticle, ParticleFacing, ParticleLevelView, ParticleProvider,
+    __private::{BoundParticleProvider, TypedParticleOptions},
+    BlockState, LightLayer, ModParticle, ParticleFacing, ParticleKey, ParticleLevelView,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{collections::BTreeMap, fmt::Debug, sync::Arc, sync::OnceLock};
+use std::{collections::HashMap, fmt::Debug, sync::Arc, sync::OnceLock};
 
 /// Requests made by one particle tick, submitted through normal spawn limits.
 #[derive(Default)]
@@ -41,21 +42,73 @@ impl Clone for Box<dyn Controller> {
     }
 }
 
-/// The mods' particle providers by type name: set once at start, before the resources first load,
+/// The mods' particle providers by registered key: set once before the first resource load,
 /// and read by every engine built after.
-static REGISTERED: OnceLock<BTreeMap<String, Arc<dyn ParticleProvider>>> = OnceLock::new();
+static REGISTERED: OnceLock<HashMap<ParticleKey, Arc<dyn BoundParticleProvider>>> = OnceLock::new();
 
 /// Sets the mods' particle providers (`register_particle_providers`), once, before
 /// the resources first load; each engine then resolves its sprite sets' providers at every load.
 /// False when already set.
-pub fn register_particle_providers(providers: BTreeMap<String, Arc<dyn ParticleProvider>>) -> bool {
+pub fn register_particle_providers(
+    providers: HashMap<ParticleKey, Arc<dyn BoundParticleProvider>>,
+) -> bool {
     REGISTERED.set(providers).is_ok()
 }
 
 /// What [`register_particle_providers`] set; none before.
-pub(super) fn registered() -> &'static BTreeMap<String, Arc<dyn ParticleProvider>> {
-    static NONE: BTreeMap<String, Arc<dyn ParticleProvider>> = BTreeMap::new();
+pub(super) fn registered() -> &'static HashMap<ParticleKey, Arc<dyn BoundParticleProvider>> {
+    static NONE: std::sync::LazyLock<HashMap<ParticleKey, Arc<dyn BoundParticleProvider>>> =
+        std::sync::LazyLock::new(HashMap::new);
     REGISTERED.get().unwrap_or(&NONE)
+}
+
+impl super::ParticleEngine {
+    pub(super) fn make_typed_particle(
+        &mut self,
+        world: &super::World,
+        value: &TypedParticleOptions,
+        position: [f64; 3],
+        aux: [f64; 3],
+        seed: i64,
+    ) -> Result<Option<Particle>, String> {
+        let Some((set, (_, provider))) = self
+            .typed_sets
+            .get(&value.key())
+            .and_then(|set| Some((set, set.provider.as_ref()?)))
+        else {
+            return Ok(None);
+        };
+        let Some(states) = (self.block_state_source)() else {
+            return Ok(None);
+        };
+        let level = ProviderLevel {
+            world,
+            block: |x, y, z| world.block(x, y, z),
+            states: (*states).as_ref(),
+        };
+        let mut particle = self.make_sprite_particle(set, position, aux, seed);
+        let Some(provided) = &particle.provided else {
+            return Ok(None);
+        };
+        let mut view = particle.provider_view(provided);
+        if provider
+            .create_particle(
+                value,
+                &level,
+                position,
+                aux,
+                &mut mod_api::__private::BorrowedRandom(&mut self.random),
+                &mut view,
+            )?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        if let Some(frame) = particle.take(&view) {
+            self.set_sprite_frame(&mut particle, frame);
+        }
+        Ok((!particle.removed).then_some(particle))
+    }
 }
 
 /// How far from the origin a provider may move a particle: the world border's limit. Past it, or
@@ -72,7 +125,7 @@ const ROLL_LIMIT: f32 = f32::MAX / 2.0;
 /// every live particle of the type ([`Batch::run`]). Holds the provider the type resolved to when
 /// its sprite sets loaded, so a tick dispatches straight to it.
 pub(super) struct Provided {
-    provider: Arc<dyn ParticleProvider>,
+    provider: Arc<dyn BoundParticleProvider>,
     /// The provider's dense slot among the registered ones, which its batch is filled by.
     slot: u32,
     /// `ModParticle::state`, kept from one tick to the next.
@@ -123,7 +176,7 @@ impl Debug for Provided {
 }
 impl Provided {
     pub(super) fn new(
-        provider: Arc<dyn ParticleProvider>,
+        provider: Arc<dyn BoundParticleProvider>,
         slot: u32,
         frame: u32,
         live: &Arc<AtomicUsize>,
@@ -139,6 +192,16 @@ impl Provided {
             live: live.clone(),
         }
     }
+    pub(super) fn extract(
+        &self,
+        particle: &Particle,
+        view: &mod_api::ParticleExtractView,
+        output: &mut dyn mod_api::QuadParticleRenderState,
+    ) -> Result<(), String> {
+        self.provider
+            .extract(&particle.provider_view(self), view, output)
+    }
+
     /// The quad's rotation at `partial` of a tick (`SingleQuadParticle.extract`): the facing's
     /// quaternion (`LOOKAT_XYZ` the camera's, `LOOKAT_Y` its y and w alone, as vanilla sets it,
     /// or the world-fixed one), then `rotateZ` of `Mth.lerp(partial, oRoll, roll)` when the
@@ -240,20 +303,7 @@ impl Batch {
                     .provided
                     .as_ref()
                     .expect("a bucket holds provider particles");
-                self.views.push(ModParticle {
-                    position: p.position,
-                    previous: p.previous,
-                    velocity: p.velocity,
-                    age: p.age,
-                    lifetime: p.lifetime,
-                    size: p.size,
-                    rgba: p.rgba,
-                    frame: provided.frame,
-                    removed: false,
-                    state: provided.state,
-                    facing: p.facing(),
-                    roll: p.roll,
-                });
+                self.views.push(p.provider_view(provided));
             }
             let mut batch =
                 mod_api::__private::particle_batch_from_vec(std::mem::take(&mut self.views));
@@ -275,6 +325,22 @@ impl Batch {
     }
 }
 impl Particle {
+    fn provider_view(&self, provided: &Provided) -> ModParticle {
+        ModParticle {
+            position: self.position,
+            previous: self.previous,
+            velocity: self.velocity,
+            age: self.age,
+            lifetime: self.lifetime,
+            size: self.size,
+            rgba: self.rgba,
+            frame: provided.frame,
+            removed: false,
+            state: provided.state,
+            facing: self.facing(),
+            roll: self.roll,
+        }
+    }
     /// The facing the provider sees.
     fn facing(&self) -> ParticleFacing {
         match self.provided.as_ref().map(|q| q.facing) {
@@ -283,7 +349,7 @@ impl Particle {
             _ => ParticleFacing::Camera,
         }
     }
-    /// What a provider's tick left of the particle, validated as the renderer needs it.
+    /// Apply native output after validating that the renderer can use its numbers.
     fn take(&mut self, view: &ModParticle) -> Option<usize> {
         let finite = |v: &[f64; 3]| v.iter().all(|c| c.abs() <= LIMIT);
         let facing = match view.facing {
@@ -318,9 +384,9 @@ impl Particle {
         self.previous = view.previous;
         self.velocity = view.velocity;
         self.lifetime = view.lifetime;
-        // The declarative range of a mod particle's size (`sunrise:behaviour`) and of its colour.
-        self.size = view.size.clamp(0.0, 16.0);
-        self.rgba = view.rgba.map(|c| c.clamp(0.0, 1.0));
+        // SingleQuadParticle's scale and colour setters do not apply the pack's ranges.
+        self.size = view.size;
+        self.rgba = view.rgba;
         self.roll = view.roll;
         provided.facing = facing;
         provided.state = view.state;
@@ -331,18 +397,21 @@ impl Particle {
 }
 
 /// `ParticleLevelView` over the engine's level: the loaded chunks' states and stored light.
-pub(super) struct ProviderLevel<'a, 'l> {
-    pub(super) level: &'a ParticleLevel<'l>,
+pub(super) struct ProviderLevel<'a, B> {
+    pub(super) world: &'a super::World,
+    pub(super) block: B,
     /// Every engine state as a mod reads it, by state id.
     pub(super) states: &'a [BlockState],
 }
-impl ParticleLevelView for ProviderLevel<'_, '_> {
+impl<B: Fn(i32, i32, i32) -> sunrise_world::registry::BlockStateId> ParticleLevelView
+    for ProviderLevel<'_, B>
+{
     fn block_state(&self, [x, y, z]: [i32; 3]) -> BlockState {
         // The table holds every state the world can: an id outside it is the game's bug.
-        self.states[self.level.block(x, y, z).0 as usize]
+        self.states[(self.block)(x, y, z).0 as usize]
     }
     fn brightness(&self, layer: LightLayer, [x, y, z]: [i32; 3]) -> u8 {
-        let world = self.level.world;
+        let world = self.world;
         match layer {
             LightLayer::Block => world.light(x, y, z) & 15,
             // A dimension without skylight has no sky layer to read.
@@ -357,11 +426,16 @@ pub(super) mod tests {
     use super::super::*;
     use super::ROLL_LIMIT;
     use crate::chunk::{Chunk, Light};
+    use mod_api::__private::bind_particle_provider;
     use mod_api::{
         BlockState, LightLayer, ModParticle, ParticleBatch, ParticleFacing, ParticleLevelView,
         ParticleProvider,
     };
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
     use {
         sunrise_core::nbt::Tag,
         sunrise_world::{
@@ -596,16 +670,564 @@ pub(super) mod tests {
         assert_eq!(calls.0.lock().unwrap().len(), 1);
     }
     fn provided(e: &mut ParticleEngine, provider: Arc<dyn ParticleProvider>) -> Particle {
-        e.providers.insert("example:orbit".into(), provider.clone());
-        e.mod_sets.get_mut("example:orbit").unwrap().provider = Some((0, provider));
-        e.make(
-            &ParticleOptions::named("example:orbit"),
-            [1.0; 3],
-            [0.0; 3],
-            5,
-        )
-        .unwrap()
+        let [ty] = unit_types(["fixture"]);
+        let set = e.mod_sets.get_mut("example:orbit").unwrap();
+        set.provider = Some((0, bind_particle_provider(ty.key(), provider)));
+        e.make_sprite_particle(&e.mod_sets["example:orbit"], [1.0; 3], [0.0; 3], 5)
     }
+
+    struct Extract<F>(F);
+    impl<F> ParticleProvider for Extract<F>
+    where
+        F: Fn(
+                &ModParticle,
+                &mod_api::ParticleExtractView,
+                &mut dyn mod_api::QuadParticleRenderState,
+            ) + Send
+            + Sync
+            + 'static,
+    {
+        fn tick(&self, _: &mut ParticleBatch, _: &dyn ParticleLevelView) {}
+        fn extract(
+            &self,
+            particle: &ModParticle,
+            view: &mod_api::ParticleExtractView,
+            output: &mut dyn mod_api::QuadParticleRenderState,
+        ) {
+            self.0(particle, view, output);
+        }
+    }
+
+    #[test]
+    fn provider_extracts_independent_lit_opaque_quads_in_order() {
+        use mod_api::{ParticleBlend, ParticleExtractView, ParticleQuad, QuadParticleRenderState};
+        let mut engine = engine();
+        engine.rects[1] = Some(Rect {
+            u0: 0.25,
+            v0: 0.5,
+            u1: 0.5,
+            v1: 0.75,
+            w: 16,
+            h: 16,
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(Extract({
+            let calls = calls.clone();
+            move |p: &ModParticle,
+                  view: &ParticleExtractView,
+                  out: &mut dyn QuadParticleRenderState| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                assert_eq!(
+                    (p.previous, p.position),
+                    ([10.0, 20.0, 25.0], [14.0, 20.0, 25.0])
+                );
+                assert_eq!(view.camera, [10.0, 20.0, 30.0]);
+                assert_eq!(view.rotation, [0.0, 1.0, 0.0, 0.0]);
+                assert_eq!(view.previous_roll, 0.25);
+                assert_eq!(view.partial_tick, 0.5);
+                assert_eq!(view.light_coords, 0xb0_0040);
+                let x = (p.previous[0]
+                    + (p.position[0] - p.previous[0]) * f64::from(view.partial_tick)
+                    - view.camera[0]) as f32;
+                for frame in 0..1025 {
+                    let mut quad = ParticleQuad::default();
+                    quad.layer = ParticleBlend::Opaque;
+                    quad.center = if frame == 0 {
+                        [x, 0.0, -5.0]
+                    } else {
+                        [4.0, 1.0, -8.0]
+                    };
+                    if frame != 0 {
+                        quad.rotation = [0.0, 0.0, 2.0, 0.0];
+                    }
+                    quad.half_size = if frame == 0 { 0.5 } else { 2.0 };
+                    quad.frame = u32::from(frame != 0);
+                    quad.uv = [0.25, 0.0, 0.75, 0.5];
+                    quad.color = 0xc9_12_45_67;
+                    quad.light_coords = 0x73_0081;
+                    out.add(quad);
+                }
+            }
+        }));
+        let mut particle = provided(&mut engine, provider);
+        particle.previous = [10.0, 20.0, 25.0];
+        particle.position = [14.0, 20.0, 25.0];
+        particle.o_roll = 0.25;
+        particle.rgba[3] = 0.5;
+        engine.particles.push(particle);
+        let camera = DVec3::new(10.0, 20.0, 30.0);
+        let cull = ParticleCullView::new(camera, [180.0, 0.0], [512, 512], 70.0, 70.0, 128.0);
+        let mut explicit = ParticleQuads::default();
+        engine.render_world(
+            camera,
+            Quat::from_xyzw(0.0, 1.0, 0.0, 0.0),
+            0.5,
+            Some((&cull, &mut explicit)),
+            None,
+            &|_| 0xb4,
+            &mut Vec::new(),
+        );
+        let vertices = explicit.opaque;
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(vertices.len(), 1025 * 4);
+        assert_eq!(
+            vertices[0..4].iter().map(|v| v.pos).collect::<Vec<_>>(),
+            [
+                [2.5, -0.5, -5.0],
+                [2.5, 0.5, -5.0],
+                [1.5, 0.5, -5.0],
+                [1.5, -0.5, -5.0]
+            ]
+        );
+        assert_eq!(
+            vertices[4..8].iter().map(|v| v.pos).collect::<Vec<_>>(),
+            [
+                [2.0, 3.0, -8.0],
+                [2.0, -1.0, -8.0],
+                [6.0, -1.0, -8.0],
+                [6.0, 3.0, -8.0]
+            ]
+        );
+        assert_eq!(vertices[0].uv, [0.75, 0.5]);
+        assert_eq!(vertices[4].uv, [0.4375, 0.625]);
+        assert_eq!(vertices[6].uv, [0.3125, 0.5]);
+        assert!(vertices.iter().all(|v| (v.layer, v.color, v.light)
+            == (crate::gfx::EXPLICIT_PARTICLE_OVERLAY, 0xc9_67_45_12, 0x8173)));
+    }
+
+    #[test]
+    fn provider_extracts_live_points_in_the_wider_cull_view_with_both_settings() {
+        use crate::gfx::{Frustum, JoinedFrusta, world_projection};
+        use mod_api::{ParticleExtractView, ParticleQuad, QuadParticleRenderState};
+        let mut engine = engine();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(Extract({
+            let calls = calls.clone();
+            move |p: &ModParticle,
+                  _: &ParticleExtractView,
+                  out: &mut dyn QuadParticleRenderState| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                assert_eq!(p.position, [3.0, 0.0, -10.0]);
+                out.add_default();
+                let mut quad = ParticleQuad::default();
+                quad.center = [0.0, 0.0, -10.0];
+                quad.half_size = 0.5;
+                out.add(quad);
+            }
+        }));
+        for (position, removed) in [
+            ([3.0, 0.0, -10.0], false), // Outside the 10° picture but inside the 70° cull view.
+            ([50.0, 0.0, -10.0], false),
+            ([0.0, 0.0, 10.0], false),
+            ([3.0, 0.0, -10.0], true),
+        ] {
+            let mut p = provided(&mut engine, provider.clone());
+            p.previous = [0.0, 0.0, -10.0]; // This does not decide whether extract runs.
+            p.position = position;
+            p.size = 0.0;
+            p.removed = removed;
+            engine.particles.push(p);
+        }
+        let cull = ParticleCullView::new(DVec3::ZERO, [180.0, 0.0], [512, 512], 70.0, 10.0, 512.0);
+        let narrow = JoinedFrusta::from(Frustum::from_view_projection(world_projection(
+            10.0, 1.0, 512.0,
+        )));
+        assert!(!narrow.contains_point(FVec3::new(3.0, 0.0, -10.0)));
+        let mut not_occluded = |_, _| panic!("subpixel default is rejected before terrain culling");
+        for stock in [
+            None,
+            Some(ParticleWorldCull {
+                pixel_focal_length: 10.0,
+                frustum: Some(&narrow),
+                occluded: &mut not_occluded,
+            }),
+        ] {
+            let mut explicit = ParticleQuads::default();
+            let mut vertices = Vec::new();
+            let stock_expected = if stock.is_none() { 4 } else { 0 };
+            engine.render_world(
+                DVec3::ZERO,
+                Quat::IDENTITY,
+                0.5,
+                Some((&cull, &mut explicit)),
+                stock,
+                &|_| 0,
+                &mut vertices,
+            );
+            assert_eq!(vertices.len(), stock_expected);
+            assert_eq!(explicit.translucent.len(), 4);
+            assert_eq!(explicit.translucent[0].pos, [0.5, -0.5, -10.0]);
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_failed_extract_keeps_the_next_providers_quad_and_scene_draw_is_stock() {
+        use mod_api::{ParticleExtractView, ParticleQuad, QuadParticleRenderState};
+        let mut engine = engine();
+        let fail = Arc::new(Extract(
+            |_: &ModParticle, _: &ParticleExtractView, _: &mut dyn QuadParticleRenderState| {
+                panic!("provider cannot finish extracting");
+            },
+        ));
+        let healthy = Arc::new(Extract(
+            |_: &ModParticle, _: &ParticleExtractView, output: &mut dyn QuadParticleRenderState| {
+                let mut quad = ParticleQuad::default();
+                quad.center = [0.0, 0.0, 10.0];
+                quad.half_size = 1.0;
+                output.add(quad);
+            },
+        ));
+        let first = provided(&mut engine, fail);
+        let second = provided(&mut engine, healthy);
+        engine.particles.extend([first, second]);
+        let mut scene = Vec::new();
+        engine.render(DVec3::ZERO, Quat::IDENTITY, 0.0, &|_| 0, &mut scene);
+        assert_eq!(
+            scene.len(),
+            8,
+            "the regular scene render uses the two stock quads"
+        );
+        let cull = ParticleCullView::new(DVec3::ZERO, [0.0, 0.0], [512, 512], 70.0, 70.0, 128.0);
+        let mut quads = ParticleQuads::default();
+        let mut stock = Vec::new();
+        engine.render_world(
+            DVec3::ZERO,
+            Quat::IDENTITY,
+            0.0,
+            Some((&cull, &mut quads)),
+            None,
+            &|_| 0,
+            &mut stock,
+        );
+        assert!(stock.is_empty());
+        assert_eq!(quads.translucent.len(), 4);
+        assert_eq!(quads.translucent[0].pos, [1.0, -1.0, 10.0]);
+    }
+
+    #[test]
+    fn bad_provider_quads_do_not_append_or_remove_neighboring_vertices() {
+        use mod_api::{ParticleBlend, ParticleExtractView, ParticleQuad, QuadParticleRenderState};
+        let mut engine = engine();
+        let provider = Arc::new(Extract(
+            |_: &ModParticle, _: &ParticleExtractView, output: &mut dyn QuadParticleRenderState| {
+                for (frame, x) in [(0, 1.0), (5, 2.0), (1, f32::INFINITY), (1, 3.0)] {
+                    let mut quad = ParticleQuad::default();
+                    quad.layer = ParticleBlend::Opaque;
+                    quad.center = [x, 0.0, 0.0];
+                    quad.half_size = 1.0;
+                    quad.frame = frame;
+                    output.add(quad);
+                }
+            },
+        ));
+        let particle = provided(&mut engine, provider);
+        engine.particles.push(particle);
+        let cull = ParticleCullView::new(DVec3::ZERO, [0.0, 0.0], [512, 512], 70.0, 70.0, 128.0);
+        let mut quads = ParticleQuads::default();
+        engine.render_world(
+            DVec3::ZERO,
+            Quat::IDENTITY,
+            0.5,
+            Some((&cull, &mut quads)),
+            None,
+            &|_| 0,
+            &mut Vec::new(),
+        );
+        let vertices = quads.opaque;
+        assert_eq!(vertices.len(), 8);
+        assert_eq!(
+            (vertices[0].pos, vertices[4].pos),
+            ([2.0, -1.0, 0.0], [4.0, -1.0, 0.0])
+        );
+    }
+
+    fn registered_types<T: 'static, const N: usize>(
+        paths: [&'static str; N],
+        register: fn(&mut dyn mod_api::Registrar, &str) -> mod_api::ParticleType<T>,
+    ) -> [mod_api::ParticleType<T>; N] {
+        type Types<T, const N: usize> = Arc<Mutex<Option<[mod_api::ParticleType<T>; N]>>>;
+        struct Register<T, const N: usize> {
+            paths: [&'static str; N],
+            types: Types<T, N>,
+            register: fn(&mut dyn mod_api::Registrar, &str) -> mod_api::ParticleType<T>,
+        }
+        impl<T: 'static, const N: usize> mod_api::Hooks for Register<T, N> {
+            fn subscribed(&self) -> &'static [Option<mod_api::HookId>] {
+                &[]
+            }
+            fn register(
+                &self,
+                registrar: &mut dyn mod_api::Registrar,
+                _: &mod_api::RegistrationContext,
+            ) {
+                *self.types.lock().unwrap() =
+                    Some(self.paths.map(|path| (self.register)(registrar, path)));
+            }
+        }
+        let types: Types<T, N> = Default::default();
+        let entries = [mod_api::ModEntry::new(
+            "mymod",
+            Box::new(Register {
+                paths,
+                types: types.clone(),
+                register,
+            }),
+        )];
+        mod_platform::__private::part_tests::install_parts_fixture(&entries).unwrap();
+        mod_api::__private::resolve_particles([], |_| {
+            Some(mod_api::__private::ParticleKind::Custom)
+        })
+        .unwrap();
+        types.lock().unwrap().take().unwrap()
+    }
+
+    pub(in crate::particles) fn unit_types<const N: usize>(
+        paths: [&'static str; N],
+    ) -> [mod_api::ParticleType<()>; N] {
+        registered_types(paths, |registrar, path| {
+            registrar.register_particle_type(
+                path,
+                false,
+                mod_api::ParticleMapCodec::unit(),
+                mod_api::ParticleStreamCodec::wire(),
+            )
+        })
+    }
+
+    #[test]
+    fn typed_factory_initializes_each_admitted_request_before_tick_and_can_decline() {
+        let [ty] = registered_types(["spark"], |registrar, path| {
+            registrar.register_particle_type(
+                path,
+                true,
+                mod_api::ParticleMapCodec::new(
+                    |fields, _| match fields.get(&"frame".into()) {
+                        Some(mod_api::Tag::Int(frame)) => {
+                            u32::try_from(*frame).map_err(|err| err.to_string())
+                        }
+                        _ => Err("missing frame".into()),
+                    },
+                    |value, _| {
+                        Ok(mod_api::Compound::from([(
+                            "frame".into(),
+                            mod_api::Tag::Int(*value as i32),
+                        )]))
+                    },
+                ),
+                mod_api::ParticleStreamCodec::wire(),
+            )
+        });
+        struct Factory(Arc<Mutex<Vec<u32>>>);
+        impl ParticleProvider<u32> for Factory {
+            fn create_particle(
+                &self,
+                value: &u32,
+                level: &dyn ParticleLevelView,
+                at: [f64; 3],
+                aux: [f64; 3],
+                rng: &mut dyn mod_api::RandomSource,
+                particle: &mut ModParticle,
+            ) -> Option<()> {
+                assert_eq!(at, [1.0, 64.0, 3.0]);
+                assert_eq!(aux, [0.125, 0.25, 0.75]);
+                assert_eq!(level.brightness(LightLayer::Block, [1, 64, 3]), 4);
+                self.0.lock().unwrap().push(*value);
+                let tint = rng.next_float();
+                particle.rgba = [tint, -0.25, 2.0, 1.5];
+                particle.size = 20.0;
+                particle.frame = *value;
+                particle.state[0] = f64::from(*value);
+                particle.velocity = aux;
+                (*value != 2).then_some(())
+            }
+            fn tick(&self, _: &mut ParticleBatch, _: &dyn ParticleLevelView) {}
+        }
+        let mut scene = Scene::new();
+        scene.world.chunks.insert((0, 0), Arc::new(lit_chunk()));
+        let mut e = engine();
+        e.camera = [0.0; 3];
+        e.particle_level = 2;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        e.typed_sets.insert(
+            ty.key(),
+            ModSet {
+                set: 0,
+                behaviour: None,
+                provider: Some((
+                    0,
+                    bind_particle_provider(ty.key(), Arc::new(Factory(calls.clone()))),
+                )),
+                group: None,
+            },
+        );
+        e.seed_randoms(37, 0, 0);
+        let mut expected_provider_rng = LegacyRandom::new(37);
+        let first = expected_provider_rng.next_float();
+        expected_provider_rng.next_float();
+        let value = ty.options(1);
+        let options = ParticleOptions::typed(value.typed().unwrap().clone()).unwrap();
+        e.add_always_visible_with_world(
+            &scene.world,
+            &options,
+            [1.0, 64.0, 3.0],
+            [0.125, 0.25, 0.75],
+        );
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "no-flag overload keeps the distance gate"
+        );
+        e.camera = [1.0, 64.0, 3.0];
+        e.level_random = LegacyRandom::new(1);
+        e.add_always_visible_with_world(
+            &scene.world,
+            &options,
+            [1.0, 64.0, 3.0],
+            [0.125, 0.25, 0.75],
+        );
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "no-flag overload keeps the setting gate"
+        );
+        for value in [1, 2] {
+            let value = ty.options(value);
+            let options = ParticleOptions::typed(value.typed().unwrap().clone()).unwrap();
+            e.add_with_world(
+                Some(&scene.world),
+                &options,
+                [1.0, 64.0, 3.0],
+                [0.125, 0.25, 0.75],
+                false,
+                false,
+            );
+        }
+        assert_eq!(*calls.lock().unwrap(), [1, 2]);
+        assert_eq!(e.pending.len(), 1);
+        let particle = e.pending[0].ordinary().unwrap();
+        assert_eq!(particle.age, 0);
+        assert_eq!(particle.velocity, [0.125, 0.25, 0.75]);
+        assert_eq!(particle.rgba, [first, -0.25, 2.0, 1.5]);
+        assert_eq!(particle.size, 20.0);
+        assert!(matches!(particle.sprite, Sprite::Index(1)));
+        assert_eq!(particle.provided.as_ref().unwrap().state[0], 1.0);
+        assert_eq!(e.random.next_long(), expected_provider_rng.next_long());
+
+        let level = scene.level();
+        e.tick(&level); // Admit the pending particle.
+        e.tick(&level); // The provider's no-op batched tick.
+        let particle = e.live().next().unwrap();
+        assert_eq!(particle.age, 1);
+        assert_eq!(
+            (particle.size, particle.rgba),
+            (20.0, [first, -0.25, 2.0, 1.5])
+        );
+    }
+
+    #[test]
+    fn packet_spread_is_independent_of_factory_rng_and_a_failed_callback_ends_only_its_packet() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use sunrise_protocol::{
+            entity_data::Particle as NetworkParticle, packets::play::LevelParticles,
+        };
+
+        struct Factory {
+            calls: Arc<AtomicUsize>,
+            panic: bool,
+        }
+        impl ParticleProvider<()> for Factory {
+            fn create_particle(
+                &self,
+                _: &(),
+                _: &dyn ParticleLevelView,
+                _: [f64; 3],
+                aux: [f64; 3],
+                rng: &mut dyn mod_api::RandomSource,
+                particle: &mut ModParticle,
+            ) -> Option<()> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                assert!(!self.panic, "test factory failed");
+                particle.rgba[0] = rng.next_float();
+                particle.velocity = aux;
+                Some(())
+            }
+            fn tick(&self, _: &mut ParticleBatch, _: &dyn ParticleLevelView) {}
+        }
+        let [broken, healthy] = unit_types(["broken", "healthy"]);
+        let mut e = engine();
+        let broken_calls = Arc::new(AtomicUsize::new(0));
+        let healthy_calls = Arc::new(AtomicUsize::new(0));
+        for (ty, panic, calls) in [
+            (broken, true, &broken_calls),
+            (healthy, false, &healthy_calls),
+        ] {
+            e.typed_sets.insert(
+                ty.key(),
+                ModSet {
+                    set: 0,
+                    behaviour: None,
+                    provider: Some((
+                        0,
+                        bind_particle_provider(
+                            ty.key(),
+                            Arc::new(Factory {
+                                calls: calls.clone(),
+                                panic,
+                            }),
+                        ),
+                    )),
+                    group: None,
+                },
+            );
+        }
+        let scene = Scene::new();
+        let mut random = LegacyRandom::new(19);
+        let packet = LevelParticles {
+            // The loop receives the already-decoded options from the packet handler.
+            particle: NetworkParticle { id: 0, data: None },
+            override_limiter: true,
+            always_show: false,
+            pos: [1.0, 2.0, 3.0],
+            dist: [0.25, 0.5, 1.0],
+            max_speed: [0.125, 0.25, 0.5],
+            count: 3,
+            randomization: 2,
+        };
+        let options = |ty: mod_api::ParticleType<()>| {
+            ParticleOptions::typed(ty.options(()).typed().unwrap().clone()).unwrap()
+        };
+        let mut reference = LegacyRandom::new(19);
+        e.handle_level_particles(&mut random, &scene.world, &packet, &options(broken));
+        assert_eq!(broken_calls.load(Ordering::Relaxed), 1);
+        assert!(e.pending.is_empty());
+        for _ in 0..6 {
+            reference.next_double();
+        }
+        assert_eq!(
+            random.next_long(),
+            reference.next_long(),
+            "the failed packet drew only one spawn"
+        );
+        e.seed_randoms(37, 0, 0);
+        let mut provider_random = LegacyRandom::new(37);
+        e.handle_level_particles(&mut random, &scene.world, &packet, &options(healthy));
+        assert_eq!(healthy_calls.load(Ordering::Relaxed), 3);
+        assert_eq!(e.pending.len(), 3);
+        for p in &e.pending {
+            let p = p.ordinary().unwrap();
+            let at = std::array::from_fn(|i| {
+                packet.pos[i] + reference.next_double() * f64::from(packet.dist[i])
+            });
+            let velocity = packet
+                .max_speed
+                .map(|max| reference.next_double() * f64::from(max));
+            assert_eq!(
+                (p.position, p.velocity, p.rgba[0]),
+                (at, velocity, provider_random.next_float())
+            );
+        }
+        assert_eq!(random.next_long(), reference.next_long());
+    }
+
     #[test]
     fn a_providers_particle_moves_changes_frame_and_expires_by_its_tick() {
         let scene = Scene::new();
@@ -674,7 +1296,7 @@ pub(super) mod tests {
         );
         tick_one(&mut e, &mut p, &level);
         assert!(!p.removed);
-        assert_eq!((p.size, p.rgba), (16.0, [1.0, 0.0, 0.5, 1.0]));
+        assert_eq!((p.size, p.rgba), (1.0e9, [2.0, -1.0, 0.5, 9.0]));
         assert!(matches!(p.sprite, Sprite::Index(1)));
         assert_eq!((p.lifetime, p.age), (i32::MIN, 1)); // the age stays the engine's
         tick_one(&mut e, &mut p, &level);
@@ -936,8 +1558,11 @@ pub(super) mod tests {
         let mut e = engine();
         e.set_block_state_source(counting);
         // A provider is registered, and no particle of it lives.
-        e.providers
-            .insert("example:orbit".into(), Arc::new(Probe::default()));
+        let [ty] = unit_types(["orbit"]);
+        e.providers.insert(
+            ty.key(),
+            bind_particle_provider(ty.key(), Arc::new(Probe::default())),
+        );
         e.tick_providers(&mut [], &level);
         assert_eq!(asked(), 0);
         // One lives and the engine has not aged it.
@@ -974,7 +1599,7 @@ pub(super) mod tests {
         Arc::make_mut(&mut chunk.sections[section]).light = Light::packed(Box::new([0xB4; 4096]));
         chunk
     }
-    fn lights(view: &super::ProviderLevel, pos: [i32; 3]) -> (u8, u8) {
+    fn lights(view: &dyn ParticleLevelView, pos: [i32; 3]) -> (u8, u8) {
         (
             view.brightness(LightLayer::Sky, pos),
             view.brightness(LightLayer::Block, pos),
@@ -991,7 +1616,8 @@ pub(super) mod tests {
             scene.world.chunks.insert((0, 0), Arc::new(lit_chunk()));
             let level = scene.level();
             let view = super::ProviderLevel {
-                level: &level,
+                world: level.world,
+                block: |x, y, z| level.block(x, y, z),
                 states: &[],
             };
             let full = if sky { 15 } else { 0 };
@@ -1017,14 +1643,16 @@ pub(super) mod tests {
             let key = |name| mod_api::__private::block_key(name).unwrap();
             let air = key("minecraft:air");
             let stone = key("minecraft:stone");
-            let states = [air, stone].map(|block| mod_api::BlockStateRecord::new(block, 0).into());
+            let states =
+                [air, stone].map(|block| mod_api::__private::block_state_from_ordinal(block, 0));
             let mut scene = Scene::new();
             let mut chunk = Chunk::empty(0, 0);
             chunk.set(1, 64, 3, 1);
             scene.world.chunks.insert((0, 0), Arc::new(chunk));
             let level = scene.level();
             let view = super::ProviderLevel {
-                level: &level,
+                world: level.world,
+                block: |x, y, z| level.block(x, y, z),
                 states: &states,
             };
             assert_eq!(view.block_state([1, 64, 3]).block(), stone);
@@ -1034,42 +1662,55 @@ pub(super) mod tests {
     }
     #[test]
     fn a_type_resolves_to_its_provider_at_load_and_other_types_stay_declarative() {
-        let dir =
-            std::env::temp_dir().join(format!("sunrise-provider-sets-{}", std::process::id()));
-        let particles = dir.join("assets/mymod/particles");
-        std::fs::create_dir_all(&particles).unwrap();
-        for name in ["orbit", "plain"] {
-            std::fs::write(
-                particles.join(format!("{name}.json")),
-                br#"{"textures":["mymod:one","mymod:two"],"sunrise:behaviour":{"lifetime":7,"size":[0.3,0.3]}}"#,
-            )
-            .unwrap();
-        }
+        let resources = ResourceSource::indexed([
+            ("orbit", br#"{"textures":[],"sunrise:behaviour":{"lifetime":7,"size":[0.3,0.3]}}"#.as_slice()),
+            ("empty_asset", br#"{"textures":[]}"#.as_slice()),
+            ("plain", br#"{"textures":["mymod:one","mymod:two"],"sunrise:behaviour":{"lifetime":7,"size":[0.3,0.3]}}"#.as_slice()),
+        ].map(|(name, bytes)| (
+            format!("assets/mymod/particles/{name}.json"),
+            sunrise_assets::resource_source::Resource::bytes(bytes.to_vec()),
+        )).into());
+        let [orbit, unmatched] = unit_types(["orbit", "unmatched"]);
         let mut e = engine();
-        e.providers
-            .insert("mymod:orbit".into(), Arc::new(Probe::default()));
-        e.providers
-            .insert("mymod:unmatched".into(), Arc::new(Probe::default()));
+        for ty in [orbit, unmatched] {
+            e.providers.insert(
+                ty.key(),
+                bind_particle_provider(ty.key(), Arc::new(Probe::default())),
+            );
+        }
+        let missing = e.rects[0].unwrap();
         e.reload(
-            &ResourceSource::directory(dir.clone()),
-            &HashMap::new(),
+            &resources,
+            &[(crate::hud::MISSING_SPRITE.to_owned(), missing)].into(),
             &HashSet::new(),
         );
-        assert!(e.mod_sets["mymod:orbit"].provider.is_some());
+        assert!(e.typed_sets.contains_key(&orbit.key()));
         assert!(e.mod_sets["mymod:plain"].provider.is_none());
-        assert!(!e.mod_sets.contains_key("mymod:unmatched"));
-        let orbit = e
-            .make(
-                &ParticleOptions::named("mymod:orbit"),
+        assert!(!e.typed_sets.contains_key(&unmatched.key()));
+        assert!(
+            e.make(
+                &ParticleOptions::named("mymod:empty_asset"),
                 [0.0; 3],
                 [0.0; 3],
-                3,
+                3
             )
+            .is_none()
+        );
+        let scene = Scene::new();
+        let value = orbit.options(());
+        let particle = e
+            .make_typed_particle(&scene.world, value.typed().unwrap(), [0.0; 3], [0.0; 3], 3)
+            .unwrap()
             .unwrap();
         // The declared spawn values seed it, and its sprite is drawn by frame from the set.
-        assert!(orbit.provided.is_some());
-        assert_eq!((orbit.lifetime, orbit.size), (7, 0.3));
-        assert_eq!(orbit.set, Some(e.mod_sets["mymod:orbit"].set));
+        assert!(particle.provided.is_some());
+        assert_eq!((particle.lifetime, particle.size), (7, 0.3));
+        assert_eq!(particle.set, Some(e.typed_sets[&orbit.key()].set));
+        let Sprite::Index(index) = particle.sprite else {
+            panic!("expected missing sprite binding")
+        };
+        assert_eq!(e.names[index as usize], crate::hud::MISSING_SPRITE);
+        assert!(e.rects[index as usize].is_some());
         let plain = e
             .make(
                 &ParticleOptions::named("mymod:plain"),
@@ -1080,7 +1721,6 @@ pub(super) mod tests {
             .unwrap();
         assert!(plain.provided.is_none());
         assert!(matches!(plain.behaviour, Behaviour::Mod { .. }));
-        let _ = std::fs::remove_dir_all(dir);
     }
     #[test]
     fn controlled_spawn_respects_distance_settings_and_declared_sprite_sets() {

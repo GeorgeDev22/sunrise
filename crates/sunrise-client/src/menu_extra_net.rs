@@ -1,7 +1,6 @@
 //! Menu extra data, client side: the answer to a Sunrise server's `sunrise:menu_extra` revision
-//! query in configuration (`sunrise_protocol::menu_extra`). A server whose query the client
-//! answered sends this revision's payload layout; one that never asked (an older Sunrise
-//! server) sends the legacy layout, and the client reads that.
+//! query in configuration (`sunrise_protocol::menu_extra`). The negotiated revision selects
+//! capabilities such as `LIVE_DATA_REVISION`; `sunrise:menu_extra` uses one wire layout.
 use sunrise_protocol::{menu_extra, packets::configuration as cfg};
 
 /// Whether `payload` is the server's menu-extra revision query.

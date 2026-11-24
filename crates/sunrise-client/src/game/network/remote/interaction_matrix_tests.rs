@@ -6,9 +6,6 @@ mod fixture;
 struct Native;
 #[mod_api::__subscriptions]
 impl Hooks for Native {
-    fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
-        fixture::register(r);
-    }
     fn right_click_block(&self, host: HostSide<'_>, event: &mut RightClickBlockEvent<'_>) -> Flow {
         fixture::right_click_block(host, event)
     }
@@ -235,8 +232,8 @@ fn matrix(mods: mod_api::Mods) {
     // registration-time declarations (a custom statistic) refuse once the registry is frozen.
     mod_platform::testing::with_mods(mods.clone(), || {
         crate::game::api_values::install_parts(&mods).unwrap();
-        // The fixture declares blocks of its own: the game stands over the content root its mods make,
-        // built once for both of this matrix's games.
+        // The fixture declares a block-entity type of its own: the game stands over the content
+        // root its mods make, built once for both of this matrix's games.
         let base = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
         let root = crate::game::mods::content_root(&base, &Default::default())
             .unwrap()
@@ -267,10 +264,8 @@ fn matrix(mods: mod_api::Mods) {
                         } else {
                             (other, held)
                         };
-                        game.keys.clear();
-                        if case.sneak {
-                            game.keys.insert(winit::keyboard::KeyCode::ShiftLeft);
-                        }
+                        // Each case supplies the logical sneak state of the acting player.
+                        game.set_mapping_held("key.sneak", case.sneak);
                         if let Some(remote) = game.remote.as_mut() {
                             remote.last_input = if case.sneak {
                                 super::super::SHIFT_INPUT
@@ -281,25 +276,12 @@ fn matrix(mods: mod_api::Mods) {
                         game.swing = Default::default();
                         game.use_failed = false;
                         advancement_tree(game);
-                        let mut control = mod_api::ModBlockEntity::new(
-                            "interaction_fixture:interaction_control".into(),
-                            Default::default(),
-                        );
-                        control.data = case.controls.iter().map(|&b| i32::from(b)).collect();
-                        game.native_block_entity_tick(
-                            &mut mod_api::BlockEntityTickReply::Changed,
-                            [0, 64, 0],
-                            &mut control,
-                        );
-                        assert!(
-                            control.data.is_empty(),
-                            "the control callback must run and accept {case:?}"
-                        );
+                        fixture::begin(case.controls);
                         let swings = game.swings_started;
                         let used = if client {
-                            game.remote_use_item_on(hand)
+                            game.remote_use_item_on(hand, mod_api::InteractionAttempt::Press, None)
                         } else {
-                            game.guest_use = Some(super::super::super::GuestUse::OnBlock(hand));
+                            game.guest_use = Some(super::super::super::GuestUse::on_block(hand));
                             game.with_hand(hand, |g| g.use_hand(Some(&hit()))).unwrap()
                         };
                         assert_eq!(used, case.used, "{client:?} {hand:?} {case:?}");
@@ -326,24 +308,19 @@ fn matrix(mods: mod_api::Mods) {
                                 "{client:?} {hand:?} {name} {case:?}"
                             );
                         }
-                        game.native_block_entity_tick(
-                            &mut mod_api::BlockEntityTickReply::Changed,
-                            [0, 64, 0],
-                            &mut control,
-                        );
-                        let expected: Vec<i32> = case
+                        let expected: Vec<u8> = case
                             .phases
                             .iter()
                             .flat_map(|phase| {
                                 [
-                                    i32::from(*phase),
-                                    i32::from(hand == Hand::Off),
-                                    i32::from(client),
-                                    i32::from(!case.held),
+                                    *phase,
+                                    u8::from(hand == Hand::Off),
+                                    u8::from(client),
+                                    u8::from(!case.held),
                                 ]
                             })
                             .collect();
-                        assert_eq!(control.data, expected, "{client:?} {hand:?} {case:?}");
+                        assert_eq!(fixture::finish(), expected, "{client:?} {hand:?} {case:?}");
                         assert_eq!(
                             game.with_hand(hand, |g| g
                                 .held()
@@ -360,11 +337,17 @@ fn matrix(mods: mod_api::Mods) {
 #[test]
 #[ignore = "daily"]
 fn native_interaction_shared_matrix() {
-    matrix(
-        vec![mod_api::ModEntry::new(
-            "interaction_fixture",
-            Box::new(Native),
-        )]
-        .into(),
+    // Loading the fixture's block-entity type freezes the process-wide block entity type table.
+    crate::game::in_own_process(
+        "game::remote::interaction_event_tests::interaction_matrix_tests::native_interaction_shared_matrix",
+        || {
+            matrix(
+                vec![mod_api::ModEntry::new(
+                    "interaction_fixture",
+                    Box::new(Native),
+                )]
+                .into(),
+            );
+        },
     );
 }

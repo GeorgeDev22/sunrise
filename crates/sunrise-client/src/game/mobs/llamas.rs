@@ -1,7 +1,7 @@
 //! Llamas on the game side: `AbstractChestedHorse.mobInteract` and
 //! `Llama.handleEating` (wheat and hay), chests, carpets, shearing a carpet
 //! off and riding.
-use super::Game;
+use super::{Game, item_abilities::ability};
 use sunrise_client::actions::Action;
 use sunrise_client::mobs::{equine, llama};
 use sunrise_core::random::RandomSource;
@@ -76,7 +76,7 @@ impl Game<'_> {
         if !m.alive() || Some(m.id) == self.riding {
             return false;
         }
-        let sneaking = self.keys.held(Action::Sneak);
+        let sneaking = self.held_mapping(Action::Sneak);
         let (baby, tamed, vehicle) = (m.is_baby(), m.extra.tame, m.rider.is_some());
         let open_inventory = !baby && tamed && sneaking;
         if !vehicle && !open_inventory && !item.is_empty() {
@@ -108,7 +108,9 @@ impl Game<'_> {
         let m = &self.mobs[index];
         let carpet = |i: &str| i.ends_with("_carpet") && i.starts_with("minecraft:");
         if !item.is_empty() {
-            if item == "minecraft:shears" && m.extra.body_id().is_some_and(carpet) {
+            if self.held_shears(ability::SHEARS_REMOVE_ARMOR)
+                && m.extra.body_id().is_some_and(carpet)
+            {
                 // Equippable.canBeSheared: the carpet comes off.
                 let at = m.center();
                 let carpet = self.mobs[index].take_body_equipment().unwrap();

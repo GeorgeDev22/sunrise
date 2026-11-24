@@ -18,29 +18,22 @@ use sunrise_client::{
 use sunrise_gameplay::mob_looting::LootingLevel;
 
 impl LootingLevel for Game<'_> {
-    type Prepared = crate::game::equip_answers::EquipStack;
     fn grief_hooked(&self) -> bool {
         Game::grief_hooked(self)
     }
     fn equippable_in_slot(&self, stack: &ItemStack, slot: &str, kind: &str) -> bool {
-        let tags = &self.stations().enchantments.entity_tags;
-        equip::equippable_in_slot(self.items(), tags, stack, slot, kind)
-    }
-    fn equip_stack(&self, stack: &ItemStack, targets: &[u32]) -> Self::Prepared {
-        Game::equip_stack(self, stack, targets)
+        equip::equippable_in_slot(self.items(), stack, slot, kind)
     }
     fn can_equip(
         &self,
-        prepared: &Self::Prepared,
+        stack: &ItemStack,
         slot: &str,
         entity: u32,
         kind: &str,
         data: bool,
     ) -> bool {
-        Game::can_equip(self, prepared, slot, entity, kind, data)
-    }
-    fn equip_can_apply(&self, prepared: &Self::Prepared, id: u32) -> bool {
-        Game::equip_can_apply(self, prepared, id)
+        let prepared = Game::equip_stack(self, stack);
+        Game::can_equip(self, &prepared, slot, entity, kind, data)
     }
     fn mob_equip_event(&mut self, id: u32, at: [f64; 3], equip: bool) {
         Game::mob_equip_event(self, id, at, equip);

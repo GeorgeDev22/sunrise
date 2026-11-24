@@ -502,7 +502,7 @@ pub(crate) fn parse_meta(bytes: &[u8]) -> Option<serde_json::Value> {
 /// The first JSON value of a `.mcmeta` file, as `ResourceMetadata.fromJsonStream` reads it:
 /// Gson's `TypeAdapter.read` stops after the value, so text after it (packs leave `//` notes
 /// there) is never read, and a UTF-8 byte order mark is skipped.
-pub(crate) fn first_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> serde_json::Result<T> {
+pub fn first_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> serde_json::Result<T> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     match serde_json::Deserializer::from_slice(bytes)
         .into_iter()
@@ -1492,16 +1492,12 @@ pub fn enabled(all: &[Pack], ids: &[String]) -> Vec<Pack> {
         .filter_map(|selected| all.iter().find(|p| p.id == selected.id).cloned())
         .collect()
 }
-/// `PackRepository.isAbleToClearAnyPack`: clearing the selection
-/// (`rebuildSelected([])`, which keeps only the required vanilla pack)
-/// changes it, that is, some selected pack still exists.
-pub fn able_to_clear_any_pack(all: &[Pack], selected: &[String]) -> bool {
-    let current = enabled(all, selected);
-    let required = enabled(all, &[]);
-    current
+/// NeoForge's `Minecraft.rollbackResourcePacks`: recover only when a selected
+/// client pack can be disabled. Reordering required packs does not count.
+pub fn has_optional_pack(selected: &[Pack]) -> bool {
+    selected
         .iter()
-        .map(|pack| &pack.id)
-        .ne(required.iter().map(|pack| &pack.id))
+        .any(|pack| !pack.selection.as_ref().is_some_and(|info| info.required))
 }
 /// Resource root for a pack selection: vanilla itself when no pack is on.
 pub fn resource_root(vanilla: &Path, packs: &[Pack], cache: &Path) -> io::Result<PathBuf> {

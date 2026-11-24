@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Bidh loidhne cabadaich ùr a’ sleamhnachadh a-steach bhon taobh chlì fhad ‘s a tha e a’ seargadh a-steach, an àite a bhith a ’nochdadh slàn.",
   "sunrise.extras.chat_indicator": "Comharra teachdaireachd",
   "sunrise.extras.chat_indicator.tooltip": "Am bàr dathte air taobh clì loidhne cabadaich.",
-  "sunrise.extras.discord_presence": "Discord làthaireachd beairteach",
-  "sunrise.extras.discord_presence.tooltip": "A’ sealltainn A’ cluich Sunrise air do phròifil Discord fhad ‘s a tha Discord a’ ruith: clàran-bìdh, cluicheadair singilte no ioma-chluicheadair, an tomhas agus an ùine air a chluich. Na bi a-riamh ainm cruinne no seòladh frithealaiche.",
   "sunrise.extras.dynamic_lights": "Solais fiùghantach",
   "sunrise.extras.dynamic_lights.tooltip": "Bidh lòchrain agus tobraichean solais eile air an cumail, air an leigeil sìos no air an losgadh a 'lasadh nam blocaichean timcheall orra.",
   "sunrise.extras.fullbright": "Làn-gheal",

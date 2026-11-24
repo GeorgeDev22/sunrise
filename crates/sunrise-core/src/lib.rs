@@ -40,6 +40,8 @@ pub mod noise;
 pub mod paletted;
 pub mod position;
 pub mod prepared_files;
+pub mod prepared_profile;
+pub mod profile;
 pub mod random;
 pub mod release;
 pub mod storage;
@@ -49,6 +51,7 @@ pub mod ticks;
 pub mod trading;
 pub mod use_animation;
 pub mod uuid;
+pub mod vanilla_bytes;
 pub mod version;
 
 pub use level_key::LevelKey;

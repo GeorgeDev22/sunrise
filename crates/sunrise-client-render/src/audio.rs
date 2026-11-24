@@ -5,7 +5,9 @@
 //! (streams on a worker thread) and OpenAL Soft's mixing: mono sources panned
 //! and attenuated, multi-channel buffers (stereo music and records) played
 //! direct as OpenAL does.
+mod mic;
 mod streams;
+
 use crate::Result;
 use crate::sound_engine::{
     Attenuation, Backend, Bound, ChannelId, InstanceId, PlayResult, SoundEngine, SoundInstance,
@@ -195,7 +197,7 @@ struct Mixer {
     cameras: Vec<([f64; 3], Basis, u32)>,
     /// Per-source gain/pan/step cache for one buffer, reused across callbacks.
     voices: Vec<(ChannelId, [f32; 3], f64)>,
-    /// Mods' audio streams (`ClientHost::open_audio_stream`).
+    /// Mods' audio streams, separate from vanilla's channels.
     streams: Vec<streams::StreamVoice>,
     /// Each `SoundSource`'s volume for a stream: master times the group, as every sound's.
     stream_gain: [f32; 11],
@@ -461,6 +463,7 @@ pub struct Audio {
     device_name: String,
     pub engine: SoundEngine,
     backend: MixerBackend,
+    mics: Arc<mic::MicPool>,
     /// Record `Heard` sounds (the subtitle overlay is listening).
     pub record_heard: bool,
     pub listener: [f64; 3],
@@ -484,9 +487,6 @@ pub struct Audio {
     preview: crate::sound_preview::SoundPreview,
     /// A mod's muffle fading out (`muffle`), advanced by `tick`.
     muffle: Option<MuffleFade>,
-    /// A frame skipped following entities while mod streams were off: their positions are stale
-    /// until one is followed again, so the mixer plays none of them before then.
-    entities_stale: std::sync::atomic::AtomicBool,
     /// The `stream_gain` the mixer was last given: it is locked again only when this changes.
     stream_gain_sent: [f32; 11],
     /// `SoundEngine.lastSeenDevices`: the system default output last seen.
@@ -948,11 +948,13 @@ fn mix_with_effects(
 fn mix_pieces(mixer: &mut Mixer, data: &mut [f32], channels: usize, rate: u32) {
     let most = MAX_MIX_FRAMES * channels.max(1);
     if data.len() <= most || !mixer.effects_heard() {
-        return mix(mixer, data, channels, rate);
+        mix(mixer, data, channels, rate);
+    } else {
+        for piece in data.chunks_mut(most) {
+            mix(mixer, piece, channels, rate);
+        }
     }
-    for piece in data.chunks_mut(most) {
-        mix(mixer, piece, channels, rate);
-    }
+    streams::request_pull(&mixer.streams, data.len() / channels, rate);
 }
 // Only the output stream mixes; a build without one (no `audio` feature) never does.
 #[cfg_attr(not(feature = "audio"), allow(dead_code))]
@@ -1231,6 +1233,13 @@ fn output_disabled(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<S
         .any(|c| c.as_os_str() == "vscreen")
         .then(|| "audio off on a virtual screen (vscreen); SUNRISE_AUDIO=1 opens it".into())
 }
+/// Whether microphone capture is suppressed by an explicit opt-out (`SUNRISE_NO_AUDIO`).
+/// Unlike [`output_disabled`], capture does not inherit the `WAYLAND_DISPLAY` `vscreen`
+/// speaker-suppression heuristic.
+#[cfg(any(feature = "audio", test))]
+fn capture_disabled(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    var("SUNRISE_NO_AUDIO").is_some()
+}
 /// An output stream on `device` in its default configuration, whatever its
 /// sample format: the mixer works in f32 and converts.
 #[cfg(feature = "audio")]
@@ -1464,11 +1473,20 @@ impl Audio {
         Self::with_device(root, "")
     }
     pub fn with_device(root: &ResourceSource, device_name: &str) -> Self {
-        Self::with_output(root, true, device_name)
+        Self::with_output(root, SoundRegistry::load(root), true, device_name)
     }
-    /// No output device: the dedicated server.
+    /// Keep the client's sound registry but open no output device.
     pub fn silent(root: &ResourceSource) -> Self {
-        Self::with_output(root, false, "")
+        Self::with_output(root, SoundRegistry::load(root), false, "")
+    }
+    /// Dedicated servers send sound events to clients without opening their sound files.
+    pub fn for_server() -> Self {
+        Self::with_output(
+            &ResourceSource::default(),
+            SoundRegistry::default(),
+            false,
+            "",
+        )
     }
     /// The output device asked for (`soundDevice`), empty for the system's default; the
     /// default plays when that one can't be opened, as in vanilla.
@@ -1485,8 +1503,12 @@ impl Audio {
         self.engine.set_loop_context(context);
         self.engine.notify_loaded();
     }
-    fn with_output(root: &ResourceSource, output: bool, target_device: &str) -> Self {
-        let registry = SoundRegistry::load(root);
+    fn with_output(
+        root: &ResourceSource,
+        registry: SoundRegistry,
+        output: bool,
+        target_device: &str,
+    ) -> Self {
         if output && registry.is_empty() {
             // The game then plays nothing on a working output (#1035, #1076).
             log::warn!(
@@ -1528,6 +1550,10 @@ impl Audio {
         } else {
             Vec::new()
         };
+        #[cfg(feature = "audio")]
+        let mics_enabled = output && !capture_disabled(|k| std::env::var_os(k));
+        #[cfg(not(feature = "audio"))]
+        let mics_enabled = false;
         Self {
             _stream: stream,
             device_name: target_device.to_owned(),
@@ -1544,6 +1570,7 @@ impl Audio {
                 world: 0,
                 shares: Arc::default(),
             },
+            mics: Arc::new(mic::MicPool::new(mics_enabled)),
             record_heard: false,
             listener: [0.0; 3],
             listener_yaw: 0.0,
@@ -1557,7 +1584,6 @@ impl Audio {
             preview: Default::default(),
             muffle: None,
             stream_gain_sent: [f32::NAN; 11],
-            entities_stale: Default::default(),
             #[cfg(feature = "audio")]
             default_seen: if live { default_output_name() } else { None },
             #[cfg(feature = "audio")]
@@ -1672,10 +1698,11 @@ impl Audio {
             self.backend.world = id;
             mixer.worlds.insert(self.backend.owner, id);
         }
-        // The primary listener changed dimension: no stream's place of the old one is heard.
+        // The primary listener changed dimension: stop all mod streams (matching vanilla's
+        // `updateLevelInEngines` -> `SoundEngine.stopAll`).
         // After the mixer's lock is released: the pool is locked before the mixer elsewhere.
         if changed && self.backend.owner == 0 {
-            self.backend.streams.unplace();
+            self.backend.streams.stop_all();
         }
     }
 
@@ -1725,6 +1752,7 @@ impl Audio {
                 world: self.backend.world,
                 shares: self.backend.shares.clone(),
             },
+            mics: self.mics.clone(),
             record_heard: false,
             listener: [0.0; 3],
             listener_yaw: 0.0,
@@ -1738,7 +1766,6 @@ impl Audio {
             preview: Default::default(),
             muffle: None,
             stream_gain_sent: [f32::NAN; 11],
-            entities_stale: Default::default(),
             // The primary backend owns and maintains the output device.
             #[cfg(feature = "audio")]
             default_seen: self.default_seen.clone(),
@@ -1884,45 +1911,55 @@ impl Audio {
             }
         }
     }
-    /// Opens a stream for the mod `owner` (`ClientHost::open_audio_stream`): the ring is
-    /// allocated here, and the mod pushes PCM into it from any thread.
+    /// Opens a mod stream on the separate mod stream pool. The shared worker reads `source`
+    /// on demand.
     pub fn open_stream(
         &self,
-        owner: &str,
+        owner: &'static str,
         spec: &mod_api::StreamSpec,
+        entity_pos: Option<[f64; 3]>,
+        source: Box<dyn mod_api::AudioStream>,
     ) -> std::result::Result<Arc<dyn mod_api::AudioStreamSource>, mod_api::AudioRefusal> {
         if !self.backend.live {
+            mod_api::__private::game::CallbackOwner::for_mod(owner).dispose(
+                "audio stream",
+                "AudioStream::drop",
+                source,
+            );
             return Err(mod_api::AudioRefusal::NoOutput);
         }
-        self.backend.streams.open(&self.backend.mixer, owner, spec)
+        self.backend
+            .streams
+            .open(&self.backend.mixer, owner, spec, entity_pos, source)
+    }
+    /// Lists available microphone input devices on this client.
+    pub fn microphone_devices(
+        &self,
+    ) -> std::result::Result<Vec<mod_api::MicDevice>, mod_api::MicRefusal> {
+        self.mics.devices()
+    }
+    /// Opens a live microphone capture stream on this client.
+    pub fn open_microphone(
+        &self,
+        spec: &mod_api::MicSpec,
+    ) -> std::result::Result<Arc<dyn mod_api::MicSource>, mod_api::MicRefusal> {
+        self.mics.open(spec)
     }
     /// Places each entity-placed stream at its entity's position as `resolve` finds it now, or
-    /// leaves it unplaced where it finds none. Called once a frame; it does nothing, and locks
-    /// nothing the output callback takes, with no stream open. While mod audio is off it follows
-    /// nothing, and the first frame after it is back follows before any stream is heard.
+    /// stops it where it finds none, even while mod audio gain is zero (matching vanilla
+    /// `SoundEngine.tickInGameSound`, which ticks and checks `isStopped()` before applying gain).
+    /// Called once a frame; it does nothing, and locks nothing the output callback takes, with no
+    /// stream open.
     pub fn follow_stream_entities(
         &self,
         resolve: impl FnMut(mod_api::EntityRef) -> Option<[f64; 3]>,
     ) {
-        self.follow_entities_at(sunrise_hooks::sound::engine::mod_stream_gain(), resolve);
+        self.backend.streams.follow_entities(resolve);
     }
-    fn follow_entities_at(
-        &self,
-        mod_gain: f32,
-        resolve: impl FnMut(mod_api::EntityRef) -> Option<[f64; 3]>,
-    ) {
-        if mod_gain > 0.0 {
-            self.backend.streams.follow_entities(resolve);
-        }
-        self.entities_stale
-            .store(mod_gain <= 0.0, std::sync::atomic::Ordering::Relaxed);
-    }
-    /// The listener left its level (`updateLevelInEngines(null)`): every vanilla sound stops, and
-    /// every positional mod stream is unplaced until its mod places it again; flat streams play
-    /// on. The one thing every way out of a level calls, so none can forget the streams.
+    /// The listener left its level (`updateLevelInEngines(null)`): every vanilla sound and mod
+    /// stream stops. The one thing every way out of a level calls, so none can forget the streams.
     pub fn leave_level(&mut self) {
         self.stop_all();
-        self.backend.streams.unplace();
     }
     /// `SoundManager.tick(paused)`, once per client tick.
     pub fn tick(&mut self, paused: bool, ctx: &TickContext) {
@@ -1951,18 +1988,9 @@ impl Audio {
             self.set_muffle_level(level);
         }
     }
-    /// Gives the mixer the volume each stream plays at: the sound's own times `mod_gain`, held at
-    /// zero while entity-placed streams have stale positions. The mixer is locked only when the
-    /// volumes changed.
+    /// Gives the mixer the volume each stream plays at: the sound's own times `mod_gain`. The
+    /// mixer is locked only when the volumes changed.
     fn sync_stream_gain(&mut self, mod_gain: f32) {
-        let mod_gain = if self
-            .entities_stale
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            0.0
-        } else {
-            mod_gain
-        };
         let gain = std::array::from_fn(|source| {
             self.engine.final_source_volume(source).clamp(0.0, 1.0) * mod_gain
         });
@@ -2030,6 +2058,9 @@ impl Audio {
     /// `SoundManager.stop()`: every sound.
     pub fn stop_all(&mut self) {
         self.engine.stop_all(&mut self.backend);
+        if self.backend.owner == 0 {
+            self.backend.streams.stop_all();
+        }
     }
     /// `SoundManager.reload` (resource packs changed): stop every sound, then
     /// read sound events and sound files from the new resource root.
@@ -2438,13 +2469,6 @@ impl Audio {
     pub fn backend_live_for_bench(&mut self) {
         self.backend.live = true;
     }
-    /// Each open mod stream's `prebuffer_ms` and how many times it ran dry, for a test of a mod's
-    /// pacing that has no device.
-    // hidden: a measurement read for the compiled-guest daily test in sunrise-client, not an API.
-    #[doc(hidden)]
-    pub fn stream_underruns_for_bench(&self) -> Vec<(u32, u32)> {
-        self.backend.streams.underruns()
-    }
 }
 impl Sounds for Audio {
     fn engine(&mut self) -> &mut SoundEngine {
@@ -2835,6 +2859,26 @@ mod tests {
         assert!(
             output_disabled(env(&[("SUNRISE_NO_AUDIO", "1"), ("SUNRISE_AUDIO", "1")])).is_some()
         );
+    }
+    #[test]
+    fn capture_ignores_virtual_screen_heuristic_but_honors_no_audio_override() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| std::ffi::OsString::from(*v))
+            }
+        };
+        const VSCREEN: &str = "/run/user/1000/vscreen/main/wayland-1";
+        assert!(!capture_disabled(env(&[])));
+        assert!(!capture_disabled(env(&[("WAYLAND_DISPLAY", "wayland-1")])));
+        assert!(!capture_disabled(env(&[("WAYLAND_DISPLAY", VSCREEN)])));
+        assert!(capture_disabled(env(&[("SUNRISE_NO_AUDIO", "1")])));
+        assert!(capture_disabled(env(&[
+            ("SUNRISE_NO_AUDIO", "1"),
+            ("SUNRISE_AUDIO", "1"),
+        ])));
     }
     #[test]
     #[cfg(feature = "audio")]

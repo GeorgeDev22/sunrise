@@ -351,7 +351,7 @@ fn glyphs_of_a_label_refused_for_capacity_still_upload() {
         let atlas = &mut game.gui.atlas;
         atlas.font = sunrise_client::font::Font::load(
             &source,
-            &Default::default(),
+            &atlas.sprites,
             &[],
             (atlas.width, atlas.height),
             (atlas.height / 2, atlas.height / 2),
@@ -481,16 +481,17 @@ fn labels_four_times_as_far_are_a_quarter_the_size_on_screen() {
 
 #[test]
 #[ignore = "daily"]
-fn a_label_too_deep_or_not_finite_is_refused_and_draws_nothing() {
+fn deep_labels_draw_but_non_finite_positions_are_refused() {
     with_client_game(|game| {
-        let mut too_deep = Text::literal("leaf");
-        for _ in 1..513 {
-            too_deep = Text::literal("parent").append(too_deep);
+        let mut deep = Text::literal("leaf");
+        for _ in 0..mod_api::text::MAX_TEXT_DEPTH {
+            deep = Text::literal("").append(deep);
         }
         let options = NameTagOptions::new(true, true, 0xF0);
-        let (refused, drawn) = labels(game, [0.5, 70.0, 0.5], &too_deep, options);
-        assert_eq!(refused, Err(DrawError::TextTooDeep));
-        assert!(drawn.iter().all(Vec::is_empty));
+        let (result, [world, see_through]) = labels(game, [0.5, 70.0, 0.5], &deep, options);
+        assert_eq!(result, Ok(()));
+        assert_eq!(world.len() / 4, 4, "one quad per leaf glyph");
+        assert!(!see_through.is_empty());
         for at in [[f64::NAN, 70.0, 0.5], [0.5, f64::INFINITY, 0.5]] {
             let (refused, drawn) = labels(game, at, &Text::literal("x"), options);
             assert_eq!(refused, Err(DrawError::NonFinite));

@@ -127,7 +127,11 @@ pub fn start(
     game::startup_progress::install(side == "server");
     // Mod loading emits refusals; both client and dedicated logs must exist first.
     load(&native, &launch);
-    crash::install(home.clone(), side);
+    let save_failure_diagnostics = options.save_failure_diagnostics.clone();
+    let panic_diagnostics = save_failure_diagnostics.clone();
+    crash::install(home.clone(), side, move || {
+        panic_diagnostics.suppressed_summary()
+    });
     let _ = sunrise_world::loot::types::install(crate::game::loot_types::capture);
     if sunrise_world::native_load_hooks::install(
         sunrise_world::native_load_hooks::NativeLoadHooks {
@@ -193,7 +197,9 @@ pub fn start(
         logging::flush();
         // The report's path is the last line on stderr (crash::SAVED_LINE).
         if !usage {
-            crash::report_error(&home, side, &*error);
+            crash::report_error(&home, side, &*error, || {
+                save_failure_diagnostics.suppressed_summary()
+            });
         }
         // Started from Explorer, the console window closes with the game:
         // keep the message on screen until it is read.
@@ -230,7 +236,7 @@ pub(crate) fn install_client_hooks() {
         living_breathe_heard: || mod_api::__private::listened(mod_api::HookId::LivingBreathe),
         has_mods: || !mod_api::__private::mods().is_empty(),
         player_name_format: |context, username, displayname| {
-            use game::api_values::{TryIntoApi, TryIntoEngine};
+            use game::api_values::TryIntoApi;
             if !mod_api::__private::listened(mod_api::HookId::PlayerNameFormat) {
                 return;
             }
@@ -243,12 +249,12 @@ pub(crate) fn install_client_hooks() {
                 return;
             };
             mod_api::dispatch_player_name_format(&context, &username, &mut converted);
-            if let Ok(converted) = converted.try_into_engine(&()) {
+            if let Ok(converted) = sunrise_client_lib::api_text::to_serialized_engine(&converted) {
                 *displayname = converted;
             }
         },
         player_tab_list_name_format: |context, player, name, display_name| {
-            use game::api_values::{TryIntoApi, TryIntoEngine};
+            use game::api_values::TryIntoApi;
             if !mod_api::__private::listened(mod_api::HookId::PlayerTabListNameFormat) {
                 return;
             }
@@ -258,7 +264,11 @@ pub(crate) fn install_client_hooks() {
                 return;
             };
             mod_api::dispatch_player_tab_list_name_format(&context, player, name, &mut converted);
-            if let Ok(converted) = converted.try_into_engine(&()) {
+            if let Ok(converted) = converted
+                .as_ref()
+                .map(sunrise_client_lib::api_text::to_serialized_engine)
+                .transpose()
+            {
                 *display_name = converted;
             }
         },
@@ -365,6 +375,7 @@ pub(crate) fn install_client_hooks() {
         is_combine_repairable: crate::game::native_item_menu_parts::is_combine_repairable,
         can_fit_inside_container_items:
             crate::game::native_item_menu_parts::can_fit_inside_container_items,
+        item_name: crate::game::native_item_menu_parts::item_name,
     }) {
         log::warn!("Native client hooks already installed; keeping the first callbacks");
     }
@@ -432,16 +443,10 @@ mod name_conversion_tests {
     use sunrise_client_core::text::Text;
     use sunrise_world::native_load_context::{DataLoadOrigin, LoadContext, LoadInputs, LoopSide};
 
-    // Both crossing directions reject a component tree deeper than 512 nodes.
-    fn deep_engine_text() -> Text {
-        let mut value = serde_json::json!({"text": "leaf"});
-        for _ in 0..mod_api::text::MAX_TEXT_DEPTH {
-            let mut parent = serde_json::Map::new();
-            parent.insert("text".into(), "parent".into());
-            parent.insert("extra".into(), serde_json::Value::Array(vec![value]));
-            value = serde_json::Value::Object(parent);
-        }
-        Text::empty().with_component(value)
+    // Engine -> API rejects unrepresentable opaque metadata (NestedNull);
+    // API -> Engine rejects a component tree deeper than 512 nodes at the serialization boundary.
+    fn unrepresentable_engine_text() -> Text {
+        Text::empty().with_component(serde_json::json!({"text": "leaf", "test:meta": [null]}))
     }
 
     fn deep_api_text() -> mod_api::Text {
@@ -496,19 +501,23 @@ mod name_conversion_tests {
         with_names(|context, calls| {
             let username = Text::literal("Steve");
             let original = Text::literal("Original");
-            let deep = deep_engine_text();
+            let unrepresentable = unrepresentable_engine_text();
             let mut display = original.clone();
-            sunrise_client_lib::lan::hub::native_player_name_format(context, &deep, &mut display);
+            sunrise_client_lib::lan::hub::native_player_name_format(
+                context,
+                &unrepresentable,
+                &mut display,
+            );
             assert_eq!(display.component(), original.component());
             assert_eq!(calls.load(Ordering::Relaxed), 0);
 
-            display = deep.clone();
+            display = unrepresentable.clone();
             sunrise_client_lib::lan::hub::native_player_name_format(
                 context,
                 &username,
                 &mut display,
             );
-            assert_eq!(display.component_view(), deep.component_view());
+            assert_eq!(display.component_view(), unrepresentable.component_view());
             assert_eq!(calls.load(Ordering::Relaxed), 0);
 
             display = original.clone();
@@ -525,8 +534,8 @@ mod name_conversion_tests {
     #[test]
     fn tab_list_name_conversion_failure_keeps_the_engine_name() {
         with_names(|context, calls| {
-            let deep = deep_engine_text();
-            let mut display = Some(deep.clone());
+            let unrepresentable = unrepresentable_engine_text();
+            let mut display = Some(unrepresentable.clone());
             sunrise_client_lib::lan::hub::native_player_tab_list_name_format(
                 context,
                 1,
@@ -535,7 +544,7 @@ mod name_conversion_tests {
             );
             assert_eq!(
                 display.as_ref().unwrap().component_view(),
-                deep.component_view()
+                unrepresentable.component_view()
             );
             assert_eq!(calls.load(Ordering::Relaxed), 0);
 

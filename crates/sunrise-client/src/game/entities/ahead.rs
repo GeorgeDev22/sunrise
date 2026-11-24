@@ -57,7 +57,7 @@ impl ItemTables<'_> {
         escape_speed: Option<f32>,
         entity_boxes: &[Aabb],
         splash: &mut impl FnMut(ItemSplash),
-    ) -> ItemStep {
+    ) -> Option<ItemStep> {
         // Entity.baseTick splashes before moving, except on the first tick, at
         // the motion before the currents push it.
         let before = item.velocity;
@@ -91,7 +91,24 @@ impl ItemTables<'_> {
             );
             if hit { 0.0 } else { fall }
         });
-        step
+        if let Some(response) = item.move_restitution(
+            sunrise_client::motion::BodyMotion {
+                world: self.world,
+                collision: self.collision,
+                facts: self.facts,
+                blocks: Some(&self.motion.blocks),
+                context: self.context,
+                side: None,
+            },
+            step,
+        ) {
+            // A real bounce has synchronous level effects. Leave that move to its own turn.
+            if response.bounce.is_some() {
+                return None;
+            }
+            item.velocity = response.velocity;
+        }
+        Some(step)
     }
     /// The rest of the move after its vertical contact: block effects, bubble columns, settling
     /// and the water entry. Whether the item lives on.
@@ -102,20 +119,23 @@ impl ItemTables<'_> {
         step: ItemStep,
         splash: &mut impl FnMut(ItemSplash),
     ) -> bool {
-        item.finish_move_block_effects(
-            self.world,
-            self.facts,
-            no_physics,
-            Some(&self.motion.blocks),
-            step,
-            self.context,
-        );
+        if !no_physics {
+            let motion = sunrise_client::motion::BodyMotion {
+                world: self.world,
+                collision: self.collision,
+                facts: self.facts,
+                blocks: Some(&self.motion.blocks),
+                context: self.context,
+                side: None,
+            };
+            item.apply_move_and_vanilla_step(motion, step);
+        }
+        item.finish_move_block_effects(self.world, self.facts, step);
         item.push_by_bubble_column(self.world, self.registry, self.facts, self.collision);
         let alive = item.tick_settle(
             self.world,
             self.registry,
             self.facts,
-            no_physics,
             step,
             self.context,
             &self.side,
@@ -159,18 +179,18 @@ fn move_alone(
     item: &mut ItemEntity,
     found: &mut Vec<u32>,
     near: &mut Vec<Aabb>,
-) -> Moved {
+) -> Option<Moved> {
     obstacles.near_shared(reach(item), found, near);
     let no_physics = item.inside_block(tables.world, tables.collision, near, Some(tables.border));
     // `moveTowardsClosestSpace` draws the speed from the item's own random.
     let escape_speed = no_physics.then(|| item.random.next_float() * 0.2 + 0.1);
     let mut splashes = Vec::new();
-    let step = tables.move_item(item, escape_speed, near, &mut |s| splashes.push(s));
+    let step = tables.move_item(item, escape_speed, near, &mut |s| splashes.push(s))?;
     if step.vertical_contact.is_some() && item.stack.count == 0 {
-        return (no_physics, false, true, splashes);
+        return Some((no_physics, false, true, splashes));
     }
     let alive = tables.settle_item(item, no_physics, step, &mut |s| splashes.push(s));
-    (no_physics, alive, false, splashes)
+    Some((no_physics, alive, false, splashes))
 }
 
 #[cfg(test)]
@@ -217,7 +237,11 @@ impl Moves {
             let (mut found, mut near) = (Vec::new(), Vec::new());
             for &i in part {
                 let mut moved = items[i].clone();
-                let result = move_alone(&tables, obstacles, &mut moved, &mut found, &mut near);
+                let Some(result) =
+                    move_alone(&tables, obstacles, &mut moved, &mut found, &mut near)
+                else {
+                    continue;
+                };
                 let started = started(&items[i]);
                 out.push((
                     i,
@@ -443,7 +467,7 @@ mod tests {
             }
             let landed = game.dropped.iter().find(|i| i.id == landing).unwrap();
             assert_eq!(landed.position.y, boat_top);
-            assert!(landed.on_ground);
+            assert!(landed.ground.on_ground);
             assert_eq!(format!("{:?}", game.world.random), format!("{random:?}"));
             let left: Vec<String> = game.dropped.iter().map(|i| format!("{i:?}")).collect();
             runs.push((

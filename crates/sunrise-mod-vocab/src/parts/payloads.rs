@@ -104,33 +104,46 @@ impl PayloadReceiver {
     pub fn owner(&self) -> &'static str {
         self.owner
     }
-    /// Recheck the owner without scanning registrations or resolving the id again: off when
-    /// its mod is off or this callback panicked.
-    pub fn enabled(&self) -> bool {
+    /// Whether the mod itself is enabled. A poisoned receiver remains a declared
+    /// channel; dispatch skips its callback without turning the packet into a refusal.
+    pub fn owner_enabled(&self) -> bool {
         crate::mod_index_on(self.owner_index)
-            && !self.panicked.load(std::sync::atomic::Ordering::Acquire)
     }
-    /// Invoke only this owner. The caller owns the root transaction and handles
-    /// a native panic as `Failed`, never as retryable contention. A panic disables
-    /// this callback for every connection; later calls refuse without running it.
+    /// Whether a panic already disabled this callback, independently of its owner's state.
+    pub fn poisoned(&self) -> bool {
+        self.panicked.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Whether the mod and this callback are both still enabled.
+    pub fn enabled(&self) -> bool {
+        crate::callback_owner::enabled(self.owner_index, &self.panicked)
+    }
+    /// Invoke only this owner. The caller owns the root transaction; the shared
+    /// boundary disables and reports a panicking callback, not its connection.
     pub fn handle(
         &self,
         bytes: crate::PayloadBytes,
         context: &mut dyn crate::IPayloadContext,
-    ) -> Result<(), crate::PayloadHandleError> {
-        self.call("payload", || self.handler.handle(bytes, context))
-            .map_err(crate::PayloadHandleError::Failed)?
+    ) -> Result<(), crate::callback_owner::CallbackFailure> {
+        self.call("payload", || self.handler.handle(bytes, context))?
+            .map_err(|crate::PayloadHandleError::Failed(error)| {
+                crate::callback_owner::CallbackFailure::Refused(error)
+            })
     }
     /// Scheduled work retains its original receiving owner and enable guard.
     pub fn run_work(
         &self,
         work: &dyn crate::PayloadWork,
         context: &mut dyn crate::IPayloadContext,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::callback_owner::CallbackFailure> {
         self.call("payload work", || work.run(context))?
+            .map_err(crate::callback_owner::CallbackFailure::Refused)
     }
-    fn call<T>(&self, operation: &'static str, call: impl FnOnce() -> T) -> Result<T, String> {
-        crate::callback_owner::call(
+    fn call<T>(
+        &self,
+        operation: &'static str,
+        call: impl FnOnce() -> T,
+    ) -> Result<T, crate::callback_owner::CallbackFailure> {
+        crate::callback_owner::call_typed(
             self.owner,
             self.owner_index,
             &self.panicked,
@@ -315,13 +328,14 @@ pub trait PayloadsRegistrar {
         handler: Arc<dyn IPayloadHandler>,
     );
     /// Register a typed declaration: `declaration` carries the mod's own version, to which
-    /// the registrar appends `schema`. Refused like [`add_payload`](Self::add_payload). The
-    /// token names the declaration's slot and this load; a refused one names load 0, so every
+    /// the registrar appends `schema`. No schema means a form unavailable in typed payloads,
+    /// refused like [`add_payload`](Self::add_payload). The token names the declaration's slot
+    /// and this load; a refused one names load 0, so every
     /// send with it is stale.
     fn add_typed_payload(
         &mut self,
         declaration: PayloadDeclaration,
-        schema: u64,
+        schema: Option<u64>,
         server: Option<Arc<dyn IPayloadHandler>>,
         client: Option<Arc<dyn IPayloadHandler>>,
     ) -> PayloadToken;

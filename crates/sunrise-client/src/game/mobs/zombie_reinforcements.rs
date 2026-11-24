@@ -127,7 +127,7 @@ impl Game<'_> {
             let [x, y, z] = from.map(|v| v + offset(own));
             if !spawn_rules::is_spawn_position_ok(&kind.id, kind.species, &level, x, y, z)
                 || !spawn_rules::check_spawn_rules(
-                    kind,
+                    kind.into(),
                     &level,
                     Reason::Reinforcement,
                     rules,

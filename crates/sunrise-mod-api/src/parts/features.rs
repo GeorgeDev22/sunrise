@@ -9,22 +9,26 @@ pub mod tests {
     #[cfg(test)]
     use crate::*;
 
+    #[cfg(test)]
+    struct Tree;
+
+    #[cfg(test)]
+    impl mod_api::FeatureType for Tree {
+        fn place(
+            &self,
+            _: &mut dyn mod_api::FeatureContext,
+            _: [i32; 3],
+        ) -> Result<bool, mod_api::FeatureError> {
+            Ok(false)
+        }
+    }
+
     /// A feature type twice, one in an unowned namespace, one without a name, one taking a
     /// vanilla feature type's id, one with an invalid schema and one with a reference field:
     /// every invalid registration is refused at startup, naming the mod.
     #[test]
     pub(crate) fn invalid_feature_types_refuse_registration() {
         use mod_api::{DatapackField, DatapackFieldKind, DatapackValue};
-        struct Tree;
-        impl mod_api::FeatureType for Tree {
-            fn place(
-                &self,
-                _: &mut dyn mod_api::FeatureContext,
-                _: [i32; 3],
-            ) -> Result<bool, mod_api::FeatureError> {
-                Ok(false)
-            }
-        }
         let height = || {
             vec![DatapackField::with_default(
                 "height",
@@ -90,6 +94,27 @@ pub mod tests {
         assert!(errors[4].contains("test:doubled: invalid config schema: InvalidFieldName"));
         assert!(errors[5].contains("test:linked: config field \"next\" is a Reference"));
     }
+
+    #[test]
+    fn a_nested_config_is_refused_without_adding_the_feature() {
+        use mod_api::{DatapackField, DatapackFieldKind, DatapackKeyKind};
+        let mut registrar = PartRegistrar::new("test");
+        registrar.add_feature_type(
+            "nested",
+            vec![DatapackField::required(
+                "by_spell",
+                DatapackFieldKind::Map {
+                    key: DatapackKeyKind::Reference {
+                        registry: "test:spell".into(),
+                    },
+                    value: Box::new(DatapackFieldKind::Bool),
+                },
+            )],
+            Arc::new(Tree),
+        );
+        assert_eq!(registrar.refused.len(), 1);
+        assert!(registrar.feature_types.is_empty());
+    }
 }
 
 impl FeaturesRegistrar for PartRegistrar {
@@ -121,19 +146,23 @@ impl FeaturesRegistrar for PartRegistrar {
                 "config field {:?} is a Reference, which feature configs don't resolve; use Identifier",
                 field.name
             )))
+        } else if let Some(field) = config.iter().find(|field| {
+            matches!(
+                field.kind,
+                crate::DatapackFieldKind::List { .. }
+                    | crate::DatapackFieldKind::Map { .. }
+                    | crate::DatapackFieldKind::Record { .. }
+                    | crate::DatapackFieldKind::Optional { .. }
+            )
+        }) {
+            // A feature config is a flat record of scalars: nested kinds (and the references
+            // they could hide, a reference map key's included) are a datapack registry's.
+            Some(refuse(format!(
+                "config field {:?} is nested, and a feature config is a flat record of scalars",
+                field.name
+            )))
         } else {
-            let mut defaults = Ok(());
-            for field in &mut config {
-                if matches!(field.kind, crate::DatapackFieldKind::Identifier)
-                    && let Some(crate::DatapackValue::Text(value)) = &mut field.default
-                {
-                    match crate::Identifier::parse(value) {
-                        Ok(parsed) => *value = parsed.to_string(),
-                        Err(_) => defaults = Err(crate::DatapackRegistrationError::InvalidDefault),
-                    }
-                }
-            }
-            defaults
+            mod_vocab::__private::parts_installation::normalize_datapack_defaults(&mut config)
                 .and_then(|()| {
                     mod_vocab::__private::parts_installation::validate_datapack_schema(&config)
                 })

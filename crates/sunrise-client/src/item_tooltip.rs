@@ -2,7 +2,6 @@
 //! and lines without player context for the recipe book and creative search trees.
 use crate::text::{GRAY, Text};
 use crate::{
-    bundle::TooltipLayout,
     enchant::Enchantments,
     hud::rgba,
     items::{ItemInfo, ItemStack, Items},
@@ -365,10 +364,10 @@ impl PlayerHeadName {
     }
     /// The title as a component, for command feedback.
     pub fn text(&self) -> crate::text::Text {
-        crate::text::Text::translate(
-            "block.minecraft.player_head.named",
-            &[crate::text::Text::literal(self.0.clone())],
-        )
+        crate::text::Text::from(serde_json::json!({
+            "translate": "block.minecraft.player_head.named",
+            "with": [&self.0],
+        }))
     }
 }
 
@@ -459,22 +458,12 @@ pub fn rarity<'a>(stack: &ItemStack, default: &'a str) -> &'a str {
     sunrise_items::properties::ItemRarity::of(rarity, !stack.enchantments().is_empty()).as_str()
 }
 
-/// `BundleItem.getTooltipImage`: the contents grid of a bundle, or None when
-/// the stack is not one or `minecraft:tooltip_display` hides
-/// `minecraft:bundle_contents` - the image is that component's tooltip
-/// detail, so a display that hides the component hides the grid too.
-pub fn bundle_tooltip(
-    items: &Items,
-    stack: &ItemStack,
-    x: f32,
-    y: f32,
-    box_width: f32,
-    description_lines: usize,
-) -> Option<TooltipLayout> {
-    tooltip_display(stack)
-        .shows("minecraft:bundle_contents")
-        .then(|| crate::bundle::tooltip_layout(items, stack, x, y, box_width, description_lines))
-        .flatten()
+/// `BundleItem.getTooltipImage`: select a stack's bundle tooltip only when it carries
+/// `minecraft:bundle_contents` and `minecraft:tooltip_display` shows that component.
+/// Selection does not copy the contents or compute their weight.
+pub fn shows_bundle_tooltip(items: &Items, stack: &ItemStack) -> bool {
+    tooltip_display(stack).shows("minecraft:bundle_contents")
+        && crate::bundle::Contents::is_bundle(items, stack)
 }
 
 fn is_beehive(path: &str) -> bool {
@@ -1802,10 +1791,10 @@ mod tests {
         let items = Items::for_tests(Default::default());
         let mut bundle = ItemStack::new("minecraft:bundle", 1);
         bundle.data_mut().bundle_contents = vec![ItemStack::new("minecraft:stone", 3)];
-        assert!(bundle_tooltip(&items, &bundle, 0.0, 0.0, 96.0, 2).is_some());
+        assert!(shows_bundle_tooltip(&items, &bundle));
         // A stack that is not a bundle has no grid.
         let stone = ItemStack::new("minecraft:stone", 1);
-        assert!(bundle_tooltip(&items, &stone, 0.0, 0.0, 96.0, 2).is_none());
+        assert!(!shows_bundle_tooltip(&items, &stone));
         // A display that hides the contents component hides the grid.
         bundle.data_mut().set_other(
             "minecraft:tooltip_display",
@@ -1814,13 +1803,13 @@ mod tests {
                 Tag::List(vec![Tag::String("minecraft:bundle_contents".into())]),
             )])),
         );
-        assert!(bundle_tooltip(&items, &bundle, 0.0, 0.0, 96.0, 2).is_none());
+        assert!(!shows_bundle_tooltip(&items, &bundle));
         // So does one that hides the whole tooltip.
         bundle.data_mut().set_other(
             "minecraft:tooltip_display",
             Some(Tag::compound([("hide_tooltip", Tag::Byte(1))])),
         );
-        assert!(bundle_tooltip(&items, &bundle, 0.0, 0.0, 96.0, 2).is_none());
+        assert!(!shows_bundle_tooltip(&items, &bundle));
         // A component the display does not name leaves the grid alone.
         bundle.data_mut().set_other(
             "minecraft:tooltip_display",
@@ -1829,7 +1818,7 @@ mod tests {
                 Tag::List(vec![Tag::String("minecraft:lore".into())]),
             )])),
         );
-        assert!(bundle_tooltip(&items, &bundle, 0.0, 0.0, 96.0, 2).is_some());
+        assert!(shows_bundle_tooltip(&items, &bundle));
     }
 
     #[test]
@@ -2105,6 +2094,15 @@ mod tests {
             Some(Tag::compound([("name", Tag::String("Notch".into()))])),
         );
         assert_eq!(name_line(&compound, &translate), "Notch's Head");
+
+        let mut numeric = ItemStack::new("minecraft:player_head", 1);
+        numeric
+            .data_mut()
+            .set_other("minecraft:profile", Some(Tag::String("123".into())));
+        assert_eq!(
+            player_head_name(&numeric).unwrap().text().component(),
+            serde_json::json!({"translate": "block.minecraft.player_head.named", "with": ["123"]}),
+        );
 
         let mut id_only = ItemStack::new("minecraft:player_head", 1);
         id_only.data_mut().set_other(

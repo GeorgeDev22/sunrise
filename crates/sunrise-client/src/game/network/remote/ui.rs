@@ -31,75 +31,14 @@ impl Game<'_> {
         self.remote_attacker_knockback(damage, strength);
     }
 
-    /// Keys with a multiplayer meaning; returns true when consumed.
-    pub(in crate::game) fn remote_key(&mut self, key: KeyCode) -> Result<bool> {
-        if self.screen != Screen::Playing {
-            if (key == KeyCode::KeyE || key == KeyCode::Escape) && self.screen == Screen::Inventory
-            {
-                self.remote_close_container();
-                self.set_screen(Screen::Playing);
-                self.capture(true);
-                return Ok(true);
-            }
-            return Ok(false);
-        }
-        match key {
-            KeyCode::KeyT | KeyCode::Slash | KeyCode::Enter => {
-                // ChatScreen, over the server's command tree.
-                self.open_chat_method(if key == KeyCode::Slash { "/" } else { "" });
-                // `Minecraft.handleKeybinds` opens it in the call that then
-                // releases an active use (Gui.handleKeybinds runs before the
-                // isUsingItem branch).
-                self.release_use_for_keybind_screen();
-                Ok(true)
-            }
-            KeyCode::KeyQ => {
-                if self.spectator() {
-                    return Ok(true);
-                }
-                if let Some(r) = self.remote.as_mut() {
-                    r.pending_keys.push(key);
-                }
-                Ok(true)
-            }
-            // Open the ridden vehicle's own screen (`HasCustomInventoryScreen`)
-            // instead of the player's inventory: riding a horse, llama or
-            // chest boat, the inventory key sends
-            // ServerboundPlayerCommandPacket OPEN_INVENTORY.
-            KeyCode::KeyE if self.riding_mount_with_menu() || self.riding_chest_boat() => {
-                if self.in_portal_transition() {
-                    return Ok(true);
-                }
-                if let Some(r) = self.remote.as_mut() {
-                    r.pending_keys.push(key);
-                }
-                Ok(true)
-            }
-            KeyCode::KeyE => {
-                if self.in_portal_transition() {
-                    return Ok(true);
-                }
-                // The inventory opens without telling the server.
-                if self.tutorial.open_inventory() {
-                    self.persist_tutorial_step();
-                }
-                self.recipe_ui.reset_screen();
-                if self.creative {
-                    self.set_screen(Screen::Creative);
-                    self.refresh_creative_tabs();
-                    self.creative_screen.reopen();
-                    self.refresh_saved_hotbars();
-                } else {
-                    self.set_screen(Screen::Inventory);
-                }
-                self.craft_size = 2;
-                self.capture(false);
-                // `Minecraft.handleKeybinds` opens the inventory in the same
-                // call that then releases an active use.
-                self.release_use_for_keybind_screen();
-                Ok(true)
-            }
-            _ => Ok(false),
+    /// The inventory key when the vehicle owns its screen.
+    pub(in crate::game) fn remote_request_mount_inventory(&self) {
+        if let Some(r) = &self.remote {
+            self.send(S::PlayerCommand(play::PlayerCommand {
+                id: r.entity_id,
+                action: 5,
+                data: 0,
+            }));
         }
     }
 
@@ -136,15 +75,25 @@ impl Game<'_> {
                 .map(|i| i.load_view())
                 .filter(|v| v.has_progress())
                 .map(|v| v.server_progress());
-            sunrise_client::widgets::begin_screen(|| {
-                super::super::screen_info::level_loading(progress, &super::super::screen_info::tr)
-            });
-            if self.draw_dimension_transition_screen(
-                batch,
-                &r.level_load,
-                progress.map(|_| self.loading_progress),
-            ) {
-                return true;
+            let begin_loading_screen = || {
+                sunrise_client::widgets::begin_screen(|| {
+                    super::super::screen_info::level_loading(
+                        progress,
+                        &super::super::screen_info::tr,
+                    )
+                });
+            };
+            begin_loading_screen();
+            if r.level_load.transition_screen().is_some() {
+                if self.draw_dimension_transition_screen(
+                    batch,
+                    &r.level_load,
+                    progress.map(|_| self.loading_progress),
+                ) {
+                    return true;
+                }
+                // A failed presentation can also have registered widgets or narration.
+                begin_loading_screen();
             }
             self.draw_level_loading_background(batch, r.level_load.reason);
             let atlas = &self.gui.atlas;

@@ -89,3 +89,171 @@ fn a_reconfiguring_client_plays_menu_music_and_never_indexes_past_the_biomes() {
     let (music, _) = game.situational_music();
     assert!(music.is_some_and(|m| m != Music::menu()));
 }
+
+/// Vanilla ClientPacketListener.handleConfigurationStart -> Minecraft.clearClientLevel ->
+/// updateLevelInEngines(null): entering configuration stops sound immediately, so a flat mod
+/// audio stream is Stopped at configuration entry without waiting for a new login.
+#[test]
+#[ignore = "daily"]
+fn a_reconfiguring_client_stops_flat_audio_streams_before_configuration() {
+    use crate::game::{
+        native_entity_refs::tests::with_client_game,
+        remote::tests::{connect_play_test, spawn_menu_test},
+    };
+    use mod_api::{AudioStream, AudioStreamState, SoundSource, StreamSpec};
+    use sunrise_client::net::Event;
+    use sunrise_protocol::packets::{Empty, play::Clientbound};
+
+    struct Silent;
+    impl AudioStream for Silent {
+        fn read(&mut self, _pcm: &mut [i16]) -> usize {
+            1
+        }
+    }
+
+    with_client_game(|game| {
+        let (_reader, mut writer) = connect_play_test(game, |_, _| {});
+        spawn_menu_test(game);
+        game.audio.backend_live_for_bench();
+        let stream = game
+            .audio
+            .open_stream(
+                "test_mod",
+                &StreamSpec::new(SoundSource::Music, 1, 48_000),
+                None,
+                Box::new(Silent),
+            )
+            .unwrap();
+        assert_eq!(stream.state(), AudioStreamState::Playing);
+
+        writer
+            .send(&Clientbound::StartConfiguration(Empty).encode())
+            .unwrap();
+        game.wait_for_test_remote_event(|event| matches!(event, Event::Reconfiguring(_)));
+        game.poll_remote_events(true).unwrap();
+
+        assert!(game.remote.as_ref().unwrap().reconfiguring.is_some());
+        assert_eq!(stream.state(), AudioStreamState::Stopped);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn client_level_transitions_stop_streams_opened_during_unload() {
+    use crate::game::{
+        integrated::Integrated, native_client_session::tests::logged_client,
+        native_entity_refs::tests::with_client_game, remote::RemoteDimensionEntry,
+    };
+    use mod_api::{
+        AudioStream, AudioStreamRef, AudioStreamState, ClientDisconnectingEvent, ClientHost,
+        ClientLevelUnloadEvent, Hooks, ModEntry, SoundSource, StreamSpec,
+    };
+    use std::sync::{Arc, Mutex};
+    use sunrise_client::level_loading::Reason;
+    use sunrise_protocol::packets::play::SpawnInfo;
+
+    struct Silent;
+    impl AudioStream for Silent {
+        fn read(&mut self, _pcm: &mut [i16]) -> usize {
+            1
+        }
+    }
+
+    struct Listener(Arc<Mutex<Vec<AudioStreamRef>>>);
+    impl Listener {
+        fn open(&self, host: &dyn ClientHost) {
+            let stream = host
+                .open_audio_stream(
+                    &StreamSpec::new(SoundSource::Music, 1, 48_000),
+                    Box::new(Silent),
+                )
+                .unwrap();
+            assert_eq!(stream.state(), AudioStreamState::Playing);
+            self.0.lock().unwrap().push(stream);
+        }
+    }
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Listener {
+        fn client_level_unload(
+            &self,
+            host: &mut dyn ClientHost,
+            _: &mut ClientLevelUnloadEvent<'_>,
+        ) {
+            self.open(host);
+        }
+
+        fn client_disconnecting(&self, host: &dyn ClientHost, _: &mut ClientDisconnectingEvent) {
+            self.open(host);
+        }
+    }
+
+    let streams = Arc::new(Mutex::new(Vec::new()));
+    let mods = vec![ModEntry::new(
+        "unload_audio",
+        Box::new(Listener(streams.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_client_game(|game| {
+            game.audio.backend_live_for_bench();
+            let spawn = SpawnInfo {
+                dimension_type: 0,
+                dimension: "minecraft:overworld".into(),
+                seed: 0,
+                game_type: 1,
+                previous_game_type: None,
+                debug: false,
+                flat: true,
+                last_death: None,
+                portal_cooldown: 0,
+                sea_level: 63,
+            };
+            for (replace, integrated) in [(true, false), (false, false), (false, true)] {
+                let _server = logged_client(game);
+                game.enter_remote_dimension(&spawn, RemoteDimensionEntry::Login, Reason::Other);
+                let existing = game
+                    .audio
+                    .open_stream(
+                        "test_mod",
+                        &StreamSpec::new(SoundSource::Music, 1, 48_000),
+                        None,
+                        Box::new(Silent),
+                    )
+                    .unwrap();
+                game.enter_remote_dimension(&spawn, RemoteDimensionEntry::Respawn, Reason::Other);
+                assert!(
+                    streams.lock().unwrap().is_empty(),
+                    "same-level respawn does not unload"
+                );
+                assert_eq!(existing.state(), AudioStreamState::Playing);
+                if replace {
+                    let mut other = spawn.clone();
+                    other.dimension = "minecraft:the_nether".into();
+                    game.enter_remote_dimension(
+                        &other,
+                        RemoteDimensionEntry::Respawn,
+                        Reason::Other,
+                    );
+                } else {
+                    if integrated {
+                        game.integrated = Some(Integrated::stopped_for_test());
+                    }
+                    game.leave_server(None).unwrap();
+                }
+                {
+                    let mut heard = streams.lock().unwrap();
+                    assert_eq!(heard.len(), if replace { 1 } else { 2 });
+                    for stream in heard.drain(..) {
+                        assert_eq!(stream.state(), AudioStreamState::Stopped);
+                    }
+                }
+                assert_eq!(existing.state(), AudioStreamState::Stopped);
+                if replace {
+                    game.leave_server(None).unwrap();
+                    streams.lock().unwrap().clear();
+                }
+            }
+        });
+    });
+}

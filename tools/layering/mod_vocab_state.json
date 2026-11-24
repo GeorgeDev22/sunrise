@@ -9,25 +9,40 @@
     "category": "immutable lookup cache",
     "reason": "Three vanilla bucket identifiers resolved once; no live registration or world state."
   },
+  "block/item_place.rs::fresh::NEXT": {
+    "type": "AtomicU64",
+    "category": "monotonic counter",
+    "reason": "Names lent scratch slots without reusing an identity after a transaction or host drops; it stores no stacks or world state."
+  },
   "block/part_state.rs::EDITING": {
     "type": "RefCell<Vec<(AttachmentHolder,&'staticstr,&'staticstr)>>",
     "category": "reentrancy guard",
     "reason": "Per-thread stack of the Part-state edits open on this thread, by holder, so an edit of the same holder and key from inside its own edit is refused."
   },
+  "callback_owner.rs::CAUGHT": {
+    "type": "RefCell<Option<String>>",
+    "category": "crash owner",
+    "reason": "Per-thread slot holding the attributed diagnostic recorded by the game panic hook during a contained unwind so hostile payload destructors cannot overwrite it."
+  },
+  "callback_owner.rs::CONTAINED": {
+    "type": "Cell<u32>",
+    "category": "reentrancy guard",
+    "reason": "Per-thread nesting depth for contain_unwind and CallbackOwner containment so the game panic hook suppresses crash reports and captures diagnostics for contained mod panics."
+  },
+  "callback_owner.rs::DELEGATED_ENGINE_PANIC": {
+    "type": "RefCell<Option<Box<dynAny+Send>>>",
+    "category": "reentrancy guard",
+    "reason": "Per-thread handoff for a fatal engine panic raised inside a delegated vanilla HUD body so wrapper containment cannot swallow it before the outermost wrapper exits."
+  },
+  "callback_owner.rs::RETAINED_CALLBACK": {
+    "type": "Cell<bool>",
+    "category": "reentrancy guard",
+    "reason": "Per-thread flag marking that a retained mod callback is currently running under CallbackOwner containment so the panic hook knows the unwind will be caught and reported."
+  },
   "client/arm_pose.rs::TEST_POSES": {
     "type": "std::cell::Cell<Option<&'static[PoseInfo]>>",
     "category": "Parts lookup table",
     "reason": "Thread-local test lookup of installed Parts metadata by engine-issued slot."
-  },
-  "client/client_reload.rs::first::ID": {
-    "type": "LazyLock<Identifier>",
-    "category": "immutable cache",
-    "reason": "Immutable vanilla reload-boundary identifier, allocated once and shared by anchor declarations."
-  },
-  "client/client_reload.rs::last::ID": {
-    "type": "LazyLock<Identifier>",
-    "category": "immutable cache",
-    "reason": "Immutable vanilla reload-boundary identifier, allocated once and shared by anchor declarations."
   },
   "client/client_reload.rs::model_manager::ID": {
     "type": "LazyLock<Identifier>",
@@ -55,9 +70,9 @@
     "reason": "Empty or set-once resolved registry lookup returned when no installed Parts inventory supplies one."
   },
   "content/registry_keys.rs::resolved_entity_types::EMPTY": {
-    "type": "std::sync::OnceLock<sunrise_mod_runtime::registry_keys::Names>",
+    "type": "std::sync::OnceLock<sunrise_mod_runtime::registry_keys::EntityTypes>",
     "category": "immutable cache",
-    "reason": "Empty or set-once resolved registry lookup returned when no installed Parts inventory supplies one."
+    "reason": "Empty or set-once resolved registry lookup with living type metadata when no installed Parts inventory supplies one."
   },
   "content/registry_keys.rs::resolved_items::EMPTY": {
     "type": "std::sync::OnceLock<sunrise_mod_runtime::registry_keys::Names>",
@@ -159,6 +174,11 @@
     "category": "immutable cache",
     "reason": "Empty or set-once resolved registry lookup returned when no installed Parts inventory supplies one."
   },
+  "runtime.rs::HOOK_DISPATCH_DEPTH": {
+    "type": "std::cell::Cell<u32>",
+    "category": "dispatch table",
+    "reason": "Thread-local depth of active hook panic-containment guards. The crash hook defers only while this call is inside a guarded native dispatch."
+  },
   "runtime.rs::LISTENER_SERIAL": {
     "type": "std::cell::Cell<(u64,u64)>",
     "category": "dispatch table",
@@ -179,32 +199,12 @@
     "category": "dispatch table",
     "reason": "Thread-local dispatch inventory for isolated engine tests."
   },
-  "wire/static_strings.rs::intern::STRINGS": {
-    "type": "OnceLock<Mutex<HashSet<&'staticstr>>>",
-    "category": "immutable cache",
-    "reason": "Bounded interning for decoded static strings; entries are immutable, shared by value, and never evicted."
+  "world/scheduler.rs::allocate::NEXT_ID": {
+    "type": "AtomicU64",
+    "category": "monotonic counter",
+    "reason": "Monotonic generator for TaskId cancellation handles so scheduled task IDs are unique across worlds and never reused."
   },
-  "world/phase_refusal.rs::SCOPE": {
-    "type": "Cell<Option<Scope>>",
-    "category": "reentrancy guard",
-    "reason": "Per-thread record of the mod and hook whose listener call is in flight and whether a refusal has latched, which the gate reads to contain a wrong-phase Host call."
-  },
-  "world/phase_refusal.rs::report::LOGGED": {
-    "type": "OnceLock<Mutex<HashSet<(&'staticstr,&'staticstr)>>>",
-    "category": "reentrancy guard",
-    "reason": "Process-wide set of the (mod, operation) pairs whose refusal has been logged, so a refusing hook names the operation once and not on every call."
-  },
-  "world/server_reload.rs::first::ID": {
-    "type": "LazyLock<Identifier>",
-    "category": "immutable cache",
-    "reason": "Immutable vanilla reload-boundary identifier, allocated once and shared by anchor declarations."
-  },
-  "world/server_reload.rs::functions::ID": {
-    "type": "LazyLock<Identifier>",
-    "category": "immutable cache",
-    "reason": "Immutable vanilla reload-boundary identifier, allocated once and shared by anchor declarations."
-  },
-  "world/server_reload.rs::last::ID": {
+  "world/server_reload.rs::functions_ref::ID": {
     "type": "LazyLock<Identifier>",
     "category": "immutable cache",
     "reason": "Immutable vanilla reload-boundary identifier, allocated once and shared by anchor declarations."
@@ -213,6 +213,11 @@
     "type": "OnceLock<Arc<dynStartupScreen>>",
     "category": "dispatch table",
     "reason": "One engine-installed startup-screen service; registration contexts carry this same resource to mods, and retained progress handles use it after registration."
+  },
+  "world/startup_progress.rs::TEST_SCREEN": {
+    "type": "std::cell::RefCell<Option<Arc<dynStartupScreen>>>",
+    "category": "dispatch table",
+    "reason": "Thread-local startup screen override lent to registration fixtures and restored on scope exit."
   },
   "world/ticket_controller.rs::TEST_CONTROLLERS": {
     "type": "std::cell::Cell<Option<&'static[ControllerInfo]>>",

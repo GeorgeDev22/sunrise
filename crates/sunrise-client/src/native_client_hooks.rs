@@ -62,6 +62,8 @@ pub struct NativeClientHooks {
     /// `ItemPart::can_fit_inside_container_items` of the stack's item; `fits` arrives with
     /// vanilla's.
     pub can_fit_inside_container_items: fn(&LoopContext, &ItemStack, &mut bool),
+    /// `ItemPart::item_name` of the stack's item; `name` arrives as `None`, the default.
+    pub item_name: fn(&LoopContext, &ItemStack, &mut Option<crate::text::Text>),
 }
 
 static HOOKS: OnceLock<NativeClientHooks> = OnceLock::new();
@@ -333,6 +335,18 @@ pub(crate) fn sound_type(
 ) {
     if let Some(hooks) = HOOKS.get() {
         (hooks.sound_type)(context, pos, state, entity, cause, sound);
+    }
+}
+
+/// Ask the installed adapter for the name the parts of `stack`'s item give it (`item_name`); with
+/// none installed, `name` stays the default.
+pub(crate) fn item_name(
+    context: &LoopContext,
+    stack: &ItemStack,
+    name: &mut Option<crate::text::Text>,
+) {
+    if let Some(hooks) = HOOKS.get() {
+        (hooks.item_name)(context, stack, name);
     }
 }
 

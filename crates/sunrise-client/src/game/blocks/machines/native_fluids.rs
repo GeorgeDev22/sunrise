@@ -4,7 +4,7 @@
 //! client's copy, and only on the level in place.
 use super::Game;
 use super::cauldron_contents::{self, CauldronContent, CauldronContents, EMPTY_CAULDRON};
-use mod_api::{BlockSide, FluidStack, Transaction};
+use mod_api::{BlockSide, FluidStack, TransactionContext};
 use std::sync::Arc;
 use sunrise_client::containers::{BlockEntity, ModFluidTanks};
 use sunrise_core::geometry::Direction;
@@ -178,8 +178,7 @@ fn write_tanks(nbt: &mut Compound, tanks: &[Tank]) {
 
 // Native mods use these; nothing in Sunrise does.
 impl Game<'_> {
-    /// What holds fluids at `pos` in the level in place: a mod block's tanks (its block
-    /// entity's, and not the placeholder standing in while it ticks), or a cauldron.
+    /// What holds fluids at `pos` in the level in place: a mod block's tanks, or a cauldron.
     fn native_fluid_at(&self, pos: [i32; 3]) -> Option<FluidAt> {
         if !self.native_simulates() {
             return None;
@@ -187,10 +186,9 @@ impl Game<'_> {
         let key = (pos[0], pos[1], pos[2]);
         let state = self.world.block(pos[0], pos[1], pos[2]);
         if let Some(tanks) = self.world.block_entities.mod_fluids(state.0) {
-            // The block entity is out of the world while it ticks.
             return matches!(
                 self.world.block_entities.get(&key),
-                Some(sunrise_client::containers::BlockEntity::Mod(m)) if !m.id().is_empty()
+                Some(sunrise_client::containers::BlockEntity::Mod(_))
             )
             .then(|| FluidAt::Mod(Arc::clone(tanks)));
         }
@@ -353,10 +351,10 @@ impl Game<'_> {
         at: BlockSide,
         tank: usize,
         fluid: FluidStack,
-        tx: &Transaction,
+        tx: &TransactionContext,
     ) -> Option<FluidStack> {
-        if !self.transaction_holds(tx) {
-            return Some(fluid).filter(|fluid| fluid.amount > 0);
+        if !self.transaction_context_is_current(tx) {
+            return Some(fluid);
         }
         if fluid.amount == 0 {
             return None;
@@ -415,9 +413,9 @@ impl Game<'_> {
         at: BlockSide,
         tank: usize,
         max: u32,
-        tx: &Transaction,
+        tx: &TransactionContext,
     ) -> Option<FluidStack> {
-        if !self.transaction_holds(tx) {
+        if !self.transaction_context_is_current(tx) {
             return None;
         }
         let max = mb(max);
@@ -775,14 +773,14 @@ mod tests {
                 }
                 let handler = handler.unwrap();
                 let extract = |game: &mut Game<'_>, resource: &FluidResource, amount| {
-                    game.transaction(|host, tx| {
-                        Ok::<_, ()>(handler.extract_at(host, tx, 0, resource, amount))
+                    game.storage_transaction(|host, tx| {
+                        handler.extract_at(host, tx, 0, resource, amount)
                     })
                     .unwrap()
                 };
                 let insert = |game: &mut Game<'_>, resource: &FluidResource, amount| {
-                    game.transaction(|host, tx| {
-                        Ok::<_, ()>(handler.insert_at(host, tx, 0, resource, amount))
+                    game.storage_transaction(|host, tx| {
+                        handler.insert_at(host, tx, 0, resource, amount)
                     })
                     .unwrap()
                 };
@@ -961,52 +959,52 @@ mod tests {
         fn insert_at(
             &self,
             host: &mut dyn ServerHost,
-            _: &Transaction,
+            _: &TransactionContext,
             index: usize,
             resource: &mod_api::FluidResource,
             amount: u32,
-        ) -> u32 {
+        ) -> Result<u32, mod_api::TransactionError<mod_api::Overanswered>> {
             if !self.is_valid(host, index, resource) {
-                return 0;
+                return Ok(0);
             }
             let mut state = self.state(host);
             let entry = &mut state[self.reached[index]];
             if entry.1 > 0 && entry.0.as_deref() != Some("minecraft:water") {
-                return 0;
+                return Ok(0);
             }
             let took = amount.min((4000 - entry.1).max(0).unsigned_abs());
             if took == 0 {
-                return 0;
+                return Ok(0);
             }
             entry.0 = Some("minecraft:water".into());
             entry.1 += took as i32;
-            if self.write(host, &state) { took } else { 0 }
+            Ok(if self.write(host, &state) { took } else { 0 })
         }
         fn extract_at(
             &self,
             host: &mut dyn ServerHost,
-            _: &Transaction,
+            _: &TransactionContext,
             index: usize,
             resource: &mod_api::FluidResource,
             amount: u32,
-        ) -> u32 {
+        ) -> Result<u32, mod_api::TransactionError<mod_api::Overanswered>> {
             let Some(&real) = self.reached.get(index) else {
-                return 0;
+                return Ok(0);
             };
             if self.resource(host, index).as_ref() != Some(resource) {
-                return 0;
+                return Ok(0);
             }
             let mut state = self.state(host);
             let entry = &mut state[real];
             let took = amount.min(entry.1.max(0).unsigned_abs());
             if took == 0 {
-                return 0;
+                return Ok(0);
             }
             entry.1 -= took as i32;
             if entry.1 == 0 {
                 entry.0 = None;
             }
-            if self.write(host, &state) { took } else { 0 }
+            Ok(if self.write(host, &state) { took } else { 0 })
         }
     }
 
@@ -1040,19 +1038,20 @@ mod tests {
                     .block_entity_type("water_tank")
                     .blocks(&["fluid_filter_test:water_tank"])
                     .build();
-                r.block_entity_capability_before_game(&FLUIDS, &kind, |host, at| {
+                r.block_entity_capability_before_game(&FLUIDS, &kind, |_, at, _, entity, offer| {
                     // The same block entity type elsewhere keeps the game's default handler.
-                    (at.pos == [2, 64, 0]).then(|| {
-                        Box::new(WaterTank {
-                            entity: host.block_entity(at.level, at.pos).unwrap(),
-                            reached: if at.side == Some(Direction::Down) {
-                                vec![1, 0]
-                            } else {
-                                vec![0, 1]
-                            },
-                        })
-                            as Box<dyn mod_api::ResourceHandler<FluidResource>>
-                    })
+                    if at.pos == [2, 64, 0] {
+                        offer.offer(|| {
+                            Box::new(WaterTank {
+                                entity,
+                                reached: if at.side == Some(Direction::Down) {
+                                    vec![1, 0]
+                                } else {
+                                    vec![0, 1]
+                                },
+                            })
+                        });
+                    }
                 });
             }
             fn blocks(
@@ -1128,9 +1127,9 @@ mod tests {
                 ));
                 assert_eq!(source.capacity(game, 0, Some(&empty)), 0);
                 assert_eq!(
-                    game.transaction(|host, tx| Ok::<_, ()>(
+                    game.storage_transaction(|host, tx| {
                         source.insert_at(host, tx, 0, &empty, 1000)
-                    )),
+                    }),
                     Ok(0)
                 );
                 assert_eq!(source.resource(game, 0), None);
@@ -1158,7 +1157,7 @@ mod tests {
                 );
                 let target = level.capability(game, &FLUIDS, pipe_target, None).unwrap();
                 assert_eq!(
-                    game.transaction(|host, tx| move_resources(
+                    game.storage_transaction(|host, tx| move_resources(
                         host,
                         &source,
                         &target,
@@ -1208,13 +1207,13 @@ mod tests {
                 );
                 assert_eq!(source.amount(game, 0), 700);
                 assert_eq!(
-                    game.transaction(|host, tx| Ok::<_, ()>(source.extract_at(
+                    game.storage_transaction(|host, tx| source.extract_at(
                         host,
                         tx,
                         0,
                         &unresolved,
                         200
-                    ))),
+                    )),
                     Ok(200)
                 );
                 assert_eq!(
@@ -1225,17 +1224,17 @@ mod tests {
                 assert_eq!(source.resource(game, 0), Some(water.clone()));
                 assert_eq!(source.amount(game, 0), 1000);
                 assert_eq!(
-                    game.transaction(|host, tx| Ok::<_, ()>(
+                    game.storage_transaction(|host, tx| {
                         source.extract_at(host, tx, 0, &water, 1000)
-                    )),
+                    }),
                     Ok(1000)
                 );
                 assert_eq!(source.resource(game, 0), None);
                 assert!(source.is_valid(game, 0, &chocolate));
                 assert_eq!(
-                    game.transaction(|host, tx| Ok::<_, ()>(
+                    game.storage_transaction(|host, tx| {
                         source.insert_at(host, tx, 0, &chocolate, 1000)
-                    )),
+                    }),
                     Ok(1000)
                 );
                 assert_eq!(source.resource(game, 0), Some(chocolate.clone()));
@@ -1252,9 +1251,9 @@ mod tests {
                     assert_eq!(target.capacity(game, index, Some(&chocolate)), 4000);
                     assert!(!target.is_valid(game, index, &chocolate));
                     assert_eq!(
-                        game.transaction(|host, tx| Ok::<_, ()>(
+                        game.storage_transaction(|host, tx| {
                             target.insert_at(host, tx, index, &chocolate, 500)
-                        )),
+                        }),
                         Ok(0)
                     );
                 }
@@ -1263,7 +1262,7 @@ mod tests {
                 assert_eq!(target.amount(game, 1), 0);
                 assert_eq!(target.resource(game, 1), None);
                 assert_eq!(
-                    game.transaction(|host, tx| move_resources(
+                    game.storage_transaction(|host, tx| move_resources(
                         host,
                         &source,
                         &target,
@@ -1280,16 +1279,16 @@ mod tests {
                 // Water is valid but cannot replace another fluid; it can fill the empty tank.
                 assert!(target.is_valid(game, 0, &water));
                 assert_eq!(
-                    game.transaction(|host, tx| Ok::<_, ()>(
+                    game.storage_transaction(|host, tx| {
                         target.insert_at(host, tx, 0, &water, 500)
-                    )),
+                    }),
                     Ok(0)
                 );
                 assert!(target.is_valid(game, 1, &water));
                 assert_eq!(
-                    game.transaction(|host, tx| Ok::<_, ()>(
+                    game.storage_transaction(|host, tx| {
                         target.insert_at(host, tx, 1, &water, 500)
-                    )),
+                    }),
                     Ok(500)
                 );
                 assert_eq!(target.resource(game, 1), Some(water.clone()));
@@ -1301,20 +1300,20 @@ mod tests {
                 assert_eq!(sided.amount(game, 0), 500);
                 // A drain does not consult acceptance, so an old refused fluid is recoverable.
                 assert_eq!(
-                    game.transaction(|host, tx| Ok::<_, ()>(
+                    game.storage_transaction(|host, tx| {
                         target.extract_at(host, tx, 0, &chocolate, 100)
-                    )),
+                    }),
                     Ok(100)
                 );
                 assert_eq!(target.amount(game, 0), 900);
                 assert_eq!(
-                    game.transaction(|host, tx| Ok::<_, ()>(
+                    game.storage_transaction(|host, tx| {
                         source.insert_at(host, tx, 1, &water, 1000)
-                    )),
+                    }),
                     Ok(1000)
                 );
                 assert_eq!(
-                    game.transaction(|host, tx| move_resources(
+                    game.storage_transaction(|host, tx| move_resources(
                         host,
                         &source,
                         &target,
@@ -1326,8 +1325,8 @@ mod tests {
                 );
                 assert_eq!(source.amount(game, 1), 800);
                 assert_eq!(target.amount(game, 1), 700);
-                let abort: Result<(), ()> = game.transaction(|host, tx| {
-                    assert_eq!(target.insert_at(host, tx, 1, &water, 200), 200);
+                let abort: Result<(), ()> = game.storage_transaction(|host, tx| {
+                    assert_eq!(target.insert_at(host, tx, 1, &water, 200), Ok(200));
                     Err(())
                 });
                 assert!(abort.is_err());

@@ -1,5 +1,6 @@
 use super::movement::stepped_move;
 use super::*;
+use crate::game::entity::Entity;
 
 impl Game<'_> {
     /// A move packet for entity `id`: to the end of `path` (None: a
@@ -13,6 +14,19 @@ impl Game<'_> {
         rotation: Option<(f32, f32)>,
         on_ground: bool,
         packet: MovePacket,
+    ) {
+        self.move_entity_with_old(id, path, rotation, on_ground, packet, None);
+    }
+
+    /// `move_entity` with an explicit old pose (`setValuesFromPositionPacket`'s snapped old pose).
+    pub(super) fn move_entity_with_old(
+        &mut self,
+        id: i32,
+        path: Option<Path>,
+        rotation: Option<(f32, f32)>,
+        on_ground: bool,
+        packet: MovePacket,
+        snap_old: Option<PosRot>,
     ) {
         // The dragon is drawn from its own state (game/mobs/dragon.rs), which
         // tick_remote_dragon eases to the server's moves through `lerps`. Its
@@ -42,7 +56,36 @@ impl Game<'_> {
             .unwrap_or([0.0; 3]);
         if let Some(r) = self.remote.as_mut() {
             if let Some(t) = r.entities.get_mut(&id) {
-                t.position = position;
+                let d = [0, 1, 2].map(|i| position[i] - t.position[i]);
+                let snap = matches!(packet, MovePacket::PositionSyncSnap)
+                    || (matches!(packet, MovePacket::Teleport | MovePacket::PositionSync)
+                        && d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 4096.0);
+                if path.is_some() {
+                    t.position = position;
+                }
+                if let Some((yaw, pitch)) = rotation {
+                    if yaw.is_finite() {
+                        t.yaw = if snap { yaw } else { yaw % 360.0 };
+                    }
+                    if pitch.is_finite() {
+                        t.pitch = (pitch % 360.0).clamp(-90.0, 90.0);
+                    }
+                }
+                if snap {
+                    if let Some(old) = snap_old {
+                        t.previous = old.position;
+                        t.previous_yaw = if old.yaw.is_finite() { old.yaw } else { t.yaw };
+                        t.previous_pitch = if old.pitch.is_finite() {
+                            (old.pitch % 360.0).clamp(-90.0, 90.0)
+                        } else {
+                            t.pitch
+                        };
+                    } else {
+                        t.previous = t.position;
+                        t.previous_yaw = t.yaw;
+                        t.previous_pitch = t.pitch;
+                    }
+                }
             }
             if driven {
                 // handleMoveEntity, handleEntityPositionSync: the mount or boat
@@ -69,7 +112,13 @@ impl Game<'_> {
                         m.yaw += wrap_degrees(yaw - m.yaw);
                         m.head_pitch = (pitch % 360.0).clamp(-90.0, 90.0);
                     }
-                    m.on_ground = on_ground;
+                    let _ = m.update_retained_ground(
+                        &self.world,
+                        self.collision,
+                        &world_items!(self).entity_type_tags,
+                        on_ground,
+                        None,
+                    );
                     return;
                 }
                 // A living entity: LivingEntity.createInterpolationHandler's
@@ -84,13 +133,26 @@ impl Game<'_> {
                     SteppedInterpolation::new(interval as i32)
                 });
                 if let Some(at) = stepped_move(handler, packet, entity, position, path, rotation) {
-                    // snapTo: setOldPosAndRot too.
                     place_interpolated(m, at);
-                    m.previous = m.position;
-                    m.previous_yaw = m.yaw;
-                    m.previous_head_pitch = m.head_pitch;
+                    if let Some(old) = snap_old {
+                        m.previous = Vec3::new(old.position[0], old.position[1], old.position[2]);
+                        m.previous_yaw = old.yaw;
+                        m.previous_head_pitch = (old.pitch % 360.0).clamp(-90.0, 90.0);
+                    } else {
+                        m.previous = m.position;
+                        m.previous_yaw = m.yaw;
+                        m.previous_head_pitch = m.head_pitch;
+                    }
                 }
-                m.on_ground = on_ground;
+                // ClientPacketListener sets onGround after moving or queuing the
+                // interpolation; the support probe uses the current bounds.
+                let _ = m.update_retained_ground(
+                    &self.world,
+                    self.collision,
+                    &world_items!(self).entity_type_tags,
+                    on_ground,
+                    None,
+                );
                 return;
             }
             // An armor stand is a living entity too: the same handler, over
@@ -99,7 +161,7 @@ impl Game<'_> {
                 let entity = PosRot {
                     position: [a.position.x, a.position.y, a.position.z],
                     yaw: a.yaw,
-                    pitch: 0.0,
+                    pitch: a.pitch,
                 };
                 let handler = r.stepped.entry(id).or_insert_with(|| {
                     let interval =
@@ -110,16 +172,50 @@ impl Game<'_> {
                     a.snap(
                         Vec3::new(at.position[0], at.position[1], at.position[2]),
                         at.yaw,
+                        at.pitch,
                     );
+                    if let Some(old) = snap_old {
+                        a.previous = Vec3::new(old.position[0], old.position[1], old.position[2]);
+                        a.previous_yaw = old.yaw;
+                        a.previous_pitch = (old.pitch % 360.0).clamp(-90.0, 90.0);
+                    }
                 }
-                a.on_ground = on_ground;
+                let _ = a.update_retained_ground(
+                    &self.world,
+                    self.collision,
+                    &world_items!(self).entity_type_tags,
+                    on_ground,
+                    None,
+                );
                 return;
             }
             // Interaction extends Entity and keeps its NO_OP interpolation
             // handler: the server's position replaces its own at once.
             if let Some(i) = self.interactions.get_mut(&id) {
-                if path.is_some() {
-                    i.position = Vec3::new(position[0], position[1], position[2]);
+                let target_pos = Vec3::new(position[0], position[1], position[2]);
+                let d = target_pos.subtract(i.position);
+                let snap = matches!(packet, MovePacket::PositionSyncSnap)
+                    || (matches!(packet, MovePacket::Teleport | MovePacket::PositionSync)
+                        && d.x * d.x + d.y * d.y + d.z * d.z > 4096.0);
+                if snap {
+                    let (yaw, pitch) = rotation.unwrap_or((i.yaw, i.pitch));
+                    i.snap_to(target_pos, yaw, pitch);
+                    if let Some(old) = snap_old {
+                        i.previous = Vec3::new(old.position[0], old.position[1], old.position[2]);
+                        i.previous_yaw = if old.yaw.is_finite() { old.yaw } else { i.yaw };
+                        i.previous_pitch = if old.pitch.is_finite() {
+                            (old.pitch % 360.0).clamp(-90.0, 90.0)
+                        } else {
+                            i.pitch
+                        };
+                    }
+                } else {
+                    if path.is_some() {
+                        i.position = target_pos;
+                    }
+                    if let Some((yaw, pitch)) = rotation {
+                        i.set_rot(yaw, pitch);
+                    }
                 }
                 return;
             }
@@ -193,7 +289,7 @@ impl Game<'_> {
             let at = Vec3::new(position[0], position[1], position[2]);
             if let Some(d) = self.dropped.iter_mut().find(|d| d.id == id as u32) {
                 d.position = at;
-                d.on_ground = on_ground;
+                d.ground.on_ground = on_ground;
                 return;
             }
             if let Some(i) = self.falling.iter().rposition(|f| f.id == id as u32) {
@@ -202,7 +298,7 @@ impl Game<'_> {
             }
             if let Some(t) = self.tnts.iter_mut().rev().find(|t| t.id == id as u32) {
                 t.position = at;
-                t.on_ground = on_ground;
+                t.ground.on_ground = on_ground;
                 return;
             }
             // ExperienceOrb.createInterpolationHandler is a
@@ -210,7 +306,7 @@ impl Game<'_> {
             // ticks (`tick_remote_entities`), while `ExperienceOrb.tick` keeps
             // moving it.
             if let Some(o) = self.orbs.iter_mut().find(|o| o.id == id as u32) {
-                o.on_ground = on_ground;
+                o.ground.on_ground = on_ground;
                 r.lerps.insert(
                     id,
                     Lerp {
@@ -235,7 +331,7 @@ impl Game<'_> {
                         }
                     });
                 }
-            } else {
+            } else if !self.text_displays.contains_key(&id) {
                 // AbstractInterpolationHandler.interpolateTo: without a
                 // rotation, the one it was heading for.
                 let rotation = rotation.or_else(|| r.lerps.get(&id).and_then(|l| l.rotation));
@@ -250,7 +346,14 @@ impl Game<'_> {
             }
         }
         self.turn_remote_object(id, rotation.map(|(yaw, _)| yaw), on_ground);
-        self.move_remote_text_display(id, position, rotation);
+        match packet {
+            MovePacket::PositionSync | MovePacket::PositionSyncSnap => {
+                self.position_sync_remote_text_display(id, position, rotation);
+            }
+            MovePacket::Move | MovePacket::Teleport => {
+                self.move_remote_text_display_opt(id, path.is_some().then_some(position), rotation);
+            }
+        }
         self.turn_remote_projectile(id, rotation);
     }
     /// `handleMoveVehicle`'s `getInterpolation().cancel()` for the mount this

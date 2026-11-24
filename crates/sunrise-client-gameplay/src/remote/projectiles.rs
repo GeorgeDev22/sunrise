@@ -4,7 +4,10 @@ use sunrise_client::items::ItemStack;
 use sunrise_client::join_seq::JoinList;
 use sunrise_client::particles::{ParticleEngine, ParticleOptions, ParticleType};
 use sunrise_client::projectiles::{Hit, Projectile, ProjectileKind, ProjectileWorld};
-use sunrise_core::{geometry::Vec3, random::RandomSource};
+use sunrise_core::{
+    geometry::{Vec3, trig},
+    random::{LegacyRandom, RandomSource},
+};
 
 /// An `AreaEffectCloud` a server tracks: what its client tick reads.
 pub struct RemoteCloud {
@@ -13,6 +16,7 @@ pub struct RemoteCloud {
     pub radius: f32,
     pub waiting: bool,
     pub particle: ParticleOptions,
+    pub random: LegacyRandom,
 }
 
 /// `AreaEffectCloud.DEFAULT_PARTICLE`: a white entity effect.
@@ -25,12 +29,14 @@ pub fn default_cloud_particle() -> ParticleOptions {
 /// (an entity effect stays still).
 pub fn cloud_client_tick(
     particles: &mut ParticleEngine,
+    world: &sunrise_client::world::World,
     at: [f64; 3],
     radius: f32,
     waiting: bool,
     particle: &ParticleOptions,
+    random: &mut LegacyRandom,
 ) {
-    if waiting && particles.random().next_boolean() {
+    if waiting && random.next_boolean() {
         return;
     }
     let (count, spread) = if waiting {
@@ -42,34 +48,35 @@ pub fn cloud_client_tick(
         )
     };
     for _ in 0..count {
-        let r = particles.random();
+        let r = &mut *random;
         let angle = r.next_float() * std::f32::consts::TAU;
         let distance = r.next_float().sqrt() * spread;
         let at = [
-            at[0] + f64::from(angle.cos() * distance),
+            at[0] + f64::from(trig::cos(f64::from(angle)) * distance),
             at[1],
-            at[2] + f64::from(angle.sin() * distance),
+            at[2] + f64::from(trig::sin(f64::from(angle)) * distance),
         ];
+        let default;
         let (options, velocity) = if particle.ty == ParticleType::EntityEffect {
-            let default = waiting && r.next_boolean();
-            let options = if default {
-                default_cloud_particle()
+            let options = if waiting && r.next_boolean() {
+                default = default_cloud_particle();
+                &default
             } else {
-                particle.clone()
+                particle
             };
             (options, [0.0; 3])
         } else if waiting {
-            (particle.clone(), [0.0; 3])
+            (particle, [0.0; 3])
         } else {
             let v = [
                 (0.5 - r.next_double()) * 0.15,
                 f64::from(0.01f32),
                 (0.5 - r.next_double()) * 0.15,
             ];
-            (particle.clone(), v)
+            (particle, v)
         };
-        // `addAlwaysVisibleParticle`.
-        particles.add_with(&options, at, velocity, false, true);
+        // The no-flag overload: always-show thinning, without a limiter override.
+        particles.add_always_visible_with_world(world, options, at, velocity);
     }
 }
 

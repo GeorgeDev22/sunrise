@@ -2,7 +2,7 @@
 //! network order, with their data for clients that do not know the vanilla
 //! pack) and the tags of every registry, loaded from the prepared resources
 //! (`data/minecraft/...`) and the registries report.
-use crate::{advancements::Tree, chunk::LevelShapes};
+use crate::{advancements::Tree, chunk::LevelShapes, items::Items};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -10,11 +10,13 @@ use std::{
     sync::Arc,
 };
 use sunrise_core::nbt::{JavaString, Tag};
+use sunrise_protocol::item::consume_effects;
 use sunrise_protocol::{
     entity_data,
     packets::configuration::{RegistryData, RegistryEntry, RegistryTags, TagEntry, UpdateTags},
     registry::{Builtin, Dynamic},
 };
+use sunrise_world::{damage_source::Catalog, level::classes::is_generated_tag};
 
 /// RegistryDataLoader.SYNCHRONIZED_REGISTRIES, in vanilla's order.
 pub const SYNCHRONIZED: &[&str] = &[
@@ -185,6 +187,41 @@ impl FrozenDamage {
     }
 }
 
+/// Tags already bound by the world. Lazy wire loading must not re-read these files.
+pub struct WorldTags {
+    items: Arc<Items>,
+    damage: sunrise_world::loot::RegistryTags,
+}
+
+impl WorldTags {
+    pub fn new(items: Arc<Items>, damage: &Catalog) -> Self {
+        Self {
+            items,
+            damage: damage
+                .tags()
+                .map(|tag| {
+                    (
+                        tag.to_owned(),
+                        damage.tag_members(tag).map(str::to_owned).collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn for_registry(&self, registry: &str) -> Option<&sunrise_world::loot::RegistryTags> {
+        let kind = registry.strip_prefix("minecraft:")?;
+        if kind == "damage_type" {
+            Some(&self.damage)
+        } else {
+            self.items
+                .ordered_tags()
+                .into_iter()
+                .find_map(|(name, tags)| (name == kind).then_some(tags))
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SyncLoad {
     Fresh,
@@ -250,6 +287,18 @@ fn synchronized_entries(
         .collect();
     if enchantments || matches!(path, "instrument" | "jukebox_song") {
         mod_entries(resources, path, &mut entries);
+    }
+    if key == "minecraft:world_clock" {
+        // The mods' clocks (`register_world_clock`), below the packs: a `WorldClock` has no field.
+        for id in mod_api::__private::world_clock_declarations() {
+            if let Some((ns, path)) = id.split_once(':') {
+                entries.push((
+                    (ns.to_owned(), path.to_owned()),
+                    Value::Object(<_>::default()),
+                    true,
+                ));
+            }
+        }
     }
     if key == "minecraft:dimension_type" {
         mod_dimension_types(
@@ -435,8 +484,7 @@ impl SyncData {
             advancements: super::advancements::ServerAdvancements::load(
                 Path::new(""),
                 &sunrise_world::loot::PackOverlay::NONE,
-                BTreeMap::new(),
-                HashMap::new(),
+                super::recipes::BookProjections::default(),
             ),
             content_identity: None,
         }
@@ -471,6 +519,7 @@ impl SyncData {
         defaults: &sunrise_world::item_defaults::ItemDefaults,
         sources: &crate::crafting::ResolvedSources,
         advancements: &Arc<Tree>,
+        world_tags: Option<&WorldTags>,
     ) -> Result<Self, String> {
         Self::load_with_frozen(
             resources,
@@ -483,6 +532,7 @@ impl SyncData {
             defaults,
             sources,
             Some(advancements),
+            world_tags,
         )
     }
 
@@ -506,6 +556,7 @@ impl SyncData {
             SyncLoad::Fresh,
             defaults,
             sources,
+            None,
             None,
         )
     }
@@ -532,6 +583,7 @@ impl SyncData {
             defaults,
             sources,
             None,
+            None,
         )
     }
 
@@ -545,6 +597,7 @@ impl SyncData {
         defaults: &sunrise_world::item_defaults::ItemDefaults,
         sources: &crate::crafting::ResolvedSources,
         advancements: Option<&Arc<Tree>>,
+        world_tags: Option<&WorldTags>,
     ) -> Result<Self, String> {
         Self::load_with_frozen(
             resources,
@@ -557,6 +610,7 @@ impl SyncData {
             defaults,
             sources,
             advancements,
+            world_tags,
         )
     }
 
@@ -571,6 +625,7 @@ impl SyncData {
         defaults: &sunrise_world::item_defaults::ItemDefaults,
         sources: &crate::crafting::ResolvedSources,
         advancements: Option<&Arc<Tree>>,
+        world_tags: Option<&WorldTags>,
     ) -> Result<Self, String> {
         use crate::spans::startup;
         // The recipe book, the recipe sync and the advancements read the
@@ -751,11 +806,42 @@ impl SyncData {
             );
             registries.push(((*key).to_owned(), e));
         }
+        if consume_effects::has_custom_types() {
+            let (names, data): (Vec<_>, Vec<_>) = consume_effects::configuration()
+                .map(|(name, schema)| (name.to_owned(), Tag::Long(schema as i64)))
+                .unzip();
+            dynamic
+                .add_consume_effects(RegistryData {
+                    registry: consume_effects::REGISTRY.to_owned(),
+                    entries: names
+                        .iter()
+                        .zip(&data)
+                        .map(|(name, schema)| RegistryEntry {
+                            id: name.clone(),
+                            data: Some(schema.clone()),
+                        })
+                        .collect(),
+                })
+                .map_err(|error| error.to_string())?;
+            let from_pack = vec![true; names.len()];
+            registries.push((
+                consume_effects::REGISTRY.to_owned(),
+                Entries {
+                    names,
+                    data,
+                    from_pack,
+                },
+            ));
+        }
         // Merge the world's tag files against the admitted registry IDs above.
         drop(registries_step);
         let tags_step = startup::step("sync.tags");
-        let mut tags = Self::load_tags(resources, overlay, &builtin, &dynamic)?;
-        Self::merge_damage_tags(&mut tags, resources, overlay, &builtin, &dynamic)?;
+        let same_files = kept
+            .filter(|_| mode == SyncLoad::SameFiles)
+            .map(|kept| (&kept.tags, biomes.is_some()));
+        let mut tags = Self::load_tags(
+            resources, overlay, &builtin, &dynamic, world_tags, same_files,
+        )?;
         if let Some(kept) = kept.filter(|_| mode == SyncLoad::Reload) {
             // TagLoader.loadPendingTags does not rebind a registry when
             // no tags were built. Play reloads and future joins both send
@@ -769,7 +855,12 @@ impl SyncData {
                 .tags
                 .registries
                 .iter()
-                .filter(|r| !loaded.contains(r.registry.as_str()))
+                .filter(|r| {
+                    !loaded.contains(r.registry.as_str())
+                        && world_tags
+                            .and_then(|tags| tags.for_registry(&r.registry))
+                            .is_none()
+                })
                 .cloned()
                 .collect();
             tags.registries.extend(retained);
@@ -787,23 +878,6 @@ impl SyncData {
         } else {
             None
         };
-        let damage = sunrise_client_core::registries::RegistryIds {
-            ids: dynamic
-                .registries
-                .get("minecraft:damage_type")
-                .into_iter()
-                .flatten()
-                .map(|(name, _)| name.clone())
-                .collect(),
-            tags: tags
-                .registries
-                .iter()
-                .find(|registry| registry.registry == "minecraft:damage_type")
-                .into_iter()
-                .flat_map(|registry| &registry.tags)
-                .map(|tag| tag.name.clone())
-                .collect(),
-        };
         let mut sync = Self {
             effect_particle_ids: Default::default(),
             content_identity,
@@ -820,29 +894,22 @@ impl SyncData {
             advancements: match kept.filter(|_| mode == SyncLoad::SameFiles) {
                 Some(kept) => kept.advancements.clone(),
                 None => {
-                    let (recipes, groups) = startup::time("sync.network_recipes", || {
-                        super::recipes::network_recipes(
-                            resources,
-                            overlay,
-                            defaults,
-                            sources,
-                            damage,
-                            packed.as_deref(),
-                        )
+                    let projections = startup::time("sync.book_projections", || {
+                        super::recipes::book_projections(sources)
                     })
                     .map_err(|error| error.to_string())?;
                     startup::time("sync.advancements", || {
                         let tree = advancements
                             .cloned()
                             .unwrap_or_else(|| Tree::shared(&resources.join("data"), overlay));
-                        super::advancements::ServerAdvancements::from_tree(tree, recipes, groups)
+                        super::advancements::ServerAdvancements::from_tree(tree, projections)
                     })
                 }
             },
             packed_registries: packed,
         };
         let (recipes, buttons) = startup::time("sync.update_recipes", || {
-            super::recipes::update_recipes(&sync.advancements.recipes, &sync, sources)
+            super::recipes::update_recipes(&sync, sources)
         });
         sync.recipes = recipes;
         sync.stonecutter_buttons = Arc::new(buttons);
@@ -925,7 +992,7 @@ impl SyncData {
         let mut meta = vec![(
             10,
             entity_data::serializer::PARTICLES,
-            entity_data::Value::Particles(particles),
+            entity_data::Value::Particles(particles.into()),
         )];
         if all_ambient {
             meta.push((
@@ -939,6 +1006,9 @@ impl SyncData {
 
     /// The id of a name in a built-in or synchronized registry.
     pub fn id(&self, registry: &str, name: &str) -> Option<i32> {
+        if registry == consume_effects::REGISTRY {
+            return self.dynamic.consume_effect_id(name);
+        }
         if registry == "minecraft:data_component_type"
             && self.dynamic.custom_components
             && let Some(id) = sunrise_protocol::item::custom::id(name)
@@ -990,34 +1060,6 @@ impl SyncData {
             })
             .collect()
     }
-    fn merge_damage_tags(
-        tags: &mut UpdateTags,
-        resources: &Path,
-        overlay: &sunrise_world::loot::PackOverlay,
-        builtin: &Builtin,
-        dynamic: &Dynamic,
-    ) -> Result<(), String> {
-        let Some(names) = Self::registry_names(builtin, dynamic, "minecraft:damage_type") else {
-            return Ok(());
-        };
-        let resolved = sunrise_world::damage_source::resource_tags(resources, overlay, |id, _| {
-            names.get(id).copied()
-        })
-        .map_err(|e| e.to_string())?;
-        tags.registries
-            .retain(|r| r.registry != "minecraft:damage_type");
-        if !resolved.is_empty() {
-            tags.registries.push(RegistryTags {
-                registry: "minecraft:damage_type".into(),
-                tags: resolved
-                    .into_iter()
-                    .map(|(name, ids)| TagEntry { name, ids })
-                    .collect(),
-            });
-        }
-        Ok(())
-    }
-
     fn registry_names<'a>(
         builtin: &'a Builtin,
         dynamic: &'a Dynamic,
@@ -1040,12 +1082,15 @@ impl SyncData {
         })
     }
 
-    /// Bind the complete resource/pack stack before translating it to wire IDs.
+    /// `TagNetworkSerialization.serializeTagsToNetwork`: encode bound tags
+    /// by registry ID. Standalone sync also binds registries with no world owner.
     fn load_tags(
         resources: &Path,
         overlay: &sunrise_world::loot::PackOverlay,
         builtin: &Builtin,
         dynamic: &Dynamic,
+        world_tags: Option<&WorldTags>,
+        same_files: Option<(&UpdateTags, bool)>,
     ) -> Result<UpdateTags, String> {
         let mut keys: Vec<_> = builtin
             .registries
@@ -1056,37 +1101,75 @@ impl SyncData {
         keys.dedup();
         let mut registries = Vec::new();
         for key in keys {
+            if let Some((kept, rebuild_biomes)) = same_files
+                && (!rebuild_biomes || key != BIOME_REGISTRY)
+            {
+                // Same-file loads only change the biome registry or feature flags.
+                // Rebinding other registries here would discard retained tags.
+                registries.extend(kept.registries.iter().find(|r| &r.registry == key).cloned());
+                continue;
+            }
             let Some(names) = Self::registry_names(builtin, dynamic, key) else {
                 continue;
             };
-            let kind = match key.split_once(':') {
-                Some(("minecraft", path)) => path.to_owned(),
-                Some((ns, path)) => format!("{ns}/{path}"),
-                None => key.clone(),
-            };
-            let contains = |id: &str| names.contains_key(id);
-            let bound: BTreeMap<_, _> = if key == "minecraft:dialog" {
-                // Dialog registry admission also tracks missing writable holders.
-                bind_dialog_tags(&resources.join("data/minecraft"), overlay, contains).0
-            } else if key == "minecraft:damage_type" {
-                // `merge_damage_tags` binds this world-owned registry below.
-                continue;
-            } else {
-                sunrise_world::tag_layers::load(resources, &kind, overlay, contains)
-                    .map_err(|e| e.to_string())?
+            let tags = if let Some(bound) = world_tags.and_then(|tags| tags.for_registry(key)) {
+                let bound: BTreeMap<_, _> = bound.iter().collect();
+                bound
                     .into_iter()
+                    // Class tags are generated on each side from the same block facts.
+                    .filter(|(tag, _)| key != "minecraft:block" || !is_generated_tag(tag))
+                    .map(|(tag, members)| {
+                        let ids = members
+                            .iter()
+                            .map(|id| {
+                                names
+                                    .get(id.as_str())
+                                    .copied()
+                                    .ok_or_else(|| format!("tag {key} {tag}: no wire id for {id}"))
+                            })
+                            .collect::<Result<_, _>>()?;
+                        Ok(TagEntry {
+                            name: tag.clone(),
+                            ids,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?
+            } else if key == "minecraft:damage_type" {
+                sunrise_world::damage_source::resource_tags(resources, overlay, |id, _| {
+                    names.get(id).copied()
+                })
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|(name, ids)| TagEntry { name, ids })
+                .collect()
+            } else {
+                let kind = match key.split_once(':') {
+                    Some(("minecraft", path)) => path.to_owned(),
+                    Some((ns, path)) => format!("{ns}/{path}"),
+                    None => key.clone(),
+                };
+                let contains = |id: &str| names.contains_key(id);
+                let bound: BTreeMap<_, _> = if key == "minecraft:dialog" {
+                    // Dialog registry admission also tracks missing writable holders.
+                    bind_dialog_tags(&resources.join("data/minecraft"), overlay, contains).0
+                } else {
+                    sunrise_world::tag_layers::load(resources, &kind, overlay, contains)
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .collect()
+                };
+                bound
+                    .into_iter()
+                    .map(|(name, members)| TagEntry {
+                        name,
+                        ids: members.iter().map(|id| names[id.as_str()]).collect(),
+                    })
                     .collect()
             };
-            if !bound.is_empty() {
+            if !tags.is_empty() {
                 registries.push(RegistryTags {
                     registry: key.clone(),
-                    tags: bound
-                        .into_iter()
-                        .map(|(name, members)| TagEntry {
-                            name,
-                            ids: members.iter().map(|id| names[id.as_str()]).collect(),
-                        })
-                        .collect(),
+                    tags,
                 });
             }
         }
@@ -1289,7 +1372,15 @@ mod tests {
             ..Default::default()
         };
         let read_tags = |overlay: &sunrise_world::loot::PackOverlay| {
-            SyncData::load_tags(root.path(), overlay, &Builtin::default(), &dynamic).unwrap()
+            SyncData::load_tags(
+                root.path(),
+                overlay,
+                &Builtin::default(),
+                &dynamic,
+                None,
+                None,
+            )
+            .unwrap()
         };
         assert_eq!(
             read_tags(&sunrise_world::loot::PackOverlay::NONE).registries[0].tags[0].ids,
@@ -1326,6 +1417,8 @@ mod tests {
                 &sunrise_world::loot::PackOverlay::new(&files[..count]),
                 &builtin,
                 &Dynamic::default(),
+                None,
+                None,
             )
             .unwrap();
             let mut received = Dynamic::default();
@@ -1378,6 +1471,8 @@ mod tests {
             &sunrise_world::loot::PackOverlay::new(&files),
             &builtin,
             &Dynamic::default(),
+            None,
+            None,
         )
         .unwrap();
         let mut client = Dynamic::default();
@@ -1413,6 +1508,7 @@ mod tests {
             &defaults,
             &sources,
             &Arc::new(Tree::load_with(&root.join("data"), &overlay)),
+            None,
         )
         .unwrap();
         let registry = "minecraft:mob_effect";
@@ -1472,6 +1568,7 @@ mod tests {
             &sunrise_world::item_defaults::read(root).unwrap(),
             &crate::crafting::ResolvedSources::default(),
             &tree,
+            None,
         )
         .unwrap();
         let advancement = reloaded.advancements.definition("test:staged").unwrap();
@@ -1541,6 +1638,7 @@ mod tests {
                 &root.join("data"),
                 &PackOverlay::new(&changed),
             )),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1752,6 +1850,8 @@ mod tests {
             &overlay,
             &Builtin::default(),
             &dynamic,
+            None,
+            None,
         )
         .unwrap();
         let dialog = tags
@@ -2122,7 +2222,7 @@ mod tests {
             ),
         ];
         let overlay = sunrise_world::loot::PackOverlay::new(&files);
-        let tags = SyncData::load_tags(&root, &overlay, &builtin, &dynamic).unwrap();
+        let tags = SyncData::load_tags(&root, &overlay, &builtin, &dynamic, None, None).unwrap();
         let _ = std::fs::remove_dir_all(&root);
         let sent = |registry: &str, tag: &str| -> Vec<i32> {
             tags.registries

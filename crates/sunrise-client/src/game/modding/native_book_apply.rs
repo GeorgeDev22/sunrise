@@ -106,10 +106,9 @@ impl Game<'_> {
         if !before.known.contains(selection.display.recipe.as_str()) {
             return Err(R::Denied);
         }
-        let seal = self.transaction_open();
-        let result = self.stage_mod_book_place(&before, selection, &plan, use_max);
-        self.transaction_close(&seal, result.is_ok());
-        result
+        self.storage_transaction(|game, _| {
+            game.stage_mod_book_place(&before, selection, &plan, use_max)
+        })
     }
     fn mod_book_placement_context(
         &self,
@@ -174,7 +173,7 @@ impl Game<'_> {
             .and_then(|play| play.crafting.machine.as_ref())
             .filter(|(window, menu)| *window == before.window && menu.kind() == kind)
             .map_or_else(|| Box::new(Menu::new(kind)), |(_, menu)| menu.clone());
-        menu.reset_mod_visibility(&before.hidden);
+        menu.reset_mod_visibility(std::iter::empty());
         menu.set_registry_id(Some(before.kind.id));
         super::lan_crafting::load_player(&mut menu, guest);
         menu.set_container_limits(graph.limits());
@@ -322,18 +321,23 @@ impl Game<'_> {
                     return Err(());
                 }
                 let place = ItemPlace::MenuSlot { menu, slot: *slot };
-                if place.stack(host).as_ref() != before.as_ref() {
+                if place
+                    .with_stack(host, |stack| stack.project())
+                    .flatten()
+                    .as_ref()
+                    != before.as_ref()
+                {
                     return Err(());
                 }
                 if let Some(stack) = before {
                     let resource = ItemResource::of(stack);
-                    if place.extract(host, tx, &resource, stack.count()) != stack.count() {
+                    if place.extract(host, tx, &resource, stack.count()) != Ok(stack.count()) {
                         return Err(());
                     }
                 }
                 if let Some(stack) = after {
                     let resource = ItemResource::of(stack);
-                    if place.insert(host, tx, &resource, stack.count()) != stack.count() {
+                    if place.insert(host, tx, &resource, stack.count()) != Ok(stack.count()) {
                         return Err(());
                     }
                 }

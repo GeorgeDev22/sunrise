@@ -6,7 +6,7 @@ no such state for reads `None` and writes `false`, as every handle does.
 
 ## Living flags
 
-Through `LivingRef`: the glide (`is_gliding`, `gliding_ticks`, `stop_gliding`), the sleep of a server player or a
+Through `LivingRef`: the glide (`is_gliding`, `gliding_ticks`, `start_gliding`, `stop_gliding`), the sleep of a server player or a
 villager (`is_sleeping`, `sleeping_pos`, `start_sleeping`, `stop_sleeping`, `set_sleeping_pos`, `clear_sleeping_pos`),
 the jump of the player in place (`is_jumping`, `set_is_jumping`), climbing (`is_climbing`, the same `onClimbable`
 movement uses, including the gliding exclusion for vines), the baby read (`baby`) and shield blocking
@@ -14,8 +14,11 @@ movement uses, including the gliding exclusion for vines), the baby read (`baby`
 and mobs). Server player sleep writes
 work for the integrated owner, LAN guests and dedicated-server guests in the level in place, both inside and
 outside their own turn; guests in another dimension and fake players refuse all four sleep writes without
-mutation. A suspended outer actor is unavailable during a nested turn. Glide counters and stops follow the
-same authoritative body across turns. These reads do not add client tracked-entity coverage.
+mutation. A suspended outer actor is unavailable during a nested turn. Glide counters and starts and stops follow the
+same authoritative body across turns. `start_gliding` is vanilla's raw `startFallFlying` flag write, not
+`tryToStartFallFlying`: it does not check the glider, the ground, levitation or a liquid, so the caller decides. A
+client mod starts the local player's glide with `ClientHost::start_local_player_gliding` from `player_tick_pre`; the
+tick then reports `START_FALL_FLYING` as a jump-started glide does. These reads do not add client tracked-entity coverage.
 
 `start_sleeping` requires a bed with an available sleep shape before changing any state (a villager also refuses an
 occupied bed). It moves the sleeper onto that shape and occupies the bed. `stop_sleeping` stands the sleeper up
@@ -31,6 +34,14 @@ Villagers use `start_sleeping`/`stop_sleeping`, not the raw player position sett
 mob's movement speed already reads as that modifier (a cat's or ocelot's own AI may set it again on its next step). It returns `false` for a stale
 handle, on a client and for a kind with no sprinting flag. It is the flag `Entity.isSprinting` reads, not
 the player's sprint key: a player's own client sets its flag again from its input.
+
+## No gravity
+
+`EntityRef::no_gravity(host)` reads `Entity.isNoGravity` and
+`EntityRef::set_no_gravity(host, enabled)` sets it on the server. Both cover mobs and live
+dropped items, including an `EntityRef` resolved from `ItemPart::on_entity_item_update`; an
+item honours the flag in its own tick. Stale handles and other kinds read `None` and refuse
+the write. The write marks the item for its next sync, as it does for a mob.
 
 ## Fire, water and consumption
 
@@ -57,6 +68,15 @@ the previous eye-in-water sample AND current water contact. The local client pla
 `LocalPlayer.isUnderWater` override instead: its saved eye sample alone, even when current water
 contact is false. It is deliberately not equivalent to checking `eye_fluid` now. Both reads return
 `None` for unsupported kinds or stale handles.
+
+On the server, `LivingRef::can_breathe_underwater(host)` reads whether the mob's type is currently in
+`minecraft:can_breathe_under_water`. It does not predict drowning: it ignores effects, species-specific
+breathing overrides and invulnerability.
+
+`EntityRef::is_swimming` reads the swimming flag, not the player's current pose.
+[Swimming eligibility](entity-hooks.md#swimming-eligibility) can change entry on
+both sides without changing either of the fluid reads above or the conditions
+for continuing a swim.
 
 `PlayerRef::trigger_consume_item(host, &stack)` is server-only and fires just
 `CriteriaTriggers.CONSUME_ITEM.trigger(serverPlayer, stack)`, the vanilla public call that NeoForge
@@ -91,6 +111,16 @@ its turn reads the motion kept in the guest record, or its carried count while a
 admitted player with no body has count 0. The value wraps like Java's `int`, and a stale handle or another entity
 kind returns `None`.
 
+On a client, the read answers for every entity of the level the client shows, whatever its kind, from the client's
+own copy: as in vanilla, each copy counts the ticks the client level gives it from when the server added it
+(`Entity.commonTick` in `ClientLevel.tickNonPassenger` and `tickPassenger`), not the server's count. A frozen level
+ticks only the players and the entities carrying them. The local player counts before its own update, so also before
+it has loaded and while it sleeps. A root counts at its own visit, once its `entity_tick_pre` let it through (a
+canceled root does not count that tick), and a passenger counts before its own tick, whatever its Pre answers; a
+`player_tick_pre` callback already reads the player's new count. The new local player that a
+respawn or a dimension change makes starts again at 0 as soon as it is admitted, and counts from there, before the
+server's first teleport gives it a body.
+
 `MobRef::can_use_portal` reads the existing server portal decision for a mob in the current level, including mounts and player riders. It takes `&dyn Host`: `Some(false)` means the mob is ineligible, while `None` means a client, stale or unavailable handle, parked mob, or the separately modelled dragon. It does not load a level.
 
 `EntityRef::leash_holder` takes `&dyn Host` and reads the live lead of a mob or boat. `LeashHolder::Unleashed`
@@ -122,12 +152,16 @@ in its saved compound.
 
 ## Mob flags
 
-Through `MobRef`: `no_ai`/`set_no_ai` (`Mob.isNoAi` and `setNoAi`: the mob stands, saved as `NoAI`) and
+Through `MobRef`: `no_ai`/`set_no_ai` (`Mob.isNoAi` and `setNoAi`: the mob stands, saved as `NoAI`),
+`is_in_sitting_pose`/`set_in_sitting_pose` (`TamableAnimal.isInSittingPose` and `setInSittingPose`, on the tamable
+animals: wolf, cat, parrot, nautilus and zombie nautilus) and
 `set_baby` (`Mob.setBaby` through the canonical species-specific setup). Ageable mobs start at their species'
 baby age (`-48000` for a sniffer, otherwise `-24000`) or become adults at `0`, including the age-boundary
 attribute, navigation and AI changes. Their age is saved as `Age` where the kind saves one. Non-ageable babies,
 such as zombies and piglins, keep their non-growing baby state instead. A species with no baby form refuses
-`set_baby` without changing anything. Neither `set_baby` nor `set_no_ai` changes `PersistenceRequired`.
+`set_baby` without changing anything. The sitting write changes the synced pose only, not the saved
+`isOrderedToSit` order, so the pet's own sit goal may write the pose again on its next tick, as vanilla. Neither
+`set_baby` nor `set_no_ai` changes `PersistenceRequired`.
 
 `ai_paused`/`set_ai_paused` pause a mob's AI step while its physics runs on, as vanilla's `isImmobile` does for a
 dying mob or a stunned ravager. A paused mob skips `Mob.serverAiStep` whole: its Brain or its goal and target
@@ -144,10 +178,7 @@ For an Allay, the expiring liked-player memory, liked-note-block cooldown and it
 stop during the pause. Passive healing, the duplication countdown, dancing and animation continue.
 
 ```rust
-// A spawner's movable no-AI mob: paused once, and still paused after a reload.
-if let Some(mob) = host.mob(entity) {
-    let _ = mob.set_ai_paused(host, true);
-}
+{{#include ../../../examples/src/entity_and_native.rs:pause_mob_ai}}
 ```
 
 The persistence pair `persistence_required`/`set_persistence_required` reads and sets `Mob.isPersistenceRequired`;
@@ -208,3 +239,40 @@ riding relationships are unlinked even when a listener cancels. Each mob keeps i
 resident or off-level classification, and descendant state remains frozen.
 Cancellation can prevent ejection while the vehicle remains live, including
 underwater or activator ejection.
+
+## A type's default attributes
+
+`host.entity_type_default_attribute(entity_type, attribute)` reads what a new entity of a type has, with no entity
+spawned and before any modifier: `DefaultAttributes.getSupplier(type).getValue(attribute)`, the supplier's base inside
+the attribute's range. It works for vanilla's types and mods' registered ones (a mod type's declared row, with the
+attributes other mods added to it), on both sides. The Host and typed reload and client setup contexts read the same
+published catalog without unwinding. Registration and config contexts do not expose the read.
+
+```rust,ignore
+// The Zombie's 20 health and 2 armor, for a screen that lists a mob's stats.
+let health = host.entity_type_default_attribute("minecraft:zombie", "minecraft:max_health");
+let armor = host.entity_type_default_attribute("minecraft:zombie", "minecraft:armor");
+```
+
+`None` means the catalog has not been published yet, the type is not registered or has no attribute supplier
+(such as `minecraft:item`), or the supplier has no entry for that attribute. Names are read as `Identifier.parse` reads them: `zombie` and `:zombie` are `minecraft:zombie`.
+
+## Extinguishing fire
+
+`EntityRef::extinguish_fire(host)` exposes vanilla `Entity.extinguishFire` on
+players, guests, mobs, armor stands and dropped items. If the entity is burning,
+it first emits `minecraft:entity.generic.extinguish_fire` at its feet with volume
+0.7 and vanilla's pitch from two ordered random float draws. It then clears
+positive remaining fire ticks, preserving a negative fire-immunity countdown.
+Intrinsically fire-immune mobs, living entities with a live fire immunity grant,
+and dropped stacks resistant to in-fire damage do not count as burning, even when their timer is positive.
+Extinguishing them draws no pitch randomness and emits no sound.
+
+The sound uses the entity's sound source, including `SoundSource::Players` for
+players and guests. The operation draws no pitch randomness for a non-burning
+entity and returns `false` for stale or unsupported handles.
+
+`EntityRef::clear_fire(host)` is the distinct vanilla `Entity.clearFire` operation:
+it is silent, draws no random, and preserves the same negative countdown. Choose
+it only when the original behavior explicitly calls `clearFire`, rather than
+using it as a substitute for extinguishing.

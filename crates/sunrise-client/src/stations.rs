@@ -39,7 +39,8 @@ impl StationData {
         defaults: &sunrise_world::item_defaults::ItemDefaults,
         context: &sunrise_world::native_load_context::LoadContext,
     ) -> crate::Result<Self> {
-        let sources = crate::crafting::ResolvedSources::load_collecting(root, overlay, context)?;
+        let sources =
+            crate::crafting::ResolvedSources::load_collecting(root, items, overlay, context)?;
         let recipes = crate::crafting::Recipes::from_resolved(root, items, overlay, &sources)?;
         Ok(Self::from_sources(
             root,
@@ -61,7 +62,9 @@ impl StationData {
             enchantments: std::sync::Arc::clone(&items.enchantments),
             recipes: StationRecipes::from_sources(root, items, sources),
             brewing: {
-                let mut brewing = crate::brewing::Brewing::load(root, items, overlay);
+                let mut brewing = crate::brewing::Brewing::from_recipes(
+                    sources.brewing_recipes().cloned().collect(),
+                );
                 let added = |key| sources.property_additions.get(key).into_iter().flatten();
                 brewing.reagents.extend(added("brewing_reagent").cloned());
                 brewing.inputs.extend(added("brewing_input").cloned());
@@ -288,10 +291,84 @@ fn can_store_enchantments(stack: &ItemStack) -> bool {
 pub fn increased_repair_cost(cost: u32) -> u32 {
     (u64::from(cost) * 2 + 1).min(i32::MAX as u64) as u32
 }
-/// `ItemStack.getHoverName` as a component: the custom name as written, a potion's or tipped
-/// arrow's contents, a written book's title, the `item_name` component, else the item's or head
-/// owner's name, translatable so each viewer renders it in their own language.
+/// `ItemStack.getHoverName` as a component: the custom name, a written book's nonblank title,
+/// or the item's name. It stays translatable so each viewer renders it in their own language.
+/// The name a mod item's part gives the stack is not asked: [`hover_name_in`] asks it.
 pub fn hover_name_text(names: &crate::creative::Names, stack: &ItemStack) -> crate::text::Text {
+    hover_name_text_with(names, stack, |_| None, None)
+}
+/// [`hover_name_text`] with the name the parts of a mod item give the stack
+/// (`Item.getName(ItemStack)`, `ItemPart::item_name`), asked once, with the loop `context` of the
+/// side naming it, when the stack has no custom name or book title.
+pub fn hover_name_in(
+    context: &LoopContext,
+    names: &crate::creative::Names,
+    stack: &ItemStack,
+) -> crate::text::Text {
+    hover_name_in_reusing(context, names, stack, None)
+}
+/// Resolve as in [`hover_name_in`], sharing an unchanged translation's component
+/// with the previous HUD tick.
+pub fn hover_name_in_reusing(
+    context: &LoopContext,
+    names: &crate::creative::Names,
+    stack: &ItemStack,
+    previous: Option<&crate::text::Text>,
+) -> crate::text::Text {
+    hover_name_text_with(
+        names,
+        stack,
+        |stack| item_name_part(context, stack),
+        previous,
+    )
+}
+/// `ItemStack.getItemName` (`Item.getName(ItemStack)`): the name the parts of a mod item give the
+/// stack, asked once with the loop `context`, else the item's own name. Neither the custom name
+/// nor a book's title: `ItemEntity.getName` puts the entity's own custom name before it.
+pub fn item_name_in(
+    context: &LoopContext,
+    names: &crate::creative::Names,
+    stack: &ItemStack,
+) -> crate::text::Text {
+    item_name_text_with(names, stack, |stack| item_name_part(context, stack), None)
+}
+/// Whether `stack` names itself (`ItemStack.getCustomName`): a custom name, or a written book's
+/// non-blank title. `Item.getName` isn't asked then.
+pub fn names_itself(stack: &ItemStack) -> bool {
+    stack.custom_name().is_some()
+        || stack
+            .data()
+            .and_then(|d| d.written.as_ref())
+            .is_some_and(|w| !sunrise_core::java_character::is_blank(&w.title))
+}
+/// `Item.getName(ItemStack)` of a mod item: the name the parts of `stack`'s item give it
+/// (`ItemPart::item_name`), or None to keep the default. Asked with the loop `context` only, so a
+/// part can't name a stack again through a host. An item with no such part costs one lookup.
+pub fn item_name_part(context: &LoopContext, stack: &ItemStack) -> Option<crate::text::Text> {
+    let mut name = None;
+    crate::native_client_hooks::item_name(context, stack, &mut name);
+    name
+}
+/// `Item.getName(ItemStack)` is being asked of the parts of `stack`'s item: `name` starts as
+/// `None`, the default, and a part may set it. Asked on both sides.
+#[inline(never)]
+pub fn native_item_name(
+    context: &LoopContext,
+    stack: &mod_api::ItemStack,
+    name: &mut Option<mod_api::Text>,
+) {
+    mod_api::dispatch_item_name(
+        &sunrise_client_render::api_context::LoopReader(context).context(),
+        stack,
+        name,
+    );
+}
+fn hover_name_text_with(
+    names: &crate::creative::Names,
+    stack: &ItemStack,
+    part: impl FnOnce(&ItemStack) -> Option<crate::text::Text>,
+    previous: Option<&crate::text::Text>,
+) -> crate::text::Text {
     use crate::text::Text;
     let data = stack.data();
     // `ItemStack.getCustomName`: the custom name, else a written book's non-blank title.
@@ -303,26 +380,43 @@ pub fn hover_name_text(names: &crate::creative::Names, stack: &ItemStack) -> cra
     if let Some(title) = data
         .and_then(|d| d.written.as_ref())
         .map(|w| w.title.as_str())
-        .filter(|t| !t.trim().is_empty())
+        .filter(|t| !sunrise_core::java_character::is_blank(t))
     {
         return Text::literal(title);
+    }
+    item_name_text_with(names, stack, part, previous)
+}
+/// `ItemStack.getItemName` (`Item.getName(ItemStack)`): the item's own name, without the custom
+/// name or a book's title, asking the part of a mod item first.
+fn item_name_text_with(
+    names: &crate::creative::Names,
+    stack: &ItemStack,
+    part: impl FnOnce(&ItemStack) -> Option<crate::text::Text>,
+    previous: Option<&crate::text::Text>,
+) -> crate::text::Text {
+    use crate::text::Text;
+    let translate = |key: &str| Text::translate_reusing(key, previous);
+    let data = stack.data();
+    // `ItemStack.getItemName`: a mod item's `getName` (its part), asked once.
+    if let Some(name) = part(stack) {
+        return name;
     }
     // `ItemStack.getItemName`: the item's own `getName`, which for a few items is not its
     // `item_name` component.
     if let Some(key) = crate::brewing::contents_name_key(stack) {
-        return Text::translate(&key, &[]);
+        return translate(&key);
     }
     if &*stack.item == "minecraft:shield"
         && let Some(color) = data.and_then(|d| d.base_color.as_deref())
     {
         // `ShieldItem.getName`: the banner's base colour names the shield.
-        return Text::translate(&format!("item.minecraft.shield.{color}"), &[]);
+        return translate(&format!("item.minecraft.shield.{color}"));
     }
     if &*stack.item == "minecraft:compass"
         && data.is_some_and(|d| d.other("minecraft:lodestone_tracker").is_some())
     {
         // `CompassItem.getName`: a lodestone tracker names it, over `item_name`.
-        return Text::translate("item.minecraft.lodestone_compass", &[]);
+        return translate("item.minecraft.lodestone_compass");
     }
     if let Some(head) = crate::item_tooltip::player_head_name(stack) {
         // `PlayerHeadItem.getName`: a profile's name, else the item name.
@@ -345,7 +439,7 @@ pub fn hover_name_text(names: &crate::creative::Names, stack: &ItemStack) -> cra
             .and_then(|component| component.get("translate"))
             .and_then(serde_json::Value::as_str)
         {
-            Some(key) => Text::translate(key, &[]),
+            Some(key) => translate(key),
             None => crate::entity_nbt::name_text(&crate::scoreboard::json_to_tag(name)),
         };
     }
@@ -360,10 +454,12 @@ pub fn hover_name_text(names: &crate::creative::Names, stack: &ItemStack) -> cra
     } else {
         "item"
     };
-    Text::translate(&format!("{prefix}.{namespace}.{path}"), &[])
+    translate(&format!("{prefix}.{namespace}.{}", path.replace('/', ".")))
 }
 /// `ItemStack.getHoverName` as plain text in the current language: the component of
-/// [`hover_name_text`], rendered.
+/// [`hover_name_text`], rendered. Tests only: the game names a stack with [`hover_name_in`], which
+/// asks a mod item's part first.
+#[cfg(test)]
 pub fn hover_name(names: &crate::creative::Names, stack: &ItemStack) -> String {
     hover_name_text(names, stack).plain()
 }
@@ -718,28 +814,32 @@ pub(crate) enum ParsedStationRecipe {
     Stonecutting(Stonecutting),
 }
 impl ParsedStationRecipe {
-    pub(crate) fn parse(id: String, v: &Value, items: &Items) -> Option<Self> {
+    pub(crate) fn parse(
+        id: String,
+        v: &Value,
+        ingredient: impl Fn(&Value) -> Option<Ingredient>,
+    ) -> Option<Self> {
         match v["type"].as_str().unwrap_or("") {
             "minecraft:smithing_transform" => {
                 // Only omitted ingredients mean empty slots; malformed present
                 // ingredients invalidate the recipe rather than becoming optional.
                 let parse_optional = |key: &str| match v.get(key) {
                     None => Some(None),
-                    Some(value) => Ingredient::parse(value, items).map(Some),
+                    Some(value) => ingredient(value).map(Some),
                 };
                 Some(Self::Smithing(Smithing::Transform {
                     id,
                     template: parse_optional("template")?,
-                    base: Ingredient::parse(&v["base"], items)?,
+                    base: ingredient(&v["base"])?,
                     addition: parse_optional("addition")?,
                     result: crate::crafting::Template::parse(&v["result"])?,
                 }))
             }
             "minecraft:smithing_trim" => Some(Self::Smithing(Smithing::Trim {
                 id,
-                template: Ingredient::parse(&v["template"], items)?,
-                base: Ingredient::parse(&v["base"], items)?,
-                addition: Ingredient::parse(&v["addition"], items)?,
+                template: ingredient(&v["template"])?,
+                base: ingredient(&v["base"])?,
+                addition: ingredient(&v["addition"])?,
                 // Use the same holder codec as item components, collapsing
                 // unstyled literal text once at the recipe boundary before
                 // publishing the typed snapshot.
@@ -760,7 +860,7 @@ impl ParsedStationRecipe {
             })),
             "minecraft:stonecutting" => Some(Self::Stonecutting(Stonecutting {
                 id,
-                input: Ingredient::parse(&v["ingredient"], items)?,
+                input: ingredient(&v["ingredient"])?,
                 result: crate::crafting::Template::parse(&v["result"])
                     .filter(|template| template.item.is_some())?
                     .create(),
@@ -829,7 +929,8 @@ impl StationRecipes {
         overlay: &PackOverlay,
         context: &sunrise_world::native_load_context::LoadContext,
     ) -> crate::Result<Self> {
-        let sources = crate::crafting::ResolvedSources::load_collecting(root, overlay, context)?;
+        let sources =
+            crate::crafting::ResolvedSources::load_collecting(root, items, overlay, context)?;
         crate::crafting::Recipes::from_resolved(root, items, overlay, &sources)?;
         Ok(Self::from_sources(root, items, &sources))
     }
@@ -841,7 +942,7 @@ impl StationRecipes {
     ) -> Self {
         let mut smithing = Vec::new();
         let mut stonecutting = Vec::new();
-        for recipe in sources.station_recipes(items).iter().flatten() {
+        for recipe in sources.station_recipes() {
             match recipe {
                 ParsedStationRecipe::Smithing(recipe) => smithing.push(recipe.clone()),
                 ParsedStationRecipe::Stonecutting(recipe) if !recipe.input.items.is_empty() => {
@@ -1806,6 +1907,8 @@ mod tests {
             };
             assert_eq!(hover_name(&names, &book("Log")), "Log");
             assert_eq!(hover_name(&names, &book(" ")), "Written Book");
+            assert_eq!(hover_name(&names, &book("\u{001c}")), "Written Book");
+            assert_eq!(hover_name(&names, &book("\u{0085}")), "\u{0085}");
             let diamond = stack(r#"{id:"minecraft:diamond",count:1}"#);
             assert_eq!(hover_name(&names, &diamond), "Diamond");
         });
@@ -2309,9 +2412,10 @@ mod tests {
     fn stonecutting_component_result_is_retained() {
         let items = Items::for_tests(Default::default());
         let json = serde_json::json!({"type":"minecraft:stonecutting","ingredient":"minecraft:stone","result":{"id":"minecraft:diamond","count":2,"components":{"minecraft:damage":7}}});
-        let rule = ParsedStationRecipe::parse("test:cut".into(), &json, &items)
-            .unwrap()
-            .rule();
+        let rule =
+            ParsedStationRecipe::parse("test:cut".into(), &json, |v| Ingredient::parse(v, &items))
+                .unwrap()
+                .rule();
         let crate::crafting::RecipeRule::Stonecutting { result, .. } = rule else {
             panic!("wrong rule")
         };
@@ -2324,7 +2428,10 @@ mod tests {
     fn smithing_transform_omitted_slots_match_empty() {
         let items = Items::for_tests(Default::default());
         let json = serde_json::json!({"type":"minecraft:smithing_transform","base":"minecraft:stone","result":"minecraft:diamond"});
-        let parsed = ParsedStationRecipe::parse("test:smith".into(), &json, &items).unwrap();
+        let parsed = ParsedStationRecipe::parse("test:smith".into(), &json, |v| {
+            Ingredient::parse(v, &items)
+        })
+        .unwrap();
         assert!(matches!(
             parsed.rule(),
             crate::crafting::RecipeRule::SmithingTransform {
@@ -2360,7 +2467,10 @@ mod tests {
         let items = Items::for_tests(Default::default());
         let json = serde_json::json!({"type":"minecraft:smithing_transform","base":"minecraft:diamond_sword","result":{"id":"minecraft:netherite_sword","count":2}});
         let ParsedStationRecipe::Smithing(recipe) =
-            ParsedStationRecipe::parse("test:smith".into(), &json, &items).unwrap()
+            ParsedStationRecipe::parse("test:smith".into(), &json, |v| {
+                Ingredient::parse(v, &items)
+            })
+            .unwrap()
         else {
             panic!("wrong rule")
         };
@@ -2389,9 +2499,10 @@ mod tests {
     fn smithing_inline_trim_pattern_is_retained() {
         let items = Items::for_tests(Default::default());
         let json = serde_json::json!({"type":"minecraft:smithing_trim","template":"minecraft:stick","base":"minecraft:stone","addition":"minecraft:iron_ingot","pattern":{"asset_id":"example:wave","description":{"translate":"trim.example.wave"},"decal":true}});
-        let rule = ParsedStationRecipe::parse("test:trim".into(), &json, &items)
-            .unwrap()
-            .rule();
+        let rule =
+            ParsedStationRecipe::parse("test:trim".into(), &json, |v| Ingredient::parse(v, &items))
+                .unwrap()
+                .rule();
         let crate::crafting::RecipeRule::SmithingTrim {
             pattern:
                 crate::crafting::RecipeTrimPattern::Inline {
@@ -2568,10 +2679,7 @@ mod tests {
                 .unwrap()
                 .to_string();
             assert!(error.contains("data/test/recipe/invalid.json"), "{error}");
-            assert!(
-                error.contains("invalid ingredients or required fields"),
-                "{error}"
-            );
+            assert!(error.contains("invalid ingredient: null"), "{error}");
         }
         fs::remove_dir_all(root).unwrap();
     }

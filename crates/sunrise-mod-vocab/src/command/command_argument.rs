@@ -2,8 +2,8 @@
 //! tab-completion for one kind of value in a `Command` usage.
 //!
 //! A client that does not know the type still parses the command: the wire tree sends the
-//! argument as a Brigadier string (one word, or the rest of the line) and asks the server for its
-//! completions. Fabric instead registers the type in the command-argument registry, whose id an
+//! argument as a Brigadier string (one word, a word or quoted phrase, or the rest of the line) and
+//! asks the server for its completions. Fabric instead registers the type in the command-argument registry, whose id an
 //! unmodded client cannot read and whose node it drops; the string keeps a vanilla tree valid.
 
 use crate::{PermissionLevel, Text};
@@ -13,17 +13,54 @@ use std::sync::Arc;
 ///
 /// The server and a client that does not know the type parse the value as this before the mod's
 /// own parser sees it, so the type must say it up front, when it is registered.
+///
+/// The same bounded numbers are kinds of a usage: `<amount:integer(0,1000)>`, `<total:long>`,
+/// `<total:long(0,)>` (see [`Command`](crate::Command)).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
 pub enum CommandArgumentKind {
     /// One word, as Brigadier's `word` string: ASCII letters and digits, and `_ - . +`. The word
     /// ends at the first other character, a space included, so a value containing `:` or `/`
-    /// needs [`Greedy`](Self::Greedy) as the usage's last argument.
+    /// needs [`Greedy`](Self::Greedy) as the usage's last argument, or
+    /// [`Quotable`](Self::Quotable) with the value in quotes.
     #[default]
     Word,
     /// The rest of the line, spaces included: the argument must be the usage's last.
     Greedy,
+    /// One unquoted word or one quoted phrase, as Brigadier's `StringArgumentType.string()`
+    /// (`QUOTABLE_PHRASE`, `StringReader.readString`): a word of [`Word`](Self::Word)'s
+    /// characters, or text between `"` or `'` quotes, empty included, in which only the active
+    /// quote and `\` may follow a `\`. Other arguments may follow it, so `"#main" @a` reads
+    /// `#main` and then a player. [`parse`](CommandArgumentType::parse) receives the decoded text,
+    /// without its quotes; [`suggest`](CommandArgumentType::suggest) receives the prefix as typed,
+    /// an opening quote included. A bad escape is refused with Brigadier's `parsing.quote.escape`
+    /// and an unclosed phrase with `parsing.quote.expected.end`, before the parser runs. It goes
+    /// to clients as `brigadier:string` in its quotable mode, so an unmodded client reads the
+    /// phrase too.
+    Quotable,
+    /// A whole number in `i32` with optional bounds, as Brigadier's
+    /// `IntegerArgumentType.integer(min, max)` (NeoForge registers the same Brigadier type in
+    /// `RegisterCommandsEvent`). It goes to clients as `brigadier:integer` with the bounds
+    /// vanilla's `IntegerArgumentInfo` sends (a bound at `i32::MIN` or `i32::MAX` is left out, as
+    /// `None` is), so an unmodded client refuses an out-of-range value too. The server refuses
+    /// one with Brigadier's `argument.integer.low` / `argument.integer.big` before the mod's
+    /// [`parse`](CommandArgumentType::parse) sees the digits it accepted.
+    Integer {
+        /// The smallest value accepted; `None` for `i32::MIN`.
+        min: Option<i32>,
+        /// The largest value accepted; `None` for `i32::MAX`.
+        max: Option<i32>,
+    },
+    /// A whole number in `i64` with optional bounds, as Brigadier's
+    /// `LongArgumentType.longArg(min, max)`: `brigadier:long` on the wire, refused out of range
+    /// with `argument.long.low` / `argument.long.big`. Otherwise as [`Integer`](Self::Integer).
+    Long {
+        /// The smallest value accepted; `None` for `i64::MIN`.
+        min: Option<i64>,
+        /// The largest value accepted; `None` for `i64::MAX`.
+        max: Option<i64>,
+    },
 }
 
 /// Why a custom argument's parser refused the text a player wrote.
@@ -155,8 +192,9 @@ impl Default for CommandSender {
 ///
 /// Register it once, from `Hooks::register`, with `Registrar::register_command_argument`. Its
 /// namespaced id (`mymod:machine`) is the kind a `Command` usage names after the argument
-/// name: `Command::new("machine use <machine:mymod:machine>")`. The game then parses the
-/// argument with [`parse`](Self::parse) before calling `run_mod_command`, and asks
+/// name: `Command::new("machine use <machine:mymod:machine>")`. Register that server usage
+/// with [`crate::Command::executes`]. The game validates the argument with [`parse`](Self::parse)
+/// before calling its executor, and asks
 /// [`suggest`](Self::suggest) for the chat box's completions. Players' clients that do not know
 /// the type complete it from the server's answer.
 ///
@@ -166,10 +204,12 @@ pub trait CommandArgumentType: Send + Sync + 'static {
     /// The part of the line the argument takes. The same on every client.
     fn kind(&self) -> CommandArgumentKind;
 
-    /// Validate the text a client wrote and return the value `run_mod_command` receives.
+    /// Validate the text a client wrote and return the value the command executor receives.
     ///
-    /// `input` is one word (see [`CommandArgumentKind::Word`] for its characters), or the rest
-    /// of the line for [`CommandArgumentKind::Greedy`]. Return the canonical text to deliver (an
+    /// `input` is one word (see [`CommandArgumentKind::Word`] for its characters), the rest
+    /// of the line for [`CommandArgumentKind::Greedy`], or the decoded word or phrase for
+    /// [`CommandArgumentKind::Quotable`] (`"a \"b\""` arrives as `a "b"`). Return the canonical
+    /// text to deliver (an
     /// id, a lower-cased name, `"3"` for `"03"`), or the message shown to the player when the
     /// input is not valid.
     fn parse(&self, input: &str) -> Result<String, CommandArgumentError>;
@@ -177,8 +217,12 @@ pub trait CommandArgumentType: Send + Sync + 'static {
     /// The completions for the text `prefix` being typed at this argument, for `sender`.
     ///
     /// `prefix` is the text the argument holds so far: one word's worth for
-    /// [`Word`](CommandArgumentKind::Word), and the whole tail of the line up to the cursor for
-    /// [`Greedy`](CommandArgumentKind::Greedy). Return the values that match, in the order the
+    /// [`Word`](CommandArgumentKind::Word), the whole tail of the line up to the cursor for
+    /// [`Greedy`](CommandArgumentKind::Greedy), and the raw typed text for
+    /// [`Quotable`](CommandArgumentKind::Quotable), often mid-quote (`"Some Ti`), as Brigadier
+    /// hands a provider. A quotable type returns insertable syntax: a candidate that is not one
+    /// word is quoted (`"Some Title"`), as NeoForge's `EntityCommand` quotes its ids. Return the
+    /// values that match, in the order the
     /// chat should show them; the game keeps each suggestion's replacement range and tooltip. A
     /// suggestion replaces the whole prefix unless it names a
     /// [`replace_start`](CommandSuggestion::replace_start), which is how a type completes the

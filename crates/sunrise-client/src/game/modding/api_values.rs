@@ -1,14 +1,15 @@
-// game-module-visibility: pub(crate)
 //! The game-owned conversion boundary between API records and engine values.
 //! Rust's orphan rule prevents foreign From/TryFrom implementations here.
 #[path = "api_values/ingredient.rs"]
 mod ingredient_values;
 use mod_api::item::item_stack::{ItemStack as ApiStack, StackWriteError};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 #[cfg(test)]
 use sunrise_client::parallel::ListenSnapshot;
 use sunrise_client::parallel::TickThread;
 use sunrise_core::nbt::{Compound, JavaString, Tag};
+use sunrise_core::random::{LegacyRandom, RandomSource as EngineRandom};
 use sunrise_items::items::{ItemStack as EngineStack, Items};
 #[path = "api_values/aggregates.rs"]
 pub(in crate::game) mod aggregates;
@@ -17,18 +18,35 @@ pub(in crate::game) mod block_edit;
 #[path = "api_values/block_state.rs"]
 pub(in crate::game) mod block_state;
 
-/// The engine's generator as the API's owned source: the same state and cached gaussian, so it
-/// draws on as the engine's would.
-pub(crate) fn random_to_api(
-    random: &sunrise_core::random::LegacyRandom,
-) -> mod_api::LegacyRandomSource {
-    <(u64, Option<f64>)>::from(random).into()
+struct LiveLevelRandom<'a>(&'a mut LegacyRandom);
+
+impl mod_api::RandomSource for LiveLevelRandom<'_> {
+    fn next_int(&mut self) -> i32 {
+        self.0.next_int()
+    }
+    fn next_int_bound(&mut self, bound: i32) -> i32 {
+        self.0.next_int_bound(bound).unwrap_or(0)
+    }
+    fn next_long(&mut self) -> i64 {
+        self.0.next_long()
+    }
+    fn next_boolean(&mut self) -> bool {
+        self.0.next_boolean()
+    }
+    fn next_float(&mut self) -> f32 {
+        self.0.next_float()
+    }
+    fn next_double(&mut self) -> f64 {
+        self.0.next_double()
+    }
+    fn next_gaussian(&mut self) -> f64 {
+        self.0.next_gaussian()
+    }
 }
-/// The API's owned source as the engine's generator, state and cached gaussian kept.
-pub(crate) fn random_to_engine(
-    source: &mod_api::LegacyRandomSource,
-) -> sunrise_core::random::LegacyRandom {
-    <(u64, Option<f64>)>::from(source).into()
+
+/// Lend the actual stream directly without unwind restoration or transaction journaling.
+pub(super) fn with_live_level_random(random: &mut LegacyRandom, draw: mod_api::RandomDraw<'_>) {
+    draw.run(&mut LiveLevelRandom(random));
 }
 
 pub(crate) fn block_jump_factor(
@@ -93,7 +111,7 @@ pub(crate) fn default_state(
 ) -> Option<sunrise_world::registry::BlockStateId> {
     use mod_api::BlockMetadata;
     let metadata = mod_api::__private::block_definitions()?;
-    let value = mod_api::BlockState::from(metadata.of(block, &[]).ok()?);
+    let value = metadata.of(block, &[]).ok()?;
     block_state::current().ok()?.to_engine(value).ok()
 }
 
@@ -439,6 +457,8 @@ where
 mod content_declarations;
 pub(in crate::game) use content_declarations::{api_push_reaction, push_reaction};
 
+#[path = "api_values/component_edit.rs"]
+pub(in crate::game) mod component_edit;
 #[path = "api_values/stack_count.rs"]
 mod stack_count;
 pub(crate) use stack_count::TryIntoEnginePreservingCount;
@@ -801,23 +821,56 @@ impl TryIntoEngine for mod_api::MerchantOffer {
     }
 }
 
+pub(in crate::game) type StackReadMetadata = (mod_api::ItemKey, NonZeroU32, Option<u32>);
+
+/// Resolve the item and check the count without copying the stack or encoding its patch.
+pub(in crate::game) fn stack_read_metadata(
+    stack: &EngineStack,
+) -> Result<StackReadMetadata, StackReadError> {
+    let key = mod_api::__private::item_key(&stack.item).ok_or(StackReadError::UnknownItem)?;
+    let count = NonZeroU32::new(stack.count).ok_or(StackReadError::Empty)?;
+    let damage = stack
+        .carries_component(None, "minecraft:damage")
+        .then_some(stack.damage);
+    Ok((key, count, damage))
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(in crate::game) static STACK_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Encode and normalize the patch using the scalars already read from this same stack.
+pub(in crate::game) fn project_stack(
+    stack: &EngineStack,
+    metadata: StackReadMetadata,
+) -> Result<ApiStack, StackReadError> {
+    #[cfg(test)]
+    STACK_PROJECTIONS.set(STACK_PROJECTIONS.get() + 1);
+    let patch = sunrise_items::item_data::encode_extra_components(stack);
+    projected_stack(metadata, patch)
+}
+
+/// Build either a full or filtered projection with the same checked damage normalization.
+fn projected_stack(
+    (key, count, damage): StackReadMetadata,
+    patch: Option<Tag>,
+) -> Result<ApiStack, StackReadError> {
+    let mut result = ApiStack::from_scalars(key, count, damage);
+    if let Some(Tag::Compound(patch)) = patch {
+        result
+            .set_components(patch)
+            .map_err(StackReadError::InvalidComponents)?;
+    }
+    Ok(result)
+}
+
 impl TryIntoApi for EngineStack {
     type Api = ApiStack;
     type Error = StackReadError;
 
     fn try_into_api(&self) -> Result<ApiStack, Self::Error> {
-        let key = mod_api::__private::item_key(&self.item).ok_or(StackReadError::UnknownItem)?;
-        let mut result = ApiStack::new(key, self.count).ok_or(StackReadError::Empty)?;
-        if self.carries_component(None, "minecraft:damage") {
-            result.set_damage(self.damage);
-        }
-        if let Some(Tag::Compound(patch)) = sunrise_items::item_data::encode_extra_components(self)
-        {
-            result
-                .set_components(patch)
-                .map_err(StackReadError::InvalidComponents)?;
-        }
-        Ok(result)
+        project_stack(self, stack_read_metadata(self)?)
     }
 }
 
@@ -868,10 +921,21 @@ pub(in crate::game) fn stack_value(value: &ApiStack) -> Result<EngineStack, Stac
     encode_stack(value, id.into())
 }
 
-fn encode_stack(
+pub(in crate::game) fn encode_stack(
     value: &ApiStack,
-    item: std::sync::Arc<str>,
+    item: Arc<str>,
 ) -> Result<EngineStack, StackWriteError> {
+    let stack = decode_stack_record(value, item);
+    // Check the original override even if its value failed to decode.
+    let patch = value.components().map(|patch| patch.as_nbt());
+    content_declarations::validate_decoded_components(|name| {
+        patch?.get(&JavaString::from(name)).map(|_| &stack)
+    })?;
+    Ok(stack)
+}
+
+/// Decode the record's component overrides without changing their saved keys.
+fn decode_stack_record(value: &ApiStack, item: Arc<str>) -> EngineStack {
     let mut patch = value.components().map(|patch| patch.as_nbt().clone());
     // Let the existing component codec preserve explicit zero versus prototype inheritance.
     if value.damage_component() == Some(0) {
@@ -881,14 +945,12 @@ fn encode_stack(
     }
     let patch = patch.map(Tag::Compound);
     let (_, extra) = sunrise_items::item_data::decode_components(patch.as_ref());
-    let stack = EngineStack {
+    EngineStack {
         item,
         count: value.count(),
         damage: value.damage(),
         extra,
-    };
-    content_declarations::validate_decoded_components(patch.as_ref(), &stack)?;
-    Ok(stack)
+    }
 }
 
 impl TryIntoApi for crate::crafting::RecipeRule {
@@ -1125,16 +1187,6 @@ impl TryIntoApi for crate::crafting::RecipeSnapshot {
 /// Install the engine-facing callbacks; snapshots never enter engine storage.
 pub(crate) fn install_stack_hooks() {
     crate::native_stack_hooks::install(crate::native_stack_hooks::StackHooks {
-        ingredient_test: |context, kind, data, stack, accept| {
-            if !mod_api::__private::listened(mod_api::HookId::IngredientTest) {
-                return;
-            }
-            if let Ok(stack) = stack.try_into_api() {
-                sunrise_client::crafting::native_hooks::native_ingredient_test(
-                    context, kind, data, &stack, accept,
-                );
-            }
-        },
         enchantments: |stack, target, value| {
             if !mod_api::__private::listened(mod_api::HookId::GetEnchantmentLevel) {
                 return;
@@ -1170,234 +1222,187 @@ pub(crate) fn menu_still_valid(
     mod_api::dispatch_menu_still_valid(&context, player, menu, pos, eye, opening_item, valid);
 }
 
-impl TryIntoApi for crate::stations::AnvilResult {
-    type Api = mod_api::item::stations::AnvilResult;
+impl TryIntoApi for crate::menu::AnvilCraftSnapshot {
+    type Api = (Option<ApiStack>, Option<ApiStack>, ApiStack);
     type Error = StackReadError;
     fn try_into_api(&self) -> Result<Self::Api, Self::Error> {
-        Ok(mod_api::item::stations::AnvilResult {
-            result: self.result.try_into_api()?,
-            cost: self.cost,
-            repair_item_count_cost: self.repair_item_count_cost,
-            only_renaming: self.only_renaming,
-        })
-    }
-}
-impl TryIntoEngine for mod_api::item::stations::AnvilResult {
-    type Engine = crate::stations::AnvilResult;
-    type Error = StackWriteError;
-    fn try_into_engine(&self, items: &Items) -> Result<Self::Engine, Self::Error> {
-        Ok(crate::stations::AnvilResult {
-            result: self.result.try_into_engine(items)?,
-            cost: self.cost,
-            repair_item_count_cost: self.repair_item_count_cost,
-            only_renaming: self.only_renaming,
-        })
-    }
-}
-impl TryIntoApi for crate::menu::AnvilCraft {
-    type Api = mod_api::item::menu::AnvilCraft;
-    type Error = StackReadError;
-    fn try_into_api(&self) -> Result<Self::Api, Self::Error> {
-        Ok(mod_api::item::menu::AnvilCraft {
-            left: self.left.try_into_api()?,
-            right: self.right.try_into_api()?,
-            output: self.output.try_into_api()?,
-        })
-    }
-}
-impl TryIntoEngine for mod_api::item::menu::AnvilCraft {
-    type Engine = crate::menu::AnvilCraft;
-    type Error = StackWriteError;
-    fn try_into_engine(&self, items: &Items) -> Result<Self::Engine, Self::Error> {
-        Ok(crate::menu::AnvilCraft {
-            left: self.left.try_into_engine(items)?,
-            right: self.right.try_into_engine(items)?,
-            output: self.output.try_into_engine(items)?,
-        })
-    }
-}
-impl TryIntoApi for crate::menu::GrindstonePlace {
-    type Api = mod_api::item::menu::GrindstonePlace;
-    type Error = StackReadError;
-    fn try_into_api(&self) -> Result<Self::Api, Self::Error> {
-        Ok(mod_api::item::menu::GrindstonePlace {
-            top: self.top.try_into_api()?,
-            bottom: self.bottom.try_into_api()?,
-            vanilla_output: self.vanilla_output.try_into_api()?,
-            output: self.output.try_into_api()?,
-            xp: self.xp,
-        })
-    }
-}
-impl TryIntoEngine for mod_api::item::menu::GrindstonePlace {
-    type Engine = crate::menu::GrindstonePlace;
-    type Error = StackWriteError;
-    fn try_into_engine(&self, items: &Items) -> Result<Self::Engine, Self::Error> {
-        Ok(crate::menu::GrindstonePlace {
-            top: self.top.try_into_engine(items)?,
-            bottom: self.bottom.try_into_engine(items)?,
-            vanilla_output: self.vanilla_output.try_into_engine(items)?,
-            output: self.output.try_into_engine(items)?,
-            xp: self.xp,
-        })
-    }
-}
-impl TryIntoApi for crate::menu::GrindstoneTake {
-    type Api = mod_api::item::menu::GrindstoneTake;
-    type Error = StackReadError;
-    fn try_into_api(&self) -> Result<Self::Api, Self::Error> {
-        Ok(mod_api::item::menu::GrindstoneTake {
-            top: self.top.try_into_api()?,
-            bottom: self.bottom.try_into_api()?,
-            xp: self.xp,
-            new_top: self.new_top.try_into_api()?,
-            new_bottom: self.new_bottom.try_into_api()?,
-        })
-    }
-}
-impl TryIntoEngine for mod_api::item::menu::GrindstoneTake {
-    type Engine = crate::menu::GrindstoneTake;
-    type Error = StackWriteError;
-    fn try_into_engine(&self, items: &Items) -> Result<Self::Engine, Self::Error> {
-        Ok(crate::menu::GrindstoneTake {
-            top: self.top.try_into_engine(items)?,
-            bottom: self.bottom.try_into_engine(items)?,
-            xp: self.xp,
-            new_top: self.new_top.try_into_engine(items)?,
-            new_bottom: self.new_bottom.try_into_engine(items)?,
-        })
-    }
-}
-
-impl TryIntoApi for crate::menu::AnvilUpdate {
-    type Api = mod_api::item::menu::AnvilUpdate;
-    type Error = StackReadError;
-    fn try_into_api(&self) -> Result<Self::Api, Self::Error> {
-        let vanilla = mod_api::item::stations::AnvilResult {
-            result: self.vanilla.output.try_into_api()?,
-            cost: self.vanilla.xp_cost,
-            repair_item_count_cost: self.vanilla.material_cost.max(0) as u32,
-            only_renaming: false,
-        };
-        let mut result = mod_api::item::menu::AnvilUpdate::new(
+        Ok((
             self.left.try_into_api()?,
             self.right.try_into_api()?,
-            self.name.clone(),
-            &vanilla,
-        );
-        result.output = self.output.try_into_api()?;
-        result.xp_cost = self.xp_cost;
-        result.material_cost = self.material_cost;
-        Ok(result)
+            self.output.try_into_api()?,
+        ))
     }
 }
 
-impl TryIntoEngine for mod_api::item::menu::AnvilUpdate {
-    type Engine = crate::menu::AnvilUpdate;
-    type Error = StackWriteError;
-    fn try_into_engine(&self, items: &Items) -> Result<Self::Engine, Self::Error> {
-        Ok(crate::menu::AnvilUpdate {
-            left: self.left.try_into_engine(items)?,
-            right: self.right.try_into_engine(items)?,
-            name: self.name.clone(),
-            vanilla: crate::menu::AnvilVanilla {
-                output: self.vanilla.output.try_into_engine(items)?,
-                xp_cost: self.vanilla.xp_cost,
-                material_cost: self.vanilla.material_cost,
-            },
-            output: self.output.try_into_engine(items)?,
-            xp_cost: self.xp_cost,
-            material_cost: self.material_cost,
-        })
-    }
-}
 impl super::Game<'_> {
     pub(in crate::game) fn api_anvil_update(
         &mut self,
         player: u128,
         entity: i32,
         pos: [i32; 3],
-        value: &mut crate::menu::AnvilUpdate,
-        cancel: &mut bool,
+        inputs: crate::menu::AnvilUpdateInputs<'_>,
+        result: &mut crate::stations::AnvilResult,
     ) {
-        let Ok(mut api) = value.try_into_api() else {
+        use mod_api::item::menu::{AnvilUpdateEdits, AnvilUpdateInputs, StackResult};
+
+        let Ok(left) = inputs.left.try_into_api() else {
             return;
         };
-        let original = api.clone();
-        self.native_anvil_update(player, entity, pos, &mut api, cancel);
-        if api == original {
+        let Ok(right) = inputs.right.try_into_api() else {
+            return;
+        };
+        let Ok(vanilla_output) = result.result.try_into_api() else {
+            return;
+        };
+        let inputs = AnvilUpdateInputs {
+            left: &left,
+            right: right.as_ref(),
+            name: inputs.name,
+            vanilla_output: vanilla_output.as_ref(),
+            vanilla_xp_cost: result.cost,
+            vanilla_material_cost: i32::try_from(result.repair_item_count_cost).unwrap_or(i32::MAX),
+        };
+        let mut edits = AnvilUpdateEdits {
+            output: StackResult::Keep,
+            xp_cost: inputs.vanilla_xp_cost,
+            material_cost: inputs.vanilla_material_cost,
+        };
+        let mut cancel = false;
+        self.native_anvil_update(player, entity, pos, &inputs, &mut edits, &mut cancel);
+        if cancel {
+            *result = Default::default();
             return;
         }
-        match api.try_into_engine(self.items()) {
-            Ok(result) => *value = result,
-            Err(_) => *cancel = true,
+        // An equal replacement keeps the original engine stack, even if a mod could not write it.
+        if let StackResult::Set(output) = edits.output
+            && output != vanilla_output
+        {
+            match output.try_into_engine(self.items()) {
+                Ok(output) => {
+                    result.only_renaming &= result.result == output;
+                    result.result = output;
+                }
+                Err(err) => {
+                    log::warn!(
+                        "anvil_update: ignoring invalid output replacement at {pos:?}: {err:?}"
+                    );
+                }
+            }
         }
+        result.cost = edits.xp_cost.max(0);
+        result.repair_item_count_cost = edits.material_cost.max(0) as u32;
     }
     pub(in crate::game) fn api_grindstone_place(
         &mut self,
         player: u128,
         entity: i32,
         pos: [i32; 3],
-        value: &mut crate::menu::GrindstonePlace,
+        inputs: [Option<&EngineStack>; 3],
         cancel: &mut bool,
-    ) -> Result<(), crate::game::transactions::decision::InvalidReason> {
-        let Ok(mut api) = value.try_into_api() else {
-            return Ok(());
+    ) -> crate::menu::GrindstonePlaceEdits {
+        use mod_api::item::menu::{GrindstonePlaceEdits, GrindstonePlaceInputs};
+
+        let Ok([top, bottom, vanilla_output]) = inputs.try_into_api() else {
+            return Default::default();
         };
-        let original = api.clone();
-        self.native_grindstone_place(player, entity, pos, &mut api, cancel);
-        if api == original {
-            return Ok(());
+        let inputs = GrindstonePlaceInputs {
+            top: top.as_ref(),
+            bottom: bottom.as_ref(),
+            vanilla_output: vanilla_output.as_ref(),
+        };
+        let mut edits = GrindstonePlaceEdits {
+            output: None,
+            xp: -1,
+        };
+        let tx_depth = self.transactions.len();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.native_grindstone_place(player, entity, pos, &inputs, &mut edits, cancel);
+        }))
+        .is_err();
+        self.abort_abandoned_transactions(tx_depth);
+        if panicked {
+            log::error!("grindstone_place: listener panicked at {pos:?}");
+            *cancel = false;
+            return Default::default();
         }
-        // An answer that is no stack is refused, never read as a cancel.
-        *value = api
-            .try_into_engine(self.items())
-            .map_err(|_| crate::game::transactions::decision::InvalidReason::Count)?;
-        Ok(())
+        if *cancel {
+            return Default::default();
+        }
+        let xp = edits.xp.max(-1);
+        let output = match edits.output.try_into_engine(self.items()) {
+            Ok(output) => output,
+            Err(err) => {
+                log::warn!(
+                    "grindstone_place: ignoring invalid output replacement at {pos:?}: {err:?}"
+                );
+                None
+            }
+        };
+        crate::menu::GrindstonePlaceEdits { output, xp }
     }
     pub(in crate::game) fn api_grindstone_take(
         &mut self,
         player: u128,
         entity: i32,
         pos: [i32; 3],
-        value: &mut crate::menu::GrindstoneTake,
+        take: &crate::menu::PendingGrindstoneTake,
         cancel: &mut bool,
-    ) -> Result<(), crate::game::transactions::decision::InvalidReason> {
-        let Ok(mut api) = value.try_into_api() else {
-            return Ok(());
+    ) -> crate::menu::GrindstoneTakeEdits {
+        use mod_api::item::menu::{GrindstoneTakeEdits, GrindstoneTakeInputs};
+
+        let initial_xp = if take.xp >= 0 {
+            take.xp
+        } else {
+            let amount = take.vanilla_amount(&self.menu_env());
+            self.journal_level_random();
+            crate::stations::grindstone_xp_roll(amount, &mut self.world.random) as i32
         };
-        let original = api.clone();
-        self.native_grindstone_take(player, entity, pos, &mut api, cancel);
-        if api == original {
-            return Ok(());
+        let Ok([top, bottom]) = [take.top.as_ref(), take.bottom.as_ref()].try_into_api() else {
+            return crate::menu::GrindstoneTakeEdits::initial(initial_xp);
+        };
+        let inputs = GrindstoneTakeInputs {
+            top: top.as_ref(),
+            bottom: bottom.as_ref(),
+        };
+        let mut edits = GrindstoneTakeEdits {
+            xp: initial_xp,
+            new_top: None,
+            new_bottom: None,
+        };
+        let tx_depth = self.transactions.len();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.native_grindstone_take(player, entity, pos, &inputs, &mut edits, cancel);
+        }))
+        .is_err();
+        self.abort_abandoned_transactions(tx_depth);
+        if panicked {
+            log::error!("grindstone_take: listener panicked at {pos:?}");
+            *cancel = false;
+            return crate::menu::GrindstoneTakeEdits::initial(initial_xp);
         }
-        // An answer that is no stack is refused, never read as a cancel.
-        *value = api
-            .try_into_engine(self.items())
-            .map_err(|_| crate::game::transactions::decision::InvalidReason::Count)?;
-        Ok(())
-    }
-    pub(in crate::game) fn api_anvil_craft_pre(
-        &mut self,
-        player: u128,
-        name: &str,
-        pos: [i32; 3],
-        value: &crate::menu::AnvilCraft,
-        cancel: &mut bool,
-    ) {
-        if let Ok(api) = value.try_into_api() {
-            self.native_anvil_craft_pre(player, name, pos, &api, cancel);
+        if *cancel {
+            return crate::menu::GrindstoneTakeEdits::initial(initial_xp);
         }
-    }
-    pub(in crate::game) fn api_anvil_craft_post(
-        &mut self,
-        player: u128,
-        name: &str,
-        pos: [i32; 3],
-        value: &crate::menu::AnvilCraft,
-    ) {
-        if let Ok(api) = value.try_into_api() {
-            self.native_anvil_craft_post(player, name, pos, &api);
+        let new_top = match edits.new_top.try_into_engine(self.items()) {
+            Ok(stack) => stack,
+            Err(err) => {
+                log::warn!("grindstone_take: ignoring invalid top remainder at {pos:?}: {err:?}");
+                None
+            }
+        };
+        let new_bottom = match edits.new_bottom.try_into_engine(self.items()) {
+            Ok(stack) => stack,
+            Err(err) => {
+                log::warn!(
+                    "grindstone_take: ignoring invalid bottom remainder at {pos:?}: {err:?}"
+                );
+                None
+            }
+        };
+        crate::menu::GrindstoneTakeEdits {
+            xp: edits.xp,
+            new_top,
+            new_bottom,
         }
     }
 }
@@ -1505,8 +1510,9 @@ mod attribute_boundary_tests {
     fn a_servers_stack_takes_the_mods_answer_on_first_equip() {
         use std::sync::Arc;
         use sunrise_client::living_attributes::LivingAttributes;
+        use sunrise_core::vanilla_bytes::Writer;
         use sunrise_items::equipment::{CHEST, Equipment};
-        use sunrise_protocol::buf::{Codec, Reader, Writer};
+        use sunrise_protocol::buf::{Codec, Reader};
         use sunrise_protocol::item::{Slot, component};
         use sunrise_protocol::registry::{Builtin, Dynamic, Ids};
         use sunrise_world::{attribute_map::ValueKind, attributes::entity::Catalog};
@@ -1796,8 +1802,6 @@ impl TryIntoApi for crate::containers::ModBlockEntity {
     }
 }
 
-include!("api_values/block_entity_writeback.rs");
-
 impl super::Game<'_> {
     pub(in crate::game) fn api_block_entity_update_tag(
         pos: [i32; 3],
@@ -1864,54 +1868,6 @@ impl super::Game<'_> {
             player_entity_id,
         })
     }
-
-    pub(in crate::game) fn api_menu_button(
-        &mut self,
-        menu: &str,
-        block: Option<&str>,
-        context: &mod_api::item::menu::MenuButtonContext,
-        entity: Option<&mut crate::containers::ModBlockEntity>,
-        carried: &mut Option<EngineStack>,
-    ) {
-        if !mod_api::__private::has_part_hook(mod_api::HookId::MenuButton) {
-            return;
-        }
-        let mut api_entity = match entity.as_deref().map(TryIntoApi::try_into_api).transpose() {
-            Ok(entity) => entity,
-            Err(_) => return,
-        };
-        let Ok(mut cursor) = carried.try_into_api() else {
-            return;
-        };
-        let revision = api_entity.as_ref().map(|entity| entity.revision());
-        let original = cursor.clone();
-        self.native_menu_button(menu, block, context, api_entity.as_mut(), &mut cursor);
-        // The outer Option means whether the callback changed the cursor; the inner one is its
-        // new value. `Some(None)` is an explicit consume, while `None` leaves it untouched.
-        let cursor: Result<Option<Option<EngineStack>>, BlockEntitySnapshotError> =
-            if cursor == original {
-                Ok(None)
-            } else {
-                cursor
-                    .try_into_engine(self.items())
-                    .map(Some)
-                    .map_err(|_| BlockEntitySnapshotError::InvalidStack)
-            };
-        if let (Some(entity), Some(api), Some(revision)) = (entity, api_entity.as_ref(), revision) {
-            if let Ok(Some(cursor)) = finish_block_entity_writeback(
-                entity,
-                api,
-                revision,
-                self.items(),
-                "menu_button",
-                cursor,
-            ) {
-                *carried = cursor;
-            }
-        } else if let Ok(Some(cursor)) = cursor {
-            *carried = cursor;
-        }
-    }
 }
 impl super::GameLevel<'_> {
     pub(in crate::game) fn api_pre_remove_side_effects(
@@ -1952,119 +1908,6 @@ impl super::GameLevel<'_> {
             return Default::default();
         }
         outputs
-    }
-}
-
-#[cfg(test)]
-mod block_entity_snapshot_tests {
-    use super::*;
-    #[test]
-    fn rejected_writebacks_invalidate_tick() {
-        assert_rejected_writeback("block_entity_tick");
-    }
-    #[test]
-    fn rejected_writebacks_invalidate_menu_button() {
-        assert_rejected_writeback("menu_button");
-    }
-    #[test]
-    fn rejected_writebacks_invalidate_menu_quick_move() {
-        assert_rejected_writeback("menu_quick_move");
-    }
-    fn assert_rejected_writeback(hook: &'static str) {
-        let items = Items::for_tests(Default::default());
-        let mut entity =
-            crate::containers::ModBlockEntity::new("test:rejected".into(), Default::default());
-        let mut snapshot = entity.try_into_api().unwrap();
-        let before = snapshot.revision();
-        snapshot.data.push(42);
-        let claimed = snapshot.revision().changes();
-        // Tick rejection: wrong identity. Menu rejection: invalid cursor/held output.
-        let output = if hook == "block_entity_tick" {
-            snapshot = mod_api::ModBlockEntity::new("other:type".into(), Default::default());
-            Ok(())
-        } else {
-            Err(BlockEntitySnapshotError::InvalidStack)
-        };
-        assert!(
-            finish_block_entity_writeback(&mut entity, &snapshot, before, &items, hook, output)
-                .is_err()
-        );
-        assert!(entity.data.is_empty());
-        assert_eq!(
-            entity.revision().changes(),
-            if hook == "block_entity_tick" {
-                1
-            } else {
-                claimed + 1
-            }
-        );
-    }
-
-    #[test]
-    fn unchanged_snapshots_keep_revision_and_callback_writes_advance_it() {
-        let mut entity =
-            crate::containers::ModBlockEntity::new("test:machine".into(), Default::default());
-        let first = entity.try_into_api().unwrap();
-        let mut second = entity.try_into_api().unwrap();
-        assert_eq!(first.revision(), second.revision());
-        let before = second.revision();
-        second.data.push(7);
-        second.data.push(8);
-        assert_ne!(before, second.revision());
-        apply_block_entity_snapshot(
-            &mut entity,
-            &second,
-            before,
-            &Items::for_tests(Default::default()),
-        )
-        .unwrap();
-        let third = entity.try_into_api().unwrap();
-        assert_ne!(first.revision(), third.revision());
-        assert_eq!(second.revision(), third.revision());
-        assert_eq!(third.revision(), entity.try_into_api().unwrap().revision());
-        assert_eq!(entity.id(), "test:machine");
-        assert_eq!(entity.data, [7, 8]);
-        let other = mod_api::ModBlockEntity::new("test:machine".into(), Default::default());
-        assert_ne!(other.revision(), third.revision());
-        entity.data.push(9);
-        let fourth = entity.try_into_api().unwrap();
-        assert_ne!(fourth.revision(), second.revision());
-        let items = Items::for_tests(Default::default());
-        assert_eq!(
-            apply_block_entity_snapshot(&mut entity, &second, before, &items),
-            Err(BlockEntitySnapshotError::InvalidRevision)
-        );
-        assert_eq!(
-            apply_block_entity_snapshot(&mut entity, &other, before, &items),
-            Err(BlockEntitySnapshotError::InvalidRevision)
-        );
-        assert_eq!(entity.data, [7, 8, 9]);
-    }
-
-    #[test]
-    fn a_callbacks_client_update_fields_reach_the_queue_only_from_a_valid_snapshot() {
-        let items = Items::for_tests(Default::default());
-        let mut entity =
-            crate::containers::ModBlockEntity::new("test:machine".into(), Default::default());
-        let batch =
-            sunrise_core::nbt::Compound::from([("effect".into(), sunrise_core::nbt::Tag::Int(23))]);
-        let made = entity.revision();
-        let mut snapshot = entity.try_into_api().unwrap();
-        let before = snapshot.revision();
-        mod_api::ModBlockEntityView::new(&mut snapshot).set_client_update_fields(batch.clone());
-        // Nothing but the queue moved, and an unchanged snapshot still delivers.
-        apply_block_entity_snapshot(&mut entity, &snapshot, before, &items).unwrap();
-        assert_eq!(entity.revision(), made);
-        assert_eq!(entity.take_client_update_fields(), Some(batch.clone()));
-        // A snapshot naming another entity is refused whole.
-        let mut other = mod_api::ModBlockEntity::new("test:machine".into(), Default::default());
-        let before = other.revision();
-        mod_api::ModBlockEntityView::new(&mut other).set_client_update_fields(batch);
-        assert_eq!(
-            apply_block_entity_snapshot(&mut entity, &other, before, &items),
-            Err(BlockEntitySnapshotError::InvalidRevision)
-        );
-        assert!(!entity.has_client_update_fields());
     }
 }
 
@@ -2132,6 +1975,10 @@ mod stack_limit_tests {
 
     pub(super) fn catalog() -> Items {
         prepare_stack_boundary_tests();
+        fixture_catalog()
+    }
+
+    fn fixture_catalog() -> Items {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "sunrise-api-limits-{}-{}",
@@ -2151,25 +1998,29 @@ mod stack_limit_tests {
         items
     }
 
-    /// Vanilla stores damage above the maximum; only writes refuse it. Reads see the stack.
+    /// Vanilla `DataComponents.DAMAGE` validates non-negative ints without capping by `max_damage`.
     #[test]
-    fn a_write_refuses_damage_over_the_maximum_a_read_takes() {
+    fn a_write_preserves_damage_above_max_damage() {
         let items = catalog();
         let mut over = ApiStack::of(mod_api::__private::item_key("minecraft:iron_sword").unwrap());
         over.set_damage(1000);
-        assert_eq!(
-            over.try_into_engine(&items),
-            Err(StackWriteError::DamageExceeded { maximum: 10 })
-        );
-        let read = stack_value(&over).unwrap();
         let definition = items.items.get("minecraft:iron_sword");
+        let written = over.try_into_engine(&items).unwrap();
+        assert_eq!(written.effective_damage(definition), 1000);
+        assert!(sunrise_client::stations::is_damageable(&items, &written));
+        let read = stack_value(&over).unwrap();
         assert_eq!(read.effective_damage(definition), 1000);
-        assert!(sunrise_client::stations::is_damageable(&items, &read));
     }
 
     #[test]
-    fn strict_damage_limits_include_zero_inheritance_removal_and_nbt_int_range() {
-        let mut items = catalog();
+    fn damage_and_max_damage_follow_vanilla_int_ranges() {
+        use sunrise_core::vanilla_bytes::Writer;
+        use sunrise_protocol::{
+            buf::{Codec, Reader},
+            item::{Component, Slot, component},
+        };
+
+        let items = catalog();
         let key = |id| mod_api::__private::item_key(id).unwrap();
         let plain = ApiStack::of(key("minecraft:stick"));
         assert!(plain.try_into_engine(&items).is_ok());
@@ -2183,10 +2034,15 @@ mod stack_limit_tests {
                 .get("minecraft:damage"),
             Some(&Tag::Int(0))
         );
+        explicit.set_damage(5);
+        let engine = explicit.try_into_engine(&items).unwrap();
+        assert_eq!(engine.damage, 5);
         explicit.set_damage(u32::MAX);
         assert_eq!(
             explicit.try_into_engine(&items),
-            Err(StackWriteError::DamageExceeded { maximum: 0 })
+            Err(StackWriteError::InvalidComponents {
+                reason: mod_api::StackError::InvalidDamage
+            })
         );
 
         let inherited = ApiStack::of(key("minecraft:iron_sword"));
@@ -2202,10 +2058,40 @@ mod stack_limit_tests {
         lower
             .set_components([(JavaString::from("minecraft:max_damage"), Tag::Int(5))].into())
             .unwrap();
+        let engine = lower.try_into_engine(&items).unwrap();
+        assert_eq!(engine.max_damage(Some(definition)), 5);
+        assert_eq!(engine.effective_damage(Some(definition)), 7);
+
+        let mut short_max = inherited.clone();
+        short_max
+            .set_components([(JavaString::from("minecraft:max_damage"), Tag::Short(20))].into())
+            .unwrap();
+        let engine = short_max.try_into_engine(&items).unwrap();
+        assert_eq!(engine.max_damage(Some(definition)), 20);
+        let packet_stack = crate::lan::guest::stack_to_network(|_| 1, |_, _| None, &Some(engine));
+        let mut writer = Writer::new();
+        Slot::write(&packet_stack, &mut writer);
+        let mut reader = Reader::new(&writer.data);
+        let decoded = Slot::read(&mut reader).unwrap().unwrap();
         assert_eq!(
-            lower.try_into_engine(&items),
-            Err(StackWriteError::DamageExceeded { maximum: 5 })
+            decoded.component(component::MAX_DAMAGE),
+            Some(&Component::Int(20))
         );
+
+        for invalid in [Tag::Int(0), Tag::Int(-1), Tag::Short(0), Tag::Short(-1)] {
+            let mut bad_max = inherited.clone();
+            bad_max
+                .set_components(
+                    [(JavaString::from("minecraft:max_damage"), invalid.clone())].into(),
+                )
+                .unwrap();
+            assert_eq!(
+                bad_max.try_into_engine(&items),
+                Err(StackWriteError::InvalidMaximum),
+                "max_damage {invalid:?}"
+            );
+        }
+
         let mut removed = inherited;
         removed
             .set_components(
@@ -2216,10 +2102,9 @@ mod stack_limit_tests {
                 .into(),
             )
             .unwrap();
-        assert_eq!(
-            removed.try_into_engine(&items),
-            Err(StackWriteError::DamageExceeded { maximum: 0 })
-        );
+        let engine = removed.try_into_engine(&items).unwrap();
+        assert_eq!(engine.max_damage(Some(definition)), 0);
+        assert_eq!(engine.effective_damage(Some(definition)), 7);
         removed.clear_damage();
         let engine = removed.try_into_engine(&items).unwrap();
         assert_eq!(engine.max_damage(Some(definition)), 0);
@@ -2227,12 +2112,12 @@ mod stack_limit_tests {
         removed.set_damage(0);
         assert!(removed.try_into_engine(&items).is_ok());
 
-        items
-            .items
-            .get_mut("minecraft:diamond_sword")
-            .unwrap()
-            .max_damage = u32::MAX;
         let mut oversized = ApiStack::of(key("minecraft:diamond_sword"));
+        oversized.set_damage(i32::MAX as u32);
+        assert_eq!(
+            oversized.try_into_engine(&items).unwrap().damage,
+            i32::MAX as u32
+        );
         oversized.set_damage(u32::MAX);
         assert_eq!(
             oversized.try_into_engine(&items),
@@ -2263,6 +2148,14 @@ mod stack_limit_tests {
                 "maximum {maximum}"
             );
         }
+        let mut short_max = ApiStack::of(key);
+        short_max
+            .set_components([("minecraft:max_stack_size".into(), Tag::Short(1))].into())
+            .unwrap();
+        assert_eq!(
+            short_max.try_into_engine(&items),
+            Err(StackWriteError::InvalidMaximum)
+        );
         for maximum in [1, 99] {
             let mut stack = ApiStack::new(key, maximum).unwrap();
             stack
@@ -2448,6 +2341,30 @@ mod stack_limit_tests {
             items.items.get("minecraft:stick"),
             "minecraft:max_stack_size"
         ));
+    }
+
+    #[test]
+    fn full_stack_write_round_trips_bare_damage() {
+        mod_api::testing::with_parts_registration_probe(
+            Default::default(),
+            |_| (),
+            |_, ()| {
+                let mut registries = mod_api::testing::FakeRegistries::default();
+                registries
+                    .resolve_items([mod_api::Identifier::parse("minecraft:iron_sword").unwrap()])
+                    .unwrap();
+                let key = mod_api::__private::item_key("minecraft:iron_sword").unwrap();
+                let items = fixture_catalog();
+                let patch: Compound = [(JavaString::from("damage"), Tag::Int(4))].into();
+                let mut draft = ApiStack::of(key);
+                draft.set_components(patch.clone()).unwrap();
+
+                let written = draft.try_into_engine(&items).unwrap();
+                let round_trip = written.try_into_api().unwrap();
+                assert_eq!(round_trip.damage_component(), None);
+                assert_eq!(round_trip.components().unwrap().as_nbt(), &patch);
+            },
+        );
     }
 
     #[test]
@@ -2708,6 +2625,15 @@ mod gui_draw_boundary_tests {
                 scale: [0.5, 1.5],
                 pivot: [55., 56.],
             },
+            D::PlayerFace {
+                uuid: 0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10,
+                x: -57,
+                y: 58,
+                size: 59,
+                hat: false,
+                flip: true,
+                color: 0x8000_0060,
+            },
             D::Push(vec![PoseOp::Translate(61., 62.), PoseOp::Scale(0.5, 1.5)]),
             D::Pop,
         ];
@@ -2751,6 +2677,43 @@ mod gui_draw_boundary_tests {
     }
 }
 
+pub(in crate::game) fn placement_source_into_engine(
+    source: mod_api::PlacementSource,
+) -> Option<sunrise_world::level::PlacementSource> {
+    match source {
+        mod_api::PlacementSource::Player {
+            yaw,
+            pitch,
+            sneaking,
+        } if yaw.is_finite() && pitch.is_finite() => {
+            Some(sunrise_world::level::PlacementSource::Player {
+                yaw,
+                pitch,
+                sneaking,
+            })
+        }
+        mod_api::PlacementSource::Directional { direction } => {
+            Some(sunrise_world::level::PlacementSource::Directional { direction })
+        }
+        _ => None,
+    }
+}
+
+/// A directional placement question vanilla throws on, as `LevelRef::state_for_placement`
+/// refuses it.
+pub(in crate::game) fn placement_refusal_into_api(
+    refusal: sunrise_world::level::DirectionalRefusal,
+) -> mod_api::PlacementStateError {
+    match refusal {
+        sunrise_world::level::DirectionalRefusal::NoVerticalLook => {
+            mod_api::PlacementStateError::NoVerticalLook
+        }
+        sunrise_world::level::DirectionalRefusal::ReplacingClickedCycle => {
+            mod_api::PlacementStateError::ReplacingClickedCycle
+        }
+    }
+}
+
 impl TryIntoApi for sunrise_world::level::PlacementContext {
     type Api = mod_api::PlacementContext;
     type Error = StackReadError;
@@ -2764,9 +2727,20 @@ impl TryIntoApi for sunrise_world::level::PlacementContext {
         snapshot.hit_pos = self.hit_pos;
         snapshot.hit = [self.hit.x, self.hit.y, self.hit.z];
         snapshot.inside = self.inside;
-        snapshot.yaw = self.yaw;
-        snapshot.pitch = self.pitch;
-        snapshot.sneaking = self.sneaking;
+        snapshot.source = match self.source {
+            sunrise_world::level::PlacementSource::Player {
+                yaw,
+                pitch,
+                sneaking,
+            } => mod_api::PlacementSource::Player {
+                yaw,
+                pitch,
+                sneaking,
+            },
+            sunrise_world::level::PlacementSource::Directional { direction } => {
+                mod_api::PlacementSource::Directional { direction }
+            }
+        };
         snapshot.replace_clicked = self.replace_clicked;
         Ok(snapshot)
     }
@@ -2776,18 +2750,20 @@ impl TryIntoApi for sunrise_world::level::PlacementContext {
 mod placement_snapshot_tests {
     use super::*;
     #[test]
-    fn placement_keeps_click_view_flags_and_empty_hand_without_fallback() {
+    fn placement_keeps_click_source_flags_and_empty_hand_without_fallback() {
         install_parts(&[]).unwrap();
-        mod_api::__private::resolve_items(["minecraft:stone"]).unwrap();
+        mod_api::__private::resolve_items(["minecraft:stone", "minecraft:shulker_box"]).unwrap();
         let mut engine = sunrise_world::level::PlacementContext {
             pos: sunrise_core::position::BlockPos::new(1, 2, 3),
             hit_pos: sunrise_core::position::BlockPos::new(4, 5, 6),
             face: sunrise_core::geometry::Direction::Up,
             hit: sunrise_core::geometry::Vec3::new(4.25, 5.5, 6.75),
             inside: true,
-            yaw: -45.0,
-            pitch: 90.0,
-            sneaking: true,
+            source: sunrise_world::level::PlacementSource::Player {
+                yaw: -45.0,
+                pitch: 90.0,
+                sneaking: true,
+            },
             item: "minecraft:stone".into(),
             replace_clicked: true,
         };
@@ -2800,19 +2776,84 @@ mod placement_snapshot_tests {
         assert_eq!(snapshot.face, sunrise_core::geometry::Direction::Up);
         assert_eq!(snapshot.hit, [4.25, 5.5, 6.75]);
         assert!(snapshot.inside);
-        assert_eq!(snapshot.yaw, -45.0);
-        assert_eq!(snapshot.pitch, 90.0);
-        assert!(snapshot.sneaking && snapshot.replace_clicked);
+        assert_eq!(
+            snapshot.source,
+            mod_api::PlacementSource::Player {
+                yaw: -45.0,
+                pitch: 90.0,
+                sneaking: true,
+            }
+        );
+        assert!(snapshot.replace_clicked);
         assert_eq!(
             snapshot.item,
             mod_api::__private::item_key("minecraft:stone")
         );
+
+        // Dispenser directional placement preserves the dispenser's facing.
+        let dispenser_engine = sunrise_world::level::PlacementContext {
+            pos: sunrise_core::position::BlockPos::new(10, 64, 2),
+            hit_pos: sunrise_core::position::BlockPos::new(10, 64, 2),
+            face: sunrise_core::geometry::Direction::Up,
+            hit: sunrise_core::geometry::Vec3::new(10.5, 64.0, 2.5),
+            inside: false,
+            source: sunrise_world::level::PlacementSource::Directional {
+                direction: sunrise_core::geometry::Direction::East,
+            },
+            item: "minecraft:shulker_box".into(),
+            replace_clicked: true,
+        };
+        let dispenser_snapshot = dispenser_engine.try_into_api().unwrap();
+        assert_eq!(
+            dispenser_snapshot,
+            mod_api::PlacementContext::directional(
+                sunrise_core::position::BlockPos::new(10, 64, 2),
+                sunrise_core::geometry::Direction::East,
+                sunrise_core::geometry::Direction::Up,
+                mod_api::__private::item_key("minecraft:shulker_box"),
+            )
+        );
+
+        // Falling-block directional check: Directional { Down } with empty hand.
+        engine.source = sunrise_world::level::PlacementSource::Directional {
+            direction: sunrise_core::geometry::Direction::Down,
+        };
         engine.item.clear();
-        let mut empty = snapshot;
-        empty.item = None;
-        assert_eq!(engine.try_into_api(), Ok(empty));
+        let mut falling = snapshot;
+        falling.source = mod_api::PlacementSource::Directional {
+            direction: sunrise_core::geometry::Direction::Down,
+        };
+        falling.item = None;
+        assert_eq!(engine.try_into_api(), Ok(falling));
+
         engine.item = "missing:item".into();
         assert_eq!(engine.try_into_api(), Err(StackReadError::UnknownItem));
+
+        // Non-finite player orientation is refused at the mod boundary.
+        assert_eq!(
+            placement_source_into_engine(mod_api::PlacementSource::Player {
+                yaw: f32::NAN,
+                pitch: 0.0,
+                sneaking: false,
+            }),
+            None
+        );
+        assert_eq!(
+            placement_source_into_engine(mod_api::PlacementSource::Player {
+                yaw: 0.0,
+                pitch: f32::INFINITY,
+                sneaking: true,
+            }),
+            None
+        );
+        assert_eq!(
+            placement_source_into_engine(mod_api::PlacementSource::Directional {
+                direction: sunrise_core::geometry::Direction::Down,
+            }),
+            Some(sunrise_world::level::PlacementSource::Directional {
+                direction: sunrise_core::geometry::Direction::Down,
+            })
+        );
     }
 }
 
@@ -2871,6 +2912,7 @@ pub(in crate::game) fn install_test_platform() {
                 install_packages: mod_platform::__private::install_packages,
                 install_registration_data: mod_platform::__private::install_registration_data,
                 install_parts: mod_platform::__private::install_parts,
+                with_registration_open: mod_platform::__private::with_registration_open,
                 profiler_is_enabled: mod_platform::__private::profiler::is_enabled,
                 profiler_start: mod_platform::__private::profiler::start,
                 profiler_stop: mod_platform::__private::profiler::stop,
@@ -2895,9 +2937,15 @@ pub(in crate::game) fn install_parts(mods: &[mod_api::ModEntry]) -> Result<(), V
 }
 #[cfg(test)]
 pub(in crate::game) fn register_game_keys(ids: impl IntoIterator<Item = String>) {
+    let mod_fluids = sunrise_world::fluid::mod_fluids();
+    let mod_fluids: Vec<&str> = mod_fluids
+        .iter()
+        .flat_map(|(_, fluid)| [fluid.id.as_str(), fluid.flowing_id.as_str()])
+        .collect();
     with_rule_schema(|schema| {
         mod_platform::__private::part_tests::register_game_keys(
             ids,
+            &mod_fluids,
             schema,
             super::native_dimensions::valid_shape,
         )
@@ -2942,8 +2990,6 @@ pub(in crate::game) fn game_rule_registry() -> sunrise_client_core::gamerules::R
     .expect("validated at registration")
 }
 
-#[path = "api_values/damage.rs"]
-pub(in crate::game) mod damage;
 #[path = "api_values/game_rule_values.rs"]
 mod game_rule_values;
 #[path = "api_values/item_properties.rs"]

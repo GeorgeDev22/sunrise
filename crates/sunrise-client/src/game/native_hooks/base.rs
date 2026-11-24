@@ -130,12 +130,17 @@ impl GameLevel<'_> {
 
     /// An authoritative server is about to deliver `neighborChanged`.
     /// State and block IDs are valid in this level's registries for this call.
-    /// The host is the level with its ticks, as vanilla's `neighborChanged` gets the
-    /// level: a part may read its inputs (`signal`, `has_neighbor_signal`) and
-    /// schedule its tick here, as a diode does (`DiodeBlock.checkTickOnNeighbor`).
+    /// The host is the level writer vanilla's `neighborChanged` gets: a part may read
+    /// its inputs (`signal`, `has_neighbor_signal`), schedule its tick, as a diode does
+    /// (`DiodeBlock.checkTickOnNeighbor`), and set blocks, as `RedstoneLampBlock` lights
+    /// itself at once (`level.setBlock(pos, state.cycle(LIT), 2)`). A write's own
+    /// neighbour updates run next, before the rest of the update that delivered this
+    /// call (`CollectingNeighborUpdater`), as `Level.setBlock` from inside
+    /// `neighborChanged` runs them. The block's own handling then runs with the state
+    /// it was called with.
     #[inline(always)]
     pub(in crate::game) fn native_neighbor_changed(
-        &self,
+        &mut self,
         ticks: &mut Ticks,
         dimension: LevelDimension,
         pos: BlockPos,
@@ -396,7 +401,8 @@ impl GameLevel<'_> {
     /// `native_is_valid_bonemeal_target`, after it did: set `success` to grow
     /// it this time. Vanilla draws the level's random here
     /// (`isBonemealSuccess(Level, RandomSource, BlockPos, BlockState)`), so
-    /// draw from `native_level_random` to keep vanilla's order.
+    /// listeners draw from the live stream with
+    /// `host.with_random(|rng| rng.next_int_bound(bound))`.
     /// Authoritative servers only.
     #[inline(always)]
     pub(in crate::game) fn native_is_bonemeal_success(
@@ -463,11 +469,7 @@ impl Game<'_> {
     /// Selection/F3+T and server-pack reloads share this point; initial startup does not
     /// (`client_setup` is the once-only moment after the initial load).
     pub(in crate::game) fn native_client_resources_reloaded(&mut self) {
-        let phase = self.mod_phase.clone();
-        let _reload = phase
-            .reloading()
-            .expect("client reload notice on its owning thread");
-        self.fire_client_resources_reloaded();
+        Self::fire_client_resources_reloaded(self);
     }
     /// The client made a new level for `dimension` (NeoForge's
     /// `LevelEvent.Load` from the `ClientLevel` constructor): on joining a
@@ -514,8 +516,10 @@ impl Game<'_> {
         self.fire_emissive(layers);
     }
     /// The world's phases, read-only; `error_text` carries the engine's
-    /// own open-failure text, empty otherwise. Server-side. A server loop or final
-    /// save failure fires `WorldCloseFailed` with the error text.
+    /// error text for `WorldOpenFailed` and `WorldCloseFailed`, empty otherwise.
+    /// Server-side. A server loop or final save failure fires `WorldCloseFailed`.
+    /// A normal stop with only individually reported record failures still fires
+    /// `WorldCloseFinal`.
     pub(in crate::game) fn native_world_lifecycle(
         &mut self,
         context: &LifecycleContext,
@@ -568,14 +572,15 @@ impl Game<'_> {
     /// The server is assembling its data tables, as for
     /// `native_data_pack_files` (a world's first open and every `/reload`):
     /// push the data map types your mod registers (NeoForge's
-    /// `RegisterDataMapTypesEvent`). A type is an `id` (`mod_id:name`, not in
-    /// `minecraft`) for a `registry`, `minecraft:item` or `minecraft:block`
-    /// so far. Its values come from the world's data packs'
-    /// `data/<mod_id>/data_maps/<registry path>/<name>.json`, and from files
-    /// you push through `native_data_pack_files` under the key
-    /// `data_maps/<mod_id>:<registry path>/<name>`: `replace`, `values`
-    /// (entry ids and `#tags` to JSON values) and `remove`, a newer value
-    /// overriding an older. Push a typed map's `DataMap::ty`
+    /// `RegisterDataMapTypesEvent`). A type is a namespaced `id`
+    /// (`namespace:path`) for a `registry`: any the game names. Its values come
+    /// from the world's data packs'
+    /// `data/<namespace>/data_maps/<registry folder>/<path>.json`, and from
+    /// files you push through `native_data_pack_files` under the key
+    /// `data_maps/<namespace>:<registry folder>/<path>`. Each file has a `values`
+    /// object (entry IDs and `#tags` to JSON), optional boolean `replace` and
+    /// optional `remove` list. Entry conditions run before reading values and
+    /// malformed layers are skipped whole. Push a typed map's `DataMap::ty`
     /// and read its values with `ItemKey::data` and `BlockKey::data`. Server-side,
     /// not synced to clients.
     pub(in crate::game) fn native_data_map_types(&mut self, types: &mut Vec<DataMapType>) {
@@ -637,24 +642,11 @@ impl Game<'_> {
     pub(in crate::game) fn native_level_tick_post(&mut self, level: LevelRef) {
         self.fire_level_tick_post(level);
     }
-    /// Before one of vanilla's HUD layers is drawn (`RenderGuiLayerEvent.Pre`):
-    /// draw here to put something below the layer, or set `canceled` to hide
-    /// it. `layer` is the layer's id. The built-in registration anchors, in registration order, are:
-    /// `minecraft:crosshair`, `hotbar`, `effects`, `boss_overlay`,
-    /// `vehicle_health` (only riding a mount), `contextual_info_bar` (the
-    /// mount's jump bar, the locator bar or the experience bar, with the level
-    /// number), `player_health` (the health, armor, food and air rows, drawn in
-    /// one pass), `selected_item_name`, `sleep_overlay`, `overlay_message`
-    /// (the action bar), `title`, `scoreboard_sidebar`, `subtitle_overlay`,
-    /// `chat` and `tab_list`. In the render pass, `player_health` fires before
-    /// `contextual_info_bar`. A layer F1 hides fires nothing, and the chat
-    /// screen draws the focused chat itself, so `chat` is only the unfocused
-    /// lines. The camera overlays and the debug screen are not layers here:
-    /// they are not drawn in this pass. Draw with `native_fill`, `native_text`
-    /// and the sprite helpers; `draw.size()` is the GUI
-    /// size. A layer a mod registered (`native_register_gui_layers`) fires this
-    /// and `native_gui_layer_post` too, with its own id, in its place among
-    /// these.
+    /// Before a vanilla or registered HUD slot runs (`RenderGuiLayerEvent.Pre`), even under F1.
+    /// Paint into `draw` below the layer, or set `canceled` to skip the entire installed body
+    /// (including any side effects) and `native_gui_layer_post`. A replacement or wrapper
+    /// keeps the slot's ID and order, but does not inherit its visibility rules; those stay
+    /// in the original body. Focused chat paints separately in its screen without dispatching the HUD slot again.
     pub(in crate::game) fn native_gui_layer_pre(
         &self,
         layer: &str,
@@ -663,9 +655,9 @@ impl Game<'_> {
     ) {
         self.fire_gui_layer_pre(layer, draw, canceled);
     }
-    /// After one of vanilla's HUD layers (or after the layer a mod hid), with
-    /// the ids of `native_gui_layer_pre`: draw here to put something above
-    /// the layer (`RenderGuiLayerEvent.Post`).
+    /// After the entire installed HUD slot body (`RenderGuiLayerEvent.Post`), once
+    /// with the ID from `native_gui_layer_pre`. Does not fire when Pre canceled the slot.
+    /// Paint into `draw` to put something above the layer.
     pub(in crate::game) fn native_gui_layer_post(&self, layer: &str, draw: &mut HudBatch) {
         self.fire_gui_layer_post(layer, draw);
     }
@@ -711,15 +703,6 @@ impl Game<'_> {
         call: mod_api::__private::PlayerTickPostCall,
     ) {
         self.fire_player_tick_post(call);
-    }
-    pub(in crate::game) fn native_health_hud(
-        &mut self,
-        inputs: &mod_api::client::hud_layout::HealthInputs,
-        wi: i32,
-        hi: i32,
-        draws: &mut Option<Vec<GuiDraw>>,
-    ) {
-        self.fire_health_hud(inputs, wi, hi, draws);
     }
     /// Raw mouse button input on any screen, before dispatch; cancel skips dispatch and Post.
     /// Button/modifiers use the same GLFW encoding as screen hooks. Synthetic clicks skip it.
@@ -874,6 +857,20 @@ impl Game<'_> {
     pub(in crate::game) fn native_shader_params(&self, partial: f32, params: &mut [[f32; 4]; 8]) {
         self.fire_shader_params(partial, params);
     }
+    /// `WorldlyContainer.canTakeItemThroughFace` for a block entity's subscribed part: whether
+    /// `stack` in `slot` may leave through `face`, replacing the declared output slots.
+    pub(in crate::game) fn native_can_take_item_through_face(
+        &self,
+        entity: &ModBlockEntity,
+        pos: BlockPos,
+        state: mod_api::BlockState,
+        slot: usize,
+        stack: &mod_api::ItemStack,
+        face: Direction,
+        allowed: &mut Option<bool>,
+    ) {
+        self.fire_can_take_item_through_face(entity, pos, state, slot, stack, face, allowed);
+    }
     /// Register namespaced NBT component types before content loads.
     pub(in crate::game) fn native_component_types(
         context: &mod_api::RegistrationContext,
@@ -884,12 +881,11 @@ impl Game<'_> {
     /// Collect blocks from native mods once at startup on each side, before resources load.
     /// Each declaration belongs to the submitting package and joins the content declarations
     /// used by saves and the join check. The event's `register` call returns a typed error for
-    /// invalid IDs or fields. Refusals stop startup even if the caller ignores the error.
+    /// invalid IDs or fields. A completed listener's refusals stop startup even if ignored;
+    /// a panicking listener's batch and diagnostics are discarded.
     pub(in crate::game) fn native_blocks(
         context: &mod_api::RegistrationContext,
-        blocks: &mut dyn FnMut(
-            mod_api::Answered<mod_api::Block>,
-        ) -> Result<(), mod_api::DeclarationError>,
+        blocks: &mut mod_api::__private::DeclarationStage<'_, mod_api::Block>,
     ) {
         Self::fire_blocks(context, blocks);
     }
@@ -898,20 +894,17 @@ impl Game<'_> {
     /// not here.
     pub(in crate::game) fn native_items(
         context: &mod_api::RegistrationContext,
-        items: &mut dyn FnMut(
-            mod_api::Answered<mod_api::Item>,
-        ) -> Result<(), mod_api::DeclarationError>,
+        items: &mut mod_api::__private::DeclarationStage<'_, mod_api::Item>,
     ) {
         Self::fire_items(context, items);
     }
-    /// File-backed standalone models and bake-time forms, registered before resource loading.
-    /// Every resource load rebakes them; dispatch attributes each form to its owning mod.
+    /// Standalone files and bakers, registered before resource loading.
+    /// Every resource load rebakes them; dispatch attributes each entry to its owning mod.
     pub(in crate::game) fn native_standalone_models(
         context: &mod_api::RegistrationContext,
-        models: &mut Vec<String>,
-        forms: &mut Vec<mod_api::Answered<mod_api::StandaloneModelForm>>,
+        registrations: &mut Vec<Answered<StandaloneModelRegistration>>,
     ) {
-        Self::fire_standalone_models(context, models, forms);
+        Self::fire_standalone_models(context, registrations);
     }
     /// The player changed setting `key` of mod `mod_id` on its page in Options > Mods; the new
     /// value is kept already.
@@ -951,19 +944,20 @@ impl Game<'_> {
     }
     /// Block `block`'s registered item slots (`WorldlyContainer`), read from
     /// its per-block declaration when the ticking table is built.
-    /// At most 256 slots, with slot numbers past the count left out.
+    /// Registration already checks the saved slot count. The table builder leaves
+    /// out slot references past that count.
     /// Its menu must be one of the supported menus:
     /// `containers::MOD_MENUS` or a content mod's menu type
     /// (`data/<id>/sunrise/menu/`) with as many
     /// slots, opens when the block is used (its template must open a menu, as
     /// a chest or a furnace does); another is left out. A mod menu type shows
-    /// on Sunrise clients through the mod's `native_screen` only.
+    /// on Sunrise clients through the mod's registered screen factory.
     pub(in crate::game) fn native_block_entity_container(
         &self,
         block: &str,
         container: &mut Option<ModContainer>,
     ) {
-        *container = mod_api::__private::parts_installation::block_container(block);
+        *container = mod_api::__private::parts_installation::block_container(block).cloned();
     }
     /// Block `block`'s registered fluid tanks: each tank's capacity in
     /// millibuckets, the tanks each face reaches, and the tanks a fill may
@@ -1011,7 +1005,7 @@ impl Game<'_> {
     /// sent and whenever its block changes, on the server thread; a client's copy of the block
     /// entity (made by `native_block_entity` there) merges it into its `nbt`.
     /// Leave it unset to send no tag of yours. A block change puts the one-shot fields of
-    /// `ModBlockEntityView::set_client_update_fields` over it, and sends them alone when it is unset.
+    /// `BlockEntityView::set_client_update_fields` over it, and sends them alone when it is unset.
     pub(in crate::game) fn native_block_entity_update_tag(
         pos: [i32; 3],
         entity: &ModBlockEntity,
@@ -1078,32 +1072,6 @@ impl Game<'_> {
     ) {
         self.fire_map_decorations(map, decorations);
     }
-    /// A menu of mod menu type `menu` opens on this client: set `screen` to
-    /// lay its screen out (`native_screen_draw` draws it), whatever opened
-    /// the menu. `block` is the mod block at the menu's position whose
-    /// container opens this menu type (`menu_opener_block`), none without
-    /// one. Only the part that owns the screen hears its hooks (on a vanilla
-    /// type, the part of the block's mod). The server asks it too, whatever
-    /// opened the menu: a slot it hides takes no shift-click there.
-    pub(in crate::game) fn native_screen(
-        &self,
-        menu: &str,
-        block: Option<&str>,
-        screen: &mut Option<mod_api::Screen>,
-    ) {
-        self.fire_screen(menu, block, screen);
-    }
-    /// Draw the screen of mod menu type `menu` (`block` as in
-    /// `native_screen`) at `origin` (its top left, GUI pixels),
-    /// over a plain panel with its slots' frames and under the items and
-    /// labels, from the menu's data slots `data`. Block-backed data is 16-bit
-    /// on the wire as in vanilla; blockless mod-menu data preserves full `i32`
-    /// values. `data` is empty until the first values arrive; read with `get`.
-    /// Draw with `native_sprite`, `native_fill` and
-    /// `native_text`.
-    pub(in crate::game) fn native_screen_draw(&self, call: mod_api::__private::ScreenDrawCall<'_>) {
-        self.fire_screen_draw(call);
-    }
     /// The open screen has drawn itself and its tooltips (`Screen.render`,
     /// the point of `ScreenEvent.Render.Post`): draw over it with
     /// `native_fill`, `native_sprite` and `native_text`, `screen.rect` being
@@ -1134,9 +1102,10 @@ impl Game<'_> {
     /// where the pointer is (so there is no position of its own), `button` the
     /// button's GLFW index (0 left, 1 right, 2 middle, 3 back, 4 forward; a
     /// button past those is the platform's own number, which differs between
-    /// systems) and `modifiers` GLFW's bits (shift 1, control 2,
-    /// alt 4, super 8). Set `canceled` and the press goes no further: no slot,
-    /// no screen button, no drag, no hotbar key, no sort or header button.
+    /// systems), and `modifiers` GLFW's bits (shift 1, control 2,
+    /// alt 4, super 8). `double_click` comes from the last handled press on
+    /// the same screen instance and button. Cancel to skip the screen and
+    /// Post; the press still counts as handled for double-click detection.
     ///
     /// It fires before anything the screen does with the press, on the window
     /// only, and while a screen of the game's or the title's is open (Options
@@ -1153,9 +1122,16 @@ impl Game<'_> {
         screen: &ScreenView<'_>,
         button: i32,
         modifiers: u32,
+        double_click: bool,
         canceled: &mut bool,
     ) {
-        self.fire_screen_mouse_button_pressed_pre(screen, button, modifiers, canceled);
+        self.fire_screen_mouse_button_pressed_pre(
+            screen,
+            button,
+            modifiers,
+            double_click,
+            canceled,
+        );
     }
     /// A mouse button went up over the open screen
     /// (`ScreenEvent.MouseButtonReleased.Pre`, vanilla's
@@ -1311,46 +1287,19 @@ impl Game<'_> {
     ) {
         self.fire_screen_char_typed_pre(screen, c, modifiers, field, canceled);
     }
-    /// A left or right (`right`) press at `at` (GUI pixels from the screen's
-    /// top left, so outside it too) on the screen of mod menu type `menu`
-    /// (`block` as in `native_screen`), over no slot: set `button` to a menu
-    /// button id when it is on one of yours.
-    /// Sunrise sends it to the server (`ContainerButtonClick`,
-    /// `native_menu_button` there) and the press goes no further.
-    pub(in crate::game) fn native_screen_click(
-        &self,
-        menu: &str,
-        block: Option<&str>,
-        data: &[i32],
-        at: [f32; 2],
-        right: bool,
-        button: &mut Option<i32>,
-    ) {
-        self.fire_screen_click(menu, block, data, at, right, button);
-    }
-    /// The tooltip of mod menu type `menu`'s screen (`block` as in
-    /// `native_screen`) after item tooltip hooks, before its image and
-    /// component gathering. `slot` is the hovered menu index, or None outside
-    /// a mapped slot. The listener's final lines replace the item's lines.
-    pub(in crate::game) fn native_screen_tooltip(
-        &self,
-        call: mod_api::__private::ScreenTooltipCall<'_>,
-    ) {
-        self.fire_screen_tooltip(call);
-    }
     /// A player pressed a mod menu's button (`clickMenuButton`), on the
-    /// server. The block entity is out of the world during the call when the
-    /// menu has one; blockless menus pass None. Mods may change it and the
-    /// clicking player's carried stack.
+    /// server. `subject` lends sequential access to the live resident block
+    /// entity (when present) and the server `Host`; blockless menus lend no
+    /// view while keeping `host()` and `transaction(...)` usable. Mods may
+    /// change the block entity in place and the clicking player's carried stack.
     pub(in crate::game) fn native_menu_button(
-        &mut self,
         menu: &str,
         block: Option<&str>,
         context: &mod_api::item::menu::MenuButtonContext,
-        entity: Option<&mut ModBlockEntity>,
+        subject: mod_api::BlockEntityScope<'_>,
         carried: &mut Option<mod_api::ItemStack>,
     ) {
-        self.fire_menu_button(menu, block, context, entity, carried);
+        Self::fire_menu_button(menu, block, context, subject, carried);
     }
     /// Whether the owner of this menu accepts button `id`. The active menu's owner
     /// decides its own IDs; the game does not impose a shared numeric range.
@@ -1363,39 +1312,26 @@ impl Game<'_> {
     ) {
         self.fire_menu_button_valid(menu, block, id, accepted);
     }
-    /// A player shift-clicked slot `slot` of the menu of the mod block
-    /// entity at `pos` (`AbstractContainerMenu.quickMoveStack`, the method a
-    /// Java menu overrides), on the server, before the game's own routing:
-    /// move the stack where your block wants it. `slot` is the menu's index:
-    /// below `container_slots` it is the block's own slot (`entity.items`),
-    /// from there on the player's inventory (27 main slots, then the hotbar).
-    /// `stack` is a copy of what the slot holds; take what you move out of
-    /// it (put it in `entity.items`, or in another block through its
-    /// `ITEMS` capability) and set `handled`: the slot then holds what is
-    /// left of `stack` (whatever you wrote to that slot of `entity.items`),
-    /// the game's routing is skipped, and the player's client gets the menu
-    /// again. Left unhandled, `entity.items` goes back to what it held and
-    /// the game moves the stack as for any container; a later mod sees what
-    /// an earlier one did to `stack`.
-    ///
-    /// For a mod container on a vanilla menu type and on a mod menu type,
-    /// the left or right button, a slot that holds something and that the
-    /// mod's screen shows; not for a spectator or a dead player, a menu no
-    /// longer valid, nor during a drag.
-    /// Asked once per click, where vanilla asks `quickMoveStack` again while
-    /// it keeps moving the same item. The player's state is swapped in, so
-    /// `native_acting_player` names them; `entity` is out of the world
-    /// during the call, as in `native_menu_button`.
+    /// The accepted menu lends its resident block entity and asks the Parts to route the move.
     pub(in crate::game) fn native_menu_quick_move(
-        &mut self,
-        pos: [i32; 3],
-        entity: &mut ModBlockEntity,
+        kind: mod_api::BlockEntityTypeKey,
+        subject: mod_api::BlockEntityScope<'_>,
         container_slots: usize,
         slot: usize,
         stack: &mut Option<mod_api::ItemStack>,
         handled: &mut bool,
-    ) {
-        self.fire_menu_quick_move(pos, entity, container_slots, slot, stack, handled);
+    ) -> bool {
+        let mut panicked = false;
+        Self::fire_menu_quick_move(
+            kind,
+            subject,
+            container_slots,
+            slot,
+            stack,
+            handled,
+            &mut panicked,
+        );
+        panicked
     }
     /// The commands native mods add to the session's tree: push the complete current set.
     /// Asked at world open before functions compile, on each reload and data pack change,
@@ -1404,18 +1340,9 @@ impl Game<'_> {
     /// within their level. A name vanilla has is left out.
     pub(in crate::game) fn native_register_commands(
         &mut self,
-        commands: &mut Vec<mod_api::Command>,
+        commands: &mut Vec<mod_api::Answered<mod_api::CommandRegistration>>,
     ) {
         self.fire_register_commands(commands);
-    }
-    /// Execute a parsed mod command with its origin and effective permission.
-    pub(in crate::game) fn native_run_mod_command(
-        &mut self,
-        source: &CommandSource,
-        command: &CommandInvocation,
-        ran: &mut bool,
-    ) {
-        self.fire_run_mod_command(source, command, ran);
     }
     /// A player takes an item from an armor stand or puts one on it
     /// (`ArmorStand.interactAt`, after the stand's disabled-slot checks and
@@ -1443,7 +1370,7 @@ impl Game<'_> {
     /// tick (`VehicleMoveEvent`): `from` and `to` are its positions, heard
     /// after the tick moved it. Once a tick for each vehicle that carries a
     /// server player, whose state is then swapped in (as for
-    /// `native_run_mod_command`: `native_acting_player`, `native_tell` and
+    /// a command executor: `native_acting_player`, `native_tell` and
     /// the item helpers reach them; `player` is their UUID), and for one a
     /// server player rode and left, until it has stood still for ten
     /// seconds (`player` is none, nobody is swapped in). It only hears.
@@ -1471,7 +1398,7 @@ impl Game<'_> {
     /// spectator) and before the menu that was open closes. Set `cancel` and
     /// nothing opens: the open menu stays as it was and the click is spent.
     /// The player's state is swapped in for the call, as for
-    /// `native_run_mod_command`, so `native_acting_player`, `native_tell` and
+    /// a command executor, so `native_acting_player`, `native_tell` and
     /// the item helpers reach them. Not heard: a menu a mod opens
     /// (`open_menu`, unlike `open_mod_menu`), the inventory screen, and the editors (sign,
     /// book, command block). Server-side, for every player of the world.
@@ -1494,7 +1421,7 @@ impl Game<'_> {
     /// packet passed vanilla's checks (a creative player, a real slot, a valid
     /// stack) and before the slot changes or the stack drops. Set `cancel`
     /// and the packet is ignored. The player's state is swapped in for the
-    /// call, as for `native_run_mod_command`, so `native_acting_player`,
+    /// call, as for a command executor, so `native_acting_player`,
     /// `native_tell` and the item helpers reach them. Not heard: stacks a
     /// creative player gets other ways (middle-click pick block, `/give`).
     /// Server-side, for every player of the world.
@@ -1512,21 +1439,10 @@ impl Game<'_> {
     /// `player` (`name`) changed dimension (NeoForge's
     /// `PlayerChangedDimensionEvent`): `from` and `to` are dimension ids
     /// (`minecraft:overworld`, `minecraft:the_nether`, `minecraft:the_end`).
-    /// Heard once per move, when it has ended: the portal's exit is found
-    /// and the player stands there (after the destination has loaded), a
-    /// command's teleport has landed, or a respawn in another level than the
-    /// death's is placed for good (a bed or anchor, or the world spawn's
-    /// free column, after the fallback when a respawn block was gone). The
-    /// level of `to` is the one in place, and the player's state is swapped
-    /// in, as for `native_run_mod_command`: `native_acting_player`,
-    /// `native_tell`, the item helpers and the rest reach them. Heard for:
-    /// Nether and End portals (also riding a vehicle, and leaving the End as
-    /// its winner), `/execute in ... run tp` and any other command that
-    /// teleports a player into another level, and death respawns, on dedicated
-    /// and integrated servers (single player and LAN), where the world is simulated.
-    /// Not heard by a remote client window, for a move within a level (`/tp`,
-    /// an End gateway), for a player who leaves before the move ends, or for a
-    /// move ending where it started (a respawn in the dimension of the death).
+    /// `ServerPlayer.teleport`: once a portal or command teleport crosses
+    /// dimensions and lands, with the destination level and player in place.
+    /// `PlayerList.respawn` replacements, including the return after credits,
+    /// use `native_player_respawned` instead.
     pub(in crate::game) fn native_player_changed_dimension(
         &mut self,
         player: u128,
@@ -1668,6 +1584,27 @@ impl Game<'_> {
     ) {
         self.fire_player_teleported(player, name, from, to, dimension);
     }
+    /// An eligible connection is waiting for the server's pre-profile login decision.
+    pub(in crate::game) fn native_player_handshake(
+        &mut self,
+        requested_host: &mut String,
+        requested_port: u16,
+        protocol_version: i32,
+        peer_ip: Option<&str>,
+        cancel: &mut bool,
+        reason: &mut Option<mod_api::Text>,
+    ) {
+        // Keep the reason typed until it crosses the login packet serialization boundary.
+        mod_api::dispatch_player_handshake(
+            self,
+            requested_host,
+            requested_port,
+            protocol_version,
+            peer_ip,
+            reason,
+            cancel,
+        );
+    }
     /// A player whose login the server has accepted (NeoForge's
     /// `PlayerNegotiationEvent` stage): the name, whitelist, ban and
     /// server-full checks have passed and the player holds a place, but their
@@ -1727,6 +1664,15 @@ impl Game<'_> {
         sprinting: bool,
     ) {
         self.fire_player_sprint(player, name, sprinting);
+    }
+    /// `player_login_profile`: the mods' edit of an admitted login's properties.
+    pub(in crate::game) fn native_player_login_profile(
+        &mut self,
+        player: u128,
+        name: &str,
+        properties: &mut Vec<mod_api::AccountProfileProperty>,
+    ) {
+        self.fire_player_login_profile(player, name, properties);
     }
     /// A server player's client answered a resource pack in play (vanilla's
     /// `ServerboundResourcePackPacket`): `status` is `Action`'s number, 0
@@ -2622,26 +2568,26 @@ impl Game<'_> {
     ) {
         self.fire_prepare_item_enchant(player, name, pos, costs);
     }
-    /// A player took an anvil's result at `pos` (`AnvilCraftEvent.Pre`), before the levels are charged, the inputs used up and the anvil worn. `craft` holds the inputs and the result as they were before. Set `cancel` to refuse the take: the result stays in its slot and the inputs, levels, inventory and cursor are as before the click.
+    /// A player took an anvil's result at `pos` (`AnvilCraftEvent.Pre`), before the levels are charged, the inputs used up and the anvil worn. `inputs` borrows the input stacks and result from before the take. Set `cancel` to return early before charging levels, consuming inputs, damaging the anvil or firing `anvil_craft_post`, without undoing the click's item move (matching NeoForge `AnvilMenu.onTake`).
     pub(in crate::game) fn native_anvil_craft_pre(
         &mut self,
         player: u128,
         name: &str,
         pos: [i32; 3],
-        craft: &mod_api::item::menu::AnvilCraft,
+        inputs: &mod_api::item::menu::AnvilCraftInputs<'_>,
         cancel: &mut bool,
     ) {
-        self.fire_anvil_craft_pre(player, name, pos, craft, cancel);
+        self.fire_anvil_craft_pre(player, name, pos, inputs, cancel);
     }
-    /// A player took an anvil's result at `pos` and the levels, inputs and anvil wear are done (`AnvilCraftEvent.Post`); a broken anvil is already air. `craft` holds the inputs and the result as they were before. Not called when `native_anvil_craft_pre` cancelled.
+    /// A player took an anvil's result at `pos` and the levels, inputs and anvil wear are done (`AnvilCraftEvent.Post`); a broken anvil is already air. `inputs` borrows the input stacks and result from before the take. Not called when `native_anvil_craft_pre` cancelled.
     pub(in crate::game) fn native_anvil_craft_post(
         &mut self,
         player: u128,
         name: &str,
         pos: [i32; 3],
-        craft: &mod_api::item::menu::AnvilCraft,
+        inputs: &mod_api::item::menu::AnvilCraftInputs<'_>,
     ) {
-        self.fire_anvil_craft_post(player, name, pos, craft);
+        self.fire_anvil_craft_post(player, name, pos, inputs);
     }
     /// A smithing result was prepared for a server player at `pos`. Change it before it is sent.
     pub(in crate::game) fn native_prepare_smithing(
@@ -2729,6 +2675,20 @@ impl Game<'_> {
         canceled: &mut bool,
     ) {
         self.fire_sleep_finished_time(dimension, current, new_time, adjustment, canceled);
+    }
+
+    /// Enough players sleep in level `dimension` to skip the night (`ServerLevel.tick`), before
+    /// the clock moves, the sleepers wake and the rain ends. Set `canceled` and none of it
+    /// happens this tick.
+    pub(in crate::game) fn native_sleep_skip_night(
+        &mut self,
+        dimension: &str,
+        percentage: i32,
+        sleeping: i64,
+        active: i64,
+        canceled: &mut bool,
+    ) {
+        self.fire_sleep_skip_night(dimension, percentage, sleeping, active, canceled);
     }
 
     /// The overworld clock is about to jump, from sleep or `/time`. Set
@@ -3148,27 +3108,17 @@ impl Game<'_> {
     ) {
         self.fire_tooltip(stack, context, lines);
     }
-    /// Client-side image component for this stack's tooltip. Answer its width/height
-    /// in GUI pixels; finite positive dimensions reserve space after text and any
-    /// vanilla bundle component. None keeps the vanilla tooltip unchanged.
-    pub(in crate::game) fn native_tooltip_component(
+    /// `Item.getTooltipImage`: optional tooltip component data for this item stack.
+    /// Answer `Some(TooltipComponent::custom(data))` (or `Some(TooltipComponent::bundle(stack))`)
+    /// to insert a component after the item's name line before
+    /// `render_tooltip_gather_components` runs. Answer `None` to leave the vanilla tooltip
+    /// component unchanged. Client-side.
+    pub(in crate::game) fn native_tooltip_image(
         &self,
         stack: &ItemStack,
-        size: &mut Option<[f32; 2]>,
+        component: &mut Option<mod_api::TooltipComponent>,
     ) {
-        self.fire_tooltip_component(stack, size);
-    }
-    /// Render the measured component at origin, inside the tooltip background.
-    /// Stack is the component's data. Use native_sprite/native_fill/native_text;
-    /// size is the measurement returned by native_tooltip_component this frame.
-    pub(in crate::game) fn native_tooltip_component_draw(
-        &self,
-        stack: &ItemStack,
-        draw: &mut HudBatch,
-        origin: [f32; 2],
-        size: [f32; 2],
-    ) {
-        self.fire_tooltip_component_draw(stack, draw, origin, size);
+        self.fire_tooltip_image(stack, component);
     }
 
     /// The small bar `GuiGraphicsExtractor.itemDecorations` draws under an
@@ -3564,9 +3514,11 @@ impl Game<'_> {
     /// any path: a lost connection, a kick, the server stopping or failing.
     /// Once for each player `native_player_logged_in` told of, and also for a
     /// kicked fake without a preceding login. Silent `remove_fake` sends no logout.
-    /// They've already
-    /// left `native_server_players`, except when the server stops, which tells
-    /// before it saves, with them still listed and able to get a last message.
+    /// The player is still in `native_server_players` when the hook fires. A
+    /// listener's edits persist only on leaves this server saves. A completed proxy
+    /// hand-over or a crash writes no logout save. Only when the server stops can
+    /// a player still get a last message. A kicked fake has already left the list
+    /// and is not saved.
     /// Server-side.
     pub(in crate::game) fn native_player_logged_out(&mut self, player: u128, name: &str) {
         self.fire_player_logged_out(player, name);
@@ -3580,12 +3532,14 @@ impl Game<'_> {
     ) {
         self.fire_player_respawn_position(call);
     }
-    /// `player` (`name`) respawned (NeoForge's `PlayerRespawnEvent`): at the
-    /// end of `PlayerList.respawn`, once they are placed and their health,
-    /// food and experience reset, with their state swapped in. Once for each
-    /// death that ends in a respawn, on a server; not for the End-exit one.
-    pub(in crate::game) fn native_player_respawned(&mut self, player: u128, name: &str) {
-        self.fire_player_respawned(player, name);
+    /// NeoForge's `PlayerRespawnEvent`, after `PlayerList.respawn` placed the new player.
+    pub(in crate::game) fn native_player_respawned(
+        &mut self,
+        player: u128,
+        name: &str,
+        end_conquered: bool,
+    ) {
+        self.fire_player_respawned(player, name, end_conquered);
     }
     /// A player was saved to the world's store (NeoForge's
     /// `PlayerEvent.SaveToFile`, `PlayerList.save`): when they leave or the
@@ -3634,7 +3588,7 @@ impl Game<'_> {
         player: u128,
         name: &str,
         was_death: bool,
-        original: mod_api::OriginalPlayerRef,
+        original: mod_api::OriginalPlayer<'_>,
     ) {
         self.fire_player_clone(player, name, was_death, original);
     }
@@ -4104,7 +4058,9 @@ impl Game<'_> {
     /// `[0, 1, 0]` for the top), at the point `at`. Set `canceled` and the impact
     /// does not happen: no damage, no knockback, no sound, no block reaction, the
     /// arrow does not stick, a pearl does not teleport, a potion or a fireball
-    /// does not burst. Cancellation leaves the projectile alive. A flying bobber
+    /// does not burst. Cancellation alone leaves the projectile alive. Its owner
+    /// row is live and a listener can resolve and discard it; a removal prevents
+    /// application of the hit independently of cancellation. A flying bobber
     /// skips hooking and redirection to the hit point, but its ordinary move
     /// still stops against solid blocks. Water is not an impact. Bobbers notify
     /// before vanilla's entity deflection and world-border bounce; rockets notify
@@ -4119,18 +4075,6 @@ impl Game<'_> {
         call: mod_api::__private::ProjectileImpactCall<'_>,
     ) {
         self.fire_projectile_impact(call);
-    }
-
-    /// `Block.stepOn` for a mod block, on its authoritative server level.
-    /// No self: the simulation owns the entity during this callback.
-    pub(in crate::game) fn native_block_step_on(
-        dimension: &str,
-        entity: i32,
-        kind: &str,
-        state: BlockStateId,
-        position: [i32; 3],
-    ) {
-        Self::fire_block_step_on(dimension, entity, kind, state, position);
     }
 }
 
@@ -4340,7 +4284,7 @@ impl Game<'_> {
     /// entities). Call it when what clients show changed (a machine started),
     /// not for every tick's progress: a menu's data slots carry that. Nothing
     /// happens for an unloaded block. It also sends the one-shot fields of
-    /// `ModBlockEntityView::set_client_update_fields`.
+    /// `BlockEntityView::set_client_update_fields`.
     pub(in crate::game) fn block_entity_sync(&mut self, pos: [i32; 3]) {
         if !self.world.loaded(pos[0], pos[2]) {
             return;
@@ -4505,33 +4449,68 @@ impl Game<'_> {
         let [a, r, g, b] = argb.to_be_bytes();
         batch.fill_quad(&self.gui.atlas, points, rgba(r, g, b, a));
     }
-    /// Opens a screen of mod `mod_id`'s own over the world: the screen hooks
-    /// fire over it as over any other, so the mod draws it in
-    /// `native_screen_render_post` and takes its clicks, scroll, keys and
-    /// typing there; the mouse is freed, and Escape closes it. Every mod's own
-    /// screen has the `ScreenView.id` `mod`, so a mod's screen hooks
-    /// check `mod_screen()` is its own before drawing. It doesn't pause
-    /// a single-player game (as the inventory doesn't). True when it is open:
-    /// false while another screen is (or another mod's), over the title
-    /// screen, a book, a sign editor, a dialog or a prompt, while the world
-    /// loads, and anywhere but the window's own client (the server thread, a
-    /// dedicated server). A gamepad can close it (B, Start) but not click on
+    /// Opens a screen of mod `mod_id`'s own through the normal screen-transition
+    /// path (`Gui.setScreen`): `screen_opening` and `screen_closing` fire for the
+    /// transition and `screen_init_post` runs once opened, so the mod mounts
+    /// widgets in `screen_init_post`, draws in `native_screen_render_post`, and
+    /// takes its clicks, scroll, keys, and typing there; the mouse is freed, and
+    /// Escape closes it. Every mod's own screen has the `ScreenView.id` `mod`, so
+    /// a mod's screen hooks check `mod_screen()` is its own before mounting or
+    /// drawing. It doesn't pause a single-player game (as the inventory doesn't).
+    /// Can replace any open vanilla screen, title screen, overlay (book, sign
+    /// editor, dialog, or prompt), or another mod's screen, running the replaced
+    /// screen's close cleanup once hooks allow the transition. Returns `true`
+    /// when `mod_id`'s screen is open, and `false` when cancelled or redirected
+    /// by `screen_opening`, while a world or connection is loading, or without a
+    /// client window (a headless/dedicated server, the server thread, or
+    /// guest-acting contexts). A gamepad can close it (B, Start) but not click on
     /// it: its clicks don't reach the mouse hooks.
     pub(in crate::game) fn mod_screen_open(&mut self, mod_id: &str) -> bool {
-        // What `screen_hooks_open` would refuse over the world: the mod's
-        // screen would be up with no hook to draw or click it.
-        let blocked = self.renderer.is_none() || self.mod_screen_blocked();
-        let owner = self.mod_screen();
-        if let Some(open) = mod_screen_opens(self.screen, blocked, owner, mod_id) {
+        let unavailable = self.renderer.is_none()
+            || self.lan_acting.is_some()
+            || (self.player.is_none() && self.title.is_none())
+            || self.remote_loading();
+        let owner = if self.screen_over_playing() {
+            None
+        } else {
+            self.mod_screen()
+        };
+        if let Some(open) = mod_screen_opens(self.screen, unavailable, owner, mod_id) {
             return open;
         }
-        self.native_mod_screen = Some(mod_id.to_owned());
-        self.set_screen(Screen::Mod);
-        if self.screen != Screen::Mod {
-            // `screen_opening` kept the world.
-            self.native_mod_screen = None;
-            return false;
+        if self.screen_hooks_heard() {
+            let decision = {
+                let current = if self.screen_over_playing() {
+                    self.observed_screen_view()
+                        .unwrap_or_else(|| self.screen_change_view(self.screen))
+                } else if self.screen == Screen::Playing
+                    && let Some(title) = self.title.as_ref()
+                {
+                    let none = self.screen_change_view(Screen::Playing);
+                    screen_view_with_id(&none, title.mode.id())
+                } else {
+                    self.screen_change_view(self.screen)
+                };
+                let new = screen_view_for_mod(&self.screen_change_view(Screen::Mod), mod_id);
+                self.decide_screen_for_mod_open(&current, &new, current.id != "playing")
+            };
+            match decision {
+                ScreenDecision::Keep => return false,
+                ScreenDecision::Vanilla(target) => {
+                    self.close_replaced_screen_for_mod();
+                    self.open_screen_target(target);
+                    return false;
+                }
+                ScreenDecision::ModScreen(other_mod) => {
+                    self.close_replaced_screen_for_mod();
+                    self.apply_screen(Screen::Mod, Some(other_mod));
+                    return self.mod_screen() == Some(mod_id);
+                }
+                ScreenDecision::Open => {}
+            }
         }
+        self.close_replaced_screen_for_mod();
+        self.apply_screen(Screen::Mod, Some(mod_id));
         self.mod_screen() == Some(mod_id)
     }
     /// Closes mod `mod_id`'s own screen, if it is open.
@@ -4599,22 +4578,6 @@ impl Game<'_> {
         self.native_text(batch, text, at, argb, shadow);
         batch.scale_since(start, at[0], at[1], scale, scale);
     }
-    /// The saved key and modifiers for an owner-bound registration, or its declared default.
-    pub(in crate::game) fn mod_key(
-        &self,
-        mod_id: &str,
-        name: &str,
-    ) -> Option<(String, ClientModifiers)> {
-        let (_, registration) = mod_api::__private::key_mappings()
-            .iter()
-            .find(|(owner, mapping)| *owner == mod_id && mapping.id == name)?;
-        let (key, modifiers) = self.settings.mods.binding(
-            mod_id,
-            name,
-            (&registration.key, registration.modifiers.bits),
-        );
-        Some((key, ClientModifiers::new(modifiers)))
-    }
     /// The instance (game) folder, which its players share: `saves/`,
     /// `resourcepacks/`, `shaderpacks/` and `sunrise-mods/` are in it, and the
     /// title's screens create worlds and read packs there. A world's own
@@ -4631,6 +4594,12 @@ impl Game<'_> {
             return None;
         }
         self.stored_setting(mod_id, key)
+    }
+    pub(in crate::game) fn startup_setting(mod_id: &str, key: &str) -> Option<String> {
+        if Self::another_mods(mod_id) {
+            return None;
+        }
+        mod_settings::read_raw(&Self::mod_data_root().join(mod_id), mod_id, key)
     }
     pub(super) fn stored_setting(&self, mod_id: &str, key: &str) -> Option<String> {
         mod_settings::read_raw(&self.native_data_dir(mod_id), mod_id, key)
@@ -4716,11 +4685,10 @@ impl Game<'_> {
             _ => return Ok(None),
         };
         let items = self.items();
-        let Some(ingredient) = sunrise_client::crafting::Ingredient::parse(&json, items) else {
+        let Some(mut ingredient) = sunrise_client::crafting::Ingredient::parse(&json, items) else {
             return Ok(None);
         };
-        let known: Vec<String> = ingredient
-            .order
+        let known: Vec<String> = std::mem::take(&mut ingredient.order)
             .into_iter()
             .filter(|item| items.get(item).is_some())
             .collect();
@@ -4766,17 +4734,13 @@ impl Game<'_> {
     pub(in crate::game) fn transfer_recipe(&mut self, book_id: i32) {
         self.transfer_viewer_recipe(book_id);
     }
-    /// Creative mode only: gives the player `count` of `item`
-    /// (`minecraft:diamond`) as taking it from the creative inventory does
-    /// (`ServerboundSetCreativeModeSlot`): the selected slot first, then the
-    /// hotbar, then the inventory. The count is cut to one stack.
-    pub(in crate::game) fn give(
+    /// Creative mode only: `stack` into the player's inventory as `Inventory.add` does, each
+    /// changed slot sent at once (`ServerboundSetCreativeModeSlotPacket`); what did not fit.
+    pub(in crate::game) fn give_stack(
         &mut self,
-        item: mod_api::ItemKey,
-        count: u32,
-    ) -> Result<(), String> {
-        let item = mod_api::__private::item_key_id(item).ok_or("unknown item key")?;
-        self.recipe_give(item, count)
+        stack: &mod_api::ItemStack,
+    ) -> Result<Option<mod_api::ItemStack>, mod_api::CreativeGiveError> {
+        self.creative_give_stack(stack)
     }
 }
 
@@ -4843,9 +4807,9 @@ impl LevelView<'_> {
     /// in `answer` as `Some(Some(state))`, including a registered state of
     /// another block, or refuse with `Some(None)`: the block goes nowhere
     /// and the stack is kept, as vanilla's `null`. Left empty, the block's
-    /// own placement runs. `context` is
-    /// vanilla's `BlockPlaceContext` (the clicked face, the placer's rotation,
-    /// the clicked position, whether the clicked block is being replaced, the
+    /// own placement runs. `context` is vanilla's `BlockPlaceContext` (the
+    /// clicked face, the clicked position, `source` distinguishing `Player`
+    /// from `Directional`, whether the clicked block is being replaced, the
     /// item in hand) and `fluid` the fluid in the position the block would go
     /// in, which a waterlogged block reads. Build the state from `state` with
     /// `native_state_with_property`, and know whether `state` is yours with
@@ -4875,6 +4839,10 @@ impl LevelView<'_> {
 mod screen_open_tests;
 
 #[cfg(test)]
+#[path = "base_tests/screen_widgets_tests.rs"]
+mod screen_widgets_tests;
+
+#[cfg(test)]
 mod text_tests {
     use super::*;
 
@@ -4884,7 +4852,7 @@ mod text_tests {
     #[ignore = "daily"]
     fn text_takes_argb_and_skips_transparent_text() {
         use mod_api::DrawContext;
-        crate::game::native_entity_refs::tests::with_game(|game| {
+        crate::game::native_entity_refs::tests::with_client_game(|game| {
             let drawn = |argb: u32| {
                 let mut batch = HudBatch::scratch([640, 480]);
                 crate::game::host::draw::GameDrawContext::new(game, &mut batch).text(

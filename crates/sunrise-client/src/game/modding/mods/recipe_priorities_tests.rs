@@ -208,6 +208,7 @@ fn check_layers(kind: &str, replace_allowed: bool, malformed_jar: bool) {
     );
     let resolved = ResolvedSources::load(
         overlay.root.prepared(),
+        &sunrise_client::items::Items::empty(),
         &PackOverlay {
             files,
             priority_layers: layers,

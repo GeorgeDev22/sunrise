@@ -5,7 +5,7 @@ CloudRenderer.isEastEmpty	inline	crates/sunrise-client-render/src/clouds.rs::Mes
 CloudRenderer.isSouthEmpty	inline	crates/sunrise-client-render/src/clouds.rs::Mesh::prepare	neighbour-empty flags passed to face_mask in N,E,S,W order
 CloudRenderer.isWestEmpty	inline	crates/sunrise-client-render/src/clouds.rs::Mesh::prepare	neighbour-empty flags passed to face_mask in N,E,S,W order
 CloudRenderer.render	port	crates/sunrise-client-render/src/gfx.rs::Renderer::draw_frame	gap: minor: one cloud pipeline; fancy vs flat is chosen by the mesh fast flag, not by pipeline
-CloudRenderer.renderOit	port	crates/sunrise-client-render/src/gfx/oit.rs::Oit::render_clouds	the clouds draw through the OIT pipeline there, with their own depth beside the world's
+CloudRenderer.renderOit	port	crates/sunrise-client-render/src/gfx/oit.rs::Oit::render_clouds	the clouds draw through the OIT pipeline there, with their own depth beside the world's; a pack's core/clouds draws there with its OIT_CLOUDS programs (gfx/core_clouds.rs::CoreClouds::draw_oit)
 CloudRenderer.buildMesh	port	crates/sunrise-client-render/src/clouds.rs::Mesh::prepare	cell ring walk via cells(radius), nearest first
 CloudRenderer.tryBuildCell	inline	crates/sunrise-client-render/src/clouds.rs::Mesh::prepare	skip empty cells, then build the cell's faces
 CloudRenderer.encodeFace	inline	crates/sunrise-client-render/src/clouds.rs::Mesh::prepare	3-byte face records replaced by vertex quads

@@ -14,14 +14,14 @@ pub trait Hooks {
     /// values, not the branch itself. An unchanged vector is not subject to the
     /// replacement budget. A malformed vector drops that listener's entire
     /// result, including cancellation; later listeners see the preceding accepted
-    /// values, and the log names the mod and refused field once per tick.
+    /// values, and the log names the mod and refused field each time.
     ///
     /// Set `cancelled` or return `Flow::Cancel` to skip the branch, its nested
     /// moves and flying vertical damping. An accepted cancellation cannot be
     /// cleared. Work before travel, such as swim steering, is not undone. If a
-    /// listener panics, the game uses the originally resolved values, skips later
-    /// listeners for that invocation and disables the failed listener for this
-    /// hook for the session. The hook takes a loop context, not a `Host`.
+    /// listener panics or incurs a phase refusal, only its own proposal is
+    /// discarded and later eligible listeners still run. A panic disables this
+    /// mod's callback for the session. The hook takes a loop context, not a `Host`.
     ///
     /// For a player, the veto takes effect at the server's travel boundary:
     /// reports it already accepted are not rewound. While the veto stands,
@@ -40,10 +40,17 @@ pub trait Hooks {
         out = "canceled",
         context = "loop",
         cancellable = true,
-        isolate = true,
+        version = 2,
         output_validator = "crate::entity::types::refused_travel_output",
-        neoforge = "none (fork addition; see travel-and-move.md, #2308)",
+        neoforge = "none (fork addition, #2308)",
         target = "sunrise_client_lib::travel_gate::native_living_travel"
     )]
-    fn living_travel();
+    fn living_travel(
+        entity: u32,
+        kind: &str,
+        mode: TravelMode,
+        input: &mut [f64; 3],
+        velocity: &mut [f64; 3],
+        canceled: &mut bool,
+    );
 }

@@ -11,13 +11,13 @@ use sunrise_client::{
     cit::{Hand, Kind, Rule},
     entities::ArmorStand,
     items::ItemStack,
+    join_seq::JoinSeq,
     mesher::Vertex,
-    mobs::{Mob, Part, Who, anim::Poses},
+    mobs::{Mob, Part, Species, Who, anim::Poses},
     trims::{TrimOverride, TrimRegistry, TrimTexture},
 };
 use sunrise_core::{
     geometry::{Aabb, Vec3},
-    position::BlockPos,
     random::RandomSource,
 };
 pub(super) const TYPE_ID: &str = "minecraft:armor_stand";
@@ -158,6 +158,7 @@ pub(super) fn layer_color(dyeable: bool, undyed: Option<u32>, stack: Option<&Ite
 }
 
 /// Armor stand models and the humanoid layers of every equipment asset.
+#[derive(Default)]
 pub(super) struct ArmorStandAssets {
     /// Shared (`Arc`) so the GPU path (`mobs::skin`) keeps one stored copy of each.
     pub main: Option<Arc<Part>>,
@@ -561,13 +562,6 @@ impl Game<'_> {
     }
     /// The armor stand under the crosshair, its distance and the hit point.
     pub(super) fn armor_stand_hit(&self) -> Option<(usize, f64, [f64; 3])> {
-        let mut pick = crate::game::pick_accumulator::PickAccumulator::new(self.entity_reach);
-        self.armor_stand_hit_with_pick(&mut pick)
-    }
-    pub(super) fn armor_stand_hit_with_pick(
-        &self,
-        pick: &mut crate::game::pick_accumulator::PickAccumulator,
-    ) -> Option<(usize, f64, [f64; 3])> {
         if let Some(hit) = self.cached_entity_pick() {
             let (entity, distance, point) = hit?;
             let index = self.armor_stands.iter().position(|f| f.id == entity.id())?;
@@ -575,31 +569,22 @@ impl Game<'_> {
         }
         let (eye, dir) = self.aim()?;
         let reach: f64 = self.entity_reach;
+        let (from, to) = super::pick_accumulator::pick_ray_segment(eye, dir, reach);
+        let mut pick = super::pick_accumulator::PickAccumulator::new(reach * reach);
         let mut best: Option<(usize, f64, [f64; 3])> = None;
         for (i, a) in self.armor_stands.iter().enumerate() {
-            // Minecraft.pick never hits the camera entity it looks from.
             if a.marker {
                 continue;
             }
-            let b = a.bounds();
-            let (lo, hi) = (b.min_position(), b.max_position());
-            let (lo, hi) = ([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]);
-            let (mut t0, mut t1) = (0.0f64, reach);
-            let mut hit = true;
-            for k in 0..3 {
-                if dir[k].abs() < 1e-9 {
-                    hit &= eye[k] >= lo[k] && eye[k] <= hi[k];
-                    continue;
-                }
-                let (mut ta, mut tb) = ((lo[k] - eye[k]) / dir[k], (hi[k] - eye[k]) / dir[k]);
-                if ta > tb {
-                    std::mem::swap(&mut ta, &mut tb);
-                }
-                t0 = t0.max(ta);
-                t1 = t1.min(tb);
-            }
-            if hit && t0 <= t1 && pick.consider(self, a.id, t0) {
-                best = Some((i, t0, std::array::from_fn(|k| eye[k] + dir[k] * t0)));
+            if pick.consider_box(
+                self,
+                a.id,
+                from,
+                to,
+                self.client_copy_box(a.id, a.position, a.bounds()),
+            ) {
+                let hit = pick.hovered.unwrap();
+                best = Some((i, hit.distance_sq.sqrt(), hit.point));
             }
         }
         best
@@ -813,6 +798,9 @@ impl Game<'_> {
                 magic.then_some(id as i32),
             );
             g.special_attack_slowdown(knockback);
+            if admitted {
+                g.remember_player_target(Some(id));
+            }
         });
         // Player.onAttack: the hit starts the attack strength again, hurt or
         // not (skipAttackInteraction only asks mayInteract).
@@ -839,7 +827,7 @@ impl Game<'_> {
         let (area, id) = (self.armor_stands[i].bounds(), self.armor_stands[i].id);
         let (center, on_ground) = (
             self.armor_stands[i].position,
-            self.armor_stands[i].on_ground,
+            self.armor_stands[i].ground.on_ground,
         );
         let hurt = self.punch_armor_stand(i);
         if hurt {
@@ -910,20 +898,19 @@ impl Game<'_> {
             self.creative,
             false,
             Some(super::commands::Target::Player),
+            "minecraft:player_attack",
+            attacker as u32,
         )
     }
-    /// The end of `ArmorStand.hurtServer` for a source in
-    /// `#can_break_armor_stand` or `#always_kills_armor_stands`, which returns
-    /// true: a creative causing player breaks the stand at once; otherwise the
-    /// first hit (`always_kills` skips it) wobbles it and posts `entity_damage`,
-    /// and a second hit within five ticks breaks it (`brokenByPlayer`). `by` is
-    /// the causing entity the game events are attributed to.
+    /// The end of `ArmorStand.hurtServer` for `#can_break_armor_stand` or `#always_kills_armor_stands`.
     fn break_armor_stand_by_hit(
         &mut self,
         i: usize,
         creative: bool,
         always_kills: bool,
         by: Option<super::commands::Target>,
+        damage_type: &str,
+        causing_id: u32,
     ) -> bool {
         let time = self.world.game_time;
         let at = self.armor_stands[i].position;
@@ -943,8 +930,7 @@ impl Game<'_> {
             return true;
         }
         if time - self.armor_stands[i].last_hit > 5 && !always_kills {
-            // First hit: entity event 32, the wobble and the hit sound, then
-            // gameEvent(ENTITY_DAMAGE, the causing entity).
+            // First hit: entity event 32, the wobble and the hit sound, then entity_damage.
             self.audio
                 .play("minecraft:entity.armor_stand.hit", Some(at), 0.3, 1.0);
             self.stand_game_event("minecraft:entity_damage", at, by);
@@ -965,11 +951,7 @@ impl Game<'_> {
             game.spawn_item(stand, center, [0.0; 3], 10);
             game.audio
                 .play("minecraft:entity.armor_stand.break", Some(at), 1.0, 1.0);
-            game.armor_stand_death_drops(
-                &a,
-                "minecraft:player_attack",
-                game.own_entity_id() as u32,
-            );
+            game.armor_stand_death_drops(&a, damage_type, causing_id);
             for stack in a.equipment.into_iter().flatten() {
                 let r = &mut game.world.random;
                 let v = [
@@ -997,10 +979,62 @@ impl Game<'_> {
     ) {
         self.entity_event_by(event, at, by);
     }
+    /// Run stand turns that precede the level's first shulker. The mob tick
+    /// interleaves the remaining turns with shulkers before applying each lid push.
+    pub(super) fn begin_armor_stand_ticks(&mut self) -> Result<()> {
+        self.ordered.armor_stands.extend(
+            self.armor_stands
+                .iter()
+                .filter(|stand| stand.join < self.ordered.born)
+                .map(|stand| stand.join),
+        );
+        if self.ordered.armor_stands.is_empty() {
+            return Ok(());
+        }
+        self.ordered.armor_stands.make_contiguous().sort_unstable();
+        let first_shulker = self
+            .mobs
+            .iter()
+            .filter(|mob| !mob.removed && mob.species() == Species::Shulker)
+            .map(|mob| mob.join)
+            .min();
+        self.tick_armor_stands_before(first_shulker.unwrap_or(JoinSeq::MAX))
+    }
+
+    pub(super) fn tick_armor_stands_before(&mut self, cut: JoinSeq) -> Result<()> {
+        if self
+            .ordered
+            .armor_stands
+            .front()
+            .is_none_or(|&join| join >= cut)
+        {
+            return Ok(());
+        }
+        let mut pending = std::mem::take(&mut self.ordered.armor_stands);
+        let count = pending
+            .make_contiguous()
+            .partition_point(|&join| join < cut);
+        let result = self.tick_armor_stand_turns(pending.drain(..count));
+        self.ordered.armor_stands = pending;
+        result
+    }
+
+    #[cfg(test)]
     pub(super) fn tick_armor_stands(&mut self) -> Result<()> {
+        let joins: Vec<_> = self.armor_stands.iter().map(|stand| stand.join).collect();
+        self.tick_armor_stand_turns(joins)
+    }
+
+    fn tick_armor_stand_turns(&mut self, joins: impl IntoIterator<Item = JoinSeq>) -> Result<()> {
         let mut dead = Vec::new();
+        let mut drowned = Vec::new();
         // ServerLevel.tick: only entities in entity-ticking chunks tick.
         let ticking = self.entity_ticking_area();
+        let server = self.remote.is_none();
+        let stand_breathes_under_water = self.items().entity_type_tags.has_flag(
+            TYPE_ID,
+            sunrise_client::items::EntityTypeTags::CAN_BREATHE_UNDER_WATER,
+        );
         // EntityGetter.getEntityCollisions: the boxes that stop a stand's move
         // (a living shulker, a boat, a happy ghast held still), gathered when
         // the first stand travels. A server's stand rides nothing (`vehicle`
@@ -1008,17 +1042,39 @@ impl Game<'_> {
         // `isPassengerOfSameVehicle` leaves those riders out.
         let mut obstacles: Option<sunrise_client::entities::ObstacleGrid> = None;
         let mut nearby = Vec::new();
-        for i in 0..self.armor_stands.len() {
+        for join in joins {
+            let Some(i) = self.armor_stands.locate(join) else {
+                continue;
+            };
             let at = self.armor_stands[i].position;
             if !ticking(at.x.floor() as i32, at.z.floor() as i32) {
                 self.armor_stands[i].previous = at;
                 self.armor_stands[i].previous_yaw = self.armor_stands[i].yaw;
                 continue;
             }
-            self.armor_stands[i].first_tick = false;
+            let target_dead = self.armor_stands[i]
+                .last_hurt_mob
+                .is_some_and(|(id, _)| !self.last_hurt_target_alive(id));
+            let stand = &mut self.armor_stands[i];
+            stand.tick_count = stand.tick_count.wrapping_add(1);
+            stand.first_tick = false;
+            if target_dead {
+                stand.last_hurt_mob = None;
+            }
             // Entity.baseTick: the saved invulnerability window counts down
             // (#916).
             self.tick_saved_invulnerable_time(self.armor_stands[i].id);
+            // LivingEntity.baseTick -> tickDeath: a stand at 0 health or less
+            // is dead, and goes at a death time of 20 with no drops.
+            let mut died_of_age = false;
+            let a = &mut self.armor_stands[i];
+            if a.health <= 0.0 {
+                a.death_time = a.death_time.wrapping_add(1);
+                if a.death_time >= 20 {
+                    dead.push((a.id, None));
+                    died_of_age = true;
+                }
+            }
             self.armor_stand_location_effects(i, false);
             // ArmorStand.travel: a marker or a NoGravity stand does not move.
             let travels = !self.armor_stands[i].marker && !self.armor_stands[i].no_gravity;
@@ -1038,9 +1094,78 @@ impl Game<'_> {
                 self.dim.id(),
                 &mut a.equipment,
             );
-            let (water_height, lava_height) =
-                a.push_by_fluid(&self.world, &self.res.motion().fluids, &self.loop_context);
+            // Entity.baseTick's updateFluidInteraction; a marker takes none.
+            let (water_height, lava_height, eye_in_water) = if a.marker {
+                (0.0, 0.0, false)
+            } else {
+                let (bounds, at, eye) = (a.bounds(), a.position, a.fluid_eye_y());
+                sunrise_client::entities::update_entity_fluids(
+                    bounds,
+                    at,
+                    eye,
+                    &mut a.velocity,
+                    &self.world,
+                    &self.res.motion().fluids,
+                    &self.loop_context,
+                )
+            };
             let in_water = water_height > 0.0;
+            // LivingEntity.baseTick: shared air logic, then hurt time; aiStep clears fall flying.
+            let stand_air = if server && a.health > 0.0 {
+                let in_bubble_column = eye_in_water && {
+                    let eye = a.fluid_eye_y();
+                    let eye_block = sunrise_core::position::BlockPos::containing(Vec3::new(
+                        a.position.x,
+                        eye,
+                        a.position.z,
+                    ));
+                    &*self
+                        .res
+                        .facts()
+                        .get(self.world.block(eye_block.x, eye_block.y, eye_block.z))
+                        .name
+                        == "minecraft:bubble_column"
+                };
+                let drowns = eye_in_water && !in_bubble_column && !stand_breathes_under_water;
+                let vanilla = sunrise_client::breathing::Breath {
+                    can_breathe: !drowns,
+                    consume: 1,
+                    refill: if drowns { 0 } else { 4 },
+                };
+                Some((
+                    a.id,
+                    sunrise_client::breathing::AirStep::generic(a.air, 300, vanilla),
+                ))
+            } else {
+                None
+            };
+            let i = if let Some((stand_id, step)) = stand_air {
+                let answer = if sunrise_client::breathing::heard() {
+                    self.ask_stand_breath(stand_id, step)
+                } else {
+                    Some(step.vanilla)
+                };
+                let Some(i) = self.armor_stands.locate(join) else {
+                    continue;
+                };
+                let a = &mut self.armor_stands[i];
+                if let Some(breath) = answer
+                    && a.air == step.air
+                    && let Some(drowning) =
+                        step.finish(&self.loop_context, a.id, TYPE_ID, &mut a.air, breath)
+                {
+                    // Stand refuses drown damage; queue entity event 67 / bubble particles.
+                    drowned.push((a.id, drowning.bubbles));
+                }
+                i
+            } else {
+                i
+            };
+            let a = &mut self.armor_stands[i];
+            if a.hurt_time > 0 {
+                a.hurt_time -= 1;
+            }
+            a.fall_flying = false;
             let medium =
                 sunrise_client::entities::StandMedium::from_heights(water_height, lava_height);
             // Entity.collide asks for the entities meeting the box stretched
@@ -1057,33 +1182,28 @@ impl Game<'_> {
                 self.res.facts(),
                 self.collision,
             );
-            let mut scene = sunrise_client::collisions::SceneCollisions {
+            let scene = sunrise_client::collisions::SceneCollisions {
                 world,
                 binding: collision,
                 subject: None,
             };
-            let mut tops: Vec<BlockPos> = Vec::new();
             let side = game_side!(self);
-            if let Some(step) = a.tick_move(
-                &mut scene,
+            let step = a.tick_move(
+                &scene,
                 facts,
+                Some(&self.res.motion().blocks),
                 &self.res.motion().climbing,
                 in_water,
                 Some(self.border.geometry()),
                 &nearby,
                 &self.loop_context,
                 &side,
-            ) {
-                // LivingEntity.aiStep: `travel` first, then the blocks' push.
+            );
+            if let Some(step) = step {
+                // LivingEntity.aiStep: `travel` settles before applyEffectsFromBlocks.
                 a.tick_settle(medium, step);
-                a.push_by_bubble_column_over(world, registry, facts, collision, |pos| {
-                    tops.push(pos)
-                });
             }
             let section_step = (a.id, a.previous, a.position);
-            for pos in tops {
-                self.bubble_column_particles(pos);
-            }
             let a = &mut self.armor_stands[i];
             if in_water {
                 a.enchantment_fall_distance = 0.0;
@@ -1092,8 +1212,8 @@ impl Game<'_> {
                 a.enchantment_fall_distance +=
                     f64::from((a.previous.y - a.position.y).max(0.0) as f32);
             }
-            let landed = a.on_ground && a.enchantment_fall_distance > 0.0;
-            if a.on_ground {
+            let landed = a.ground.on_ground && a.enchantment_fall_distance > 0.0;
+            if a.ground.on_ground {
                 a.enchantment_fall_distance = 0.0;
             }
             // LivingEntity.checkFallDamage: onChangedBlock before the block's
@@ -1107,6 +1227,39 @@ impl Game<'_> {
                 let stand = &self.armor_stands[i];
                 let (position, bounds) = (stand.position, stand.bounds());
                 self.post_landing_event(position, bounds, true);
+            }
+            if step.is_some() && !self.armor_stands[i].no_physics(None) {
+                let stand = &self.armor_stands[i];
+                let (id, footprint, ground, mut velocity) = (
+                    stand.id,
+                    (stand.position, stand.bounds()),
+                    stand.ground,
+                    stand.velocity,
+                );
+                let writes = self.body_step_on((id, TYPE_ID), footprint, &ground, &mut velocity);
+                let stand = &mut self.armor_stands[i];
+                // `ArmorStand.hurtServer` does not take generic damage; the stand
+                // has no stuck multiplier or active-effect list in its travel row.
+                super::entity::apply_contact_writes(
+                    writes,
+                    &mut velocity,
+                    Some(&mut stand.enchantment_fall_distance),
+                    None,
+                    Some(&mut stand.fire_ticks),
+                );
+                stand.velocity = velocity;
+                // BubbleColumnBlock.entityInside runs in the sweep after Block.stepOn.
+                let mut tops = Vec::new();
+                stand.push_by_bubble_column_over(
+                    &self.world,
+                    registry,
+                    self.res.facts(),
+                    collision,
+                    |pos| tops.push(pos),
+                );
+                for pos in tops {
+                    self.bubble_column_particles(pos);
+                }
             }
             self.armor_stands[i].apply_honey_slide(&self.world, self.res.facts());
             let a = &self.armor_stands[i];
@@ -1123,6 +1276,7 @@ impl Game<'_> {
             // own doPush is empty; only this shove runs.
             self.push_rideable_minecarts(i);
             let id = self.armor_stands[i].id;
+            let prev_fire = self.armor_stands[i].fire_ticks;
             let saved = ["minecraft:on_fire", "minecraft:in_fire"]
                 .map(|damage| self.saved_refuses_damage(id, damage, false));
             let tags = world_items!(self);
@@ -1158,34 +1312,71 @@ impl Game<'_> {
                         vanilla,
                     )
                 },
-            ) {
-                dead.push((id, damage_type));
+            ) && !died_of_age
+            {
+                dead.push((id, Some(damage_type)));
+            }
+            if self.armor_stands[i].fire_ticks > 0
+                && self.armor_stands[i].fire_ticks >= prev_fire
+                && let Some(sunrise_core::nbt::Tag::Compound(map)) = self.persist.raw.get_mut(&id)
+            {
+                map.remove(&"TicksFrozen".into());
             }
             let (id, from, to) = section_step;
             self.entity_section_step(id, [from.x, from.y, from.z], [to.x, to.y, to.z]);
+            // The end of LivingEntity.tick.
+            let a = &mut self.armor_stands[i];
+            if a.impulse_grace > 0 {
+                a.impulse_grace -= 1;
+            }
+        }
+        for (id, bubbles) in drowned {
+            let Some((at, v)) = self.armor_stands.iter().find(|a| a.id == id).map(|a| {
+                (
+                    [a.position.x, a.position.y, a.position.z],
+                    [a.velocity.x, a.velocity.y, a.velocity.z],
+                )
+            }) else {
+                continue;
+            };
+            if self.drown_bubbles(at, v, bubbles) {
+                self.lan_entity_event(id as i32, super::combat::DROWN_EVENT, at);
+                self.drown_particles(at, v, 8);
+            }
         }
         for (id, damage_type) in dead.into_iter().rev() {
-            if let Some(i) = self.armor_stands.iter().position(|a| a.id == id) {
-                self.break_armor_stand_by_anything(i, damage_type, 0);
+            match damage_type {
+                Some(damage_type) => {
+                    if let Some(i) = self.armor_stands.iter().position(|a| a.id == id) {
+                        self.break_armor_stand_by_anything(i, damage_type, 0);
+                    }
+                }
+                None => {
+                    // Entity event 60 (the poof), then remove(KILLED).
+                    if let Some(a) = self.armor_stands.iter().find(|a| a.id == id) {
+                        let at = a.position.components();
+                        self.remove_armor_stand_after(id, |game| {
+                            game.lan_entity_event(id as i32, 60, at);
+                            let (x, z) = (at[0].floor() as i32, at[2].floor() as i32);
+                            game.world.modified.insert((x >> 4, z >> 4));
+                        });
+                    }
+                }
             }
         }
         Ok(())
     }
-    /// `Entity.move(mover, delta)` for armor stand `i` (a lid's push or a mod's move), one with physics (vanilla's
-    /// `!noPhysics`: not a marker, not `NoGravity`), the stand's own `shove` by `delta`. Stands tick
-    /// before mobs here, while vanilla ticks a stand that joined after the
-    /// pushing `shulker` (one placed on it) after the shulker: `shove` makes
-    /// up for the order. A shulker box's lid moves it after every entity's tick.
+    /// `Entity.move(mover, delta)` for a stand with physics (not a marker or
+    /// `NoGravity`). Mob lids act on the shulker's turn; block-entity lids act
+    /// after the entity ticks.
     /// `grid` holds the stands' obstacles, built once per lid at its first stand.
     pub(super) fn shoves_armor_stand(
         &mut self,
         i: usize,
         mover: sunrise_world::entity_move::MoverType,
-        shulker: Option<u32>,
         delta: Vec3,
         grid: &mut Option<sunrise_client::entities::ObstacleGrid>,
     ) {
-        let joined = shulker.and_then(|id| self.mobs.iter().find(|m| m.id == id).map(|m| m.join));
         let grid = grid.get_or_insert_with(|| self.stand_entity_collisions());
         let mut nearby = Vec::new();
         let a = &mut self.armor_stands[i];
@@ -1198,13 +1389,12 @@ impl Game<'_> {
             binding: self.collision,
             subject: None,
         };
-        let travels_after = joined.is_some_and(|joined| a.join > joined);
         a.shove(
             scene,
             delta,
             Some(self.border.geometry()),
             &nearby,
-            travels_after,
+            !self.options.execution_role.is_client() && self.remote.is_none(),
             mover,
             &self.loop_context,
         );
@@ -1286,7 +1476,10 @@ impl Game<'_> {
     /// still steps). `canDestroyEgg` wants mob griefing before the level's roll.
     fn armor_stand_turtle_eggs(&mut self, i: usize, landed: bool) -> Result<()> {
         let stand = &self.armor_stands[i];
-        if !stand.on_ground || self.remote.is_some() || self.options.execution_role.is_client() {
+        if !stand.ground.on_ground
+            || self.remote.is_some()
+            || self.options.execution_role.is_client()
+        {
             return Ok(());
         }
         let p = stand.on_pos_legacy(|p| {
@@ -1430,10 +1623,24 @@ impl Game<'_> {
         damage_type: &str,
         causing: Option<super::commands::Target>,
     ) -> bool {
+        let direct = causing
+            .and_then(|target| self.network_entity_id(target))
+            .unwrap_or(0) as u32;
+        self.hurt_armor_stand(id, damage_type, causing, direct, None)
+    }
+    /// `ArmorStand.hurtServer`: shared damage entry for commands and projectiles.
+    pub(super) fn hurt_armor_stand(
+        &mut self,
+        id: u32,
+        damage_type: &str,
+        causing: Option<super::commands::Target>,
+        direct: u32,
+        position: Option<[f64; 3]>,
+    ) -> bool {
         use super::commands::Target;
-        let Some(i) = self.armor_stands.iter().position(|a| a.id == id) else {
+        if !self.armor_stands.iter().any(|a| a.id == id) {
             return false;
-        };
+        }
         let Some(kind) = self.health_resources.damage.id(damage_type) else {
             return false;
         };
@@ -1456,23 +1663,37 @@ impl Game<'_> {
             Some(Target::Guest(conn)) => self.command_guest(conn).is_some_and(|g| g.creative()),
             _ => false,
         };
-        let invulnerable = self
-            .persist
-            .raw
-            .get(&id)
-            .is_some_and(|tag| sunrise_client::entity_nbt::flag(tag, "Invulnerable"));
-        // Entity.isInvulnerableTo: the flag, then EnchantmentHelper.isImmuneToDamage.
+        let causing_id = causing
+            .and_then(|target| self.network_entity_id(target))
+            .unwrap_or(0) as u32;
+        let invulnerable = self.saved_refuses_damage(id, damage_type, creative);
+        let source = sunrise_client::health::HurtSource {
+            damage_type,
+            causing: causing_id as i32,
+            direct: direct as i32,
+            position,
+        };
+        if super::entity::damage_level_of!(self, self.combat.attack(), no_push, None)
+            .invulnerability_check(
+                sunrise_client::health::Hurting::ArmorStand(id as i32, source),
+                invulnerable,
+            )
+        {
+            return false;
+        }
+        // Re-locate after invulnerability hooks may have removed or moved the stand.
+        let Some(i) = self.armor_stands.iter().position(|a| a.id == id) else {
+            return false;
+        };
         let a = &self.armor_stands[i];
-        if (invulnerable && !creative)
-            || (a.mod_fire_immune && tagged(self, "minecraft:is_fire"))
+        if (a.mod_fire_immune && tagged(self, "minecraft:is_fire"))
             || a.invisible
             || a.marker
             || self.stand_immune_to_damage(i, damage_type, causing)
         {
             return false;
         }
-        // ArmorStand.hurtServer attributes its game events to the source
-        // entity: the player, a LAN guest or the mob.
+        // ArmorStand.hurtServer attributes its game events to the source entity.
         let by = match causing {
             Some(Target::Player | Target::Guest(_) | Target::Mob(_)) => causing,
             _ => None,
@@ -1482,9 +1703,6 @@ impl Game<'_> {
             tagged(self, "minecraft:ignites_armor_stands"),
             tagged(self, "minecraft:burns_armor_stands"),
         );
-        let causing_id = causing
-            .and_then(|target| self.network_entity_id(target))
-            .unwrap_or(0) as u32;
         let (breaks, always_kills) = (
             tagged(self, "minecraft:can_break_armor_stand"),
             tagged(self, "minecraft:always_kills_armor_stands"),
@@ -1500,8 +1718,7 @@ impl Game<'_> {
             if self.armor_stands[i].is_on_fire() {
                 self.cause_stand_damage(i, 0.15, damage_type, causing_id);
             } else {
-                // igniteForSeconds(5.0f): at least 100 ticks, and
-                // Entity.igniteForTicks calls clearFreeze.
+                // igniteForSeconds(5.0f): at least 100 ticks, and clearFreeze.
                 let a = &mut self.armor_stands[i];
                 a.fire_ticks = a.fire_ticks.max(100);
                 if let Some(sunrise_core::nbt::Tag::Compound(map)) = self.persist.raw.get_mut(&id) {
@@ -1528,7 +1745,7 @@ impl Game<'_> {
         if !may_build {
             return false;
         }
-        self.break_armor_stand_by_hit(i, creative, always_kills, by)
+        self.break_armor_stand_by_hit(i, creative, always_kills, by, damage_type, causing_id)
     }
     /// `EnchantmentHelper.isImmuneToDamage` for the stand at `i`: whether an
     /// enchantment on an active equipment slot has a `minecraft:damage_immunity`

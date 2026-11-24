@@ -299,7 +299,7 @@ mod tests {
         let Some(kind) = kind else { return };
         let llama = |id, x| {
             let mut m = Mob::new(id, kind.clone(), Vec3::new(x, 64.0, 0.5), 0.0);
-            m.on_ground = true;
+            m.ground.on_ground = true;
             // AbstractHorse.canParent: tame and in love.
             m.extra.tame = true;
             m.extra.in_love = 600;

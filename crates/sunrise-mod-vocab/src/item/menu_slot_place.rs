@@ -59,12 +59,6 @@ pub enum MenuSlotBackRefusal {
     },
 }
 
-impl crate::AccessRefusal for MenuSlotBackRefusal {
-    fn unavailable() -> Self {
-        Self::NoPlayerOrWindow
-    }
-}
-
 impl crate::NoBackend for MenuSlotBackRefusal {
     /// No game behind the host: no player is online there.
     fn no_backend() -> Self {

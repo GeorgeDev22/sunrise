@@ -377,11 +377,7 @@ fn progress_events_capture_each_players_full_mutation_state() {
                 &scratch,
                 &sunrise_world::loot::PackOverlay::NONE,
                 // Rewards must name a recipe registered in the server's index.
-                std::collections::BTreeMap::from([(
-                    "testmod:reward".into(),
-                    r#"{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:stone"],"result":{"id":"minecraft:diamond","count":1}}"#.into(),
-                )]),
-                Default::default(),
+                sunrise_client::lan::recipes::BookProjections::single_shapeless("testmod:reward"),
             );
             let reload = case == "reload";
             let host = game.lan.as_mut().unwrap();

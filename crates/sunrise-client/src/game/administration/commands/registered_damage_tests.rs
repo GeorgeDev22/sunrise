@@ -5,6 +5,9 @@ use sunrise_client::{
 };
 use sunrise_world::damage_source::Catalog;
 
+#[path = "registered_damage_tests/creaking_borrowed.rs"]
+pub(in crate::game) mod creaking_borrowed;
+
 #[test]
 fn formerly_aliased_types_keep_their_id_and_registry_tags() {
     let registry_backed = ["minecraft:indirect_magic", "minecraft:fly_into_wall"];
@@ -318,11 +321,22 @@ fn spawn_test_projectile(
 #[test]
 #[ignore = "daily"]
 fn live_damage_and_blast_warden_reactions_follow_source_entities_and_cooldown() {
-    use crate::game::commands::Target;
+    use crate::game::{
+        commands::{Target, data::DataRef},
+        native_goal_ticks::live_read_tests::read_borrowed_target,
+        native_living_flags::tests::{guest, guest_server},
+    };
     use mod_api::{ExplosionInteraction, ExplosionSettings};
-    use sunrise_client::projectiles::ProjectileKind;
-    use sunrise_core::{geometry::Vec3, position::BlockPos};
+    use sunrise_client::{mobs::ai, projectiles::ProjectileKind};
+    use sunrise_core::{geometry::Vec3, nbt::Tag, position::BlockPos};
 
+    if crate::game::native_entity_refs::tests::run_fresh_cases(
+        "game::commands::world_cmds::registered_damage_tests::live_damage_and_blast_warden_reactions_follow_source_entities_and_cooldown",
+        "SUNRISE_WARDEN_LIVE_DAMAGE_CHILD",
+        &["live-damage"],
+    ) {
+        return;
+    }
     with_game(|game| {
         setup_live_damage_world(game);
         assert!(game.run_command("summon warden 4.5 64 4.5 {UUID:[I;84,0,0,1],NoGravity:1b}"));
@@ -352,9 +366,8 @@ fn live_damage_and_blast_warden_reactions_follow_source_entities_and_cooldown() 
             w.invulnerable = 0;
             w.last_hurt = 0.0;
             w.health = 500.0;
-            let st = w.extra.warden.as_mut().unwrap();
-            st.anger = Default::default();
-            st.brain.mem.attack_target.clear();
+            w.extra.warden.as_mut().unwrap().anger = Default::default();
+            assert!(ai::set_brain_target(w, None, None));
         };
         let warden_state = |game: &Game<'_>| {
             let st = game
@@ -450,7 +463,7 @@ fn live_damage_and_blast_warden_reactions_follow_source_entities_and_cooldown() 
         let index = game.mobs.iter().position(|m| m.id == warden_id).unwrap();
         let health_after_first = game.mobs[index].health;
         let from = game.target_position(Target::Player).unwrap();
-        assert!(!game.hurt_by_player(index, 1.0, Damage::player(from)));
+        assert!(!game.hurt_by_player(index, 1.0, Damage::player(from)).0);
         assert_eq!(game.mobs[index].health, health_after_first);
         assert_eq!(warden_state(game), (Some(Who::Player), 100));
 
@@ -487,19 +500,149 @@ fn live_damage_and_blast_warden_reactions_follow_source_entities_and_cooldown() 
         )
         .unwrap();
         assert_eq!(warden_state(game), (None, 0));
+
+        const WARDEN: &str = "00000054-0000-0000-0000-000000000001";
+        const DRAGON: &str = "00000054-0000-0000-0000-000000000007";
+        let warden = game.mob(game.entity(warden_id).unwrap()).unwrap();
+        let check_target = |game: &mut Game<'_>, expected: Option<mod_api::LivingRef>| {
+            assert_eq!(warden.target(game), expected);
+            // Keep guest 23 selected in the tick even when the stored target is 22.
+            assert_eq!(read_borrowed_target(game, warden, pig_id, 23), expected);
+            let selector = match expected.map(|living| living.entity().id()) {
+                Some(22) => "@s[name=guest22]",
+                Some(23) => "@s[name=guest23]",
+                Some(id) if id == pig_id => "@s[type=minecraft:pig]",
+                Some(_) => "@s[type=minecraft:ender_dragon]",
+                None => "@s",
+            };
+            game.cmds.results = Some(Vec::new());
+            assert!(game.run_command(&format!(
+                "execute as {WARDEN} on target if entity {selector}"
+            )));
+            let results = game.cmds.results.take().unwrap();
+            if expected.is_some() {
+                assert_eq!(results, [(true, 1)], "{selector}");
+            } else {
+                assert!(
+                    results.is_empty(),
+                    "the target fork should produce no source"
+                );
+            }
+        };
+        guest_server(game, true, false);
+        let (first, _first_out) = guest(game, 22);
+        let (second, _second_out) = guest(game, 23);
+        let hurt = |game: &mut Game<'_>, amount, direct| {
+            game.hurt_target(
+                Target::Mob(warden_id),
+                amount,
+                "minecraft:generic",
+                direct,
+                None,
+                None,
+            )
+        };
+        reset_warden(game);
+        assert!(hurt(game, 1.0, Some(Target::Guest(22))));
+        assert!(hurt(game, 5.0, Some(Target::Guest(23))));
+        assert_eq!(
+            game.lan.as_ref().unwrap().mob_players.get(&warden_id),
+            Some(&23)
+        );
+        check_target(game, Some(first));
+
+        reset_warden(game);
+        assert!(hurt(game, 5.0, None));
+        assert!(!hurt(game, 1.0, Some(Target::Guest(23))));
+        check_target(game, Some(second));
+        assert!(game.entity_set_invulnerable_time(second.entity(), 7));
+        check_target(game, None);
+        assert!(game.entity_set_invulnerable_time(second.entity(), 0));
+        check_target(game, Some(second));
+
+        // A read after every live edit: absence and the two unreadable shapes
+        // keep the brain; a correctly typed empty map replaces it.
+        let cooldown = |game: &mut Game<'_>| {
+            game.data_of(&DataRef::Entity(Target::Mob(warden_id)))
+                .unwrap()
+                .get("Brain")
+                .and_then(|tag| tag.get("memories"))
+                .and_then(|tag| tag.get("minecraft:sonic_boom_cooldown"))
+                .and_then(|tag| tag.get("ttl"))
+                .cloned()
+        };
+        assert_eq!(cooldown(game), Some(Tag::Long(200)));
+        for edit in [
+            format!("data remove entity {WARDEN} Brain"),
+            format!("data modify entity {WARDEN} Brain set value 1"),
+            format!("data modify entity {WARDEN} Brain.memories set value 1"),
+        ] {
+            assert!(game.run_command(&edit), "{edit}");
+            assert_eq!(cooldown(game), Some(Tag::Long(200)), "{edit}");
+            check_target(game, Some(second));
+        }
+        assert!(game.run_command(&format!(
+            "data modify entity {WARDEN} Brain.memories set value {{}}"
+        )));
+        assert_eq!(cooldown(game), None);
+        check_target(game, None);
+
+        let pig = game.living(game.entity(pig_id).unwrap()).unwrap();
+        reset_warden(game);
+        assert!(hurt(game, 1.0, Some(Target::Mob(pig_id))));
+        game.mobs
+            .iter_mut()
+            .find(|mob| mob.id == pig_id)
+            .unwrap()
+            .invulnerable = 20;
+        check_target(game, Some(pig)); // Damage cooldown is not entity immunity.
+        assert!(game.entity_set_invulnerable_time(pig.entity(), 5));
+        check_target(game, None);
+        assert!(game.entity_set_invulnerable_time(pig.entity(), 0));
+        check_target(game, Some(pig));
+
+        assert!(game.run_command("summon ender_dragon 8.5 64 8.5 {UUID:[I;84,0,0,7]}"));
+        let (dragon_id, _) = game.dragon_target().unwrap();
+        let dragon = game.living(game.entity(dragon_id).unwrap()).unwrap();
+        reset_warden(game);
+        assert!(game.run_command(&format!("damage {WARDEN} 1 minecraft:generic by {DRAGON}")));
+        check_target(game, Some(dragon));
+        assert!(game.entity_set_invulnerable_time(dragon.entity(), 10));
+        check_target(game, None);
+        assert!(game.entity_set_invulnerable_time(dragon.entity(), 0));
+        check_target(game, Some(dragon));
+        assert!(game.entity_set_invulnerable(dragon.entity(), true));
+        check_target(game, None);
     });
 }
 
 #[test]
 #[ignore = "daily"]
 fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
-    use crate::game::{combat::PlayerCredit, commands::Target};
+    run_live_damage_and_blast_creaking_reactions_and_timed_player_credit();
+}
+
+pub(in crate::game) fn run_live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
+    use crate::game::{
+        combat::PlayerCredit,
+        commands::Target,
+        sculk::{TEST_POSTED_EVENT_ORDER, TEST_POSTED_EVENTS},
+    };
     use mod_api::{ExplosionInteraction, ExplosionSettings};
     use sunrise_client::{mobs::creaking, projectiles::ProjectileKind};
     use sunrise_core::{geometry::Vec3, position::BlockPos};
 
+    if crate::game::native_entity_refs::tests::run_fresh_cases(
+        "game::commands::world_cmds::registered_damage_tests::live_damage_and_blast_creaking_reactions_and_timed_player_credit",
+        "SUNRISE_CREAKING_LIVE_DAMAGE_CHILD",
+        &["live-damage"],
+    ) {
+        return;
+    }
     with_game(|game| {
         setup_live_damage_world(game);
+        assert!(game.run_command("forceload add 0 0"));
+        assert!(game.run_command("time set night"));
         assert!(
             game.run_command("summon creaking 4.5 64 4.5 {UUID:[I;85,0,0,1],NoAI:1b,NoGravity:1b}")
         );
@@ -518,20 +661,26 @@ fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
             [8, 64, 8],
         );
         // `CreakingHeartBlockEntity.creakingHurt` from its protector starts the 100-tick emitter.
+        use sunrise_client::containers::BlockEntity::CreakingHeart;
         let heart_emitter = |game: &Game<'_>| match game.world.block_entities.get(&(8, 64, 8)) {
-            Some(sunrise_client::containers::BlockEntity::CreakingHeart(heart)) => heart.emitter,
+            Some(CreakingHeart(heart)) => heart.emitter,
             _ => panic!("the protecting heart is gone"),
         };
+        let clear_emitter =
+            |game: &mut Game<'_>| match game.world.block_entities.get_mut(&(8, 64, 8)) {
+                Some(CreakingHeart(heart)) => heart.emitter = 0,
+                _ => panic!("the protecting heart is gone"),
+            };
 
         assert!(game.run_command("summon pig 6.5 64 4.5 {UUID:[I;85,0,0,2],NoAI:1b,NoGravity:1b}"));
-        let _arrow_id = spawn_test_projectile(
+        let arrow_id = spawn_test_projectile(
             game,
             ProjectileKind::Arrow {
                 base_damage: 2.0,
                 critical: false,
                 effect: None,
             },
-            Vec3::new(5.5, 64.0, 4.5),
+            Vec3::new(5.5, 64.8, 4.5),
             None,
             [85, 0, 0, 3],
         );
@@ -559,16 +708,10 @@ fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
         let clear_anim = |game: &mut Game<'_>| {
             let c = game.mobs.iter_mut().find(|m| m.id == creaking_id).unwrap();
             c.extra.ints[0] = 0;
-            c.extra.counter = 0;
         };
         let creaking_state = |game: &Game<'_>| {
             let c = game.mobs.iter().find(|m| m.id == creaking_id).unwrap();
-            (
-                c.health,
-                c.extra.ints[0],
-                c.extra.counter,
-                c.ai.last_hurt_by_player,
-            )
+            (c.health, c.extra.ints[0], c.ai.last_hurt_by_player)
         };
 
         // Vary damage type with fixed direct living and projectile entities: valid reactions return true.
@@ -590,7 +733,7 @@ fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
                 );
                 assert_eq!(
                     creaking_state(game),
-                    (start_health, 8, 1, 0),
+                    (start_health, 8, 0),
                     "{ty} by {direct}"
                 );
             }
@@ -605,7 +748,7 @@ fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
                 )),
                 "entityless {ty}"
             );
-            assert_eq!(creaking_state(game), (start_health, 0, 0, 0));
+            assert_eq!(creaking_state(game), (start_health, 0, 0));
 
             clear_anim(game);
             assert!(
@@ -614,26 +757,56 @@ fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
                 )),
                 "tnt {ty}"
             );
-            assert_eq!(creaking_state(game), (start_health, 0, 0, 0));
+            assert_eq!(creaking_state(game), (start_health, 0, 0));
         }
 
-        // Player hit refreshes timed player credit; ownerless follow-up reacts while timer is live,
-        // and fails once the timer expires. Only a player-credited reaction tells the heart.
+        // A player hit posts ENTITY_ACTION before the heart reacts; `creakingHurt` places
+        // and sounds the resin before the Creaking sways.
         assert_eq!(heart_emitter(game), 0);
+        TEST_POSTED_EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));
+        game.audio.capture = Some(Vec::new());
         clear_anim(game);
         assert!(
             game.run_command(
                 "damage 00000055-0000-0000-0000-000000000001 2 minecraft:generic by @p"
             )
         );
-        assert_eq!(creaking_state(game), (start_health, 8, 3, 100));
+        assert_eq!(creaking_state(game), (start_health, 8, 100));
         assert_eq!(heart_emitter(game), 100);
+        assert_eq!(game.lan_entity_events, [(creaking_id as i32, 66)]);
+        let events = TEST_POSTED_EVENTS.with(|events| events.borrow_mut().take().unwrap());
+        assert_eq!(
+            events.first(),
+            Some(&(
+                "minecraft:entity_action",
+                [4.5, 64.0, 4.5],
+                Some(Who::Mob(creaking_id))
+            ))
+        );
+        assert!(!events[1..].is_empty());
+        assert!(
+            events[1..]
+                .iter()
+                .all(|(event, _, source)| *event == "minecraft:block_place" && source.is_none())
+        );
+        let sounds = game.audio.capture.as_ref().unwrap();
+        assert_eq!(
+            sounds.last().unwrap().event,
+            "minecraft:entity.creaking.sway"
+        );
+        assert!(
+            sounds[..sounds.len() - 1]
+                .iter()
+                .all(|sound| sound.event == "minecraft:block.resin.place")
+        );
+        assert_eq!(sounds.len(), events.len());
 
+        // Ownerless follow-up reacts while the timer is live and refuses once it expires.
         clear_anim(game);
         assert!(
             game.run_command("damage 00000055-0000-0000-0000-000000000001 1 minecraft:generic")
         );
-        assert_eq!(creaking_state(game), (start_health, 8, 3, 100));
+        assert_eq!(creaking_state(game), (start_health, 8, 100));
 
         clear_anim(game);
         game.mobs
@@ -642,27 +815,29 @@ fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
             .unwrap()
             .ai
             .last_hurt_by_player = 0;
+        game.last_hurt_by_player.remove(&creaking_id);
         assert!(
             !game.run_command("damage 00000055-0000-0000-0000-000000000001 1 minecraft:generic")
         );
-        assert_eq!(creaking_state(game), (start_health, 0, 0, 0));
+        assert_eq!(creaking_state(game), (start_health, 0, 0));
 
         // Tame wolf owned by a live player sets player credit; an ownerless tame wolf clears it.
         clear_anim(game);
         assert!(game.run_command(
             "damage 00000055-0000-0000-0000-000000000001 2 minecraft:generic by 00000055-0000-0000-0000-000000000005"
         ));
-        assert_eq!(creaking_state(game), (start_health, 8, 3, 100));
+        assert_eq!(creaking_state(game), (start_health, 8, 100));
 
         clear_anim(game);
         assert!(game.run_command(
             "damage 00000055-0000-0000-0000-000000000001 2 minecraft:generic by 00000055-0000-0000-0000-000000000006"
         ));
-        assert_eq!(creaking_state(game), (start_health, 8, 1, 0));
+        assert_eq!(creaking_state(game), (start_health, 8, 0));
 
         // Live blasts: unowned TNT does not trigger without player credit, triggers with live
         // remembered player credit, and player-lit TNT replaces stale offline player credit.
         clear_anim(game);
+        clear_emitter(game);
         game.last_hurt_by_player.remove(&creaking_id);
         game.native_explode(
             Some((unowned_tnt_id, Target::Tnt(unowned_tnt_id))),
@@ -673,7 +848,8 @@ fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
             ExplosionSettings::default(),
         )
         .unwrap();
-        assert_eq!(creaking_state(game), (start_health, 0, 0, 0));
+        assert_eq!(creaking_state(game), (start_health, 0, 0));
+        assert_eq!(heart_emitter(game), 0);
 
         assert!(
             game.run_command(
@@ -681,6 +857,7 @@ fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
             )
         );
         clear_anim(game);
+        clear_emitter(game);
         game.native_explode(
             Some((unowned_tnt_id, Target::Tnt(unowned_tnt_id))),
             [4.5, 64.0, 4.5],
@@ -690,9 +867,11 @@ fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
             ExplosionSettings::default(),
         )
         .unwrap();
-        assert_eq!(creaking_state(game), (start_health, 8, 3, 100));
+        assert_eq!(creaking_state(game), (start_health, 8, 100));
+        assert_eq!(heart_emitter(game), 100);
 
         clear_anim(game);
+        clear_emitter(game);
         game.mobs
             .iter_mut()
             .find(|m| m.id == creaking_id)
@@ -712,7 +891,93 @@ fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
             ExplosionSettings::default(),
         )
         .unwrap();
-        assert_eq!(creaking_state(game), (start_health, 8, 3, 100));
+        assert_eq!(creaking_state(game), (start_health, 8, 100));
+        assert_eq!(heart_emitter(game), 100);
+
+        // The arrow's impact sound follows the Creaking's reaction to the live collision.
+        // The heart is already emitting; observe the impact and the next real mob tick.
+        clear_anim(game);
+        game.load_ticking_neighbourhood(0, 0);
+        game.update_chunk_tickets();
+        assert!(game.entity_ticking_area()(4, 4));
+        assert!(game.creatures.projectiles.iter().any(|p| p.id == arrow_id));
+        game.creatures.projectiles.for_each_mut(|p| {
+            if p.id == arrow_id {
+                p.velocity = Vec3::new(-1.0, 0.0, 0.0);
+            }
+        });
+        game.audio.capture.as_mut().unwrap().clear();
+        game.lan_entity_events.clear();
+        TEST_POSTED_EVENT_ORDER.with(|order| *order.borrow_mut() = Some(Vec::new()));
+        let reaction = |game: &Game<'_>| {
+            let sounds = game.audio.capture.as_ref().unwrap();
+            let is_hit_sound = |event: &str| {
+                matches!(
+                    event,
+                    "minecraft:entity.creaking.sway" | "minecraft:entity.arrow.hit"
+                )
+            };
+            let flashes = game.lan_entity_events.as_slice();
+            let is_flash = |event: &(i32, i8)| *event == (creaking_id as i32, 66);
+            let action = TEST_POSTED_EVENT_ORDER.with(|order| {
+                order
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .filter(|(event, source, _, _)| {
+                        *event == "minecraft:entity_action"
+                            && *source == Some(Who::Mob(creaking_id))
+                    })
+                    .map(|(_, _, flash_cursor, sound_cursor)| {
+                        [
+                            flashes[..*flash_cursor]
+                                .iter()
+                                .filter(|e| is_flash(e))
+                                .count(),
+                            sounds[..*sound_cursor]
+                                .iter()
+                                .filter(|s| is_hit_sound(&s.event))
+                                .count(),
+                        ]
+                    })
+                    .collect::<Vec<_>>()
+            });
+            serde_json::json!({
+                "action": action,
+                "flashes": flashes.iter().filter(|e| is_flash(e)).count(),
+                "sounds": sounds.iter().filter(|s| is_hit_sound(&s.event)).map(|s| &s.event).collect::<Vec<_>>(),
+                "emitter": heart_emitter(game),
+                "animation": creaking_state(game).1,
+            })
+        };
+        game.tick_projectiles().unwrap();
+        let impact = reaction(game);
+        assert_eq!(
+            impact,
+            serde_json::json!({
+                "action": [[1, 0]], "flashes": 1,
+                "sounds": ["minecraft:entity.creaking.sway", "minecraft:entity.arrow.hit"],
+                "emitter": 100, "animation": 8,
+            })
+        );
+        game.mobs
+            .iter_mut()
+            .find(|m| m.id == creaking_id)
+            .unwrap()
+            .no_ai = false;
+        game.tick_creature_entities().unwrap();
+        let next_tick = reaction(game);
+        TEST_POSTED_EVENT_ORDER.with(|order| *order.borrow_mut() = None);
+        let mut expected = impact.clone();
+        expected["animation"] = 7.into();
+        assert_eq!(
+            next_tick, expected,
+            "the mob tick must not replay the hurt reaction"
+        );
+        if let Some(path) = std::env::var_os("SUNRISE_CREAKING_HIT_ORDER_OUTPUT") {
+            std::fs::write(path, serde_json::json!([impact, next_tick]).to_string()).unwrap();
+        }
     });
 }
 

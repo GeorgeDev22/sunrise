@@ -1,4 +1,3 @@
-#![cfg(test)]
 use crate::game::{
     execution_role::ExecutionRole,
     native_entity_refs::tests::{run_fresh_cases, with_game_role},
@@ -259,17 +258,49 @@ fn piston_push_reaction_parts_cache_reload_and_replay() {
                 ExecutionRole::IntegratedServer
             },
             |game| {
+                let host = &*game as &dyn Host;
                 let registry = game.pack.assets.registry;
                 let a = state(registry, "test:lock", &[("locked", "false")]);
                 let z = state(registry, "test:lock", &[("locked", "true")]);
-                assert_eq!(
-                    game.res.behaviours().piston_reaction(a),
-                    if parts {
-                        EngineReaction::Immoveable
-                    } else {
-                        EngineReaction::PushPull
+                let a_api = host.block_state_id("test:lock[locked=false]").unwrap();
+                let z_api = host.block_state_id("test:lock[locked=true]").unwrap();
+                let fixed_api = host.block_state_id("test:fixed").unwrap();
+                let torch = host.block_state_id("minecraft:torch").unwrap();
+                // The callback view exposes the same table, without needing a resident block.
+                let level = crate::game::native_level_signals::ReadLevel {
+                    game,
+                    level: LevelRef::new(
+                        game.native_lifecycle.epoch().unwrap(),
+                        DimensionKey::OVERWORLD,
+                    ),
+                };
+                for facts in [host.block_states(), level.block_states()] {
+                    for (state, expected) in [
+                        (torch, PushReaction::Popped),
+                        (
+                            a_api,
+                            if parts {
+                                PushReaction::Immoveable
+                            } else {
+                                PushReaction::PushPull
+                            },
+                        ),
+                        (z_api, PushReaction::PushPull),
+                        (
+                            fixed_api,
+                            if parts {
+                                PushReaction::PushPull
+                            } else {
+                                PushReaction::Immoveable
+                            },
+                        ),
+                    ] {
+                        assert_eq!(facts.piston_push_reaction(state), Ok(Some(expected)));
                     }
-                );
+                    let invalid =
+                        mod_api::__private::block_state_from_ordinal(a_api.block(), u16::MAX);
+                    assert_eq!(facts.piston_push_reaction(invalid), Ok(None));
+                }
                 exercise(
                     game.res.behaviours(),
                     registry,
@@ -328,10 +359,14 @@ fn piston_push_reaction_parts_cache_reload_and_replay() {
                 // Removing the last subscriber must clear its immovable override on both sides.
                 if parts {
                     unbreakable.store(0, Ordering::Relaxed);
+                    enabled.store(false, Ordering::Relaxed);
                     assert_eq!(
-                        game.res.behaviours().piston_reaction(a),
-                        EngineReaction::Immoveable
+                        (&*game as &dyn Host)
+                            .block_states()
+                            .piston_push_reaction(a_api),
+                        Ok(Some(PushReaction::Immoveable))
                     );
+                    enabled.store(true, Ordering::Relaxed);
                 }
                 // A reload retains registry metadata; only the active subscriber set changes.
                 let after: Mods = if parts {
@@ -346,8 +381,10 @@ fn piston_push_reaction_parts_cache_reload_and_replay() {
                             HookId::PistonPushReaction
                         ));
                         assert_eq!(
-                            game.res.behaviours().piston_reaction(a),
-                            EngineReaction::PushPull
+                            (&*game as &dyn Host)
+                                .block_states()
+                                .piston_push_reaction(a_api),
+                            Ok(Some(PushReaction::PushPull))
                         );
                         exercise(
                             game.res.behaviours(),

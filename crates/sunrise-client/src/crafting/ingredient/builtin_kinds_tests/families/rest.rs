@@ -106,22 +106,44 @@ fn simplicity_follows_all_children_and_custom_display_base() {
     let source = r#"{"type":"neoforge:custom_display","base":{"type":"neoforge:components","items":"minecraft:apple","components":{}},"display":{"type":"minecraft:item","item":"minecraft:diamond"}}"#;
     assert!(!parse(source, &items).is_simple());
     let mut custom = Ingredient::of(vec!["minecraft:apple".into()]);
-    custom.custom = Some(("fixture:custom".into(), Default::default()));
+    custom.custom = Some(
+        mod_api::__private::bind_ingredient_predicate(
+            "fixture",
+            0,
+            "fixture:custom",
+            mod_api::IngredientDefinition::new(vec![], |_, _| false),
+        )
+        .1,
+    );
     assert!(!custom.is_simple());
 }
 
 #[test]
 fn builtin_kinds_bypass_mod_resolution_and_honor_type_key_priority() {
     let load = load();
+    let mut items = Items::empty();
+    items
+        .block_tag_order
+        .insert("minecraft:logs".into(), Vec::new());
     for source in [
         r#"{"type":"neoforge:components","items":"minecraft:diamond_sword","components":{"minecraft:damage":5}}"#,
         r#"{"type":"neoforge:block_tag","tag":"minecraft:logs"}"#,
         r#"{"type":"fixture:wrong","neoforge:ingredient_type":"neoforge:custom_display","base":"minecraft:apple","display":{"type":"minecraft:item","item":"minecraft:diamond"}}"#,
     ] {
-        let mut json: Value = serde_json::from_str(source).unwrap();
-        let original = json.clone();
-        assert!(!Ingredient::resolve(&mut json, &load));
-        assert_eq!(json, original);
+        let file = serde_json::json!({
+            "type": "minecraft:stonecutting",
+            "ingredient": serde_json::from_str::<Value>(source).unwrap(),
+            "result": "minecraft:stone"
+        });
+        // No mod listens to ingredient kinds here; resolving a built-in as
+        // a mod kind would refuse the recipe.
+        let sources = crate::crafting::ResolvedSources::resolve(
+            vec![("fixture:builtin".into(), file.clone())],
+            &items,
+            &load,
+        )
+        .unwrap();
+        assert_eq!(sources.recipes[0].file(), &file);
     }
 }
 
@@ -1269,9 +1291,8 @@ fn optional_codec_json_null_uses_defaults_without_weakening_required_fields() {
 
 #[test]
 fn custom_model_data_recipe_decodes_ordered_lists_and_matches_without_allocating() {
-    use crate::crafting::{Recipes, ResolvedRecipe, ResolvedSources};
+    use crate::crafting::{Recipes, ResolvedSources};
     use serde_json::json;
-    use std::sync::Arc;
     use sunrise_core::nbt::JavaString;
     use sunrise_world::loot::PackOverlay;
 
@@ -1321,20 +1342,20 @@ fn custom_model_data_recipe_decodes_ordered_lists_and_matches_without_allocating
         Some(&expected),
     );
     let named = |name: &str, ingredient: serde_json::Value| {
-        let file = Arc::new(json!({
-            "type": "minecraft:crafting_shaped", "pattern": ["A"],
-            "key": {"A": ingredient}, "result": {"id": "minecraft:diamond", "count": 2}
-        }));
-        ResolvedRecipe {
-            name: name.into(),
-            file: file.clone(),
-            resolved: file,
-        }
+        (
+            name.to_owned(),
+            json!({
+                "type": "minecraft:crafting_shaped", "pattern": ["A"],
+                "key": {"A": ingredient}, "result": {"id": "minecraft:diamond", "count": 2}
+            }),
+        )
     };
-    let sources = ResolvedSources {
-        recipes: vec![named("fixture:model", source.clone())],
-        ..ResolvedSources::default()
-    };
+    let sources = ResolvedSources::resolve(
+        vec![named("fixture:model", source.clone())],
+        &items,
+        &load(),
+    )
+    .unwrap();
     for invalid in [
         json!(3),
         json!({"floats": 1}),

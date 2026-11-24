@@ -53,7 +53,6 @@ fn a_post_write_placement_reads_the_stack_without_loading_its_data() {
     use sunrise_client::{block_entity_item::BLOCK_ENTITY_DATA, items::ItemStack};
 
     with_game(|game| {
-        let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
         loaded(game);
         let level = game.level(game.dim.id()).unwrap();
         let pos = [2, 70, 2];
@@ -142,7 +141,7 @@ fn a_code_placement_notifies_only_the_blocks_part_with_its_stack() {
                 placer: event.placer,
                 stack: event
                     .stack
-                    .map(|stack| (stack.item().id(host), stack.count())),
+                    .and_then(|stack| Some((stack.item().id(host)?.to_owned(), stack.count()))),
             });
             let [x, y, z] = event.pos;
             event
@@ -169,7 +168,6 @@ fn a_code_placement_notifies_only_the_blocks_part_with_its_stack() {
     crate::game::api_values::install_parts(&mods).unwrap();
     mod_platform::testing::with_mods(mods, || {
         with_game(|game| {
-            let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
             loaded(game);
             let level = game.level(game.dim.id()).unwrap();
             let wool = state(game, "minecraft:white_wool");
@@ -184,15 +182,16 @@ fn a_code_placement_notifies_only_the_blocks_part_with_its_stack() {
             assert!(probe.0.lock().unwrap().is_empty());
 
             let before = level.block_state(game, ABOVE);
-            let aborted: Result<(), ()> = (game as &mut dyn ServerHost).transaction(|host, _| {
-                assert_eq!(level.set_placed_by(host, POS, Some(&stack)), Ok(true));
-                assert_eq!(
-                    level.block_state(host, ABOVE),
-                    Some(wool.try_into_api().unwrap())
-                );
-                Err(())
-            });
-            assert_eq!(aborted, Err(()));
+            let aborted: Result<(), mod_api::TransactionError<()>> = (game as &mut dyn ServerHost)
+                .transaction(|host, _| {
+                    assert_eq!(level.set_placed_by(host, POS, Some(&stack)), Ok(true));
+                    assert_eq!(
+                        level.block_state(host, ABOVE),
+                        Some(wool.try_into_api().unwrap())
+                    );
+                    Err(())
+                });
+            assert_eq!(aborted, Err(mod_api::TransactionError::Aborted(())));
             assert_eq!(level.block_state(game, ABOVE), before);
             assert_eq!(
                 *probe.0.lock().unwrap(),
@@ -213,7 +212,6 @@ fn a_command_block_placement_callback_saves_updated_entity_data() {
     use sunrise_client::containers::BlockEntity;
 
     with_game(|game| {
-        let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
         loaded(game);
         let level = game.level(game.dim.id()).unwrap();
         let pos = [2, 70, 2];
@@ -254,7 +252,6 @@ fn a_command_block_placement_callback_saves_updated_entity_data() {
 #[ignore = "daily"]
 fn placement_does_not_write_a_fenced_companion() {
     with_game(|game| {
-        let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
         loaded(game);
         let level = game.level(game.dim.id()).unwrap();
         let foot = [2, 70, 2];
@@ -282,7 +279,6 @@ fn placement_does_not_write_a_fenced_companion() {
 #[ignore = "daily"]
 fn a_tripwire_placement_cannot_rewrite_a_fenced_hook_or_wire() {
     with_game(|game| {
-        let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
         loaded(game);
         let level = game.level(game.dim.id()).unwrap();
         let hook = state(game, "minecraft:tripwire_hook");
@@ -353,7 +349,6 @@ fn placement_previews_shape_updates_before_the_tripwire_callback() {
     use mod_api::PlayerWorldRefusal;
 
     with_guests(|game| {
-        let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
         loaded(game);
         let level = game.level(game.dim.id()).unwrap();
         let player = game.player(13).unwrap();
@@ -406,7 +401,6 @@ fn a_transaction_refuses_only_a_completing_wither_placement() {
     use mod_api::{HostTransaction, LevelWriteError, PlayerWorldRefusal, ServerHost};
 
     with_guests(|game| {
-        let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
         loaded(game);
         game.ui.difficulty = 2;
         let level = game.level(game.dim.id()).unwrap();
@@ -448,35 +442,37 @@ fn a_transaction_refuses_only_a_completing_wither_placement() {
                 Ok(true)
             );
         }
-        let projected: Result<(), ()> = (game as &mut dyn ServerHost).transaction(|host, _| {
-            assert_eq!(
-                level.place_block(host, at, skull.try_into_api().unwrap(), false),
-                Err(LevelWriteError::InTransaction)
-            );
-            assert_eq!(
-                player.place_block(host, level, at, skull.try_into_api().unwrap(), false),
-                Err(PlayerWorldRefusal::InTransaction)
-            );
-            Err(())
-        });
-        assert_eq!(projected, Err(()));
+        let projected: Result<(), mod_api::TransactionError<()>> = (game as &mut dyn ServerHost)
+            .transaction(|host, _| {
+                assert_eq!(
+                    level.place_block(host, at, skull.try_into_api().unwrap(), false),
+                    Err(LevelWriteError::InTransaction)
+                );
+                assert_eq!(
+                    player.place_block(host, level, at, skull.try_into_api().unwrap(), false),
+                    Err(PlayerWorldRefusal::InTransaction)
+                );
+                Err(())
+            });
+        assert_eq!(projected, Err(mod_api::TransactionError::Aborted(())));
         assert_eq!(game.world.block(at[0], at[1], at[2]), air);
         assert_eq!(
             game.level_set_block(level, at, skull, BlockUpdateFlags::NONE),
             Ok(true)
         );
-        let aborted: Result<(), ()> = (game as &mut dyn ServerHost).transaction(|host, _| {
-            assert_eq!(
-                level.set_placed_by(host, at, None),
-                Err(LevelWriteError::InTransaction)
-            );
-            assert_eq!(
-                level.place_block(host, at, skull.try_into_api().unwrap(), false),
-                Ok(false)
-            );
-            Err(())
-        });
-        assert_eq!(aborted, Err(()));
+        let aborted: Result<(), mod_api::TransactionError<()>> = (game as &mut dyn ServerHost)
+            .transaction(|host, _| {
+                assert_eq!(
+                    level.set_placed_by(host, at, None),
+                    Err(LevelWriteError::InTransaction)
+                );
+                assert_eq!(
+                    level.place_block(host, at, skull.try_into_api().unwrap(), false),
+                    Ok(false)
+                );
+                Err(())
+            });
+        assert_eq!(aborted, Err(mod_api::TransactionError::Aborted(())));
         for ([x, y, z], state) in cells {
             assert_eq!(game.world.block(x, y, z), state);
         }

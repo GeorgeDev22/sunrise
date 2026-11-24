@@ -13,7 +13,7 @@ namespace has no effect.
 |---|---|
 | `entries` | recipe ID to priority, a signed 32-bit integer; an ID without a namespace is `minecraft:`. A layer cannot give the same ID twice using different spellings. |
 | `replace` | `true` clears every priority an earlier layer set, even when `entries` is absent or empty |
-| `neoforge:conditions` | an array of [load conditions](load-conditions.md); a valid false condition skips the entire layer |
+| `neoforge:conditions` | an array of [load conditions](conditional-data.md); a valid false condition skips the entire layer |
 
 A recipe with no entry has priority 0.
 

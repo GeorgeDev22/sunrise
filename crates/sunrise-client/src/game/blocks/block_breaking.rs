@@ -12,7 +12,7 @@ impl Game<'_> {
         let stack = self.inventory[self.selected].clone()?;
         let per_block = self.items().mining_damage(&stack)?;
         let max = self.items().mining_damage_capacity(&stack);
-        let wears = if &*stack.item == "minecraft:shears" {
+        let wears = if self.stack_shears(&stack, super::item_abilities::ability::SHEARS_DIG) {
             !self.items().block_in_tag("minecraft:fire", name)
         } else {
             hardness != 0.0

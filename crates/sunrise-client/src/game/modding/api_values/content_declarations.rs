@@ -1,5 +1,5 @@
 //! Content declaration conversion. Admission retains the content loader's validation.
-use super::TryIntoEngine;
+use super::{EngineStack, TryIntoEngine};
 #[path = "arm_pose.rs"]
 mod arm_pose;
 use sunrise_mod_package::content as engine;
@@ -712,20 +712,23 @@ mod tests {
     }
 }
 
-pub(super) fn validate_decoded_components(
-    patch: Option<&mod_api::Tag>,
-    stack: &sunrise_items::items::ItemStack,
+/// Check cached decode results for present own overrides, not removals or defaults.
+/// The source must return the stack even when its override failed to decode.
+pub(super) fn validate_decoded_components<'a>(
+    stack_for: impl Fn(&str) -> Option<&'a EngineStack>,
 ) -> Result<(), mod_api::StackWriteError> {
-    // Use the admission results already produced by the component codec.
-    let Some(patch) = patch else { return Ok(()) };
-    if (patch.get("minecraft:consumable").is_some() && stack.consumable(None).is_none())
-        || (patch.get("minecraft:death_protection").is_some()
-            && stack.death_protection(None).is_none())
+    if sunrise_client::item_data::StackData::CONSUME_EFFECT_COMPONENTS
+        .into_iter()
+        .any(|id| {
+            stack_for(id)
+                .and_then(EngineStack::data)
+                .is_some_and(|data| data.refused_consume_effect_component(id))
+        })
     {
         return Err(mod_api::StackWriteError::InvalidEffectPayload);
     }
     let id = "minecraft:villager_food";
-    if patch.get(id).is_some() && stack.villager_food(None).is_none() {
+    if stack_for(id).is_some_and(|stack| stack.villager_food(None).is_none()) {
         return Err(mod_api::StackWriteError::InvalidComponents {
             reason: mod_api::StackError::InvalidComponent {
                 id: mod_api::ComponentId::new(id).expect("built-in component id"),
@@ -807,7 +810,14 @@ impl TryIntoEngine<()> for (String, mod_api::WorldFluid) {
                 slope_find_distance: fluid.slope_find_distance,
                 source_conversion: fluid.source_conversion,
                 bucket: fluid.bucket,
+                flowing: fluid.flowing.clone(),
             }),
+            // Named here, the generated bucket keeps its id over a fluid file's `bucket_item`.
+            bucket_item: fluid
+                .bucket_item
+                .clone()
+                .or_else(|| fluid.bucket.then(|| format!("{id}_bucket"))),
+            measures: Default::default(),
         })
     }
 }

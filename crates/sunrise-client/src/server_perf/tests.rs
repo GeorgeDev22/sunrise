@@ -1211,6 +1211,8 @@ fn memory_snapshots_keep_their_labels_paths_values_and_capture_time() {
     ];
     assert!(!perf.memory_snapshot(0.0, "idle", &rows));
     perf.start_capture(10.0, &scratch.0, options(5.0)).unwrap();
+    let cost = perf.memory_cost().unwrap();
+    cost.0.store(5_000_000, Ordering::Relaxed);
     assert!(perf.memory_snapshot(10.25, "start", &rows));
     let saved = stop(&mut perf, 11.0, R::Normal).unwrap().unwrap();
     let capture = read(&saved.path);
@@ -1227,5 +1229,28 @@ fn memory_snapshots_keep_their_labels_paths_values_and_capture_time() {
         ["process.resident_mb", "gpu.resident_mb"]
     );
     assert_eq!(snapshot.value_mb, [12.5, 2.0]);
+    assert!(
+        capture.stop[0]
+            .overhead
+            .as_ref()
+            .unwrap()
+            .memory_snapshot_ns
+            >= 5_000_000
+    );
     assert!(!perf.memory_snapshot(11.5, "after", &rows));
+
+    // A worker finishing after its capture stopped must not charge the next one.
+    perf.start_capture(12.0, &scratch.0, options(5.0)).unwrap();
+    cost.0.fetch_add(5_000_000, Ordering::Relaxed);
+    let saved = stop(&mut perf, 13.0, R::Normal).unwrap().unwrap();
+    let capture = read(&saved.path);
+    assert!(capture.memory.is_empty());
+    assert_eq!(
+        capture.stop[0]
+            .overhead
+            .as_ref()
+            .unwrap()
+            .memory_snapshot_ns,
+        0
+    );
 }

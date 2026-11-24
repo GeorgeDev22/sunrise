@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Яңы чат һыҙығы һулдан шыуып инә, ә ул һүнә, урынына бөтөн күренә.",
   "sunrise.extras.chat_indicator": "Хәбәр күрһәткесе",
   "sunrise.extras.chat_indicator.tooltip": "Чат һыҙығының һул яғында төҫлө һыҙыҡ.",
-  "sunrise.extras.discord_presence": "Discord Бай булыу",
-  "sunrise.extras.discord_presence.tooltip": "Һеҙҙең Discord профилендә Sunrise уйнауҙы күрһәтә, ә Discord йүгерә: менюлар, бер уйынсы йәки күп уйынсы, үлсәм һәм уйнаған ваҡыт. Бер ҡасан да донъяның исеме йәки сервер адресы.",
   "sunrise.extras.dynamic_lights": "Динамик яҡтылыҡ",
   "sunrise.extras.dynamic_lights.tooltip": "Факелдар һәм башҡа яҡтылыҡ сығанаҡтары тотолған, төшөрөлгән йәки ут өҫтөндә улар тирәһендәге блоктарҙы яҡтырта.",
   "sunrise.extras.fullbright": "Фуллбрайт",

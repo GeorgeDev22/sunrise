@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Txat-lerro berri bat ezkerretik sartzen da desagertzen den bitartean, osorik agertu beharrean.",
   "sunrise.extras.chat_indicator": "Mezuen adierazlea",
   "sunrise.extras.chat_indicator.tooltip": "Txat-lerro baten ezkerreko koloretako barra.",
-  "sunrise.extras.discord_presence": "Discord Presentzia aberatsa",
-  "sunrise.extras.discord_presence.tooltip": "Discord exekutatzen den bitartean Sunrise Jolasean erakusten du: menuak, jokalari bakarreko edo jokalari anitzeko, dimentsioa eta jokatutako denbora. Inoiz ez mundu baten izenik edo zerbitzari baten helbidea.",
   "sunrise.extras.dynamic_lights": "Argi dinamikoak",
   "sunrise.extras.dynamic_lights.tooltip": "Zuziak eta beste argi-iturri batzuk eusten, erorita edo sutan pizten dituzte inguruko blokeak.",
   "sunrise.extras.fullbright": "Argi osoa",

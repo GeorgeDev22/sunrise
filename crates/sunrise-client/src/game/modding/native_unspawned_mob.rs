@@ -296,7 +296,7 @@ impl Game<'_> {
         })
     }
 
-    /// The tags a mod gave the mob so far (`Entity.getTags`).
+    /// The tags a mod gave the mob so far (`Entity.entityTags()`).
     pub(super) fn unspawned_mob_tags(
         &self,
         mob: UnspawnedMobRef,
@@ -598,7 +598,10 @@ impl UnspawnedMobEdits for Edits<'_, '_> {
         mob: UnspawnedMobRef,
         name: Option<mod_api::Text>,
     ) -> Result<(), UnspawnedMobError> {
-        let name = name.try_into_engine(&())?;
+        let name = name
+            .as_ref()
+            .map(sunrise_client_lib::api_text::to_serialized_engine)
+            .transpose()?;
         self.game.edit_lent_mob(mob, |_, m| {
             m.custom_name = name.as_ref().map(Text::plain);
             m.custom_name_text = name;
@@ -617,14 +620,16 @@ impl Edits<'_, '_> {
         write: AttributeWrite,
     ) -> Result<bool, UnspawnedMobError> {
         self.game.edit_lent_mob(mob, |game, m| {
-            write_unspawned_attribute(
-                &game.motion.attributes,
-                world_items!(game),
-                m,
-                &attribute.to_string(),
-                write,
-            )
-            .ok_or(UnspawnedMobError::Unsupported)
+            let name = attribute.to_string();
+            // Every write here is a mod's, so a base stays in the attribute's range.
+            let write = match write {
+                AttributeWrite::Base(base) => {
+                    AttributeWrite::Base(game.mod_base_in_range(&name, base))
+                }
+                other => other,
+            };
+            write_unspawned_attribute(&game.motion.attributes, world_items!(game), m, &name, write)
+                .ok_or(UnspawnedMobError::Unsupported)
         })
     }
 }
@@ -743,6 +748,31 @@ mod tests {
                 assert_eq!(kind, Ok(id("minecraft:pig")));
                 assert_eq!(base, Ok(20.0));
                 assert_eq!(head, Ok(Some(pumpkin())));
+            },
+        );
+    }
+
+    /// A mod's base written through the editor stays in the attribute's range, as documented.
+    #[test]
+    #[ignore = "daily"]
+    fn a_base_written_through_the_editor_stays_in_range() {
+        let seen: Arc<Mutex<Option<Result<f64, UnspawnedMobError>>>> = Arc::new(Mutex::new(None));
+        let saw = seen.clone();
+        let max_health = id("minecraft:max_health");
+        listening(
+            move |host, event| {
+                let (mob, edits) = (event.mob, event.edits);
+                edits.set_attribute_base(mob, &max_health, 2000.0).unwrap();
+                *saw.lock().unwrap() = Some(mob.attribute_base(host, &max_health));
+                Flow::Continue
+            },
+            || {
+                with_game(|game| {
+                    let spawned = spawn_pig(game).unwrap();
+                    let m = game.mobs.iter().find(|m| m.id == spawned).unwrap();
+                    assert_eq!(finalize::base_value(m, Attr::MaxHealth), 1024.0);
+                });
+                assert_eq!(seen.lock().unwrap().take(), Some(Ok(1024.0)));
             },
         );
     }

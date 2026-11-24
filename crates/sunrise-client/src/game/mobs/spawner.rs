@@ -5,8 +5,9 @@
 use super::{
     Game,
     creatures::{Finalized, SpawnReason},
+    persist::SpawnTree,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use sunrise_client::{
     Result,
     containers::BlockEntity,
@@ -33,14 +34,12 @@ pub(super) enum Planned {
     Finalized(Mob, Option<Tag>),
     /// A mob loaded from the spawn data (with its passengers) and its
     /// `equipment`; the provisional id its events carry.
-    Loaded(Tag, Option<Tag>, u32),
+    Loaded(SpawnTree, Option<Tag>, u32),
 }
 
 /// What the spawner code keeps between ticks.
 #[derive(Default)]
 pub(super) struct SpawnerState {
-    /// Every entity type id (`EntityType.byString`), read once.
-    entity_types: Option<HashSet<String>>,
     /// The mob shown in each spawner and the id it was made for
     /// (`getOrCreateDisplayEntity`).
     displays: HashMap<Pos, (String, Mob)>,
@@ -49,35 +48,14 @@ pub(super) struct SpawnerState {
 impl Game<'_> {
     /// `EntityType.byString`: the type is in the registry.
     pub(super) fn entity_type_exists(&self, id: &str) -> bool {
-        self.spawners
-            .entity_types
-            .as_ref()
-            .is_some_and(|t| t.contains(id))
+        self.res
+            .rest
+            .get()
+            .is_some_and(|rest| rest.spawner_types.contains_key(id))
     }
     /// Whether `entity_type_exists` has a registry to answer from.
     pub(super) fn entity_types_loaded(&self) -> bool {
-        self.spawners
-            .entity_types
-            .as_ref()
-            .is_some_and(|t| !t.is_empty())
-    }
-    pub(super) fn load_entity_types(&mut self) {
-        if self.spawners.entity_types.is_some() {
-            return;
-        }
-        let path = self.options.resources.join("entity-types.json");
-        let types = std::fs::read(path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|v| {
-                v.as_object().map(|o| {
-                    o.keys()
-                        .map(|k| sunrise_client::command::args::normalize(k))
-                        .collect()
-                })
-            })
-            .unwrap_or_default();
-        self.spawners.entity_types = Some(types);
+        self.res.rest.get().is_some()
     }
     /// The server tick of the spawner at `key`. Its client tick comes after
     /// every block entity's (`client_tick_spawners`).
@@ -189,14 +167,14 @@ impl Game<'_> {
         let _save_lease = sunrise_client::join_seq::visibility::PassLease::enter();
         let mut finalized: Vec<Mob> = Vec::new();
         let mut gears: Vec<Option<Tag>> = Vec::new();
-        let mut loads: Vec<(Tag, Option<Tag>, u32)> = Vec::new();
+        let mut loads = Vec::new();
         for plan in planned {
             match plan {
                 Planned::Finalized(mob, equipment) => {
                     finalized.push(mob);
                     gears.push(equipment);
                 }
-                Planned::Loaded(tag, equipment, key) => loads.push((tag, equipment, key)),
+                Planned::Loaded(tree, equipment, key) => loads.push((tree, equipment, key)),
             }
         }
         // Real ids for finalizeSpawn's provisional mobs, in spawn order, the
@@ -218,19 +196,18 @@ impl Game<'_> {
             self.mobs.push(mob);
             self.native_mobs_joined(i, false);
         }
-        for (tag, equipment, key) in loads {
-            if let Some(id) = self.load_mob(tag, None) {
-                // `nextSpawnData.getEquipment().ifPresent(mob::equip)`.
-                if let Some(table) = equipment {
-                    self.equip_from_table(id, &table);
-                }
-                ids.insert(key, id);
+        for (tree, equipment, key) in loads {
+            let id = tree.install(self);
+            // `nextSpawnData.getEquipment().ifPresent(mob::equip)`.
+            if let Some(table) = equipment {
+                self.equip_from_table(id, &table);
             }
+            ids.insert(key, id);
         }
         ids
     }
     /// The spawner's `loadEntityRecursive` and `tryAddFreshEntityWithPassengers`:
-    /// the mob it will add (created after the tick) and its box.
+    /// make the accepted mobs visible to the next attempt before the tick inserts them.
     pub(super) fn plan_spawner_mob(
         &self,
         l: &super::natural_spawning::GameLevel,
@@ -242,7 +219,7 @@ impl Game<'_> {
         let kind = self.res.mob_types().get(r.id)?.clone();
         let [x, y, z] = r.position;
         let at = Vec3::new(x, y, z);
-        let (bounds, key) = if r.finalize {
+        let key = if r.finalize {
             // The mob a listened position check created, else a new one.
             let mut mob = l
                 .take_checked(r.id, r.position, r.yaw)
@@ -269,9 +246,7 @@ impl Game<'_> {
                         };
                         sunrise_client::mobs::finalize::finalize(&mut cx, &mut mob, reason, group);
                         for m in cx.created {
-                            let bounds = m.bounds();
-                            l.pending.borrow_mut().push(bounds);
-                            l.pending_ids.borrow_mut().push((m.kind.id.clone(), bounds));
+                            l.record_pending(&m);
                             l.spawned.borrow_mut().push(m);
                         }
                     }
@@ -286,18 +261,12 @@ impl Game<'_> {
                 mob.head_yaw = 0.0;
                 mob.previous_head_yaw = 0.0;
             }
-            let bounds = mob.bounds();
+            l.record_pending(&mob);
             let key = mob.id;
             planned.push(Planned::Finalized(mob, r.equipment.cloned()));
-            (bounds, key)
+            key
         } else {
-            // A UUID already in the level is refused.
             let mut tag = r.entity.clone();
-            if let Some(uuid) = sunrise_client::entity_nbt::uuid(&Tag::Compound(tag.clone()))
-                && self.persist.uuids.values().any(|u| *u == uuid)
-            {
-                return None;
-            }
             let double = |v: f64| Tag::Double(v.to_bits());
             tag.insert(
                 "Pos".into(),
@@ -317,24 +286,15 @@ impl Game<'_> {
             // EntityType.loadEntityRecursive applies the spawner's placement
             // callback to every passenger as well as the root.
             super::commands::place_summoned(&mut tag, r.position);
-            let mob = sunrise_client::entity_nbt::mob_from_nbt(
-                &tag,
-                self.res.mob_types(),
-                0,
-                Some(self.pack.assets.registry),
-            )?;
-            let bounds = mob.bounds();
+            let mut tree = SpawnTree::decode(self, tag)?;
+            if !l.admit_pending_tree(&mut tree) {
+                return None;
+            }
             let key = l.provisional_id();
-            planned.push(Planned::Loaded(tag, r.equipment.cloned(), key));
-            (bounds, key)
+            planned.push(Planned::Loaded(tree, r.equipment.cloned(), key));
+            key
         };
-        l.pending.borrow_mut().push(bounds);
-        l.pending_ids.borrow_mut().push((r.id.to_owned(), bounds));
-        Some(SpawnerAdded {
-            id: key,
-            bounds,
-            mob: true,
-        })
+        Some(SpawnerAdded { id: key, mob: true })
     }
     /// What a spawner's tick or a spawn egg did, shown and sent.
     fn apply_spawner_events(

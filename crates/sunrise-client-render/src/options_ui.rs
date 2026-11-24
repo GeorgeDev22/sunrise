@@ -36,6 +36,11 @@ use self::layout::OptionsLayout;
 mod wheel;
 pub(crate) use wheel::slider_unsnapped;
 
+/// `Options.renderDistance`'s upper bound in 26.3 (`IntRange(2, 32)`; 16 below 1 GiB of JVM heap).
+/// Sunrise has no JVM heap to size it by, so the classic page takes the 32; Sunrise Graphics goes
+/// to `MAX_RENDER_DISTANCE`.
+pub(crate) const VANILLA_MAX_RENDER_DISTANCE: i32 = 32;
+
 fn tr(key: &str) -> Text {
     Text::translate(key, &[])
 }
@@ -235,7 +240,7 @@ impl Opt {
     pub(crate) fn caption(self) -> &'static str {
         match self {
             Opt::Fov => "options.fov",
-            Opt::RenderDistance => "options.renderDistance",
+            Opt::RenderDistance | Opt::VanillaRenderDistance => "options.renderDistance",
             Opt::SimulationDistance => "options.simulationDistance",
             Opt::Sensitivity => "options.sensitivity",
             Opt::WheelSensitivity => "options.mouseWheelSensitivity",
@@ -388,6 +393,15 @@ impl Opt {
                 2.0,
                 crate::options_file::MAX_RENDER_DISTANCE as f64,
             ),
+            // `IntRange(2, 32).toSliderValue`: the ends at 0 and 1, every value between them at
+            // its bin's centre. A Sunrise Graphics distance past 32 shows as 32 and stays saved.
+            Opt::VanillaRenderDistance => {
+                Kind::Slider(match s.render_distance.min(VANILLA_MAX_RENDER_DISTANCE) {
+                    d if d <= 2 => 0.0,
+                    VANILLA_MAX_RENDER_DISTANCE => 1.0,
+                    d => (f64::from(d) - 1.5) / f64::from(VANILLA_MAX_RENDER_DISTANCE - 1),
+                })
+            }
             Opt::SimulationDistance => unit(s.simulation_distance as f64, 5.0, 32.0),
             Opt::Sensitivity => Kind::Slider(s.sensitivity),
             Opt::WheelSensitivity => wheel::kind(s.mouse_wheel_sensitivity),
@@ -490,6 +504,7 @@ impl Opt {
             Opt::ChatDelay => Some(60),
             Opt::Fov => Some(80),
             Opt::RenderDistance => Some((crate::options_file::MAX_RENDER_DISTANCE - 2) as u32),
+            Opt::VanillaRenderDistance => Some((VANILLA_MAX_RENDER_DISTANCE - 2) as u32),
             Opt::SimulationDistance => Some(27),
             Opt::MaxFps => Some(25),
             Opt::CloudRange => Some(126),
@@ -564,6 +579,13 @@ impl Opt {
                 v => generic(c, Text::literal(v.to_string())),
             },
             Opt::RenderDistance => generic(c, Text::tr("options.chunks", &[&s.render_distance])),
+            Opt::VanillaRenderDistance => generic(
+                c,
+                Text::tr(
+                    "options.chunks",
+                    &[&s.render_distance.min(VANILLA_MAX_RENDER_DISTANCE)],
+                ),
+            ),
             Opt::SimulationDistance => {
                 generic(c, Text::tr("options.chunks", &[&s.simulation_distance]))
             }
@@ -951,6 +973,18 @@ impl Opt {
                 s.render_distance =
                     step(2.0, crate::options_file::MAX_RENDER_DISTANCE as f64) as i32
             }
+            Opt::VanillaRenderDistance => {
+                // `IntRange(2, 32).fromSliderValue`: floor into the inclusive bins, the top
+                // position read as 0.99999F. `AbstractSliderButton.setValue` applies only a
+                // changed value, so a saved distance past 32 stays until the slider moves.
+                let v = if v >= 1.0 { f64::from(0.99999_f32) } else { v };
+                let distance =
+                    (2.0 + v * f64::from(VANILLA_MAX_RENDER_DISTANCE - 1)).floor() as i32;
+                if distance == s.render_distance.min(VANILLA_MAX_RENDER_DISTANCE) {
+                    return;
+                }
+                s.render_distance = distance;
+            }
             Opt::SimulationDistance => s.simulation_distance = step(5.0, 32.0) as i32,
             Opt::Sensitivity => s.sensitivity = v,
             Opt::WheelSensitivity => s.mouse_wheel_sensitivity = wheel::from_slider(v),
@@ -1014,6 +1048,7 @@ impl Opt {
         matches!(
             self,
             Opt::RenderDistance
+                | Opt::VanillaRenderDistance
                 | Opt::SimulationDistance
                 | Opt::SmoothLighting
                 | Opt::Clouds
@@ -1448,7 +1483,7 @@ fn section_title(text: Text, y: f32, w: f32) -> Widget {
 }
 
 /// A registered key's binding as Controls shows it: its modifiers' key names, then its key's.
-fn binding_text(key: &str, modifiers: u32) -> Text {
+pub fn binding_text(key: &str, modifiers: u32) -> Text {
     let mut text = Text::empty();
     for (bit, name) in [
         (crate::mod_list::SHIFT, "key.keyboard.left.shift"),
@@ -1673,6 +1708,8 @@ pub enum Event {
     Language(String),
     /// The pack selection changed (reload resources).
     Packs(Vec<String>),
+    /// Video settings affecting stitched atlases changed on closing (`VideoSettingsScreen.removed`).
+    ReloadTextures,
     /// Create World's Data Packs screen closed with a new selection.
     DataPacks(Vec<String>),
     OpenPackFolder,
@@ -1848,6 +1885,8 @@ pub struct OptionsUi {
     pub agent_recording: bool,
     /// The Music page's groups (set by the game when it opens the page).
     pub music_groups: Vec<MusicGroup>,
+    /// `(textureFiltering, maxAnisotropyBit, mipmapLevels)` when entering video/graphics settings.
+    video_atlas_snapshot: Option<(i32, i32, i32)>,
     /// Keyboard focus: the interactive target currently focused.
     focus: Option<FocusId>,
     /// The focus came from keyboard or pad navigation, so the mouse wheel steps it
@@ -1938,6 +1977,7 @@ impl Default for OptionsUi {
             agent_status: Vec::new(),
             agent_recording: false,
             music_groups: Vec::new(),
+            video_atlas_snapshot: None,
             focus: None,
             focus_from_keyboard: false,
             can_change_value: false,
@@ -2296,6 +2336,15 @@ impl OptionsUi {
     pub fn open(&mut self, in_world: bool) {
         self.open_at(in_world, Page::Main);
     }
+    /// Rebuild the resource-pack editor from the committed selection. The shared
+    /// fields belong to Create World's editor while it is showing data packs.
+    pub fn set_resource_pack_selection(&mut self, selected: &[String]) {
+        if self.data_pack_dir.is_none() {
+            self.pack_selection.clear();
+            self.pack_selection.extend_from_slice(selected);
+            self.pack_screen = None;
+        }
+    }
     /// Create World's Data Packs (`openDataPackSelectionScreen`): the Packs
     /// page on the new world's pack folder `dir`, `selected` chosen;
     /// `resources` holds the built-in pack's icon.
@@ -2370,6 +2419,7 @@ impl OptionsUi {
     pub fn open_at(&mut self, in_world: bool, page: Page) {
         self.discard_draw();
         self.stack.clear();
+        self.video_atlas_snapshot = None;
         self.data_pack_dir = None;
         self.focus = None;
         self.focus_from_keyboard = false;
@@ -2426,10 +2476,20 @@ impl OptionsUi {
     pub fn reveal(&mut self, s: &Settings, size: (f32, f32), rect: [f32; 4]) -> Option<f32> {
         self.shell_mut()?.reveal(s, size, rect)
     }
+    /// Capture `(textureFiltering, maxAnisotropyBit, mipmapLevels)` when entering video settings.
+    pub fn capture_video_atlas(&mut self, s: &Settings) {
+        if self.stack.iter().any(|&p| Self::is_video_page(p)) && self.video_atlas_snapshot.is_none()
+        {
+            self.video_atlas_snapshot = Some(s.texture_atlas_settings());
+        }
+    }
+    fn is_video_page(page: Page) -> bool {
+        page == Page::Video || Self::graphics_page(page).is_some()
+    }
     /// Whether a video settings screen is open, Sunrise's or vanilla's: the fullscreen mode
     /// waits for it to close, and Ctrl with the wheel steps the GUI scale.
     pub fn video_open(&self) -> bool {
-        self.page() == Page::Video || Self::graphics_page(self.page()).is_some()
+        Self::is_video_page(self.page())
     }
     /// Where the graphics screen opens for `page`, if it is one of its pages.
     fn graphics_page(page: Page) -> Option<crate::graphics_ui::Page> {
@@ -2795,9 +2855,8 @@ impl OptionsUi {
                 rows
             }
             Page::Video => {
-                // Vanilla's VideoSettingsScreen as vanilla lays it out. No menu opens it (Video
-                // Settings... opens the graphics screen, which has all of it); it stays for
-                // `sunrise-ctl options video-vanilla` and the tests that pin vanilla's screen.
+                // Vanilla's VideoSettingsScreen as vanilla lays it out: what Video Settings...
+                // opens. Sunrise's graphics screen is `Page::Graphics`, from the Extras page.
                 let mut rows = vec![Row::Header("options.video.display.header")];
                 rows.push(Row::Big(Opt::ExclusiveMode));
                 rows.extend(pairs(&[
@@ -2814,7 +2873,7 @@ impl OptionsUi {
                 rows.push(Row::Big(Opt::Preset));
                 rows.extend(pairs(&[
                     Opt::BiomeBlend,
-                    Opt::RenderDistance,
+                    Opt::VanillaRenderDistance,
                     Opt::ChunkBuilder,
                     Opt::SimulationDistance,
                     Opt::SmoothLighting,
@@ -3095,13 +3154,113 @@ impl OptionsUi {
         drag: bool,
         right: bool,
     ) -> Vec<Event> {
-        let events = self.click_unrevised(s, atlas, x, y, size, framebuffer, drag, right);
+        self.click_with_outcome(s, atlas, x, y, size, framebuffer, drag, right)
+            .0
+    }
+
+    /// The events and whether a widget accepted the pointer input (which can be silent).
+    pub fn click_with_outcome(
+        &mut self,
+        s: &mut Settings,
+        atlas: &HudAtlas,
+        x: f32,
+        y: f32,
+        size: (f32, f32),
+        framebuffer: [i32; 2],
+        drag: bool,
+        right: bool,
+    ) -> (Vec<Event>, bool) {
+        self.capture_video_atlas(s);
+        if drag {
+            let (handled, events) = self.drag(s, atlas, (x, y), size, framebuffer, right);
+            return (events, handled);
+        }
+        let (events, handled) = self.click_unrevised(s, atlas, x, y, size, framebuffer, right);
         // A click that changed nothing the layout reads (an empty spot, a
         // focus move) keeps the built layout.
         if !events.is_empty() {
             self.relayout();
         }
-        events
+        (events, handled)
+    }
+    /// A held pointer moved. The boolean is the receiving child's response,
+    /// independent of whether it emitted an option event.
+    pub fn drag(
+        &mut self,
+        s: &mut Settings,
+        atlas: &HudAtlas,
+        (x, y): (f32, f32),
+        size: (f32, f32),
+        framebuffer: [i32; 2],
+        right: bool,
+    ) -> (bool, Vec<Event>) {
+        self.capture_video_atlas(s);
+        if self.resource_error.is_some() {
+            return (false, Vec::new());
+        }
+        match self.page() {
+            Page::Studio | Page::ControllerRadialName => return (false, Vec::new()),
+            _ => {}
+        }
+        if self.page() == Page::HdrCalibration
+            && let Some(calibration) = &mut self.calibration
+        {
+            let handled = !right
+                && calibration.click(&atlas.font, (x, y), size, true)
+                    != crate::hdr_calibration::Outcome::Nothing;
+            return (handled, Vec::new());
+        }
+        self.framebuffer = framebuffer;
+        if self.shell().is_some() {
+            self.shell_framebuffers();
+            if let Some(shell) = self.shell_mut() {
+                let (handled, outputs) = shell.drag(s, (x, y), size);
+                let events = self.shell_events(s, outputs);
+                if !events.is_empty() {
+                    self.relayout();
+                }
+                return (handled, events);
+            }
+        }
+        match self.page() {
+            Page::Mods => return (self.mods_page(s, size).drag(f64::from(y)), Vec::new()),
+            Page::Packs => return (self.packs(atlas, size).drag(f64::from(y)), Vec::new()),
+            _ => {}
+        }
+        let layout = self.built_layout(s, size.0, size.1);
+        let (widgets, top, bottom, content) = layout.parts();
+        self.size = size;
+        let mut events = Vec::new();
+        if let Some(previous_y) = self.scrollbar_drag_y {
+            if let Some((_, thumb)) = ui::scrollbar_thumb(top, bottom, content, self.scroll) {
+                let max = content - (bottom - top);
+                self.scroll = if y < top {
+                    0.0
+                } else if y > bottom {
+                    max
+                } else {
+                    self.scroll + (y - previous_y) * max / (bottom - top - thumb)
+                };
+                self.clamp_scroll(top, bottom, content);
+                self.scrollbar_drag_y = Some(y);
+                return (true, events);
+            } else {
+                self.scrollbar_drag_y = None;
+            }
+            return (false, events);
+        }
+        if let Some(opt) = self.dragging
+            && let Some(wd) = widgets
+                .iter()
+                .find(|wd| matches!(&wd.kind, WKind::Slider { opt: o, .. } if *o == opt))
+        {
+            let v = ui::slider_value(wd.x, wd.w, x);
+            self.slider_value = Some((opt, v as f32, Instant::now()));
+            drag_slider(opt, s, v, &mut events);
+            self.relayout();
+            return (true, events);
+        }
+        (false, events)
     }
     /// `click` without the layout revision: the events it answered with say
     /// whether the layout's inputs moved.
@@ -3113,25 +3272,21 @@ impl OptionsUi {
         y: f32,
         size: (f32, f32),
         framebuffer: [i32; 2],
-        drag: bool,
         right: bool,
-    ) -> Vec<Event> {
+    ) -> (Vec<Event>, bool) {
         if self.resource_error.is_some() {
-            if !drag
-                && !right
-                && ui::hovered((x, y), size.0 / 2.0 - 100.0, size.1 - 28.0, 200.0, 20.0)
-            {
+            if !right && ui::hovered((x, y), size.0 / 2.0 - 100.0, size.1 - 28.0, 200.0, 20.0) {
                 self.resource_error = None;
-                return vec![Event::ButtonClick];
+                return (vec![Event::ButtonClick], true);
             }
-            return Vec::new();
+            return (Vec::new(), false);
         }
         if self.page() == Page::Studio {
-            if right || drag {
-                return Vec::new();
+            if right {
+                return (Vec::new(), false);
             }
             use crate::studio_ui::StudioAction;
-            return match self.studio.click((x, y), size) {
+            let events = match self.studio.click((x, y), size) {
                 StudioAction::None => Vec::new(),
                 StudioAction::Refresh => vec![Event::ButtonClick],
                 StudioAction::OpenReplay(path) => {
@@ -3144,54 +3299,55 @@ impl OptionsUi {
                     events
                 }
             };
+            let handled = !events.is_empty();
+            return (events, handled);
         }
         if self.page() == Page::HdrCalibration
             && let Some(c) = &mut self.calibration
         {
             if right {
-                return Vec::new();
+                return (Vec::new(), false);
             }
-            let outcome = c.click(&atlas.font, (x, y), size, drag);
-            return self.calibration_outcome(s, outcome);
+            let outcome = c.click(&atlas.font, (x, y), size, false);
+            return (
+                self.calibration_outcome(s, outcome),
+                outcome != crate::hdr_calibration::Outcome::Nothing,
+            );
         }
         if self.page() == Page::ControllerRadialName {
-            return self.click_radial_name(s, atlas, (x, y), size, drag || right);
+            return self.click_radial_name(s, atlas, (x, y), size, right);
         }
         if self.shell().is_some() {
             // Waiting on a controller button: a click cancels the wait.
-            if !drag && self.selected_pad_action.take().is_some() {
-                return Vec::new();
+            if self.selected_pad_action.take().is_some() {
+                return (Vec::new(), true);
             }
             // Waiting on a key: a mouse button binds, as on Key Binds.
-            if self.selected_key.is_some() && !drag {
+            if self.selected_key.is_some() {
                 let button = if right {
                     winit::event::MouseButton::Right
                 } else {
                     winit::event::MouseButton::Left
                 };
-                return self.bind_mouse(s, button);
+                return (self.bind_mouse(s, button), true);
             }
             let shift = self.shift;
             self.framebuffer = framebuffer;
             self.shell_framebuffers();
-            let outputs = self.shell_mut().map_or_else(Vec::new, |shell| {
-                shell.click(s, (x, y), size, drag, right, shift)
+            let (outputs, handled) = self.shell_mut().map_or((Vec::new(), false), |shell| {
+                shell.click_with_outcome(s, (x, y), size, false, right, shift)
             });
-            return self.shell_events(s, outputs);
+            return (self.shell_events(s, outputs), handled);
         }
         if self.page() == Page::Mods {
             let mut events = Vec::new();
-            if drag {
-                self.mods_page(s, size).drag(y as f64);
-                return events;
-            }
             if right {
-                return events;
+                return (events, false);
             }
             let m = crate::screen_draw::Measure(&atlas.font);
             let screen = self.mods_page(s, size);
             let before = screen.search_focused();
-            let (action, sound) = screen.click(&m, x as f64, y as f64);
+            let (action, sound, handled) = screen.click_with_outcome(&m, x as f64, y as f64);
             if !before && screen.search_focused() {
                 self.pack_focus = Instant::now();
             }
@@ -3210,16 +3366,12 @@ impl OptionsUi {
                 Do::Link(url) => events.push(Event::OpenLink(url)),
                 Do::Copy(text) => events.push(Event::CopyText(text)),
             }
-            return events;
+            return (events, handled);
         }
         if self.page() == Page::Packs {
             let mut events = Vec::new();
-            if drag {
-                self.packs(atlas, size).drag(y as f64);
-                return events;
-            }
             if right {
-                return events;
+                return (events, false);
             }
             let m = crate::screen_draw::Measure(&atlas.font);
             let p = self.packs(atlas, size);
@@ -3227,7 +3379,7 @@ impl OptionsUi {
                 events.push(Event::ButtonClick);
             }
             let before = p.search_focused();
-            let action = p.click(&m, x as f64, y as f64);
+            let (action, handled) = p.click_with_outcome(&m, x as f64, y as f64);
             if !before && p.search_focused() {
                 self.pack_focus = Instant::now();
             }
@@ -3244,19 +3396,17 @@ impl OptionsUi {
                 crate::pack_screen::Action::Options(id) => self.open_pack_options(&id),
                 crate::pack_screen::Action::None => {}
             }
-            return events;
+            return (events, handled);
         }
         let layout = self.built_layout(s, size.0, size.1);
         let (widgets, top, bottom, content) = layout.parts();
         self.size = size;
         self.framebuffer = framebuffer;
         let mut events = Vec::new();
-        if !drag
-            && matches!(
-                self.page(),
-                Page::Video | Page::Controls | Page::KeyBinds | Page::ModBrowser
-            )
-        {
+        if matches!(
+            self.page(),
+            Page::Video | Page::Controls | Page::KeyBinds | Page::ModBrowser
+        ) {
             let search = &mut self.settings_search;
             search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);
             if search.focused {
@@ -3266,10 +3416,10 @@ impl OptionsUi {
                 search.click(atlas, x, false, false);
                 self.scroll = 0.0;
                 events.push(Event::ButtonClick);
-                return events;
+                return (events, true);
             }
         }
-        if !drag && self.page() == Page::Language {
+        if self.page() == Page::Language {
             let search = &mut self.language_search;
             search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);
             if search.focused {
@@ -3278,37 +3428,8 @@ impl OptionsUi {
                 self.can_change_value = false;
                 search.click(atlas, x, false, false);
                 self.scroll = 0.0;
-                return events;
+                return (events, true);
             }
-        }
-        if drag {
-            if let Some(previous_y) = self.scrollbar_drag_y {
-                if let Some((_, thumb)) = ui::scrollbar_thumb(top, bottom, content, self.scroll) {
-                    let max = content - (bottom - top);
-                    self.scroll = if y < top {
-                        0.0
-                    } else if y > bottom {
-                        max
-                    } else {
-                        self.scroll + (y - previous_y) * max / (bottom - top - thumb)
-                    };
-                    self.clamp_scroll(top, bottom, content);
-                    self.scrollbar_drag_y = Some(y);
-                } else {
-                    self.scrollbar_drag_y = None;
-                }
-                return events;
-            }
-            if let Some(opt) = self.dragging
-                && let Some(wd) = widgets
-                    .iter()
-                    .find(|wd| matches!(&wd.kind, WKind::Slider { opt: o, .. } if *o == opt))
-            {
-                let v = ui::slider_value(wd.x, wd.w, x);
-                self.slider_value = Some((opt, v as f32, Instant::now()));
-                drag_slider(opt, s, v, &mut events);
-            }
-            return events;
         }
         // Key Binds: a mouse button pressed while waiting binds it.
         if self.selected_key.is_some() {
@@ -3317,18 +3438,18 @@ impl OptionsUi {
             } else {
                 winit::event::MouseButton::Left
             };
-            return self.bind_mouse(s, button);
+            return (self.bind_mouse(s, button), true);
         }
         // AbstractWidget accepts only the primary button. Rebinding above
         // accepts other mouse buttons, but is not a widget activation.
         if right {
-            return events;
+            return (events, false);
         }
         if ui::scrollbar_thumb(top, bottom, content, self.scroll).is_some()
             && ui::hovered((x, y), self.scrollbar_x(size.0), top, 6.0, bottom - top)
         {
             self.scrollbar_drag_y = Some(y);
-            return events;
+            return (events, true);
         }
         for (wd_idx, wd) in widgets.iter().enumerate() {
             if !ui::hovered((x, y), wd.x, wd.y, wd.w, wd.h) {
@@ -3340,7 +3461,7 @@ impl OptionsUi {
             // AbstractWidget.mouseClicked rejects inactive buttons before the
             // container can focus them.
             if matches!(&wd.kind, WKind::Button { active: false, .. }) {
-                return events;
+                return (events, false);
             }
             // A click focuses the widget for its highlight only: vanilla's wheel
             // steps a keyboard-focused widget from anywhere, not a clicked one.
@@ -3366,7 +3487,8 @@ impl OptionsUi {
                             if *p == Page::ModBrowser {
                                 events.push(Event::BrowseMods);
                             }
-                            self.push(*p)
+                            self.push(*p);
+                            self.capture_video_atlas(s);
                         }
                         Act::Done => events.extend(self.back(s)),
                         Act::Cycle(opt) => {
@@ -3470,11 +3592,11 @@ impl OptionsUi {
                         self.relayout();
                     }
                 }
-                _ => {}
+                _ => return (events, false),
             }
-            break;
+            return (events, true);
         }
-        events
+        (events, false)
     }
     /// Where a slider's handle sits: its own position while held (or until
     /// a delayed one applies), else the option's stepped value.
@@ -3485,17 +3607,25 @@ impl OptionsUi {
         }
     }
     pub fn release(&mut self) -> Vec<Event> {
-        self.scrollbar_drag_y = None;
+        self.release_with_outcome().0
+    }
+
+    /// The release's events and whether an active slider/scrollbar accepted it.
+    pub fn release_with_outcome(&mut self) -> (Vec<Event>, bool) {
+        let mut handled = self.scrollbar_drag_y.take().is_some();
         if let Some(p) = &mut self.pack_screen {
-            p.release();
+            handled |= p.release();
         }
         if let Some(p) = &mut self.mods_screen {
-            p.release();
+            handled |= p.release();
         }
         // AbstractSliderButton suppresses the press sound and plays once on
         // release, even if the pointer has left the widget or its value stayed.
         let slider = self.dragging.take().is_some();
-        let shell_slider = self.shell_mut().and_then(|shell| shell.release());
+        let (shell_slider, shell_released) = self
+            .shell_mut()
+            .map_or((None, false), |shell| shell.release_with_outcome());
+        handled |= shell_released;
         let calibration_slider = self.calibration.as_mut().is_some_and(|c| c.release());
         if slider || shell_slider.is_some() || calibration_slider {
             let mut events = vec![Event::ButtonClick, Event::Changed];
@@ -3506,9 +3636,9 @@ impl OptionsUi {
                 shell::Output::Event(event) => Some(event),
                 _ => None,
             }));
-            events
+            (events, true)
         } else {
-            Vec::new()
+            (Vec::new(), handled)
         }
     }
     pub fn scroll(&mut self, s: &Settings, size: (f32, f32), amount: f32) {
@@ -3577,11 +3707,24 @@ impl OptionsUi {
         framebuffer: [i32; 2],
         amount: f32,
     ) -> Vec<Event> {
-        let events = self.wheel_unrevised(s, size, cursor, framebuffer, amount);
+        self.wheel_input(s, size, cursor, framebuffer, amount).1
+    }
+
+    /// Whether the hovered child consumed the wheel, independently of settings events.
+    pub fn wheel_input(
+        &mut self,
+        s: &mut Settings,
+        size: (f32, f32),
+        cursor: (f32, f32),
+        framebuffer: [i32; 2],
+        amount: f32,
+    ) -> (bool, Vec<Event>) {
+        self.capture_video_atlas(s);
+        let (handled, events) = self.wheel_unrevised(s, size, cursor, framebuffer, amount);
         if !events.is_empty() {
             self.relayout();
         }
-        events
+        (handled, events)
     }
     /// `wheel` without the layout revision: a scroll bumps it in `scroll`, and
     /// the events of a setting's step say whether its label moved.
@@ -3592,27 +3735,37 @@ impl OptionsUi {
         cursor: (f32, f32),
         framebuffer: [i32; 2],
         amount: f32,
-    ) -> Vec<Event> {
+    ) -> (bool, Vec<Event>) {
         self.size = size;
         self.framebuffer = framebuffer;
         if self.resource_error.is_some() {
-            return Vec::new();
+            return (false, Vec::new());
         }
         self.shell_framebuffers();
         if let Some(shell) = self.shell_mut() {
-            let outputs = shell.wheel(s, size, cursor, amount);
-            return self.shell_events(s, outputs);
+            let (handled, outputs) = shell.wheel(s, size, cursor, amount);
+            return (handled, self.shell_events(s, outputs));
         }
         if self.page() == Page::Studio {
             self.studio.wheel(amount);
-            return Vec::new();
+            return (true, Vec::new());
         }
         let plain = self.resource_error.is_none()
             && !(self.pack_screen.is_some() && self.stack.last() == Some(&Page::Packs))
             && self.stack.last() != Some(&Page::Mods);
         if !plain {
-            self.scroll_at(s, size, cursor, amount);
-            return Vec::new();
+            let handled = match self.page() {
+                Page::Packs => self
+                    .pack_screen
+                    .as_mut()
+                    .is_some_and(|p| p.scroll(cursor.0.into(), cursor.1.into(), amount.into())),
+                Page::Mods => self
+                    .mods_screen
+                    .as_mut()
+                    .is_some_and(|p| p.scroll(cursor.0.into(), cursor.1.into(), amount.into())),
+                _ => false,
+            };
+            return (handled, Vec::new());
         }
         let extra = s.extras.wheel_cycles_settings;
         // The extra: a keyboard-focused slider or cycle button intercepts the
@@ -3630,13 +3783,13 @@ impl OptionsUi {
                         .iter()
                         .find(|wd| matches!(&wd.kind, WKind::Slider { opt: o, .. } if *o == opt))
                         .map_or(150.0, |wd| wd.w);
-                    return self.step_slider_option(s, opt, amount > 0.0, width);
+                    return (true, self.step_slider_option(s, opt, amount > 0.0, width));
                 }
                 Some(FocusId::Cycle(opt)) => {
                     let opt = *opt;
                     let mut events = vec![Event::ButtonClick];
                     events.extend(self.cycle_option(s, opt, amount > 0.0, framebuffer));
-                    return events;
+                    return (true, events);
                 }
                 _ => {}
             }
@@ -3667,17 +3820,21 @@ impl OptionsUi {
         });
         match hovered {
             Some(HoveredControl::Cycle(opt)) if amount != 0.0 => {
-                self.cycle_option(s, opt, amount > 0.0, framebuffer)
+                (true, self.cycle_option(s, opt, amount > 0.0, framebuffer))
             }
             Some(HoveredControl::Extra(item)) if amount != 0.0 => {
                 item.cycle(&mut s.extras, amount > 0.0);
-                vec![Event::Changed]
+                (true, vec![Event::Changed])
             }
-            Some(_) => Vec::new(),
-            None => {
-                self.scroll_at(s, size, cursor, amount);
-                Vec::new()
+            Some(_) => (false, Vec::new()),
+            None if cursor.1 >= top
+                && cursor.1 < bottom
+                && widgets.iter().any(|widget| widget.list) =>
+            {
+                self.scroll(s, size, amount);
+                (true, Vec::new())
             }
+            None => (false, Vec::new()),
         }
     }
     /// The mouse wheel at the cursor.
@@ -3701,7 +3858,7 @@ impl OptionsUi {
         }
         match &mut self.pack_screen {
             Some(p) if self.stack.last() == Some(&Page::Packs) => {
-                p.scroll(cursor.0 as f64, cursor.1 as f64, amount as f64)
+                p.scroll(cursor.0 as f64, cursor.1 as f64, amount as f64);
             }
             _ => self.scroll(s, size, amount),
         }
@@ -3890,6 +4047,13 @@ impl OptionsUi {
             }
             _ => {}
         }
+        if Self::is_video_page(page)
+            && !self.stack.iter().any(|&p| Self::is_video_page(p))
+            && let Some(before) = self.video_atlas_snapshot.take()
+            && before != s.texture_atlas_settings()
+        {
+            events.push(Event::ReloadTextures);
+        }
         events.push(Event::Changed);
         if self.stack.is_empty() {
             events.push(Event::Close);
@@ -4051,11 +4215,24 @@ impl OptionsUi {
         text: Option<&str>,
         shift: bool,
     ) -> Vec<Event> {
-        let events = self.key_modifiers_unrevised(s, atlas, key, text, shift);
+        self.key_input(s, atlas, key, text, shift).1
+    }
+
+    /// A physical key's handled result, independent of settings events.
+    pub fn key_input(
+        &mut self,
+        s: &mut Settings,
+        atlas: &HudAtlas,
+        key: winit::keyboard::KeyCode,
+        text: Option<&str>,
+        shift: bool,
+    ) -> (bool, Vec<Event>) {
+        self.capture_video_atlas(s);
+        let (handled, events) = self.key_modifiers_unrevised(s, atlas, key, text, shift);
         if !events.is_empty() {
             self.relayout();
         }
-        events
+        (handled, events)
     }
     /// `key_modifiers` without the layout revision: search text and the keys
     /// that change a setting bump it themselves, and the events of the rest
@@ -4067,19 +4244,23 @@ impl OptionsUi {
         key: winit::keyboard::KeyCode,
         text: Option<&str>,
         shift: bool,
-    ) -> Vec<Event> {
+    ) -> (bool, Vec<Event>) {
         use winit::keyboard::KeyCode as K;
         if self.page() == Page::HdrCalibration
             && let Some(c) = &mut self.calibration
         {
             let outcome = c.key(key);
-            return self.calibration_outcome(s, outcome);
+            return (
+                !matches!(outcome, crate::hdr_calibration::Outcome::Nothing),
+                self.calibration_outcome(s, outcome),
+            );
         }
         if self.resource_error.is_some() {
-            if matches!(key, K::Escape | K::Enter | K::NumpadEnter) {
+            let handled = matches!(key, K::Escape | K::Enter | K::NumpadEnter);
+            if handled {
                 self.resource_error = None;
             }
-            return Vec::new();
+            return (handled, Vec::new());
         }
         if self.page() == Page::Packs
             && let Some(p) = &mut self.pack_screen
@@ -4089,11 +4270,11 @@ impl OptionsUi {
                 // ConfirmScreen.keyPressed: Escape answers no.
                 K::Escape if p.confirming() => {
                     p.cancel_confirm(&m);
-                    return Vec::new();
+                    return (true, Vec::new());
                 }
                 K::Backspace => {
                     p.erase(&m, 1);
-                    return Vec::new();
+                    return (true, Vec::new());
                 }
                 _ => {}
             }
@@ -4105,15 +4286,15 @@ impl OptionsUi {
             match key {
                 K::Backspace => {
                     p.erase(&m, 1);
-                    return Vec::new();
+                    return (true, Vec::new());
                 }
                 K::ArrowUp => {
                     p.step(-1);
-                    return Vec::new();
+                    return (true, Vec::new());
                 }
                 K::ArrowDown => {
                     p.step(1);
-                    return Vec::new();
+                    return (true, Vec::new());
                 }
                 _ => {}
             }
@@ -4123,7 +4304,7 @@ impl OptionsUi {
             if key == K::Escape {
                 s.controller.bind(action, None);
             }
-            return vec![Event::Changed];
+            return (true, vec![Event::Changed]);
         }
         if self.selected_key.is_some() {
             // KeyBindsScreen.keyPressed: Escape unbinds.
@@ -4139,7 +4320,7 @@ impl OptionsUi {
                 )
             {
                 self.pending_mod_key = Some(key);
-                return Vec::new();
+                return (true, Vec::new());
             }
             let value = if key == K::Escape {
                 "key.keyboard.unknown".to_owned()
@@ -4148,10 +4329,11 @@ impl OptionsUi {
                     .unwrap_or("key.keyboard.unknown")
                     .to_owned()
             };
-            return self.bind_key(s, value);
+            return (true, self.bind_key(s, value));
         }
         if self.page() == Page::ControllerRadialName {
-            return self.radial_name_key(s, key, text);
+            let events = self.radial_name_key(s, key, text);
+            return (!events.is_empty(), events);
         }
 
         // The size it was drawn at; before the first draw, one its keys can lay out at.
@@ -4163,11 +4345,12 @@ impl OptionsUi {
         self.shell_framebuffers();
         if let Some(shell) = self.shell_mut() {
             let outputs = shell.key(s, key, text, shift, gui);
-            return self.shell_events(s, outputs);
+            let events = self.shell_events(s, outputs);
+            return (key == K::Escape || !events.is_empty(), events);
         }
 
         if key == K::Escape {
-            return self.back(s);
+            return (true, self.back(s));
         }
 
         // Search field text entry when search box is focused
@@ -4178,9 +4361,8 @@ impl OptionsUi {
                 } else {
                     &mut self.settings_search
                 };
-                if !search.key(key, false, shift)
-                    && let Some(t) = text
-                {
+                let handled = search.key(key, false, shift);
+                if !handled && let Some(t) = text {
                     let typed: String = t.chars().filter(|c| !c.is_control()).collect();
                     if !typed.is_empty() {
                         search.insert_text(&typed);
@@ -4188,12 +4370,11 @@ impl OptionsUi {
                 }
                 self.scroll = 0.0;
                 self.relayout();
-                return Vec::new();
+                return (handled, Vec::new());
             }
         } else if self.page() == Page::Language && self.focus.is_none() {
-            if !self.language_search.key(key, false, shift)
-                && let Some(t) = text
-            {
+            let handled = self.language_search.key(key, false, shift);
+            if !handled && let Some(t) = text {
                 let typed: String = t.chars().filter(|c| !c.is_control()).collect();
                 if !typed.is_empty() {
                     self.language_search.insert_text(&typed);
@@ -4201,10 +4382,12 @@ impl OptionsUi {
             }
             self.scroll = 0.0;
             self.relayout();
+            if handled {
+                return (true, Vec::new());
+            }
         } else if self.settings_search_active() && self.focus.is_none() {
-            if !self.settings_search.key(key, false, shift)
-                && let Some(t) = text
-            {
+            let handled = self.settings_search.key(key, false, shift);
+            if !handled && let Some(t) = text {
                 let typed: String = t.chars().filter(|c| !c.is_control()).collect();
                 if !typed.is_empty() {
                     self.settings_search.insert_text(&typed);
@@ -4212,6 +4395,9 @@ impl OptionsUi {
             }
             self.scroll = 0.0;
             self.relayout();
+            if handled {
+                return (true, Vec::new());
+            }
         }
 
         // Gather focusables on the current page
@@ -4242,7 +4428,7 @@ impl OptionsUi {
             }
         }
         if focusables.is_empty() {
-            return Vec::new();
+            return (false, Vec::new());
         }
 
         // 1. Tab / Shift+Tab navigation
@@ -4279,7 +4465,7 @@ impl OptionsUi {
                 }
                 self.clamp_scroll(top, bottom, content);
             }
-            return Vec::new();
+            return (false, Vec::new());
         }
 
         // 2. Left / Right Arrow keys
@@ -4293,7 +4479,7 @@ impl OptionsUi {
                     .iter()
                     .find(|wd| matches!(wd.kind, WKind::Slider { opt: o, .. } if o == opt))
                     .map_or(150.0, |wd| wd.w);
-                return self.step_slider_option(s, opt, forward, width);
+                return (true, self.step_slider_option(s, opt, forward, width));
             }
             // Otherwise, navigate horizontally using 2D focus stepping
             if let Some(fid) = &self.focus {
@@ -4325,7 +4511,7 @@ impl OptionsUi {
                 self.focus_from_keyboard = true;
                 self.can_change_value = false;
             }
-            return Vec::new();
+            return (false, Vec::new());
         }
 
         // 3. Up / Down Arrow keys
@@ -4366,7 +4552,7 @@ impl OptionsUi {
                 self.focus_from_keyboard = true;
                 self.can_change_value = false;
             }
-            return Vec::new();
+            return (false, Vec::new());
         }
 
         // 4. Enter / Space selection keys
@@ -4374,12 +4560,12 @@ impl OptionsUi {
             match &self.focus {
                 Some(FocusId::Slider(_)) => {
                     self.can_change_value = !self.can_change_value;
-                    return Vec::new();
+                    return (true, Vec::new());
                 }
                 Some(FocusId::Cycle(opt)) => {
                     let mut events = vec![Event::ButtonClick];
                     events.extend(self.cycle_option(s, *opt, shift, self.framebuffer));
-                    return events;
+                    return (true, events);
                 }
                 Some(FocusId::Act(act)) => {
                     let mut events = vec![Event::ButtonClick];
@@ -4402,6 +4588,7 @@ impl OptionsUi {
                                 events.push(Event::BrowseMods);
                             }
                             self.push(p);
+                            self.capture_video_atlas(s);
                         }
                         Act::Done => {
                             self.focus = None;
@@ -4493,7 +4680,7 @@ impl OptionsUi {
                         Act::ExportRepro => events.push(Event::ExportRepro),
                         Act::None => {}
                     }
-                    return events;
+                    return (true, events);
                 }
                 Some(FocusId::Lang(code)) => {
                     // `LanguageSelectionList.Entry.keyPressed`: the selection
@@ -4503,12 +4690,12 @@ impl OptionsUi {
                     let mut events = vec![Event::ButtonClick];
                     self.language_choice = Some(code.clone());
                     events.extend(self.back(s));
-                    return events;
+                    return (true, events);
                 }
                 _ => {}
             }
         }
-        Vec::new()
+        (false, Vec::new())
     }
 }
 
@@ -5051,6 +5238,69 @@ mod tests {
         assert!(!s.operator_items_tab);
         Opt::OperatorItemsTab.cycle(&mut s, false, [854, 480]);
         assert!(s.operator_items_tab);
+    }
+
+    #[test]
+    fn video_settings_render_distance_stops_at_vanilla_range_and_keeps_saved_value() {
+        let mut s = Settings::default();
+        // Sunrise Graphics' slider still reaches the extended range.
+        set_slider(Opt::RenderDistance, &mut s, 1.0);
+        assert_eq!(s.render_distance, crate::options_file::MAX_RENDER_DISTANCE);
+        // The classic page's slider stops at 32, reached from inside its range.
+        s.render_distance = 10;
+        set_slider(Opt::VanillaRenderDistance, &mut s, 1.0);
+        assert_eq!(s.render_distance, 32);
+        set_slider(Opt::VanillaRenderDistance, &mut s, 0.0);
+        assert_eq!(s.render_distance, 2);
+        // Page rows use the classic slider, never the extended one.
+        let mut ui = OptionsUi::default();
+        ui.show(Page::Video);
+        let rows = ui.list_rows(&s);
+        let has = |opt| {
+            rows.iter().any(|r| match r {
+                Row::Big(o) => *o == opt,
+                Row::Pair(a, b) => *a == opt || *b == Some(opt),
+                _ => false,
+            })
+        };
+        assert!(has(Opt::VanillaRenderDistance) && !has(Opt::RenderDistance));
+        // Vanilla's integer bins: 5.2% of the track is 3 chunks, shown at its bin's centre.
+        set_slider(Opt::VanillaRenderDistance, &mut s, 0.052);
+        assert_eq!(s.render_distance, 3);
+        assert_eq!(
+            Opt::VanillaRenderDistance.slider_position(&s),
+            Some(1.5 / 31.0)
+        );
+        // Stepping walks every distance from 2 to 32 and back.
+        s.render_distance = 2;
+        for distance in 3..=32 {
+            Opt::VanillaRenderDistance.step_slider(&mut s, true, 150.0);
+            assert_eq!(s.render_distance, distance);
+        }
+        for distance in (2..32).rev() {
+            Opt::VanillaRenderDistance.step_slider(&mut s, false, 150.0);
+            assert_eq!(s.render_distance, distance);
+        }
+        // A saved 64 shows as 32. Input that leaves the displayed 32 keeps it; a real move writes.
+        s.render_distance = 64;
+        assert_eq!(Opt::VanillaRenderDistance.slider_position(&s), Some(1.0));
+        set_slider(Opt::VanillaRenderDistance, &mut s, 1.0);
+        Opt::VanillaRenderDistance.step_slider(&mut s, true, 150.0);
+        assert_eq!(s.render_distance, 64);
+        assert_eq!(
+            Opt::VanillaRenderDistance.label(&s).plain(),
+            Opt::VanillaRenderDistance
+                .label(&Settings {
+                    render_distance: 32,
+                    ..Settings::default()
+                })
+                .plain()
+        );
+        let _ = ui.list_rows(&s);
+        assert_eq!(s.render_distance, 64);
+        assert!(Opt::RenderDistance.slider_position(&s).unwrap() > 0.4);
+        set_slider(Opt::VanillaRenderDistance, &mut s, 0.5);
+        assert_eq!(s.render_distance, 17);
     }
 
     #[test]
@@ -6129,6 +6379,43 @@ mod tests {
         assert_eq!(ui.page(), Page::NativeMod(0));
     }
 
+    /// OptionsScreen's Video Settings button opens VideoSettingsScreen, not Sunrise's graphics
+    /// screen, which has its own row on the Extras page.
+    #[test]
+    fn extras_opens_sunrise_graphics_and_video_settings_opens_vanilla() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        let (widgets, _, _, _) = ui.layout(&s, 427.0, 240.0);
+        let video = widgets.iter().find(|w| match &w.kind {
+            WKind::Button { label, .. } => label.plain() == lang::get("options.video"),
+            _ => false,
+        });
+        let Some(Widget {
+            kind: WKind::Button { act, .. },
+            ..
+        }) = video
+        else {
+            panic!("no Video Settings button");
+        };
+        assert!(matches!(act, Act::Push(Page::Video)), "{act:?}");
+        // Nothing of Sunrise's graphics screen sits on vanilla's.
+        ui.show(Page::Video);
+        let (widgets, _, _, _) = ui.layout(&s, 427.0, 4000.0);
+        assert!(!widgets.iter().any(|w| matches!(
+            &w.kind,
+            WKind::Button {
+                act: Act::Push(Page::Graphics | Page::ShaderPacks),
+                ..
+            }
+        )));
+        ui.show(Page::Extras);
+        let size = (480.0, 480.0);
+        let at = ui.extras.point_at(&s, size, ExtraRow::Graphics);
+        ui.click(&mut s, &atlas, at.0, at.1, size, [960, 960], false, false);
+        assert_eq!(ui.page(), Page::Graphics);
+    }
+
     #[test]
     fn exclusive_fullscreen_and_its_tooltips_follow_the_option() {
         let mut s = Settings::default();
@@ -6415,7 +6702,7 @@ mod tests {
         assert_eq!(headers(ui.list_rows(&settings)), all_headers);
         for (opt, header) in [
             (Opt::Fullscreen, all_headers[0]),
-            (Opt::RenderDistance, all_headers[1]),
+            (Opt::VanillaRenderDistance, all_headers[1]),
             (Opt::Preset, all_headers[1]),
             (Opt::Autosave, all_headers[2]),
         ] {
@@ -6540,8 +6827,8 @@ mod tests {
         }
         assert_eq!(
             ui.extras.row_labels(&s).len(),
-            // And the note about the Zoom mod over them.
-            1 + crate::extras::rows().iter().filter(|r| r.is_ok()).count()
+            // And the note about the Zoom mod and the Sunrise Graphics row over them.
+            2 + crate::extras::rows().iter().filter(|r| r.is_ok()).count()
         );
         let press = |ui: &mut OptionsUi, s: &mut Settings, item: crate::extras::Item| {
             let at = ui.extras.point_at(s, size, ExtraRow::Item(item));
@@ -6623,12 +6910,13 @@ mod tests {
         ui.show(Page::Extras);
         // Too short for the page.
         let short = (480.0, 180.0);
-        ui.wheel(&mut s, short, (0.0, 0.0), [960, 360], -1.0);
+        let inside = (240.0, 90.0);
+        ui.wheel(&mut s, short, inside, [960, 360], -1.0);
         let one = ui.extras.scroll_amount();
         assert!(one > 0.0);
-        ui.scroll_at(&s, short, (0.0, 0.0), -1.0);
+        ui.scroll_at(&s, short, inside, -1.0);
         assert_eq!(ui.extras.scroll_amount(), 2.0 * one);
-        ui.scroll_at(&s, short, (0.0, 0.0), 2.0);
+        ui.scroll_at(&s, short, inside, 2.0);
         assert_eq!(ui.extras.scroll_amount(), 0.0);
     }
 
@@ -7460,9 +7748,9 @@ mod tests {
 
     /// Every setting a player reaches, from the Options screen through every button that opens
     /// a page, is in one place, and every page has one way in. Vanilla's own repeats stay as
-    /// vanilla has them; the graphics screen stands for Video Settings, so the vanilla video
-    /// options it shows count as Video Settings' (Menu Background Blur is in both of
-    /// vanilla's). Vanilla's Video Settings rows are all on the graphics screen.
+    /// vanilla has them; Video Settings is vanilla's own screen, and Sunrise's graphics screen
+    /// (opened from Extras) repeats its options, so they are not counted twice (Menu Background
+    /// Blur is in two of vanilla's). Vanilla's Video Settings rows are all on the graphics screen.
     #[test]
     fn every_setting_and_page_is_reached_from_one_place() {
         use std::collections::{BTreeMap, BTreeSet};
@@ -7508,6 +7796,8 @@ mod tests {
             ui.stack = vec![page];
             let (widgets, _, _, _) = ui.layout(&s, 427.0, 4000.0);
             let name = format!("{page:?}");
+            // Vanilla's Video Settings: the graphics screen has all its rows, listed above.
+            let counted = page != Page::Video;
             for w in &widgets {
                 let id = match &w.kind {
                     WKind::Slider { opt, .. } => format!("{opt:?}"),
@@ -7531,9 +7821,17 @@ mod tests {
                     },
                     _ => continue,
                 };
-                put(id, &name);
+                if counted {
+                    put(id, &name);
+                }
             }
         }
+        // The Extras page's Sunrise Graphics row opens the graphics screen (its shell has no
+        // widgets here; `extras_opens_sunrise_graphics_and_video_settings_opens_vanilla`).
+        ways_in
+            .entry(format!("{:?}", Page::Graphics))
+            .or_default()
+            .insert("Extras".to_owned());
         // Vanilla's own: the same option on two of its screens.
         let vanilla_repeats: BTreeMap<&str, &[&str]> = [
             ("MenuBlur", &["Accessibility", "Graphics"][..]),
@@ -7564,9 +7862,10 @@ mod tests {
             Some(1),
             "{ways_in:?}"
         );
-        assert!(
-            !seen.contains("Video"),
-            "vanilla's own layout has no way in"
+        assert_eq!(
+            ways_in.get("Video").map(|f| f.len()),
+            Some(1),
+            "{ways_in:?}"
         );
         // Every row of vanilla's Video Settings is on the graphics screen.
         ui.stack = vec![Page::Video];
@@ -7579,6 +7878,9 @@ mod tests {
             for o in opts {
                 let id = match o {
                     Opt::GraphicsBackend => "graphics-api".to_owned(),
+                    // The classic page's Render Distance row is the graphics screen's
+                    // RenderDistance row: the same saved setting.
+                    Opt::VanillaRenderDistance => "RenderDistance".to_owned(),
                     o => format!("{o:?}"),
                 };
                 // macOS has one graphics API: the graphics screen leaves the row out.
@@ -7618,8 +7920,8 @@ mod tests {
             &main[main.len() - 3..],
             [Page::Sunrise, Page::Mods, Page::Credits]
         );
-        // Video Settings... is the graphics screen, as Sodium's.
-        assert!(main.contains(&Page::Graphics) && !main.contains(&Page::Video));
+        // Video Settings... is vanilla's VideoSettingsScreen; the graphics screen is Extras'.
+        assert!(main.contains(&Page::Video) && !main.contains(&Page::Graphics));
         ui.push(Page::Sunrise);
         assert_eq!(
             pushes(&mut ui),
@@ -7772,6 +8074,28 @@ mod tests {
         assert_eq!(ui.page(), Page::Main);
         assert_eq!(ui.focus, None);
         assert!(!ui.settings_search.focused);
+    }
+
+    #[test]
+    fn wheel_result_distinguishes_blank_background_from_a_control() {
+        let mut ui = OptionsUi::default();
+        let mut settings = Settings::default();
+        let gui = (480.0, 600.0);
+        assert!(
+            !ui.wheel_input(&mut settings, gui, (3.0, 3.0), [480, 600], 1.0)
+                .0
+        );
+        ui.show(Page::Extras);
+        settings.extras.wheel_cycles_settings = true;
+        let cursor = ui
+            .extras
+            .point_at(&settings, gui, ExtraRow::Item(crate::extras::Item::Sort));
+        assert!(!settings.extras.sort);
+        assert!(
+            ui.wheel_input(&mut settings, gui, cursor, [480, 600], 1.0)
+                .0
+        );
+        assert!(settings.extras.sort);
     }
 
     #[test]
@@ -7995,6 +8319,7 @@ mod tests {
         let stepped_opts = [
             Opt::Fov,
             Opt::RenderDistance,
+            Opt::VanillaRenderDistance,
             Opt::SimulationDistance,
             Opt::MaxFps,
             Opt::CloudRange,
@@ -8329,6 +8654,42 @@ mod tests {
         ui.click(&mut s, &atlas, px, py, size, [854, 480], false, false);
         assert_eq!(s.particles, 0);
         ui.shift = false;
+    }
+
+    #[test]
+    fn leaving_video_settings_reloads_textures_only_when_atlas_options_changed() {
+        let mut ui = OptionsUi::default();
+        let mut s = Settings::default();
+        // Changing mipmapLevels on Page::Video triggers ReloadTextures on exit.
+        ui.open_at(true, Page::Video);
+        ui.capture_video_atlas(&s);
+        s.mipmap_levels = 0;
+        let events = ui.back(&mut s);
+        assert!(events.contains(&Event::ReloadTextures));
+
+        // Changing and reverting before leaving triggers no ReloadTextures.
+        ui.open_at(true, Page::Video);
+        ui.capture_video_atlas(&s);
+        s.mipmap_levels = 2;
+        s.mipmap_levels = 0;
+        let events = ui.back(&mut s);
+        assert!(!events.contains(&Event::ReloadTextures));
+
+        // Changing textureFiltering triggers ReloadTextures.
+        ui.open_at(true, Page::Video);
+        ui.capture_video_atlas(&s);
+        s.file
+            .set("textureFiltering", crate::options_file::V::Int(2));
+        let events = ui.back(&mut s);
+        assert!(events.contains(&Event::ReloadTextures));
+
+        // Changing maxAnisotropyBit on Sunrise Graphics triggers ReloadTextures.
+        ui.open_at(true, Page::Graphics);
+        ui.capture_video_atlas(&s);
+        s.file
+            .set("maxAnisotropyBit", crate::options_file::V::Int(3));
+        let events = ui.back(&mut s);
+        assert!(events.contains(&Event::ReloadTextures));
     }
 }
 

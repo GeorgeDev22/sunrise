@@ -22,7 +22,10 @@ enum Target {
         events: crate::net::ingress::Producer<Event>,
     },
     Server(PlayerSender),
-    Configuration(ConfigSender),
+    Configuration {
+        sender: ConfigSender,
+        session: Option<std::sync::Weak<crate::lan::configuration_tasks::Session>>,
+    },
 }
 /// Retains no endpoint, sender, producer, writer, transport or payload lease.
 #[cfg(any(test, feature = "test-payload-probe"))]
@@ -69,6 +72,14 @@ impl Prepared {
             }
         }
     }
+    /// Extract a server `PreparedPayload` as a `Body::Prepared` for inclusion inside
+    /// an entity pairing bundle.
+    pub(crate) fn into_prepared_body(self, epoch: Arc<Epoch>) -> Option<crate::lan::Body> {
+        match self {
+            Self::Server(prepared) => Some(prepared.into_prepared_body(epoch)),
+            Self::Client(_) | Self::Droppable(..) => None,
+        }
+    }
 }
 impl Endpoint {
     pub(crate) fn client(
@@ -87,8 +98,19 @@ impl Endpoint {
     pub fn server(sender: PlayerSender) -> Self {
         Self(Target::Server(sender))
     }
-    pub fn configuration(sender: ConfigSender) -> Self {
-        Self(Target::Configuration(sender))
+    pub fn configuration(
+        sender: ConfigSender,
+        session: Option<std::sync::Weak<crate::lan::configuration_tasks::Session>>,
+    ) -> Self {
+        Self(Target::Configuration { sender, session })
+    }
+    pub fn configuration_session(
+        &self,
+    ) -> Option<&std::sync::Weak<crate::lan::configuration_tasks::Session>> {
+        match &self.0 {
+            Target::Configuration { session, .. } => session.as_ref(),
+            _ => None,
+        }
     }
     pub fn side(&self) -> Side {
         match self.0 {
@@ -100,7 +122,7 @@ impl Endpoint {
         match &self.0 {
             Target::Client { transport, .. } => transport,
             Target::Server(sender) => sender.payload_transport(),
-            Target::Configuration(sender) => sender.payload_transport(),
+            Target::Configuration { sender, .. } => sender.payload_transport(),
         }
     }
     #[cfg(any(test, feature = "test-payload-probe"))]
@@ -125,7 +147,7 @@ impl Endpoint {
                 })
             }
             Target::Server(sender) => sender.payload_diagnostic_observer(),
-            Target::Configuration(_) => Box::new(|| "configuration sender not observed".into()),
+            Target::Configuration { .. } => Box::new(|| "configuration sender not observed".into()),
         };
         Observation {
             transport: Arc::downgrade(self.transport()),
@@ -142,10 +164,7 @@ impl Endpoint {
     ) -> Result<Prepared, PayloadSendError> {
         #[cfg(any(test, feature = "test-payload-probe"))]
         super::staging_probe::capture(&id.0, self);
-        if !epoch.active() {
-            return Err(PayloadSendError::StaleEpoch);
-        }
-        epoch.peer.can_send(epoch.phase, id)?;
+        epoch.can_send(id)?;
         // A raw channel keeps vanilla's clientbound custom-payload limit, by name.
         let limit = sunrise_protocol::packets::custom_payload::CLIENTBOUND_LIMIT;
         if epoch.peer.local.is_raw(&id.0) && bytes.0.len() > limit {
@@ -187,7 +206,7 @@ impl Endpoint {
                     .prepare_payload(encode(epoch.phase, self.side(), id, bytes), id)
                     .map(Prepared::Server)
             }
-            Target::Configuration(sender) => {
+            Target::Configuration { sender, .. } => {
                 preflight(sender.framing(), sender.payload_capacity(), len, id)?;
                 sender
                     .prepare_payload(encode(epoch.phase, self.side(), id, bytes), id)
@@ -222,7 +241,7 @@ impl Endpoint {
                     .framing()
             }
             Target::Server(sender) => sender.payload_framing(),
-            Target::Configuration(sender) => sender.framing(),
+            Target::Configuration { sender, .. } => sender.framing(),
         };
         preflight(framing, usize::MAX, len, id)?;
         let queue = self
@@ -239,7 +258,7 @@ impl Endpoint {
     }
     /// A failure closes this physical connection only; a client reason joins its ordered events.
     pub fn disconnect(&self, reason: Text) {
-        let reason = crate::api_text::to_engine(&reason).unwrap_or_else(|error| {
+        let reason = crate::api_text::to_serialized_engine(&reason).unwrap_or_else(|error| {
             crate::text::Text::tr(
                 "disconnect.genericReason",
                 &[&format!("invalid payload disconnect reason: {error:?}")],
@@ -270,7 +289,7 @@ impl Endpoint {
             Target::Server(sender) => {
                 sender.disconnect(crate::lan::data::component_nbt(&reason.component()))
             }
-            Target::Configuration(sender) => {
+            Target::Configuration { sender, .. } => {
                 sender.disconnect(crate::lan::data::component_nbt(&reason.component()))
             }
         }

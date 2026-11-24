@@ -87,7 +87,7 @@ fn on_a_client(mods: mod_api::Mods, test: impl FnOnce(&mut Game<'_>)) {
                     .chunks
                     .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
                 game.sync_tick_chunks();
-                game.set_mode_id(0);
+                game.set_local_mode(sunrise_client::command::args::GameMode::Survival);
                 test(game);
             },
         );
@@ -130,6 +130,243 @@ fn client_placement_prediction_asks_placement_and_survival_parts() {
                 "{held} on {ground}"
             );
         }
+    });
+}
+
+struct StorageFacing;
+#[mod_api::sunrise_part]
+impl BlockPart for StorageFacing {
+    fn state_for_placement(
+        &self,
+        level: LevelSide<'_>,
+        event: &mut StateForPlacementEvent<'_>,
+    ) -> Option<Option<BlockState>> {
+        let level = match level {
+            LevelSide::Client(level) | LevelSide::Server(level) => level,
+        };
+        let pos = event.context.pos;
+        let present = level.has_item_capability([pos.x + 1, pos.y, pos.z], None)?;
+        level
+            .state_with_property(event.state, "axis", if present { "x" } else { "z" })
+            .map(Some)
+    }
+}
+
+struct StoragePort;
+impl mod_api::ResourceHandler<mod_api::ItemResource> for StoragePort {
+    fn size(&self, _: &mut dyn mod_api::ServerHost) -> usize {
+        0
+    }
+    fn resource(&self, _: &mut dyn mod_api::ServerHost, _: usize) -> Option<mod_api::ItemResource> {
+        None
+    }
+    fn amount(&self, _: &mut dyn mod_api::ServerHost, _: usize) -> u32 {
+        0
+    }
+    fn capacity(
+        &self,
+        _: &mut dyn mod_api::ServerHost,
+        _: usize,
+        _: Option<&mod_api::ItemResource>,
+    ) -> u32 {
+        0
+    }
+    fn insert_at(
+        &self,
+        _: &mut dyn mod_api::ServerHost,
+        _: &mod_api::TransactionContext,
+        _: usize,
+        _: &mod_api::ItemResource,
+        _: u32,
+    ) -> std::result::Result<u32, mod_api::TransactionError<mod_api::Overanswered>> {
+        Ok(0)
+    }
+    fn extract_at(
+        &self,
+        _: &mut dyn mod_api::ServerHost,
+        _: &mod_api::TransactionContext,
+        _: usize,
+        _: &mod_api::ItemResource,
+        _: u32,
+    ) -> std::result::Result<u32, mod_api::TransactionError<mod_api::Overanswered>> {
+        Ok(0)
+    }
+}
+
+struct PlacementStorageMod;
+#[mod_api::__subscriptions]
+impl Hooks for PlacementStorageMod {
+    fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+        let log = r.block_key("minecraft:oak_log");
+        r.block_part(log, StorageFacing);
+        let fire = r.block_entity_type_key("minecraft:campfire");
+        r.block_entity_capability(&mod_api::ITEMS, &fire, |level, at, state, _, offer| {
+            if at.side.is_none() && level.state_with_property(state, "lit", "true") == Some(state) {
+                offer.offer(|| Box::new(StoragePort));
+            }
+        });
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn placement_and_prediction_choose_from_their_local_item_providers() {
+    use crate::game::{
+        execution_role::ExecutionRole,
+        native_entity_refs::tests::{fixture_root, run_fresh_cases},
+    };
+    use mod_api::{Direction, LevelHost};
+    use sunrise_core::position::BlockPos;
+    use sunrise_world::level::{PlaceContext, PlaceOutcome, PlacementSource};
+
+    if run_fresh_cases(
+        "game::remote::placement_prediction_tests::placement_and_prediction_choose_from_their_local_item_providers",
+        "SUNRISE_PLACEMENT_STORAGE_CHILD",
+        &["run"],
+    ) {
+        return;
+    }
+    const TARGET: [i32; 3] = [4, 65, 4];
+    const PORT: [i32; 3] = [5, 65, 4];
+    let mods = || {
+        vec![mod_api::ModEntry::new(
+            "placement_storage",
+            Box::new(PlacementStorageMod),
+        )]
+        .into()
+    };
+    let root = fixture_root();
+    let builtin = sunrise_protocol::registry::Builtin::load(
+        &sunrise_protocol::registry::Builtin::find(&root).unwrap(),
+    )
+    .unwrap();
+    let kinds = &builtin.get("minecraft:block_entity_type").unwrap().names;
+    let resolve_kinds = || {
+        // This fresh fixture bypasses content loading, which normally resolves
+        // provider keys against the engine's block-entity registry.
+        mod_api::__private::resolve_block_entity_types(kinds.iter().map(String::as_str), |id| {
+            kinds.iter().any(|kind| kind == id).then_some(())
+        })
+        .unwrap();
+    };
+    let server_state = std::cell::Cell::new(None);
+    let setup = |game: &mut Game<'_>, lit: bool| {
+        let registry = game.pack.assets.registry;
+        let state = registry
+            .resolve(&sunrise_world::chunk::BlockState {
+                name: "minecraft:campfire".into(),
+                properties: [
+                    ("facing", "north"),
+                    ("lit", if lit { "true" } else { "false" }),
+                    ("signal_fire", "false"),
+                    ("waterlogged", "false"),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+            })
+            .unwrap();
+        let ground = registry.default_state("minecraft:stone").unwrap();
+        game.world.set(4, 64, 4, ground).unwrap();
+        game.world.set(5, 65, 4, state).unwrap();
+        game.world.block_entities.insert(
+            (5, 65, 4),
+            sunrise_client::containers::BlockEntity::Campfire(Box::default()),
+        );
+        state
+    };
+    mod_platform::testing::with_mods(mods(), || {
+        with_game_role(root, ExecutionRole::IntegratedServer, |game| {
+            resolve_kinds();
+            game.options.dedicated = Some(Vec::new());
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
+            game.sync_tick_chunks();
+            setup(game, true);
+            let context = PlaceContext {
+                clicked_pos: BlockPos::new(4, 64, 4),
+                face: Direction::Up,
+                hit: sunrise_core::geometry::Vec3::new(4.5, 65.0, 4.5),
+                inside: false,
+                source: PlacementSource::Player {
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    sneaking: false,
+                },
+                item: "minecraft:oak_log".to_owned(),
+                can_use_game_master_blocks: false,
+            };
+            let placed =
+                game.with_level(|rules, level, ticks| rules.place_block(level, ticks, &context));
+            let PlaceOutcome::Placed { pos, state } = placed else {
+                panic!("server refused placement")
+            };
+            assert_eq!(pos, BlockPos::new(4, 65, 4));
+            assert_eq!(
+                game.pack.assets.registry.state(state).unwrap().properties["axis"],
+                "x"
+            );
+            server_state.set(Some(state));
+        });
+    });
+    on_a_client(mods(), |game| {
+        resolve_kinds();
+        game.remote.as_mut().unwrap().logged_in = true;
+        setup(game, false);
+        let guess = game
+            .remote_can_place(&top_of(4, 4), &ItemStack::new("minecraft:oak_log", 1))
+            .unwrap();
+        assert_eq!(guess.pos, BlockPos::new(4, 65, 4));
+        assert_eq!(guess.changes.len(), 1);
+        let guessed = guess.changes[0].1;
+        assert_eq!(
+            game.pack.assets.registry.state(guessed).unwrap().properties["axis"],
+            "z"
+        );
+        game.predict_blocks(&guess.changes, 7);
+        assert_eq!(game.world.block(4, 65, 4), guessed);
+        let server = server_state.get().unwrap();
+        game.handle_packet(C::BlockUpdate(play::BlockUpdate {
+            pos: TARGET,
+            state: server.0 as i32,
+        }))
+        .unwrap();
+        game.handle_packet(C::BlockChangedAck(play::BlockChangedAck { sequence: 7 }))
+            .unwrap();
+        assert_eq!(game.world.block(4, 65, 4), server);
+
+        // Keep the same campfire state but remove its block entity in the disposable level.
+        let campfire = setup(game, true);
+        game.with_level(|_, level, ticks| {
+            assert_eq!(
+                level.view(ticks).has_item_capability(PORT, None),
+                Some(true)
+            );
+        });
+        game.check_dry_fire_odds_view(
+            |_, dry, _| {
+                dry.remove_block_entity(BlockPos::new(5, 65, 4), campfire, false);
+            },
+            |view| assert_eq!(view.has_item_capability(PORT, None), Some(false)),
+        );
+        // A staged replacement also removes the previous provider through the placement view.
+        let air = game.world.air;
+        game.with_level(|_, level, ticks| {
+            let changes =
+                sunrise_world::level::PreviewBlocks::from([(BlockPos::new(5, 65, 4), air)]);
+            assert_eq!(
+                level
+                    .view(ticks)
+                    .previewing(Some(&changes))
+                    .has_item_capability(PORT, None),
+                Some(false)
+            );
+            assert_eq!(
+                level.view(ticks).has_item_capability(PORT, None),
+                Some(true)
+            );
+        });
     });
 }
 
@@ -358,7 +595,7 @@ fn a_predicted_break_reconciles_its_neighbour_s_shape_change() {
 fn a_denied_break_restores_wall_sign_text_and_synced_attachments() {
     use mod_api::{AttachmentCodec, AttachmentType, Host};
     use sunrise_mod_runtime::attachments::AttachmentSync;
-    use sunrise_protocol::attachment_sync::{Message, encode};
+    use sunrise_protocol::attachment_sync::Message;
 
     static VALUE: AttachmentType<i32> = AttachmentType {
         namespace: "break_test",
@@ -387,7 +624,11 @@ fn a_denied_break_restores_wall_sign_text_and_synced_attachments() {
             portal_cooldown: 0,
             sea_level: 63,
         };
-        game.enter_remote_dimension(&spawn, false, sunrise_client::level_loading::Reason::Other);
+        game.enter_remote_dimension(
+            &spawn,
+            RemoteDimensionEntry::Login,
+            sunrise_client::level_loading::Reason::Other,
+        );
         game.remote.as_mut().unwrap().logged_in = true;
         game.world
             .chunks
@@ -415,12 +656,15 @@ fn a_denied_break_restores_wall_sign_text_and_synced_attachments() {
         let holder = Holder::BlockEntity([0, 65, 0]);
         let attachment_values = |game: &Game<'_>| {
             let host: &dyn Host = game;
-            host.attachment_query(VALUE.namespace, VALUE.name)
+            let query = host
+                .attachment_query(VALUE.namespace, VALUE.name)
                 .unwrap()
                 .query(&VALUE)
-                .unwrap()
-                .iter()
-                .map(|row| *row.unwrap().value)
+                .unwrap();
+            let scope = host.attachment_read_scope().unwrap();
+            let mut rows = query.iter();
+            std::iter::from_fn(|| rows.try_next().unwrap())
+                .map(|row| row.with_value(scope, |value| *value).unwrap())
                 .collect::<Vec<_>>()
         };
         game.world.set(1, 65, 0, support).unwrap();
@@ -432,18 +676,15 @@ fn a_denied_break_restores_wall_sign_text_and_synced_attachments() {
         sign.back.lines[3] = "Keep this side clear".into();
         sign.waxed = true;
         let original = sign.clone();
-        game.remote_attachment_sync(
-            &encode(&Message {
-                holder,
-                replace: true,
-                changes: vec![AttachmentSync {
-                    namespace: VALUE.namespace.into(),
-                    name: VALUE.name.into(),
-                    value: Some([("n".into(), Tag::Int(41))].into()),
-                }],
-            })
-            .unwrap(),
-        );
+        game.remote_attachment_sync(Message {
+            holder,
+            replace: true,
+            changes: vec![AttachmentSync {
+                namespace: VALUE.namespace.into(),
+                name: VALUE.name.into(),
+                value: Some([("n".into(), Tag::Int(41))].into()),
+            }],
+        });
         assert_eq!(attachment_values(game), [41]);
 
         game.predict_break([1, 65, 0], support, 7);
@@ -801,7 +1042,7 @@ fn an_active_vault_ends_a_held_item_s_click_on_the_client() {
         let (mut peer, _writer) = super::tests::connect_menu_test(game);
         peer.set_read_timeout(Some(std::time::Duration::from_millis(50)))
             .unwrap();
-        game.set_mode_id(0);
+        game.set_local_mode(sunrise_client::command::args::GameMode::Survival);
         game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 3.5)).unwrap());
         game.world
             .chunks

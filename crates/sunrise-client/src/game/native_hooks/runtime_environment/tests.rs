@@ -191,7 +191,7 @@ fn native_process_environment_in_registration_and_game_hosts() {
     mod_platform::__private::install_packages(&inventory, &[]);
     let root = std::path::PathBuf::from(std::env::var_os("SUNRISE_TEST_RESOURCES").unwrap());
     // Freeze the real bootstrap snapshot before with_mods runs registration hooks.
-    mods::install_registration_data(&root, Default::default()).unwrap();
+    mods::install_registration_data(&root, Default::default(), Default::default()).unwrap();
     mod_platform::testing::with_mods(entries.into(), || {
         let role = if dedicated {
             ExecutionRole::DedicatedServer
@@ -204,8 +204,6 @@ fn native_process_environment_in_registration_and_game_hosts() {
             crate::game::native_entity_refs::tests::fixture_root(),
             role,
             |game: &mut Game<'_>| {
-                let _phase =
-                    mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
                 if role.is_client() {
                     game.native_client_tick_pre();
                     // A client process's integrated logical server must read that same snapshot.

@@ -33,18 +33,7 @@ impl DatapackRegistriesRegistrar for PartRegistrar {
             {
                 return Err(DatapackRegistrationError::Duplicate);
             }
-            for field in &mut fields {
-                if matches!(
-                    field.kind,
-                    crate::DatapackFieldKind::Identifier
-                        | crate::DatapackFieldKind::Reference { .. }
-                ) && let Some(crate::DatapackValue::Text(value)) = &mut field.default
-                {
-                    *value = crate::Identifier::parse(value)
-                        .map_err(|_| DatapackRegistrationError::InvalidDefault)?
-                        .to_string();
-                }
-            }
+            mod_vocab::__private::parts_installation::normalize_datapack_defaults(&mut fields)?;
             mod_vocab::__private::parts_installation::validate_datapack_schema(&fields)?;
             self.datapack_registries.push(DatapackRegistryDeclaration {
                 mod_id: self.mod_id.to_owned(),
@@ -125,6 +114,78 @@ mod tests {
                 .iter()
                 .all(|refusal| refusal.contains("mod example"))
         );
+    }
+
+    /// Through the registrar: an id default is normalised inside a record and as a map key as
+    /// at the top, and a default map naming one id twice is refused as a duplicate.
+    #[test]
+    fn nested_id_defaults_normalise_through_the_registrar() {
+        use crate::{DatapackKeyKind, DatapackValue};
+        use DatapackRegistrationError as E;
+        let mut registrar = PartRegistrar::new("example");
+        let sync = DatapackRegistrySync::Required;
+        let by_mob = |pairs: Vec<(&str, &str)>| {
+            DatapackField::with_default(
+                "by_mob",
+                DatapackFieldKind::Map {
+                    key: DatapackKeyKind::Identifier,
+                    value: Box::new(DatapackFieldKind::Identifier),
+                },
+                DatapackValue::Map(
+                    pairs
+                        .into_iter()
+                        .map(|(k, v)| (k.to_owned(), DatapackValue::Text(v.to_owned())))
+                        .collect(),
+                ),
+            )
+        };
+        let record = |fields| {
+            vec![DatapackField::required(
+                "drop",
+                DatapackFieldKind::Record { fields },
+            )]
+        };
+        registrar
+            .declare_datapack_registry(
+                "drops",
+                sync,
+                record(vec![
+                    DatapackField::with_default(
+                        "item",
+                        DatapackFieldKind::Identifier,
+                        DatapackValue::Text("stone".into()),
+                    ),
+                    by_mob(vec![("zombie", "rotten_flesh")]),
+                ]),
+            )
+            .unwrap();
+        let DatapackFieldKind::Record { fields } = &registrar.datapack_registries[0].fields[0].kind
+        else {
+            panic!("a record");
+        };
+        assert_eq!(
+            fields[0].default,
+            Some(DatapackValue::Text("minecraft:stone".into()))
+        );
+        assert_eq!(
+            fields[1].default,
+            Some(DatapackValue::Map(vec![(
+                "minecraft:zombie".into(),
+                DatapackValue::Text("minecraft:rotten_flesh".into())
+            )]))
+        );
+        assert_eq!(
+            registrar.declare_datapack_registry(
+                "twice",
+                sync,
+                record(vec![by_mob(vec![
+                    ("zombie", "a"),
+                    ("minecraft:zombie", "b")
+                ])]),
+            ),
+            Err(E::DuplicateKey)
+        );
+        assert_eq!(registrar.datapack_registries.len(), 1);
     }
 
     #[test]

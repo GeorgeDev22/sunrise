@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Ang isang bagong linya ng chat ay dumudulas mula sa kaliwa habang ito ay nawawala, sa halip na lumabas nang buo.",
   "sunrise.extras.chat_indicator": "Tagapagpahiwatig ng mensahe",
   "sunrise.extras.chat_indicator.tooltip": "Ang may kulay na bar sa kaliwa ng isang chat line.",
-  "sunrise.extras.discord_presence": "Rich Presence ng Discord",
-  "sunrise.extras.discord_presence.tooltip": "Ipinapakita ang Paglalaro ng Sunrise sa iyong Discord profile habang tumatakbo ang Discord: mga menu, single player o multiplayer, ang dimensyon at ang oras ng paglalaro. Hindi kailanman pangalan ng mundo o address ng server.",
   "sunrise.extras.dynamic_lights": "Mga dynamic na ilaw",
   "sunrise.extras.dynamic_lights.tooltip": "Ang mga sulo at iba pang pinagmumulan ng liwanag na hawak, nalaglag o nasusunog ay nagpapasindi sa mga bloke sa paligid nila.",
   "sunrise.extras.fullbright": "Fullbright",

@@ -389,8 +389,6 @@
   "sunrise.extras.chat_animation.tooltip": "Eine neue Chatzeile gleitet von links herein und blendet dabei ein, statt sofort ganz zu erscheinen.",
   "sunrise.extras.chat_indicator": "Nachrichtenmarkierung",
   "sunrise.extras.chat_indicator.tooltip": "Der farbige Balken links neben einer Chatzeile.",
-  "sunrise.extras.discord_presence": "Discord Rich Presence",
-  "sunrise.extras.discord_presence.tooltip": "Zeigt „Spielt Sunrise“ in deinem Discord-Profil an, solange Discord läuft: Menüs, Einzel- oder Mehrspielermodus, die Dimension und die Spielzeit. Nie den Namen einer Welt oder die Adresse eines Servers.",
   "sunrise.extras.dynamic_lights": "Dynamisches Licht",
   "sunrise.extras.dynamic_lights.tooltip": "Fackeln und andere Lichtquellen, die gehalten, fallen gelassen werden oder brennen, beleuchten die Blöcke um sich herum.",
   "sunrise.extras.fullbright": "Maximale Helligkeit",

@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Một dòng trò chuyện mới trượt vào từ bên trái trong khi nó mờ dần thay vì xuất hiện nguyên vẹn.",
   "sunrise.extras.chat_indicator": "Chỉ báo tin nhắn",
   "sunrise.extras.chat_indicator.tooltip": "Thanh màu ở bên trái dòng trò chuyện.",
-  "sunrise.extras.discord_presence": "Sự hiện diện phong phú của Discord",
-  "sunrise.extras.discord_presence.tooltip": "Hiển thị Playing Sunrise trên hồ sơ Discord của bạn trong khi Discord chạy: menu, trình phát đơn hoặc nhiều người chơi, kích thước và thời gian chơi. Không bao giờ có tên thế giới hoặc địa chỉ máy chủ.",
   "sunrise.extras.dynamic_lights": "Đèn năng động",
   "sunrise.extras.dynamic_lights.tooltip": "Đuốc và các nguồn sáng khác được giữ, thả hoặc đốt sẽ chiếu sáng các khối xung quanh chúng.",
   "sunrise.extras.fullbright": "Ánh sáng đầy đủ",

@@ -9,9 +9,15 @@ pub trait PlayerProgressBackend {
     /// Side: server.
     /// The value of statistic `stat_type` for `key` (`minecraft:stone`,
     /// `minecraft:jump`...), as `ServerStatsCounter.getValue`: 0 when never
-    /// counted.
-    #[access(WorldOnly)]
+    /// counted. Reads the player's own counter even during a nested turn that
+    /// displaces them. In `player_stat_award` the award has not been applied yet.
     fn player_stat(&self, player: PlayerRef, stat_type: StatType, key: &str) -> Option<i32>;
+    /// Side: server.
+    /// An owned snapshot of the player's live counters in the `ServerStatsCounter.toJson`
+    /// save format: namespaced keys grouped by statistic type and the current `DataVersion`.
+    /// A reachable player without counters has an empty `stats` map. Returns `None` on
+    /// a client or for a stale or unavailable player.
+    fn player_statistics(&self, player: PlayerRef) -> Option<String>;
 }
 /// The handles' writes of the `player_progress` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -36,7 +42,6 @@ pub trait PlayerProgressBackendMut {
     ///
     /// `test` is lent to this call only. A failed test stops further testing
     /// and reports `Test`; earlier matching criteria may already be granted.
-    #[access(WorldOnly)]
     fn player_trigger_criterion(
         &mut self,
         player: PlayerRef,
@@ -50,7 +55,6 @@ pub trait PlayerProgressBackendMut {
     /// `Ok(())` means reached, even if no criterion matched. Refuses remote clients
     /// (`NotServer`), stale/offline/displaced players (`PlayerUnavailable`), and
     /// unloaded positions (`UnloadedChunk`).
-    #[access(WorldOnly)]
     fn player_trigger_block_use(
         &mut self,
         player: PlayerRef,
@@ -66,7 +70,6 @@ pub trait PlayerProgressBackendMut {
     /// `Ok(())` means reached, even if nothing matched. Refuses remote clients
     /// (`NotServer`), stale/offline/displaced players (`PlayerUnavailable`), and
     /// unloaded positions (`UnloadedChunk`).
-    #[access(WorldOnly)]
     fn player_trigger_item_used_on_block(
         &mut self,
         player: PlayerRef,
@@ -81,7 +84,6 @@ pub trait PlayerProgressBackendMut {
     /// even if nothing matched. Refuses clients (`NotServer`), stale/offline/displaced
     /// players (`PlayerUnavailable`) and invalid stacks (`Stack(StackWriteError)`)
     /// before firing.
-    #[access(WorldOnly)]
     fn player_trigger_consume_item(
         &mut self,
         player: PlayerRef,
@@ -92,7 +94,6 @@ pub trait PlayerProgressBackendMut {
     /// for its own counts, so `player_stat_award` hears it and may rewrite or cancel
     /// it, and scoreboard criteria follow. False for a player it can't
     /// reach.
-    #[access(WorldOnly)]
     fn player_award_stat(
         &mut self,
         player: PlayerRef,
@@ -103,6 +104,19 @@ pub trait PlayerProgressBackendMut {
     /// Side: server.
     /// `Player.resetStat`: sets the statistic back to 0, which scoreboard
     /// criteria follow. False for a player it can't reach.
-    #[access(WorldOnly)]
     fn player_reset_stat(&mut self, player: PlayerRef, stat_type: StatType, key: &str) -> bool;
+    /// Side: server.
+    /// Replaces the player's live counters with borrowed save JSON, upgrading it as
+    /// `ServerStatsCounter.parse` does. An absent `stats` map means empty; decode errors
+    /// are logged and recoverable registered entries are retained. Returns `false`
+    /// without changing the player if the document is malformed, no map can be decoded,
+    /// or the player is stale or unavailable for writes (including dead or displaced).
+    ///
+    /// Omitted counters read as zero. Changed statistic scores follow the replacement,
+    /// and changed counts, including zero for removals, go out on the next statistics
+    /// request. The normal player save persists the replacement. No `player_stat_award`
+    /// hook fires. Inside a transaction the replacement, with its scores, happens when the
+    /// outermost transaction commits and is dropped if it aborts; until then reads see the
+    /// old counters.
+    fn player_set_statistics(&mut self, player: PlayerRef, snapshot: &str) -> bool;
 }

@@ -37,8 +37,9 @@ pub fn install_process_datapack_registry_declarations(
 pub trait DatapackRegistriesRegistrar {
     /// Declare a datapack registry of the mod's own (NeoForge's
     /// `DataPackRegistryEvent.NewRegistry`): `path` in the mod's namespace
-    /// (`spell` of `example` is `example:spell`), the flat record `fields` an
-    /// entry has, and how clients receive the entries.
+    /// (`spell` of `example` is `example:spell`), the record `fields` an
+    /// entry has (scalars, and lists, maps, records and optional fields of them, nested as
+    /// deep as the schema says), and how clients receive the entries.
     ///
     /// Entries are JSON files in data packs: entry `addon:fire` of
     /// `example:spell` is `data/addon/example/spell/fire.json`
@@ -52,8 +53,9 @@ pub trait DatapackRegistriesRegistrar {
     /// manifest namespaces or a content package it serves via `served_by`, with vanilla
     /// registries excluded), a malformed key, a duplicate (of this mod's or
     /// another's, caught where the declarations join), an empty or repeated
-    /// field name, unusable bounds, or a default that is not a value of its
-    /// field inside its bounds.
+    /// field name, unusable bounds, an optional kind inside a list, map or optional, or a
+    /// default that is not a value of its field inside its bounds or whose map names one key
+    /// twice, at any depth. Id and reference defaults are normalised at every depth.
     fn declare_datapack_registry(
         &mut self,
         path: &str,

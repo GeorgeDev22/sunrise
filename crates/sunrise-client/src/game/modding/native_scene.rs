@@ -1,5 +1,5 @@
 //! A few blocks drawn in a screen as a small scene seen from an angle: what
-//! Create's Ponder shows its machines in (docs/native-mods.md, "Scenes in
+//! Create's Ponder shows its machines in (docs/modding/src/how-to/native-mods.md, "Scenes in
 //! screens"). The blocks' models and their mod block entities' drawing are
 //! projected into the GUI with their own depth, as the smithing screen draws
 //! its armour stand.

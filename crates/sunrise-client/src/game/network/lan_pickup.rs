@@ -3,8 +3,8 @@
 //! `item_stacked_on_other` (`stacked_pickup`). The trading menu builds its own and does the same
 //! in `lan_trading.rs`.
 use super::{Game, lan_crafting::input};
-use crate::game::stacked_on_other::{Pickup, plan_click};
-use sunrise_client::menu::{Env, Input, Menu, RuleAnswers, StoredRules};
+use crate::game::stacked_on_other::Pickup;
+use sunrise_client::menu::{Env, Input, Menu};
 use sunrise_protocol::packets::play;
 
 /// The click a menu op makes: slot, button and input mode.
@@ -18,10 +18,8 @@ pub(in crate::game) fn click_of(p: &play::ContainerClick) -> Click {
 impl Game<'_> {
     /// `guest_menu_op`, with `click` (the click `op` makes, if it makes one) decided by the mods
     /// first. With no listener, no click or a click that is not a pickup this is `guest_menu_op`.
-    /// A pickup the mods listen to is planned (their slot rules asked once, on a copy of `menu`
-    /// set up by `prepare`, as `op` sets it up), frozen, decided and then run, inside the
-    /// decision's savepoint, with the plan's answers; a refused one changes nothing and gives
-    /// `None`, as does a guest who is gone.
+    /// A pickup the mods listen to is frozen, decided and then run inside the decision's
+    /// savepoint; a refused one changes nothing and gives `None`, as does a guest who is gone.
     pub(super) fn guest_menu_op_decided<R>(
         &mut self,
         gi: usize,
@@ -46,14 +44,14 @@ impl Game<'_> {
         op: impl FnOnce(&mut Menu, &Env) -> R,
         write_back: impl FnOnce(&mut Game<'_>, &mut Menu, &R),
     ) -> Option<R> {
-        self.guest_menu_action(gi, menu, click, prepare, |game, menu, rules, stacked| {
-            let ran = game.guest_menu_op_with(gi, menu, rules, stacked, op)?;
+        self.guest_menu_action(gi, menu, click, prepare, |game, menu, stacked| {
+            let ran = game.guest_menu_op_with(gi, menu, stacked, op)?;
             write_back(game, menu, &ran);
             Some(ran)
         })
     }
 
-    /// Run an authoritative menu action with a pickup's rule answers, when it needed a decision.
+    /// Run an authoritative menu action, deciding a pickup click first when a mod listens.
     /// The action can release the menu's `Env` between takes and continue inside the savepoint.
     pub(super) fn guest_menu_action<R>(
         &mut self,
@@ -64,18 +62,17 @@ impl Game<'_> {
         action: impl FnOnce(
             &mut Game<'_>,
             &mut Menu,
-            Option<&dyn sunrise_client::menu::SlotRules>,
             Option<&sunrise_client::menu::StackedOutcome>,
         ) -> Option<R>,
     ) -> Option<R> {
-        let Some((slot, button, mode)) = click.filter(|c| c.2 == Input::Pickup) else {
-            return action(self, menu, None, None);
+        let Some((slot, button, mode)) =
+            click.filter(|c| matches!(c.2, Input::Pickup | Input::QuickCraft))
+        else {
+            return action(self, menu, None);
         };
         if !Self::stacked_listened() {
-            return action(self, menu, None, None);
+            return action(self, menu, None);
         }
-        // Freeze what the click finds on a copy; the answer determines its slot rules.
-        let answers = RuleAnswers::default();
         let mut found = None;
         let mut copy = menu.clone();
         let planned = self.guest_menu_op(gi, &mut copy, |menu, env| {
@@ -84,13 +81,19 @@ impl Game<'_> {
             }
             found = menu.stacked_click(env, slot, button, mode);
         });
-        let (Some(frozen), Some(())) = (found, planned) else {
-            return action(self, menu, None, None);
+        let (Some(frozen), Some(())) = (found.filter(Self::stacked_listens_for), planned) else {
+            return action(self, menu, None);
         };
         let conn = self.lan.as_ref()?.hub.guests[gi].conn;
         let route = self.lan.as_mut()?.menus.entry(conn).or_default().hub.id();
         let mut ran = None;
-        let (carried, same) = (frozen.carried.clone(), frozen.clone());
+        let (carried, same, resolved_slot, primary) = (
+            frozen.carried.clone(),
+            frozen.clone(),
+            frozen.slot,
+            frozen.primary,
+        );
+        let mut probe = copy.clone();
         let pickup = self.stacked_pickup(
             route,
             frozen,
@@ -98,20 +101,21 @@ impl Game<'_> {
                 let now = game.lan.as_ref()?.hub.guests.get(gi)?.carried.clone();
                 (now == carried).then(|| same.clone())
             },
-            |game, answer| {
-                if game
-                    .guest_menu_op(gi, &mut copy, |menu, env| {
-                        plan_click(menu, env, slot, button, &answers, answer);
-                    })
-                    .is_none()
-                {
-                    answer.refused.set(true);
-                }
+            move |game, carried, clicked| {
+                game.guest_menu_op(gi, &mut probe, |menu, env| {
+                    menu.probe_carried_vanilla_override(
+                        env,
+                        resolved_slot,
+                        primary,
+                        carried,
+                        clicked,
+                    )
+                })
+                .unwrap_or(false)
             },
             |game, answer| {
                 game.journal_guest_click(conn);
-                let rules = StoredRules(&answers);
-                ran = action(game, menu, Some(&rules), answer);
+                ran = action(game, menu, answer);
             },
         );
         match pickup {

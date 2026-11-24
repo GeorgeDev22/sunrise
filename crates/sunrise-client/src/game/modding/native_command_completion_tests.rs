@@ -12,8 +12,9 @@ use sunrise_client::{
     command::{MOD_COMMAND, Registries},
     lan::{Joined, NetConfig, Out, PlayerSender, guest::Guest, hub::HubConfig},
 };
+use sunrise_core::vanilla_bytes::Writer;
 use sunrise_protocol::{
-    buf::{Codec, Reader, Writer},
+    buf::{Codec, Reader},
     ids,
     packets::{configuration::ClientInformation, play},
 };
@@ -125,7 +126,11 @@ fn install_warps(game: &mut Game<'_>) {
         mod_api::Command::new("warp go <name:test:warp>"),
         mod_api::Command::op("warp admin <name:test:warp>", 4),
     ];
-    let (tree, _, problems) = command_tree(&commands, |_| false, &arguments);
+    let (tree, _, problems) = command_tree(
+        &commands,
+        &sunrise_client::command::Dispatcher::new(),
+        &arguments,
+    );
     assert!(problems.is_empty(), "{problems:?}");
     let mut dispatcher = (*game.ui.dispatcher.0).clone();
     register_dispatcher(&mut dispatcher, &tree, MOD_COMMAND, &arguments);
@@ -280,7 +285,7 @@ fn a_providers_answer_reaches_the_player_without_passing_through_the_completion_
                 mod_api::Command::new("warp go <name:test:warp>"),
                 mod_api::Command::new("probe <value:word>"),
             ],
-            |_| false,
+            &sunrise_client::command::Dispatcher::new(),
             &arguments,
         );
         assert!(problems.is_empty(), "{problems:?}");
@@ -330,7 +335,7 @@ fn an_identifier_listener_replies_on_the_wire_and_leaves_room_for_the_next_argum
         let arguments = CommandArguments::new();
         let (tree, _, problems) = command_tree(
             &[mod_api::Command::new("probe <value:id> <count:integer>")],
-            |_| false,
+            &sunrise_client::command::Dispatcher::new(),
             &arguments,
         );
         assert!(problems.is_empty(), "{problems:?}");
@@ -379,6 +384,189 @@ fn an_identifier_listener_replies_on_the_wire_and_leaves_room_for_the_next_argum
             Some(&sunrise_client::command::Arg::Str("example:stone".into()))
         );
     });
+}
+
+/// FTB Quests' `QuestObjectArgument`: a hex id, or a quoted `"#tag"` or title, with more
+/// arguments after it. Its titles complete as insertable syntax, quoted.
+struct QuestObject;
+
+/// The quest titles the test mod knows.
+const QUEST_TITLES: [&str; 2] = ["Getting Started", "Getting Rich"];
+
+impl mod_api::CommandArgumentType for QuestObject {
+    fn kind(&self) -> mod_api::CommandArgumentKind {
+        mod_api::CommandArgumentKind::Quotable
+    }
+
+    fn parse(&self, input: &str) -> Result<String, mod_api::CommandArgumentError> {
+        Ok(format!("object {input}"))
+    }
+
+    fn suggest(
+        &self,
+        _: Option<&mod_api::CommandSender>,
+        prefix: &str,
+    ) -> Vec<mod_api::CommandSuggestion> {
+        // Brigadier hands the typed suffix, opening quote included.
+        assert_eq!(prefix, "\"Getting St");
+        let typed = prefix.trim_start_matches('"');
+        QUEST_TITLES
+            .into_iter()
+            .filter(|title| title.starts_with(typed))
+            .map(|title| mod_api::CommandSuggestion::new(format!("\"{title}\"")))
+            .collect()
+    }
+}
+
+/// `<object:test:quest_object>` and `<title:string>` read a quoted phrase with an argument after
+/// it, on the server and on a vanilla client that rebuilds the tree from the packet: both nodes
+/// are `brigadier:string` mode 1 (`QUOTABLE_PHRASE`), the mod's asks the server, and its
+/// completion replaces the half-typed phrase from its opening quote.
+#[test]
+#[ignore = "daily"]
+fn a_quotable_argument_reads_a_quoted_phrase_mid_command_and_goes_out_as_a_quotable_string() {
+    crate::game::in_own_process(
+        "game::native_command_completion_tests::a_quotable_argument_reads_a_quoted_phrase_mid_command_and_goes_out_as_a_quotable_string",
+        || {
+            use sunrise_client::command::{Arg, Dispatcher, network};
+            let arguments = CommandArguments::from([(
+                "test:quest_object".to_owned(),
+                Arc::new(QuestObject) as Arc<dyn mod_api::CommandArgumentType>,
+            )]);
+            let (tree, _, problems) = command_tree(
+                &[
+                    mod_api::Command::new("quests open <object:test:quest_object> <count:integer>"),
+                    mod_api::Command::new("quests rename <title:string> <count:integer>"),
+                ],
+                &Dispatcher::new(),
+                &arguments,
+            );
+            assert!(problems.is_empty(), "{problems:?}");
+            let mut dispatcher = Dispatcher::new();
+            register_dispatcher(&mut dispatcher, &tree, MOD_COMMAND, &arguments);
+            let registries = Registries::default();
+            for (typed, decoded) in [
+                (r##""#chapter_one""##, "#chapter_one"),
+                ("1A2B3C4D5E6F7A8B", "1A2B3C4D5E6F7A8B"),
+                (r#"'say "hi" \'now\''"#, r#"say "hi" 'now'"#),
+                (r#""""#, ""),
+            ] {
+                let line = format!("quests open {typed} 2");
+                let parsed = dispatcher.parse(&line, &registries);
+                let (context, _) = parsed.executable().unwrap();
+                assert_eq!(
+                    context.get("object"),
+                    Some(&Arg::Custom {
+                        kind: "test:quest_object".into(),
+                        value: format!("object {decoded}"),
+                    }),
+                    "{line}"
+                );
+                assert_eq!(context.get("count"), Some(&Arg::Int(2)), "{line}");
+            }
+            let line = r#"quests rename "Getting \"Started\"" 2"#;
+            let parsed = dispatcher.parse(line, &registries);
+            assert_eq!(
+                parsed.executable().unwrap().0.get("title"),
+                Some(&Arg::Str(r#"Getting "Started""#.into()))
+            );
+            let line = r#"quests open "Getting 2"#;
+            let error = dispatcher
+                .parse(line, &registries)
+                .executable()
+                .unwrap_err();
+            assert_eq!(error.key, "parsing.quote.expected.end");
+            assert_eq!(error.cursor, line.len());
+
+            let mut resources = None;
+            let (mut game, rx) = game_with_guest(&mut resources, "QuestTester");
+            // Vanilla's en_us text for `readerExpectedEndOfQuote`, in the game's language.
+            assert_eq!(
+                sunrise_client::text::Text::tr("parsing.quote.expected.end", &[]).plain(),
+                "Unclosed quoted string"
+            );
+            game.ui.dispatcher.0 = Arc::new(dispatcher);
+            game.lan.as_mut().unwrap().hub.set_mod_commands(0, tree);
+            let packet = last_tree(&rx);
+            let node = |parent: &str, child: &str| {
+                let parent = packet
+                    .nodes
+                    .iter()
+                    .find(|node| node.name == parent)
+                    .unwrap();
+                parent
+                    .children
+                    .iter()
+                    .map(|&i| &packet.nodes[i as usize])
+                    .find(|node| node.name == child)
+                    .unwrap()
+            };
+            // 26.3 ArgumentTypeInfos: brigadier:string is parser 5; StringArgumentSerializer
+            // writes QUOTABLE_PHRASE as 1.
+            let object = node("open", "object");
+            assert_eq!(object.parser, Some((5, vec![1])));
+            assert_eq!(object.suggestions.as_deref(), Some("minecraft:ask_server"));
+            let title = node("rename", "title");
+            assert_eq!(title.parser, Some((5, vec![1])));
+            assert_eq!(title.suggestions, None);
+            let vanilla_client = network::from_packet(&packet, &Dispatcher::new());
+            for line in [
+                r##"quests open "#chapter_one" 2"##,
+                r#"quests rename 'Getting "Started"' 2"#,
+            ] {
+                assert!(
+                    vanilla_client.parse(line, &registries).executable().is_ok(),
+                    "{line}"
+                );
+            }
+
+            // The completion over the wire: it replaces from the opening quote, and the line it
+            // makes parses on the server.
+            let typed = r#"quests open "Getting St"#;
+            let mut request = Writer::new();
+            request.varint(7);
+            request.string(typed);
+            game.guest_suggestions(2, &request.data);
+            let mut answer = None;
+            for out in rx.try_iter() {
+                let bodies = match out {
+                    Out::Packet(body) => vec![body],
+                    Out::Packets(bodies) => bodies,
+                    Out::Disconnect(_) => panic!("unexpected disconnect"),
+                };
+                for body in bodies {
+                    let mut reader = Reader::new(&body);
+                    if reader.varint().unwrap() != ids::play::clientbound::COMMAND_SUGGESTIONS {
+                        continue;
+                    }
+                    assert_eq!(reader.varint().unwrap(), 7);
+                    let start = reader.varint().unwrap();
+                    let length = reader.varint().unwrap();
+                    assert_eq!(reader.varint().unwrap(), 1);
+                    let text = reader.string(32767).unwrap();
+                    assert!(!reader.bool().unwrap());
+                    assert!(answer.replace((start, length, text)).is_none());
+                }
+            }
+            let (start, length, text) = answer.expect("no suggestion packet");
+            assert_eq!(
+                (start, length, text.as_str()),
+                (12, 11, r#""Getting Started""#)
+            );
+            let mut applied = typed.to_owned();
+            applied.replace_range(start as usize..(start + length) as usize, &text);
+            assert_eq!(applied, r#"quests open "Getting Started""#);
+            let completed = format!("{applied} 1");
+            let parsed = game.ui.dispatcher.0.parse(&completed, &game.ui.registries);
+            assert_eq!(
+                parsed.executable().unwrap().0.get("object"),
+                Some(&Arg::Custom {
+                    kind: "test:quest_object".into(),
+                    value: "object Getting Started".into(),
+                })
+            );
+        },
+    );
 }
 
 /// The `warp` tree and completions an operator gets, and a plain player does not: the admin child

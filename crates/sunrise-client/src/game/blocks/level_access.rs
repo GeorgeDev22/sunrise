@@ -85,7 +85,7 @@ impl LevelAccess for GameLevel<'_> {
         cancel
     }
     fn observe_neighbor_changed(
-        &self,
+        &mut self,
         ticks: &mut Ticks,
         pos: BlockPos,
         state: BlockStateId,
@@ -963,8 +963,8 @@ impl LevelAccess for GameLevel<'_> {
         )
     }
     fn biome_name(&self, pos: BlockPos) -> Option<&str> {
-        let chunk = self.world.chunks.get(&(pos.x >> 4, pos.z >> 4))?;
-        Some(&self.biomes.get(chunk.biome(pos.x, pos.y, pos.z)).name)
+        let biome = self.world.biome_at(self.biome_zoom, pos.x, pos.y, pos.z)?;
+        Some(&self.biomes.get(biome).name)
     }
     fn world_seed(&self) -> i64 {
         self.seed
@@ -1246,10 +1246,13 @@ impl LevelAccess for GameLevel<'_> {
         if !self.collision.publishes_shapes(state) {
             return None;
         }
-        match self.world.block_entities.get(&(pos.x, pos.y, pos.z))? {
-            BlockEntity::Mod(entity) => entity.shapes().map(|shapes| shapes.collision().clone()),
-            _ => None,
-        }
+        sunrise_client::collisions::published_shapes(
+            self.world,
+            self.registry,
+            state,
+            [pos.x, pos.y, pos.z],
+        )
+        .map(|shapes| shapes.collision().clone())
     }
     fn remove_block_entity(&mut self, pos: BlockPos, old: BlockStateId, side_effects: bool) -> u8 {
         if let Some(change) = &mut self.command_block_transition

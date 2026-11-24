@@ -3,6 +3,7 @@ use super::native_level_signals::ReadLevel;
 use super::{Dim, Game};
 use mod_api::BlockKey;
 use mod_api::{FluidKey, FluidState, LevelRef, LifecycleContext, UnresolvedFluid};
+use std::cell::RefCell;
 use sunrise_client::{items::Items, world::World};
 use sunrise_core::{geometry::Direction, position::BlockPos};
 use sunrise_world::{
@@ -11,6 +12,62 @@ use sunrise_world::{
     level::{Behaviours, fluid_can_be_replaced_with, fluid_tick_delay},
     registry::{BlockRegistry, BlockStateId},
 };
+
+/// Kinds of contextual block provider dispatched by the game.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum BlockProviderQuery {
+    EnchantPower,
+    LightEmission,
+}
+
+#[derive(PartialEq, Eq)]
+struct BlockQueryKey {
+    game: *const (),
+    state: BlockStateId,
+    query: BlockProviderQuery,
+}
+
+thread_local! {
+    static ACTIVE_BLOCK_QUERIES: RefCell<Vec<BlockQueryKey>> = const { RefCell::new(Vec::new()) };
+}
+
+struct PopBlockQuery;
+
+impl Drop for PopBlockQuery {
+    fn drop(&mut self) {
+        ACTIVE_BLOCK_QUERIES.with(|active| {
+            active.borrow_mut().pop();
+        });
+    }
+}
+
+impl Game<'_> {
+    /// Refuse re-entry for the same state and query kind in this game, regardless of level and
+    /// position. A provider can delegate to another state. Only actual dispatch enters here;
+    /// the vector retains its capacity between calls.
+    pub(super) fn with_block_provider_query<R>(
+        &self,
+        state: BlockStateId,
+        query: BlockProviderQuery,
+        ask: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let key = BlockQueryKey {
+            game: std::ptr::from_ref(self).cast(),
+            state,
+            query,
+        };
+        ACTIVE_BLOCK_QUERIES.with(|active| {
+            let mut active = active.borrow_mut();
+            if active.contains(&key) {
+                return None;
+            }
+            active.push(key);
+            drop(active);
+            let _pop = PopBlockQuery;
+            Some(ask())
+        })
+    }
+}
 
 /// Shared by the level handle and the restricted block-hook view.
 pub(super) fn block_face_sturdy(
@@ -378,24 +435,76 @@ impl Game<'_> {
     }
 
     /// The bucket item that picks `fluid` up (`Fluid.getBucket`), `minecraft:water_bucket` for
-    /// water and flowing water. None for `minecraft:empty`, whose bucket is air, and for a name
-    /// no fluid has.
+    /// water and flowing water, the bucket a mod's fluid names, a tank-only one's too. None for
+    /// `minecraft:empty`, whose bucket is air, for a fluid with no bucket, for a name no
+    /// registered fluid has, for a named item no item has, and for one of the game's own
+    /// buckets that would not keep it: the empty bucket, another fluid's or a mob's.
     pub(super) fn fluid_bucket(&self, fluid: &str) -> Option<mod_api::ItemKey> {
-        mod_api::__private::item_key(sunrise_world::level::fluid_bucket(fluid_kind(fluid)?)?)
+        let item = match fluid_kind(fluid) {
+            Some(FluidKind::Mod(mod_fluid) | FluidKind::ModFlowing(mod_fluid)) => {
+                mod_api::__private::item_key(&sunrise_client::mod_content::fluid_bucket(
+                    &mod_fluid.get().id,
+                )?)?
+            }
+            Some(kind) => mod_api::__private::item_key(sunrise_world::level::fluid_bucket(kind)?)?,
+            // A fluid file alone registers no tank-only fluid.
+            None => {
+                mod_api::__private::fluid_key(fluid)?;
+                mod_api::__private::item_key(&sunrise_client::mod_content::fluid_bucket(fluid)?)?
+            }
+        };
+        // The game's own buckets keep what they hold: filling the empty one, or one of another
+        // fluid or a mob, would lose this fluid.
+        let id = mod_api::__private::item_key_id(item)?;
+        match sunrise_client::items::bucket_contents(id) {
+            Some((sunrise_world::level::BucketContent::Fluid(held), ..))
+                if fluid_kind(fluid).is_some_and(|fluid| fluid.same_family(held)) =>
+            {
+                Some(item)
+            }
+            Some(_) => None,
+            None if id == "minecraft:bucket" => None,
+            None => Some(item),
+        }
+    }
+
+    /// The fluid a filled bucket the game registers holds (`BucketItem.content`): water for
+    /// `minecraft:water_bucket`, lava for `minecraft:lava_bucket`, a mod world fluid's source
+    /// for its generated bucket. None for any other item.
+    pub(super) fn bucket_fluid(&self, bucket: mod_api::ItemKey) -> Option<mod_api::FluidKey> {
+        let item = mod_api::__private::item_key_id(bucket)?;
+        match sunrise_client::items::bucket_contents(item)? {
+            (sunrise_world::level::BucketContent::Fluid(kind), ..) => {
+                mod_api::__private::fluid_key(kind.name())
+            }
+            _ => None,
+        }
     }
 
     /// The sound event a bucket plays as it picks `fluid` up (`Fluid.getPickupSound`),
-    /// `minecraft:item.bucket.fill_lava` for lava and flowing lava. None for
-    /// `minecraft:empty`, which has none, and for a name no fluid has.
+    /// `minecraft:item.bucket.fill_lava` for lava and flowing lava, `minecraft:item.bucket.fill`
+    /// for water and a mod's fluid with a bucket. None for `minecraft:empty`, which has none,
+    /// for a tank-only fluid with no bucket and for a name no fluid has.
     pub(super) fn fluid_pickup_sound(&self, fluid: &str) -> Option<&'static str> {
-        sunrise_world::level::fluid_pickup_sound(fluid_kind(fluid)?)
+        match fluid_kind(fluid) {
+            Some(kind) => sunrise_world::level::fluid_pickup_sound(kind),
+            None => self
+                .fluid_bucket(fluid)
+                .map(|_| "minecraft:item.bucket.fill"),
+        }
     }
 
     /// The sound event a bucket plays as it empties `fluid` (`BucketItem.playEmptySound`),
-    /// `minecraft:item.bucket.empty_lava` for lava and flowing lava. None for
-    /// `minecraft:empty`, for a tank-only fluid and for a name no fluid has.
+    /// `minecraft:item.bucket.empty_lava` for lava and flowing lava, `minecraft:item.bucket.empty`
+    /// for water and a mod's fluid with a bucket. None for `minecraft:empty`, for a tank-only
+    /// fluid with no bucket and for a name no fluid has.
     pub(super) fn fluid_empty_sound(&self, fluid: &str) -> Option<&'static str> {
-        sunrise_world::level::fluid_empty_sound(fluid_kind(fluid)?)
+        match fluid_kind(fluid) {
+            Some(kind) => sunrise_world::level::fluid_empty_sound(kind),
+            None => self
+                .fluid_bucket(fluid)
+                .map(|_| "minecraft:item.bucket.empty"),
+        }
     }
 
     /// Read a loaded block in a server tick hook, without loading a chunk.
@@ -697,8 +806,11 @@ mod tests {
                     panic!("the oak logs tag is loaded");
                 };
                 assert_eq!(
-                    keys.into_iter().map(|key| key.id(host)).collect::<Vec<_>>(),
-                    oak
+                    keys.into_iter()
+                        .map(|key| key.id(host))
+                        .collect::<Option<Vec<_>>>()
+                        .as_deref(),
+                    Some(&oak.each_ref().map(String::as_str)[..])
                 );
                 let item = host
                     .item_key(&mod_api::Identifier::parse("minecraft:oak_log").unwrap())
@@ -842,7 +954,7 @@ mod tests {
             use super::super::api_values::TryIntoApi;
             let stone = stone.try_into_api().unwrap();
             let slab = slab.try_into_api().unwrap();
-            let invalid = mod_api::BlockStateRecord::new(stone.block(), u16::MAX).into();
+            let invalid = mod_api::__private::block_state_from_ordinal(stone.block(), u16::MAX);
             let parsed = game
                 .block_state_id("minecraft:oak_slab[waterlogged=true]")
                 .try_into_api()

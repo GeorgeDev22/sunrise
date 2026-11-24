@@ -20,5 +20,14 @@ sunrise-render-core = { path = "../sunrise-render-core" }
 sunrise-shaders = { path = "../sunrise-shaders" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true
+
+# tools/shader_fuzz.py's fuzzer; `test = true` runs its unit tests with the crate's.
+[[example]]
+name = "shader_fuzz"
+path = "examples/shader_fuzz/main.rs"
+test = true

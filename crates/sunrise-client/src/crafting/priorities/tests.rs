@@ -260,7 +260,7 @@ fn projections_follow_one_order() {
     };
     ResolvedSources::order_by_priority(&mut sources, &root.0, &overlay).unwrap();
     let resolved =
-        ResolvedSources::resolve_collecting(sources, &crate::test_resources::server_load())
+        ResolvedSources::resolve_collecting(sources, &items, &crate::test_resources::server_load())
             .unwrap()
             .checked()
             .unwrap();

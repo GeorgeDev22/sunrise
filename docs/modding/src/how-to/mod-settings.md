@@ -26,9 +26,11 @@ files `config/<mod id>.<ext>` and `config/<mod id>-<rest>`.
    `config_unloading` drops it after `server_stopping`. `Client` and `Common` configs load once and stay until the
    game quits.
 
-These hooks run in the Config [load phase](../concepts/load-phases.md): settings reads and config files are
-available, world handles and transactions are not. A file outside `config/`, or one already registered, is
-skipped.
+`register_configs` and `config_loading` take `&dyn ConfigContext` for settings reads and config files, without
+world handles or transactions. `config_reloading` takes `HostSide<'_>` on the polling game, and
+`config_unloading` takes `&mut dyn ServerHost` on the stopping server. These hosts still expose config files
+and registered settings; world queries return `None` when no world is open. A file outside `config/`, or one
+already registered, is skipped. See [load callbacks](../concepts/load-phases.md).
 
 For files the hooks don't manage, `Host::config_files()` gives your mod its own files in `config/`. Paths retain
 the ownership spelling above, such as `<mod id>/extra.toml`. The service is bound to the mod whose hook or Part

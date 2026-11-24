@@ -60,8 +60,6 @@ pub(super) struct GuestPlay {
     swings: u32,
     /// The guest's riding jump charge (`LocalPlayer.jumpRidingTicks`).
     mount: super::mounts::MountState,
-    /// The trading screen the guest has open.
-    pub(super) merchant: Option<super::lan_trading::GuestMerchant>,
     /// The mount inventory the guest has open (game/network/lan_mount_menu.rs).
     pub(super) mount_window: Option<super::lan_mount_menu::GuestMount>,
     /// The lectern the guest reads (game/network/lan_stations.rs).
@@ -86,10 +84,6 @@ pub(super) struct GuestPlay {
     marks: super::advancements::TravelMarks,
     /// `Entity.portalProcess` and `portalCooldown` (game/world/server_travel.rs).
     pub(super) portal: sunrise_client::nether_portal::PortalState,
-    /// `ServerPlayer.wonGame`: the End poem is showing, the player waits for
-    /// its client's PERFORM_RESPAWN (`respawn_requested`).
-    pub(super) won_game: bool,
-    pub(super) respawn_requested: bool,
     /// `Player.takeXpDelay`: ticks until the next orb can be taken.
     pub(super) xp_delay: u32,
     /// This player entity's age and level-up sound cooldown.
@@ -155,112 +149,6 @@ pub(super) enum TurnRefused {
     Gone,
     /// The guest is already taking a turn: its record holds an outer player's state.
     Nested,
-}
-
-/// The game's own state while a guest's is swapped in (`enter_guest`), and
-/// the guest's records that live outside `Guest`.
-pub(super) struct GuestSwap {
-    attachments: sunrise_mod_runtime::attachments::ResidentAttachments,
-    conn: u32,
-    i: usize,
-    play: GuestPlay,
-    player: Option<PlayerMotion>,
-    player_save_projection: (Option<i32>, Option<bool>),
-    /// The guest's eye height and the game's.
-    eye: (f32, f32),
-    yaw: f32,
-    pitch: f32,
-    selected: usize,
-    mode: sunrise_client::command::args::GameMode,
-    creative: bool,
-    /// The previous game mode of the turn this one nests in: each player's
-    /// own (`ServerPlayerGameMode.previousGameModeForPlayer`).
-    previous_mode: Option<sunrise_client::command::args::GameMode>,
-    /// The abilities of the turn this one nests in.
-    abilities: Option<sunrise_client::lan::abilities::PlayerAbilities>,
-    /// The host's cached interaction ranges, restored after the guest turn.
-    entity_reach: f64,
-    block_reach: f64,
-    /// The host's command permission, swapped for the guest's for its turn.
-    permission: u8,
-    xp: Experience,
-    level_up_sound: sunrise_client::entities::LevelUpSound,
-    host_keys: sunrise_client::held::HeldKeys,
-    screen: Screen,
-    host_sign: Option<super::sign_edit::SignEditor>,
-    host_book: Option<super::books::BookScreen>,
-    host_command_block: Option<super::command_blocks::CommandBlockScreen>,
-    host_mount_menu: super::mount_menu::MountMenu,
-    craft_size: usize,
-    craft_table: Option<[i32; 3]>,
-    craft_grid: Vec<Option<ItemStack>>,
-    container: Option<(i32, i32, i32)>,
-    mining: Option<Mining>,
-    destroy_delay: u32,
-    using: Option<(usize, u32)>,
-    use_duration: i32,
-    use_start: super::using_item::UseStart,
-    use_delay: u32,
-    pub(super) shield_cooldown: u32,
-    /// The guest's item cooldowns (`Game::cooldowns` for its turn).
-    cooldowns: sunrise_client::cooldowns::Cooldowns,
-    /// The guest's `takeXpDelay` (`Game::xp_delay` for its turn).
-    xp_delay: u32,
-    attack_ticks: u32,
-    attack_item: Option<std::sync::Arc<str>>,
-    swing: sunrise_client::first_person::SwingState,
-    left: bool,
-    right: bool,
-    riding: Option<u32>,
-    host_station: Option<super::stations::Station>,
-    sleeping: Option<[i32; 3]>,
-    sleep_timer: u32,
-    spawn: Option<Vec3>,
-    respawn: (
-        Option<super::respawn_anchor::RespawnConfig>,
-        Option<[f64; 3]>,
-    ),
-    message: Option<(String, std::time::Instant)>,
-    host_ender: Option<(i32, i32, i32)>,
-    adv_loaded: bool,
-    last_inventory: u64,
-    levitation: Option<([f64; 3], u64)>,
-    marks: super::advancements::TravelMarks,
-    death_cause: Option<String>,
-    /// The guest's own damage record, in place while they act.
-    combat: super::combat::CombatTracker,
-    /// The guest whose turn this one nests in, if any.
-    acting: (
-        Option<u32>,
-        Option<String>,
-        Option<u128>,
-        Option<u8>,
-        Option<u32>,
-        Option<i32>,
-    ),
-    /// Whether the outer turn is a fake player.
-    acting_fake: bool,
-    /// That turn's other-player building boxes.
-    building_boxes: BuildingPlayers,
-    /// That turn's `known_movement`.
-    known_movement: Vec3,
-    /// The packets queued for that guest.
-    packets: Vec<play::Clientbound>,
-    /// The entity events queued for that guest.
-    entity_events: Vec<i8>,
-    /// The equipment breaks queued for that guest.
-    equipment_breaks: Vec<i8>,
-    /// The cooldown packets queued for that guest.
-    cooldown_events: Vec<(std::sync::Arc<str>, i32)>,
-    /// The player-source sounds queued for that guest.
-    player_sounds: Vec<(String, [f64; 3], f32, f32)>,
-    block_sounds: Vec<(String, [f64; 3], f32, f32)>,
-    /// The host's count of swings started, kept while the guest acts.
-    swings: u32,
-    /// How many projectiles there were: those added since are the guest's.
-    projectiles: usize,
-    /// The host's equipment modifiers.
-    modifiers: Vec<(String, String)>,
 }
 
 impl GuestPlay {
@@ -524,14 +412,6 @@ fn stop_dig(play: &GuestPlay, pos: [i32; 3], air: bool, ticks: u64, per_tick: f3
     }
 }
 
-/// What `copyRespawnPosition` sets at respawn time, when it is decided here:
-/// nothing to decide for a point with a block (`has_config`, copied once the
-/// block is found); otherwise the Overworld forced point's block (`spawn`,
-/// stored at its bottom centre), or none.
-fn copied_respawn_point(has_config: bool, spawn: Option<[f64; 3]>) -> Option<Option<[i32; 3]>> {
-    (!has_config).then(|| spawn.map(|s| s.map(|c| c.floor() as i32)))
-}
-
 /// ServerPlayer.swingAndResetAttackStrength resets only when a use starts a swing.
 fn reset_use_attack_strength(ticker: &mut u32, before: u32, after: u32) {
     if before != after {
@@ -541,7 +421,7 @@ fn reset_use_attack_strength(ticker: &mut u32, before: u32, after: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{copied_respawn_point, eye_columns, reset_use_attack_strength};
+    use super::{eye_columns, reset_use_attack_strength};
     use crate::game::api_values::TryIntoApi;
     use sunrise_client::pose::Pose;
 
@@ -1277,11 +1157,14 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn block_parts_pick_and_use_on_the_server_and_for_a_guest() {
-        use super::super::{lan::LanSettings, native_entity_refs::tests::with_game};
+        use super::super::{
+            lan::LanSettings,
+            native_entity_refs::tests::{run_fresh_cases, with_game},
+        };
         use mod_api::InteractionResult as Answer;
         use mod_api::{
-            self, BlockPart, CloneItemStackEvent, Hooks, Host, ItemPart, ItemStack, Registrar,
-            ServerHost, UseItemOnEvent, UseOnEvent, UseWithoutItemEvent,
+            self, BlockPart, CloneItemStackEvent, Hooks, Host, HostSide, ItemPart, ItemStack,
+            Registrar, UseItemOnEvent, UseOnEvent, UseWithoutItemEvent,
         };
         use std::sync::{
             Arc, Mutex,
@@ -1293,15 +1176,28 @@ mod tests {
         };
         use sunrise_protocol::packets::{configuration::ClientInformation, play};
 
-        struct Picker(Arc<Mutex<Vec<bool>>>);
+        if run_fresh_cases(
+            "game::lan_actions::tests::block_parts_pick_and_use_on_the_server_and_for_a_guest",
+            "SUNRISE_PICK_PARTS_CHILD",
+            &["players"],
+        ) {
+            return;
+        }
+        type Picks = Arc<Mutex<Vec<(u32, u128, bool)>>>;
+        struct Picker(Picks);
         #[mod_api::sunrise_part]
         impl BlockPart for Picker {
             fn clone_item_stack(
                 &self,
-                _: &dyn Host,
+                host: &dyn Host,
                 event: &mut CloneItemStackEvent<'_>,
             ) -> Option<ItemStack> {
-                self.0.lock().unwrap().push(event.include_data);
+                assert!(event.player.food(host).is_some());
+                self.0.lock().unwrap().push((
+                    event.player.entity().id(),
+                    event.player.uuid(),
+                    event.include_data,
+                ));
                 event.include_data.then(|| {
                     mod_api::ItemStack::new(
                         mod_api::__private::item_key("minecraft:diamond").unwrap(),
@@ -1325,9 +1221,12 @@ mod tests {
         impl BlockPart for User {
             fn use_item_on(
                 &self,
-                host: &mut dyn ServerHost,
+                host: HostSide<'_>,
                 event: &mut UseItemOnEvent<'_>,
             ) -> Option<Answer> {
+                let HostSide::Server(host) = host else {
+                    return None;
+                };
                 let replacement = self.replace_with.lock().unwrap().take();
                 if let Some(state) = replacement {
                     let level = host.level("minecraft:overworld").unwrap();
@@ -1349,9 +1248,12 @@ mod tests {
             }
             fn use_without_item(
                 &self,
-                host: &mut dyn ServerHost,
+                host: HostSide<'_>,
                 event: &mut UseWithoutItemEvent<'_>,
             ) -> Option<Answer> {
+                let HostSide::Server(host) = host else {
+                    return None;
+                };
                 assert_eq!(event.click.hand, mod_api::client::first_person::Hand::Main);
                 if let Some(level) = self.empty_food.lock().unwrap().take() {
                     let player = host.player(event.click.player).unwrap();
@@ -1375,7 +1277,7 @@ mod tests {
             }
         }
         struct Mod {
-            picks: Arc<Mutex<Vec<bool>>>,
+            picks: Picks,
             user: User,
         }
         #[mod_api::__subscriptions]
@@ -1468,26 +1370,34 @@ mod tests {
                 };
                 game.lan_host(settings, net, config).unwrap();
                 let (tx, _rx) = std::sync::mpsc::channel();
-                let mut guest = Guest::new(
-                    Joined {
-                        conn: 12,
-                        uuid: 12,
-                        name: "guest12".into(),
-                        properties: Vec::new(),
-                        info: ClientInformation::new(8),
-                        brand: String::new(),
-                        sender: PlayerSender::new(tx, Arc::new(AtomicUsize::new(0))),
-                        latency: Arc::new(AtomicI32::new(0)),
-                        address: "127.0.0.1:1".parse().unwrap(),
-                        expected: false,
-                    },
-                    12,
-                    [0.5, 64.0, 2.0],
-                    10,
-                );
-                guest.placed = true;
-                guest.game_mode = 1;
-                game.lan.as_mut().unwrap().hub.guests.push(guest);
+                let make_guest = |conn, uuid, entity_id| {
+                    let mut guest = Guest::new(
+                        Joined {
+                            conn,
+                            uuid,
+                            name: format!("guest{conn}"),
+                            properties: Vec::new(),
+                            info: ClientInformation::new(8),
+                            brand: String::new(),
+                            sender: PlayerSender::new(tx.clone(), Arc::new(AtomicUsize::new(0))),
+                            latency: Arc::new(AtomicI32::new(0)),
+                            address: "127.0.0.1:1".parse().unwrap(),
+                            expected: false,
+                        },
+                        entity_id,
+                        [0.5, 64.0, 2.0],
+                        10,
+                    );
+                    guest.placed = true;
+                    guest.game_mode = 1;
+                    guest
+                };
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .guests
+                    .push(make_guest(12, 12, 12));
 
                 // BlockState.useItemOn replaces the template. Only TryWithEmptyHand
                 // reaches useWithoutItem, which toggles this lever on the main hand.
@@ -1906,7 +1816,28 @@ mod tests {
                     &*guest.inventory[guest.selected].as_ref().unwrap().item,
                     "minecraft:wheat_seeds"
                 );
-                assert_eq!(*seen.lock().unwrap(), [true, false]);
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .guests
+                    .push(make_guest(13, 1300, 130));
+                game.lan_guest_packet(
+                    13,
+                    play::Serverbound::PickItemFromBlock(play::PickItemFromBlock {
+                        pos: [0, 64, 0],
+                        include_data: false,
+                    }),
+                );
+                let second = &game.lan.as_ref().unwrap().hub.guests[1];
+                assert_eq!(
+                    &*second.inventory[second.selected].as_ref().unwrap().item,
+                    "minecraft:stone"
+                );
+                assert_eq!(
+                    *seen.lock().unwrap(),
+                    [(12, 12, true), (12, 12, false), (130, 1300, false)]
+                );
 
                 // addBlockDataToItem runs on the part's item: a chest picked with
                 // its data gives the part's diamond carrying the chest's contents.
@@ -1933,7 +1864,13 @@ mod tests {
                     panic!("the chest's data is on the diamond");
                 };
                 assert!(components.contains_key(&"minecraft:container".into()));
-                assert_eq!(*seen.lock().unwrap(), [true, false, true]);
+                let expected = [
+                    (12, 12, true),
+                    (12, 12, false),
+                    (130, 1300, false),
+                    (12, 12, true),
+                ];
+                assert_eq!(*seen.lock().unwrap(), expected);
 
                 let hive = game
                     .pack
@@ -1954,7 +1891,7 @@ mod tests {
                         .iter()
                         .any(|item| &*item.stack.item == "minecraft:beehive")
                 );
-                assert_eq!(*seen.lock().unwrap(), [true, false, true]);
+                assert_eq!(*seen.lock().unwrap(), expected);
             })
         });
     }
@@ -1964,7 +1901,7 @@ mod tests {
     fn block_part_use_item_on_consumes_once() {
         use super::super::native_entity_refs::tests::with_game;
         use mod_api::InteractionResult as Answer;
-        use mod_api::{self, BlockPart, Hooks, Registrar, ServerHost, UseItemOnEvent};
+        use mod_api::{self, BlockPart, Hooks, HostSide, Registrar, UseItemOnEvent};
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering::SeqCst},
@@ -1975,11 +1912,7 @@ mod tests {
         struct BlockUse(Arc<AtomicUsize>);
         #[mod_api::sunrise_part]
         impl BlockPart for BlockUse {
-            fn use_item_on(
-                &self,
-                _: &mut dyn ServerHost,
-                _: &mut UseItemOnEvent<'_>,
-            ) -> Option<Answer> {
+            fn use_item_on(&self, _: HostSide<'_>, _: &mut UseItemOnEvent<'_>) -> Option<Answer> {
                 self.0.fetch_add(1, SeqCst);
                 Some(Answer::Success)
             }
@@ -2032,7 +1965,7 @@ mod tests {
     fn replacing_empty_note_block_use_does_not_award_vanilla_stats() {
         use super::super::native_entity_refs::tests::with_game;
         use mod_api::InteractionResult as Answer;
-        use mod_api::{self, BlockPart, Hooks, Registrar, ServerHost, UseWithoutItemEvent};
+        use mod_api::{self, BlockPart, Hooks, HostSide, Registrar, UseWithoutItemEvent};
         use std::sync::{
             Arc,
             atomic::{AtomicBool, Ordering::SeqCst},
@@ -2045,7 +1978,7 @@ mod tests {
         impl BlockPart for Replacement {
             fn use_without_item(
                 &self,
-                _: &mut dyn ServerHost,
+                _: HostSide<'_>,
                 _: &mut UseWithoutItemEvent<'_>,
             ) -> Option<Answer> {
                 self.0.load(SeqCst).then_some(Answer::Success)
@@ -2116,18 +2049,6 @@ mod tests {
             game.lan_acting_fake = false;
             assert_eq!(game.sleep_counts(), real);
         });
-    }
-
-    /// `copyRespawnPosition` copies an Overworld forced point, not none; a
-    /// point with a block is left to its block check.
-    #[test]
-    fn respawn_copies_the_forced_point() {
-        assert_eq!(
-            copied_respawn_point(false, Some([12.5, 64.0, -3.5])),
-            Some(Some([12, 64, -4]))
-        );
-        assert_eq!(copied_respawn_point(false, None), Some(None));
-        assert_eq!(copied_respawn_point(true, Some([0.5, 64.0, 0.5])), None);
     }
 
     /// #4124: a STOP is measured from the START that named its block (`destroyPos`) — an abort, or
@@ -2502,6 +2423,7 @@ mod pickup_xp_tests {
             game.lan.as_mut().unwrap().hub.guests.push(g);
             let p = Vec3::new(0.5, 70.0, 0.5);
             game.orbs.push(ExperienceOrb {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 rotation: [0.0, 0.0],
                 join: Default::default(),
@@ -2511,7 +2433,7 @@ mod pickup_xp_tests {
                 velocity: Vec3::ZERO,
                 value: 7,
                 age: 0,
-                on_ground: true,
+                ground: sunrise_world::ground_support::GroundState::from_ground_flag(true),
                 count: 1,
                 fire_ticks: 0,
                 ticks: 0,
@@ -3498,7 +3420,7 @@ mod bundle_slot_tests;
 
 #[cfg(test)]
 #[path = "tests/crack_feedback_tests.rs"]
-mod crack_feedback_tests;
+pub(in crate::game) mod crack_feedback_tests;
 
 #[cfg(test)]
 #[path = "tests/menu_still_valid_tests.rs"]

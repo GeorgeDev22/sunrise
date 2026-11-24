@@ -819,16 +819,16 @@ fn pick_origin_is_the_eye_used_for_each_pick_and_isolated_per_listener() {
 struct RiderPart(Arc<Mutex<usize>>, bool);
 #[mod_api::sunrise_part]
 impl mod_api::EntityPart for RiderPart {
-    fn can_rider_interact(
-        &self,
-        host: &mut dyn ClientHost,
-        event: &mut mod_api::CanRiderInteractEvent,
-    ) {
-        assert_eq!(event.entity.id(), 31);
+    fn can_rider_interact(&self, event: &mut mod_api::CanRiderInteractEvent<'_>) {
+        let entity = event
+            .subject
+            .with_view(|view| view.handle())
+            .expect("live resident entity");
+        assert_eq!(entity.id(), 31);
         *self.0.lock().unwrap() += 1;
         event.allowed = true;
         if self.1 {
-            assert!(host.set_camera_entity(event.entity));
+            assert!(event.subject.host().set_camera_entity(entity));
         }
     }
 }
@@ -974,6 +974,51 @@ fn rider_pick_refuses_a_camera_changed_by_its_listener() {
             assert!(game.crosshair_target().is_none());
             assert!(game.mob_hit().is_none());
             assert!(!game.entity_targeted());
+        });
+    });
+}
+
+struct SelectOccludedEntity;
+#[mod_api::__subscriptions]
+impl Hooks for SelectOccludedEntity {
+    fn client_pick(&self, _host: &mut dyn ClientHost, event: &mut ClientPickEvent<'_>) {
+        assert!(
+            matches!(event.original, Some(CrosshairTarget::Block { .. })),
+            "vanilla original keeps the closer block"
+        );
+        assert!(
+            matches!(event.entity_candidate, Some(CrosshairTarget::Entity { .. })),
+            "ClientPick supplies the reachable entity candidate independently of the closer block"
+        );
+        *event.result = event.entity_candidate;
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn client_pick_listener_can_select_pig_occluded_by_closer_block() {
+    let mods = vec![mod_api::ModEntry::new(
+        "select_occluded_entity",
+        Box::new(SelectOccludedEntity),
+    )];
+    mod_platform::testing::with_mods(mods.into(), || {
+        with_pick_game("minecraft:pig", 2.5, |game, _| {
+            let stone = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:stone")
+                .unwrap();
+            game.world.set(1, 2, 0, stone).unwrap();
+            game.refresh_client_pick(1.0);
+            assert!(
+                matches!(
+                    game.crosshair_target(),
+                    Some(CrosshairTarget::Entity { entity, .. }) if entity.id() == 31
+                ),
+                "listener selected the pig behind the closer block"
+            );
+            assert_eq!(game.mob_hit().map(|(i, _, _)| game.mobs[i].id), Some(31));
         });
     });
 }

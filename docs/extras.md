@@ -18,7 +18,7 @@ again restores vanilla's behaviour completely.
 | Mouse Tweaks-style controls, sort buttons | `crates/sunrise-client/src/game/interface/extras/mouse_tweaks.rs`, `game/interface/extras/sorting.rs` |
 | Sort order and its clicks | `crates/sunrise-client/src/inv_sort.rs` (pure, unit tested) |
 | The music page's rows, and the pools it filters | `options_ui.rs` (`Page::Music`), `crates/sunrise-client/src/music.rs` (`track_groups`, `MusicManager::set_off`), `sound_events.rs` (`sound_except`) |
-| The settings page | `options_ui.rs` (`Page::Extras`): **Options → Sunrise Settings... → Extras...**; fullbright, dynamic lights and hiding block-break particles are on the graphics screen's Quality page instead (`graphics_ui.rs`, **Options → Video Settings...**) |
+| The settings page | `options_ui.rs` (`Page::Extras`): **Options → Sunrise Settings... → Extras...**; fullbright, dynamic lights and hiding block-break particles are on the graphics screen's Quality page instead (`graphics_ui.rs`, **Options → Sunrise Settings... → Extras... → Sunrise Graphics...**) |
 
 The settings are grouped by extra, under a header each, one to a row, and the strip
 under the list says what the row in focus or under the pointer does. An
@@ -73,8 +73,9 @@ in Controls, and adding one would put a non-vanilla mapping into `options.txt`.
   nothing measurable (numbers in the pull request, #814).
 
 ### Mod audio streams (`modAudioStreams`, default on)
-- Mods can play audio they make (`ClientHost::open_audio_stream`, [the how-to](modding/src/how-to/client/audio-streams.md)).
-  Off, every stream plays on unheard: the engine mixes none of it and only takes each stream's audio in at its own pace.
+- Mods can play audio by supplying a native source to `ClientHost::open_audio_stream`
+  ([the how-to](modding/src/how-to/client/audio-streams.md)).
+  Off, the mixer still consumes each stream's audio at its own pace, but none of it is heard.
 - The one extra that is on by default; its line is written to `sunrise-extras.txt` only while it is off. It lives in
   `crates/sunrise-official/src/mod_audio.rs` and sets the engine's mod-stream gain (`sunrise_platform::sound`).
 

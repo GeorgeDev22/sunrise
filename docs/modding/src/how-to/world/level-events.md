@@ -14,8 +14,25 @@ on the level in place.
   `level_event`. Nothing is written. The game resolves the state's number itself, so a mod never
   handles one; prefer it to `level_event` with id 2001.
 
+  The client dispatches the destroyed state's [`add_destroy_effects` Part](../../concepts/parts/block-parts.md#hit-and-destroy-particles)
+  before producing debris. A handled callback replaces the debris, not the break sound or any block state.
+
 Both `level_event` and `global_level_event` return `false` without playing anything for an event that carries a block state (2001, 2014, 3008)
 when `data` is not one, for a parked level, for a stale handle and on a client.
+
+Inside an open transaction, `level_event`, `block_break_effect`, and `global_level_event` defer publication until
+the outermost commit for the owning level and discard on rollback or an aborted nested transaction. Each event replays in the
+level where it was requested (checking `global_sound_events` at commit for `global_level_event`) and delivers
+packets in call order alongside deferred sounds, particles, and entity events.
+
+## Sending particles
+
+`LevelRef::send_particles` sends a particle to players within 32 blocks in the level. Supply
+`ty.options(value)` for a [registered particle type](../client/particles-and-movement-queries.md#particle-providers)
+and `None` for its block state. The mod belongs on both sides; custom particles are not sent to
+vanilla clients. The server encodes the registered stream value once per packet, and a receiving
+client decodes it once for all the spawns. A count of zero still spawns one particle, with
+auxiliary values of `speed × spread` on each axis.
 
 ## The global events
 
@@ -41,3 +58,27 @@ event's level hears it from the event's direction, and a player in another level
 With the `global_sound_events` game rule off, `global_level_event` is a plain `level_event`, as in
 vanilla: only the players of that level within 64 blocks of `pos` get it, and 1023, 1028 and 1038 play
 nothing.
+
+## Emitting game events with context
+
+Use `LevelRef::game_event(host, event, at, context)` to emit a vanilla game event
+at an explicit position. For example, `event` can be `"minecraft:block_change"`
+and `at` is an `[f64; 3]` position. This is a server operation; vibration listeners
+such as sculk sensors and wardens hear the event through the normal game path.
+
+`GameEventContext` mirrors vanilla's `GameEvent.Context`:
+
+- `source_entity: Option<EntityRef>` identifies the responsible entity. Its current
+  spectator, sneaking, vibration-dampening and other listener facts are captured
+  when the event is emitted.
+- `affected_state: Option<BlockState>` identifies the state affected by the action,
+  not necessarily the state currently at the position. Wool, for example, dampens
+  the vibration when supplied as the affected state.
+
+Use `GameEventContext::default()` when neither field applies. An unknown event, invalid position,
+stale or foreign source, invalid state or inactive level returns `false` without
+emitting an event. A source must belong to the level in place.
+
+`EntityRef::game_event(host, event)` is the convenience operation for an event at
+the entity's position with that entity as source and no affected state. It calls
+the same level operation; use the level form when the position or state differs.

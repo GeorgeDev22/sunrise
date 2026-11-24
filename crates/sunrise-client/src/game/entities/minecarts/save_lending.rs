@@ -4,7 +4,7 @@ use super::*;
 impl Game<'_> {
     /// `MinecartTNT.explode`: with explosions disabled, only a primed cart is
     /// discarded. An unprimed cart survives, including its current tick.
-    pub(super) fn explode_cart(&mut self, c: &mut Minecart, speed_sqr: f64) -> bool {
+    pub(in crate::game) fn explode_cart(&mut self, c: &mut Minecart, speed_sqr: f64) -> bool {
         let explodes = self
             .ui
             .rules

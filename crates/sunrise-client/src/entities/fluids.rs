@@ -85,6 +85,43 @@ pub fn water_clip(
         .shape(&mut scene, state, p)
         .is_ok_and(|shape| shape.clip(from, to, p).is_some())
 }
+/// Query budget covering every chunk, section, and block cell inside `bounds`
+/// (after `EntityFluidInteraction`'s 0.001 deflation), so legal large boxes
+/// such as radius-32 area effect clouds are never truncated.
+fn fluid_query_budget(bounds: Aabb) -> usize {
+    let deflated = bounds.deflate(Vec3::new(0.001, 0.001, 0.001));
+    let a = deflated.min_position();
+    let b = deflated.max_position();
+    if [a.x, a.y, a.z, b.x, b.y, b.z]
+        .iter()
+        .any(|v| !v.is_finite())
+    {
+        return 4096;
+    }
+    let low = [a.x.floor() as i32, a.y.floor() as i32, a.z.floor() as i32];
+    let high = [
+        (b.x.ceil() as i32).wrapping_sub(1),
+        (b.y.ceil() as i32).wrapping_sub(1),
+        (b.z.ceil() as i32).wrapping_sub(1),
+    ];
+    let span = |lo: i32, hi: i32| -> usize {
+        if hi < lo {
+            0
+        } else {
+            usize::try_from(i64::from(hi) - i64::from(lo) + 1).unwrap_or(usize::MAX)
+        }
+    };
+    let cx = span(low[0].wrapping_sub(1) >> 4, high[0].wrapping_add(1) >> 4);
+    let cz = span(low[2].wrapping_sub(1) >> 4, high[2].wrapping_add(1) >> 4);
+    let sy = span(low[1] >> 4, high[1] >> 4);
+    let chunks = cx
+        .saturating_mul(cz)
+        .saturating_mul(1_usize.saturating_add(sy));
+    let cells = span(low[0], high[0])
+        .saturating_mul(span(low[1], high[1]))
+        .saturating_mul(span(low[2], high[2]));
+    chunks.saturating_add(cells).max(4096)
+}
 /// `Entity.baseTick`'s fluid step for an entity that is pushed by fluid: its
 /// immersion heights, then the current of each fluid it sits in, added to
 /// `velocity` with vanilla's scales (water 0.014, lava 0.007 fast or
@@ -109,7 +146,10 @@ pub fn update_entity_fluids(
         fluids,
         context,
     };
-    if interaction.update(&mut scene, false, 4096).is_err() {
+    if interaction
+        .update(&mut scene, false, fluid_query_budget(bounds))
+        .is_err()
+    {
         return (0.0, 0.0, false);
     }
     let water_height = interaction.fluid_height(&scene, WATER);
@@ -421,6 +461,7 @@ mod tests {
         }
         let at = Vec3::new(20.5, 4.0, 20.5);
         let item = ItemEntity {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
             random: sunrise_core::random::LegacyRandom::new(0),
@@ -441,9 +482,8 @@ mod tests {
             position: at,
             previous: at,
             velocity: Vec3::ZERO,
-            on_ground: false,
+            ground: Default::default(),
             vertical_collision: false,
-            horizontal_collision: false,
             age: 0,
             pickup_delay: 0,
             bob_offset: 0.0,
@@ -536,6 +576,7 @@ mod tests {
         }
         let at = Vec3::new(20.5, 4.0, 20.5);
         let orb = ExperienceOrb {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
             rotation: [0.0, 0.0],
@@ -547,7 +588,7 @@ mod tests {
             velocity: Vec3::ZERO,
             value: 1,
             age: 0,
-            on_ground: false,
+            ground: Default::default(),
             count: 1,
             ticks: 0,
             health: 5,
@@ -566,6 +607,7 @@ mod tests {
             None,
             &fluids,
             crate::test_resources::server_loop_context(),
+            None,
             sunrise_client::motion::dry_side(),
             &mut |_, _| {},
         ));
@@ -583,6 +625,7 @@ mod tests {
             None,
             &fluids,
             crate::test_resources::server_loop_context(),
+            None,
             sunrise_client::motion::dry_side(),
             &mut |_, _| {},
         ));
@@ -603,6 +646,7 @@ mod tests {
                 None,
                 &fluids,
                 crate::test_resources::server_loop_context(),
+                None,
                 sunrise_client::motion::dry_side(),
                 &mut |_, _| {},
             );
@@ -642,6 +686,7 @@ mod tests {
         }
         let at = Vec3::new(20.5, 4.6, 20.5);
         let mut orb = ExperienceOrb {
+            size_answer: None,
             attachment_lifetime: Default::default(),
             fall_distance: 0.0,
             rotation: [0.0, 0.0],
@@ -653,7 +698,7 @@ mod tests {
             velocity: Vec3::ZERO,
             value: 1,
             age: 0,
-            on_ground: false,
+            ground: Default::default(),
             count: 1,
             ticks: 0,
             health: 5,
@@ -671,6 +716,7 @@ mod tests {
             None,
             &fluids,
             crate::test_resources::server_loop_context(),
+            None,
             sunrise_client::motion::dry_side(),
             &mut |_, _| {},
         ));

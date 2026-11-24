@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "新聊天行从左侧滑入并淡入，而不是整行直接出现。",
   "sunrise.extras.chat_indicator": "消息指示条",
   "sunrise.extras.chat_indicator.tooltip": "聊天行左侧的彩色竖条。",
-  "sunrise.extras.discord_presence": "Discord 动态状态",
-  "sunrise.extras.discord_presence.tooltip": "Discord 运行时在你的 Discord 资料上显示“正在玩 Sunrise”：菜单、单人、多人、维度以及游玩时长。绝不显示世界名称或服务器地址。",
   "sunrise.extras.dynamic_lights": "动态光源",
   "sunrise.extras.dynamic_lights.tooltip": "手持、掉落或燃烧中的火把等光源会照亮周围方块。",
   "sunrise.extras.fullbright": "全亮",

@@ -68,6 +68,35 @@ fn fixture() -> tempfile::TempDir {
 }
 
 #[test]
+fn method_digests_separate_impl_context_from_the_block() {
+    let root = fixture();
+    let file = root.path().join("crates/sunrise-client/src/game.rs");
+    let indexed = |source| {
+        fs::write(&file, source).unwrap();
+        index(root.path(), &BTreeSet::new())
+            .unwrap()
+            .functions
+            .remove("sunrise_client::game::Game::ticks")
+            .unwrap()
+    };
+    let original = indexed(GAME.to_owned());
+    let formatting = indexed(GAME.replace("*self.ticks", "/* a comment */ * self . ticks"));
+    assert_ne!(formatting.sha256, original.sha256);
+    assert_eq!(formatting.digests, original.digests);
+
+    let unrelated = indexed(GAME.replace("        t\n", "        panic!()\n"));
+    assert_eq!(unrelated.digests, original.digests);
+
+    let new_context =
+        indexed(GAME.replace("impl Game<'_> {", "#[allow(dead_code)] impl Game<'_> {"));
+    assert_eq!(new_context.sha256, original.sha256);
+    let original = original.digests.unwrap();
+    let new_context = new_context.digests.unwrap();
+    assert_ne!(new_context.declaration, original.declaration);
+    assert_eq!(new_context.body, original.body);
+}
+
+#[test]
 fn the_index_lists_each_function_with_its_text_or_its_refusal() {
     let root = fixture();
     let index = index(root.path(), &BTreeSet::new()).unwrap();
@@ -123,6 +152,7 @@ fn the_index_lists_each_function_with_its_text_or_its_refusal() {
         &[ModuleFile {
             path: "crates/sunrise-client/src/game.rs".into(),
             sha256: sha256(GAME.as_bytes()),
+            include_cfg: None,
         }]
     );
     assert_eq!(ticks.module, "sunrise_client::game");

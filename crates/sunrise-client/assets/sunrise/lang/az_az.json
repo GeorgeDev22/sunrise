@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Yeni söhbət xətti bütöv görünmək əvəzinə soldan içəri sürüşür.",
   "sunrise.extras.chat_indicator": "Mesaj göstəricisi",
   "sunrise.extras.chat_indicator.tooltip": "Söhbət xəttinin solunda olan rəngli bar.",
-  "sunrise.extras.discord_presence": "Discord Rich Presence",
-  "sunrise.extras.discord_presence.tooltip": "Discord işləyərkən Discord profilinizdə Sunrise Playing göstərilir: menyular, tək oyunçu və ya multiplayer, ölçü və oynanılan vaxt. Heç vaxt dünyanın adı və ya server ünvanı.",
   "sunrise.extras.dynamic_lights": "Dinamik işıqlar",
   "sunrise.extras.dynamic_lights.tooltip": "Məşəllər və digər işıq mənbələri ətrafdakı blokları tutmuş, yerə atmış və ya odda yandırır.",
   "sunrise.extras.fullbright": "Tam parlaq",

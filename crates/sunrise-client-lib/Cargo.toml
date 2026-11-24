@@ -9,14 +9,10 @@ license.workspace = true
 rust-version.workspace = true
 description = "Reusable client systems, control tool and parity probes"
 
-[build-dependencies]
-sunrise-game-discovery = { path = "../sunrise-game-discovery" }
-
 [lib]
 path = "../sunrise-client/src/client_lib.rs"
 
 [dependencies]
-sunrise-guest-stack = { path = "../sunrise-guest-stack" }
 sunrise-mod-api-macros = { path = "../sunrise-mod-api-macros" }
 sunrise-hooks = { path = "../sunrise-hooks" }
 sunrise-mod-runtime = { path = "../sunrise-mod-runtime" }
@@ -89,6 +85,8 @@ sunrise-dualsense = { path = "../sunrise-dualsense", optional = true }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 # `LevelStorageAccess.estimateDiskSpace`: usable disk space, without unsafe code on Windows.
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
+# Contain recursive native item renderers before a stack overflow can abort the process.
+stacker = "0.1.25"
 
 [target.'cfg(unix)'.dependencies]
 # The server thread's CPU time per tick (`SUNRISE_SPIKES`, spans.rs).
@@ -116,8 +114,12 @@ test-menu-validity = []
 test-payload-probe = []
 # Isolated server-publication slots for resource-backed game fixtures only.
 test-publication-scope = []
+# Thread-local tooltip component factories for isolated game unit tests only.
+test-tooltip-factories = []
 # Non-consuming residency journal observation for game fixtures only.
 test-residency-observer = []
+# Local server-pack feedback observation for game fixtures only.
+test-pack-feedback = []
 # A level side with no weather, tags or block entities, for tests and probes that never read them.
 test-dry-side = []
 default = ["audio", "controllers"]
@@ -148,6 +150,7 @@ mod_api = { package = "sunrise-mod-vocab", path = "../sunrise-mod-vocab", featur
 sunrise-theme = { path = "../sunrise-theme" }
 sunrise-client-render = { path = "../sunrise-client-render", features = ["test-support"] }
 sunrise-items = { path = "../sunrise-items", features = ["test-support"] }
+sunrise-world = { path = "../sunrise-world", features = ["test-support"] }
 # Reads back the captures the server_perf tests write.
 sunrise-perf = { path = "../sunrise-perf" }
 # Every WGSL shader translated as wgpu's DirectX 12 backend does (gfx.rs tests).
@@ -232,6 +235,10 @@ path = "../sunrise-client/tests/custom_component_unregistered.rs"
 [[test]]
 name = "custom_component_wire"
 path = "../sunrise-client/tests/custom_component_wire.rs"
+
+[[test]]
+name = "custom_bundle_wire"
+path = "../sunrise-client/tests/custom_bundle_wire.rs"
 
 [[test]]
 name = "datapack_join"

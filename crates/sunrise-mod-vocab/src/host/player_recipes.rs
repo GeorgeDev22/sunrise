@@ -10,7 +10,6 @@ pub trait PlayerRecipesBackend {
     /// Read one registered custom book's authoritative flags. A fresh book
     /// returns the default pair; an unavailable player or unregistered key
     /// returns None. This never reads a vanilla ordinal or pending client intent.
-    #[access(WorldOnly)]
     fn player_recipe_book_settings(
         &self,
         player: PlayerRef,
@@ -19,12 +18,10 @@ pub trait PlayerRecipesBackend {
     /// Side: server.
     /// Whether the player's recipe book knows `recipe`
     /// (`ServerRecipeBook.contains`).
-    #[access(WorldOnly)]
     fn player_has_discovered_recipe(&self, player: PlayerRef, recipe: &str) -> Option<bool>;
     /// Side: both.
     /// The recipes in the player's recipe book (`ServerRecipeBook.recipes`), as qualified ids in
     /// order (`minecraft:oak_planks`). None for a player it can't reach.
-    #[access(WorldOnly)]
     fn player_discovered_recipes(&self, player: PlayerRef) -> Option<Vec<String>>;
 }
 /// The handles' writes of the `player_recipes` area, implemented by the game and reached through [`BackendMut`].
@@ -36,7 +33,6 @@ pub trait PlayerRecipesBackendMut {
     /// Set a registered custom book's authoritative pair and synchronize an
     /// accepted change. Returns false for an unavailable player, unknown key
     /// or exhausted storage. An unchanged pair succeeds without notification.
-    #[access(WorldOnly)]
     fn player_set_recipe_book_settings(
         &mut self,
         player: PlayerRef,
@@ -49,11 +45,9 @@ pub trait PlayerRecipesBackendMut {
     /// `player_recipe_discovered` hook, and the client hears of them.
     /// Unknown ids are skipped. The number of recipe displays added, None
     /// for a player it can't reach.
-    #[access(WorldOnly)]
     fn player_award_recipes(&mut self, player: PlayerRef, recipes: &[&str]) -> Option<i32>;
     /// Side: server.
     /// `ServerPlayer.resetRecipes`, as `/recipe take` does. The number of
     /// recipe displays taken out, None for a player it can't reach.
-    #[access(WorldOnly)]
     fn player_reset_recipes(&mut self, player: PlayerRef, recipes: &[&str]) -> Option<i32>;
 }

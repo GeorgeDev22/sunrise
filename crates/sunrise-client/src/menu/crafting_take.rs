@@ -1,28 +1,6 @@
-//! Result-slot take handling, including pre-take revalidation and remainders.
+//! Result-slot take handling and crafting remainders.
 use super::*;
 impl Menu {
-    pub(super) fn crafting_result_is_current(&self, env: &Env, slot: usize) -> bool {
-        if !env.recipes.has_mod_crafting() {
-            return true;
-        }
-        env.recipes
-            .find_with(
-                env.loop_context,
-                &self.state.containers[GRID],
-                self.state.grid_size,
-                &|id| {
-                    env.maps
-                        .and_then(|maps| maps.state(id))
-                        .map(|(_, scale)| scale)
-                },
-            )
-            .is_some_and(|(_, result)| {
-                self.slot(slot).is_some_and(|shown| {
-                    shown.count == result.count && shown.same_item_same_components(&result)
-                })
-            })
-    }
-
     /// `ResultSlot.onTake` and the other `Slot.onTake` overrides.
     pub(super) fn on_take(&mut self, env: &Env, s: usize, taken: &mut ItemStack) {
         self.touch();
@@ -67,14 +45,20 @@ impl Menu {
             self.take_sound("minecraft:ui.stonecutter.take_result");
             return;
         }
+        if matches!(self.state.kind, Kind::Anvil | Kind::Grindstone)
+            && self.state.slots[s].container == MAIN
+        {
+            // GrindstoneMenu and ItemCombinerMenu's input slots inherit Slot.onTake:
+            // the repair container's setChanged recomputes the result again.
+            self.slot_changed(env, s);
+            return;
+        }
         if self.state.slots[s].role == Role::GrindResult {
             if self.state.grind_hook {
-                self.state.grind_take = Some(GrindstoneTake {
+                self.state.grind_take = Some(PendingGrindstoneTake {
                     top: self.state.containers[MAIN][0].clone(),
                     bottom: self.state.containers[MAIN][1].clone(),
                     xp: self.state.grind_xp,
-                    new_top: None,
-                    new_bottom: None,
                 });
                 return;
             }
@@ -91,7 +75,7 @@ impl Menu {
         }
         if self.state.slots[s].role == Role::CombineResult && self.state.kind == Kind::Anvil {
             if self.state.anvil_hook {
-                self.state.anvil_craft = Some(AnvilCraft {
+                self.state.anvil_craft = Some(AnvilCraftSnapshot {
                     left: self.state.containers[MAIN][0].clone(),
                     right: self.state.containers[MAIN][1].clone(),
                     output: taken.clone(),

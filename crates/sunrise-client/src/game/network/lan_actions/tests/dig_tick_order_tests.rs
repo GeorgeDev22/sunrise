@@ -222,12 +222,8 @@ fn advancement_criteria_straddle_the_player_body_even_with_entity_cancel() {
                 )
                 .unwrap();
                 let mut sync = SyncData::empty();
-                sync.advancements = ServerAdvancements::load(
-                    pack.path(),
-                    &PackOverlay::NONE,
-                    Default::default(),
-                    Default::default(),
-                );
+                sync.advancements =
+                    ServerAdvancements::load(pack.path(), &PackOverlay::NONE, Default::default());
                 game.with_advancement_hub(|hub, owners| {
                     hub.reload_resources(Arc::new(sync), owners)
                 });

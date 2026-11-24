@@ -2,12 +2,12 @@
 
 pub trait Hooks {
     /// Register the mod's own render pipelines, once at client startup (NeoForge's
-    /// `RegisterRenderPipelinesEvent`; 1.21.1 mods used `RegisterShadersEvent`): push a
-    /// [`RenderPipeline`] for each into `event.pipelines`. The game builds them with its own at
-    /// startup and again on every resource reload. An id outside the mod's own or served
-    /// (`served_by`) namespaces, or one an earlier registration took, is logged with the mod and
-    /// dropped. A required pipeline whose shader is missing or doesn't build fails the load: the
-    /// game does not start, and a reload fails and keeps the previous resources. An
+    /// `RegisterRenderPipelinesEvent`; 1.21.1 mods used `RegisterShadersEvent`): call
+    /// `event.register(pipeline)` with each [`RenderPipeline`]. The game builds them with its own
+    /// at startup and again on every resource reload. An id outside the mod's own or served
+    /// (`served_by`) namespaces, or one already registered, is logged with the mod and dropped. A
+    /// required pipeline whose shader is missing or doesn't build fails the load: the game does
+    /// not start, and a reload fails and keeps the previous resources. An
     /// [optional](RenderPipeline::optional()) one is logged and resolves to
     /// [`RenderPipelineError::Invalid`].
     #[notes = r#"## Render pipelines
@@ -15,7 +15,7 @@ pub trait Hooks {
 `Hooks::register_render_pipelines` is the client registration-phase counterpart of NeoForge's
 `RegisterRenderPipelinesEvent` (and of 1.21.1's `RegisterShadersEvent`, which it replaced). A
 pipeline is plain data: its id, a WGSL fragment shader in the mod's assets, a blend mode and a
-depth mode. Registration takes no GPU object or shader handle.
+depth mode. Pass it to `event.register(pipeline)`; registration takes no GPU object or shader handle.
 
 ```rust,ignore
 fn register_render_pipelines(
@@ -23,7 +23,7 @@ fn register_render_pipelines(
     _context: &RegistrationContext,
     event: &mut RegisterRenderPipelinesEvent<'_>,
 ) {
-    event.pipelines.push(RenderPipeline::new(
+    event.register(RenderPipeline::new(
         Identifier::parse("example:glow").unwrap(),
         Identifier::parse("example:glow").unwrap(),
         PipelineBlend::Additive,
@@ -45,7 +45,7 @@ fn pipeline_fragment(input: PipelineInput) -> vec4<f32> {
 `PipelineInput` has `uv` (the quad's texture coordinate), `color` (the quad's colour) and
 `position` (blocks, relative to the camera). `frame.time` is seconds, wrapping every hour, and
 `frame.viewport` is the world picture's size in pixels. Colours follow the
-mod render colour rule (`docs/design/mod-api/mod-render-colour.md`): the function reads and returns linear
+mod render colour rule: the function reads and returns linear
 light, 1.0 is paper white, more is brighter, and alpha is coverage. A file that declares its own
 bindings or entry points is refused, and so is one over 20,000 expressions or 64 texture reads, or
 that SPIR-V, MSL or HLSL translation refuses (the refusal names the backend), or one over 131,072
@@ -70,13 +70,16 @@ stage they draw after that stage's plain quads and lines, in the order submitted
 pack they follow the plain quads: a stage the pack draws itself is drawn with the next stage the
 game reaches."#]
     #[hook(
-        version = 2,
+        receiver = "associated",
+        dispatch = "flat",
         side = "client",
         contract = "collect",
         out = "pipelines",
+        registration_append = "register",
         collect_validator = "crate::client::render_pipeline::validate_render_pipelines",
         context = "registration",
-        neoforge = "RegisterRenderPipelinesEvent"
+        neoforge = "RegisterRenderPipelinesEvent",
+        version = 2
     )]
-    fn register_render_pipelines();
+    fn register_render_pipelines(pipelines: &mut Vec<mod_api::RenderPipeline>);
 }

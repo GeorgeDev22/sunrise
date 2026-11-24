@@ -256,7 +256,7 @@ fn hide_level_and_nickname_read_back() {
         assert_eq!(a.hidden(game), Ok(None));
 
         assert!(a.set_nickname(game, Some("Cap")));
-        assert_eq!(a.nickname(game), Ok(Some("Cap".to_owned())));
+        assert_eq!(a.nickname(game), Ok(Some("Cap")));
         assert_eq!(b.nickname(game), Ok(None));
         assert!(a.set_nickname(game, None));
         assert_eq!(a.nickname(game), Ok(None));
@@ -282,10 +282,10 @@ fn an_unpublished_single_player_world_reads_the_stored_hide_level() {
         assert!(owner.hide(game, Some(2)));
         assert!(owner.set_nickname(game, Some("Cap")));
         assert_eq!(owner.hidden(game), Ok(Some(2)));
-        assert_eq!(owner.nickname(game), Ok(Some("Cap".to_owned())));
+        assert_eq!(owner.nickname(game), Ok(Some("Cap")));
         game.serving = Some(super::integrated::Serving::fixture(25565));
         assert_eq!(owner.hidden(game), Ok(Some(2)));
-        assert_eq!(owner.nickname(game), Ok(Some("Cap".to_owned())));
+        assert_eq!(owner.nickname(game), Ok(Some("Cap")));
     });
 }
 
@@ -335,7 +335,7 @@ fn player_support_uses_the_footprint_then_the_exact_feet_offset_on_both_sides() 
     let land = |game: &mut super::Game<'_>| {
         // The player's centre is over air. Only the edge overlaps the slab.
         game.player.as_mut().unwrap().position = Vec3::new(1.125, 65.0, 0.5);
-        game.move_local_player(SelfMovement, Vec3::new(0.0, -1.0, 0.0))
+        game.move_local_player(SelfMovement, Vec3::new(0.0, -1.0, 0.0), false)
             .unwrap();
     };
 
@@ -372,7 +372,7 @@ fn player_support_uses_the_footprint_then_the_exact_feet_offset_on_both_sides() 
 
         for (dy, block_y) in [(0.5, 64), (0.1, 65)] {
             game.as_guest(12, |game| {
-                game.move_local_player(SelfMovement, Vec3::new(0.0, dy, 0.0))
+                game.move_local_player(SelfMovement, Vec3::new(0.0, dy, 0.0), false)
                     .unwrap();
             })
             .unwrap();
@@ -408,7 +408,7 @@ fn player_support_uses_the_footprint_then_the_exact_feet_offset_on_both_sides() 
         assert_eq!(player.supporting_block(game), Ok(Some(slab)));
         assert_eq!(player.on_block(game), Ok(Some(slab)));
         for (dy, block_y) in [(0.5, 64), (0.1, 65)] {
-            game.move_local_player(SelfMovement, Vec3::new(0.0, dy, 0.0))
+            game.move_local_player(SelfMovement, Vec3::new(0.0, dy, 0.0), false)
                 .unwrap();
             assert_eq!(player.supporting_block(game), Ok(None));
             assert_eq!(

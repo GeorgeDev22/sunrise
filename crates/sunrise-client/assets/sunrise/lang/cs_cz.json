@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Nová čára chatu se vsune zleva, zatímco se mizí, místo aby vypadala celá.",
   "sunrise.extras.chat_indicator": "Indikátor zprávy",
   "sunrise.extras.chat_indicator.tooltip": "Barevný pruh nalevo od chatovací linky.",
-  "sunrise.extras.discord_presence": "Neshoda bohatá přítomnost",
-  "sunrise.extras.discord_presence.tooltip": "Zobrazuje Playing Sunrise na vašem Discord profilu, zatímco Discord běží: nabídky, single player nebo multiplayer, dimenze a hraný čas. Nikdy jméno světa nebo adresa serveru.",
   "sunrise.extras.dynamic_lights": "Dynamická světla",
   "sunrise.extras.dynamic_lights.tooltip": "Pochodně a jiné světelné zdroje držené, shozené nebo v plamenech osvětlují bloky kolem nich.",
   "sunrise.extras.fullbright": "Plné osvětlení",

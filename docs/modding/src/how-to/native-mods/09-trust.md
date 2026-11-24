@@ -1,30 +1,33 @@
 # Trust native mods
 
-Native mods run unsandboxed with full access to your computer. Read and trust their source
-before installing or building them. Bundle validation checks packaging, not whether code is safe.
-Native mixins compile function-replacement code with the same access as other native code.
+Native mods run unsandboxed with full access to your computer. Bundle validation checks packaging,
+not whether code is safe, and native mixins compile function-replacement code with the same access
+as any other native code.
 
-## Give consent
+## Registry releases and unreviewed sources
 
-The launcher shows a trust notice for native mods. In the command line, `--trust-native-code`
-records your consent in launcher settings. Commands accept that saved consent without repeating
-the flag; without consent they refuse to proceed. The window shows a red warning before each
-build, including the mod IDs and versions.
+- **Registry releases** are signed with a GitHub artifact attestation tied to the mod's registered
+  repository and Sunrise's shared release workflow, then reviewed for malware, dangerous patterns
+  and hidden or obfuscated code before they are listed ([Signed, reviewed releases](../../players/installing-mods.md#signed-reviewed-releases)).
+  The launcher verifies the file's SHA-256 hash and attestation against the signed registry index
+  and remembers the mod's publisher; if a later release comes from a different publisher, it stops
+  and asks before installing. A takedown in the signed index removes a release or a whole project.
+- **Unreviewed sources** (**Add from source** and local `.smod` files) are not reviewed by Sunrise.
+  The launcher shows a warning naming the exact repository and commit, release tag, folder or file,
+  with **Cancel** as the default ([Add a mod from source](08-add-from-source.md)). On the command
+  line, `--trust-native-code` records your consent to build and run unreviewed native code.
 
-The Mods page identifies each mod's author and marks third-party mods as not made or endorsed
-by the Sunrise project.
+Registry review does not sandbox the code you run: native mods are compiled from source on your
+computer and run with your permissions.
 
 ## Package checks
 
-Registry entries distinguish native code with the `native-mod` kind and identify the source
-repository with `repo`. Registry review is separate from the launcher's local consent and
-validation checks; it does not sandbox the code you run.
-
-- A `.smod` contains a flat Rust project and can include `assets/`, `data/` and `icon.png`.
-- The launcher validates the bundle without running its code, then builds it on your computer.
-- Registry downloads are pinned by SHA-256. `sunrise-mod.toml` supplies the mod identity and exact
-  game build pins. Revocation entries in `revoked.toml` prevent installing revoked releases.
-- A registry project's kind cannot change.
+- A native `.smod` holds a flat Rust project (`sunrise-mod.toml`, `Cargo.toml`, `Cargo.lock`, `src/`)
+  and can include `assets/`, `data/` and `icon.png`.
+- The launcher validates the bundle without running its code, then builds it for your game build.
+- Registry entries distinguish native code with the `native-mod` kind; switching a project between
+  `mod` and `native-mod` changes the project's kind in the registry and removes its earlier releases
+  ([Publish a mod](../publish.md)).
 
 ## Instance data
 

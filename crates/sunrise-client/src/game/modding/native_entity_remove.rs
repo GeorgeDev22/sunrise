@@ -2,12 +2,10 @@
 //! (docs/modding/src/how-to/native-mods.md, "Entity and level handles", #7387): `Entity.discard`
 //! and `Entity.remove` with a reason. Nothing dies and nothing drops loot.
 //! `Entity.spawnAtLocation` drops an item at one.
-//! Outside a mod block-entity tick, `Entity.setRemoved` tells the world at the call:
-//! the handle and selectors stop finding it, passengers get off and mods hear it leave.
-//! Inside a transaction the handle stops finding it at the call, and the rest waits for the root
-//! commit (`transactions/entities.rs`); an abort leaves it as it was.
-//! Dropped-item removal inside that tick is instead staged with its final snapshot;
-//! scoped reads hide it immediately, while the leave notification waits for publication. A mob's list entry is marked at once too; the other
+//! `Entity.setRemoved` tells the world at the call: the handle and selectors stop finding it,
+//! passengers get off and mods hear it leave. Inside a transaction the handle stops finding it at
+//! the call and the rest waits for the root commit (`transactions/entities.rs`); an abort leaves
+//! it as it was. A mob's list entry is marked at once too; the other
 //! kinds stay in their lists until the level's next sweep of departed
 //! entities, a few times per tick, so a hook that removes one never shifts the
 //! lists the game is walking. A container vehicle spills before its logical removal;
@@ -36,9 +34,6 @@ impl Game<'_> {
             // A part leaves the level with its dragon, never alone.
             None | Some(Target::Player | Target::Guest(_) | Target::DragonPart(_)) => false,
             Some(t) if self.persist.preparing_vehicle_removals.contains(&t) => false,
-            Some(Target::Item(id)) if self.block_entity_tick_key.is_some() => {
-                self.stage_tick_item(id, None).unwrap_or(false)
-            }
             Some(t) if self.journal_removal(entity, t, killed) => true,
             Some(Target::Mob(id)) => {
                 self.remove_mob_now(id, killed);
@@ -173,6 +168,7 @@ impl Game<'_> {
         };
         mob.removed = true;
         let position = mob.position;
+        self.last_hurt_by_player.remove(&id);
         self.dismount_mob(id);
         self.dismount_removed_passengers(id, position.y);
         if self.has_seated_passengers(id)
@@ -217,14 +213,25 @@ impl Game<'_> {
         let pending = std::mem::take(&mut self.persist.removals);
         let mut already_marked = Vec::new();
         for &target in &pending {
-            if matches!(target, Target::Boat(_) | Target::Cart(_))
-                && !self.persist.destroying_vehicles.insert(target)
-            {
-                already_marked.push(target);
+            match target {
+                // Discard already announced the leave. Remove these owning rows
+                // before any callback in the sweep can resolve them again.
+                Target::Projectile(id) => self.remove_projectile(id),
+                Target::Trident(id) => {
+                    self.tridents.retain(|t| t.id != id);
+                    self.forget_entity(id);
+                }
+                Target::Boat(_) | Target::Cart(_)
+                    if !self.persist.destroying_vehicles.insert(target) =>
+                {
+                    already_marked.push(target);
+                }
+                _ => {}
             }
         }
         for t in pending {
             match t {
+                Target::Projectile(_) | Target::Trident(_) => {}
                 Target::Crystal(id) => self.crystals.retain(|c| c.id != id),
                 Target::Dragon(id) => {
                     if self.dragon.as_ref().is_some_and(|d| d.id == id) {
@@ -310,6 +317,7 @@ mod tests {
 
         with_game(|game| {
             game.others.push(OtherEntity {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 knot_check: None,
                 eye: None,
@@ -420,6 +428,7 @@ mod tests {
                 .chunks
                 .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
             game.others.push(OtherEntity {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 knot_check: None,
                 eye: None,
@@ -574,6 +583,7 @@ mod tests {
                 pos: [0, 64, 0],
                 facing: 2,
                 variant: "minecraft:kebab".into(),
+                asset: None,
                 width: 1,
                 height: 1,
                 check_interval: 0,
@@ -612,6 +622,7 @@ mod tests {
 
         with_game(|game| {
             game.others.push(OtherEntity {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
                 knot_check: None,
                 eye: None,

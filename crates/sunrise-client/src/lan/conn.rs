@@ -17,7 +17,7 @@ use super::{
     io_pool::{self, Session as _},
 };
 use crate::raw_payloads::{Side, Transport};
-use mod_api::{PayloadFrameStage, PayloadId, PayloadSendError};
+use mod_api::{PayloadFrameStage, PayloadId, PayloadSendError, VirtualHost};
 use std::{
     cell::Cell,
     net::TcpStream,
@@ -67,9 +67,50 @@ fn login_disconnect(c: &mut Connection, reason: &sunrise_core::nbt::Tag) {
 pub fn component_json(tag: &sunrise_core::nbt::Tag) -> String {
     component_value(tag).compact()
 }
-fn component_value(tag: &sunrise_core::nbt::Tag) -> crate::server::json::Json {
+
+/// A login disconnect's reason JSON for a component already in its JSON form, written as
+/// [`component_json`] writes one, or None when `ClientboundLoginDisconnectPacket`'s codec
+/// would refuse it.
+pub fn login_disconnect_json(component: &serde_json::Value) -> Option<String> {
+    let reason_json = json_component_value(component).compact();
+    let packet = login::Clientbound::Disconnect(login::Disconnect { reason_json }).encode();
+    // The packet id, 0, is one VarInt byte.
+    match login::Clientbound::decode(i32::from(packet[0]), &packet[1..]) {
+        Ok(login::Clientbound::Disconnect(login::Disconnect { reason_json })) => Some(reason_json),
+        _ => None,
+    }
+}
+
+/// [`component_value`] for a JSON component: its numbers keep their JSON form.
+fn json_component_value(value: &serde_json::Value) -> crate::server::json::Json {
     use crate::server::json::Json;
-    use sunrise_core::nbt::Tag;
+    use serde_json::Value;
+    match value {
+        Value::Null => Json::Null,
+        Value::Bool(b) => Json::Bool(*b),
+        Value::Number(n) => Json::Number(n.to_string()),
+        Value::String(s) => Json::String(s.clone()),
+        Value::Array(items) => Json::Array(items.iter().map(json_component_value).collect()),
+        Value::Object(map) => {
+            if map.len() == 1
+                && let Some(Value::String(t)) = map.get("text")
+            {
+                return Json::String(t.clone());
+            }
+            let mut members: Vec<(&String, &Value)> = map.iter().collect();
+            members.sort_by_key(|(k, _)| component_key_rank(k));
+            Json::Object(
+                members
+                    .into_iter()
+                    .map(|(k, v)| (k.clone(), json_component_value(v)))
+                    .collect(),
+            )
+        }
+    }
+}
+
+/// Where ComponentSerialization.CODEC writes the field `key`: unknown fields last.
+fn component_key_rank(key: &str) -> usize {
     const ORDER: &[&str] = &[
         "type",
         "text",
@@ -104,6 +145,12 @@ fn component_value(tag: &sunrise_core::nbt::Tag) -> crate::server::json::Json {
         "insertion",
         "font",
     ];
+    ORDER.iter().position(|o| *o == key).unwrap_or(ORDER.len())
+}
+
+fn component_value(tag: &sunrise_core::nbt::Tag) -> crate::server::json::Json {
+    use crate::server::json::Json;
+    use sunrise_core::nbt::Tag;
     match tag {
         Tag::String(s) => Json::String(s.to_string_lossy()),
         Tag::List(items) => Json::Array(items.iter().map(component_value).collect()),
@@ -114,7 +161,7 @@ fn component_value(tag: &sunrise_core::nbt::Tag) -> crate::server::json::Json {
                 return Json::String(t.to_string_lossy());
             }
             let mut keys: Vec<String> = map.keys().map(|k| k.to_string_lossy()).collect();
-            keys.sort_by_key(|k| ORDER.iter().position(|o| o == k).unwrap_or(ORDER.len()));
+            keys.sort_by_key(|k| component_key_rank(k));
             Json::Object(
                 keys.into_iter()
                     .map(|k| {
@@ -278,6 +325,7 @@ impl Undrained {
 #[derive(Clone)]
 pub struct PlayerSender {
     payload_transport: Arc<Transport>,
+    virtual_host: Option<Arc<VirtualHost>>,
     /// What the player's network thread has handed the hub and the hub hasn't taken yet.
     pub undrained: Arc<Undrained>,
     /// The bytes of the bodies sent and not framed yet.
@@ -296,8 +344,8 @@ pub struct PlayerSender {
     pub announced: Arc<super::announced_channels::AnnouncedChannels>,
     /// Its `sunrise:levels` answer: its revision and the levels besides its own it can view.
     pub viewed_levels: sunrise_protocol::viewed_levels::Answer,
-    /// The `sunrise:menu_extra` payload layout the client reads: its revision answer,
-    /// 0 for one that did not answer (the legacy layout, a menu of a block only).
+    /// The `sunrise:menu_extra` revision the client answered in configuration,
+    /// or 0 when the client did not answer (for example, a vanilla client).
     pub menu_extra_rev: u8,
 }
 #[derive(Clone)]
@@ -350,6 +398,10 @@ impl PlayerSender {
     pub fn payload_transport(&self) -> &Arc<Transport> {
         &self.payload_transport
     }
+    /// The client-supplied destination from this connection's login handshake.
+    pub fn virtual_host(&self) -> Option<&VirtualHost> {
+        self.virtual_host.as_deref()
+    }
     /// Frozen physical framing, used to reject before copying a large raw body.
     pub(crate) fn payload_framing(&self) -> sunrise_protocol::connection::Framing {
         self.framing
@@ -368,6 +420,7 @@ impl PlayerSender {
             to: To::Channel(tx),
             wire: None,
             payload_transport: Transport::empty(),
+            virtual_host: None,
             datapack_offer: None,
             announced: Arc::default(),
             viewed_levels: Default::default(),
@@ -395,6 +448,7 @@ impl PlayerSender {
         let inspect = outbox.clone();
         let sender = Self {
             payload_transport: transport,
+            virtual_host: None,
             undrained: Arc::default(),
             pending,
             cap: io_pool::MAX_PENDING,
@@ -415,6 +469,12 @@ impl PlayerSender {
         };
         (sender, move || inspect.queued_contents())
     }
+    /// Override framing on a test sender (e.g. `Framing::Network(None)` for TCP frame limits).
+    #[cfg(test)]
+    pub fn with_framing(mut self, framing: sunrise_protocol::connection::Framing) -> Self {
+        self.framing = framing;
+        self
+    }
     /// A connectionless actor has no writer, queue or packet delivery.
     pub fn disabled() -> Self {
         Self {
@@ -426,6 +486,7 @@ impl PlayerSender {
             to: To::Disabled,
             wire: None,
             payload_transport: Transport::empty(),
+            virtual_host: None,
             datapack_offer: None,
             announced: Arc::default(),
             viewed_levels: Default::default(),
@@ -444,6 +505,14 @@ impl PlayerSender {
     /// Whether the client has answered no keep-alive for too long.
     pub fn timed_out(&self) -> bool {
         matches!(&self.to, To::Pool(_, watch) if watch.timed_out())
+    }
+    /// Whether the connection still accepts new packets.
+    pub(super) fn is_live(&self) -> bool {
+        match &self.to {
+            To::Pool(outbox, _) => outbox.alive(),
+            To::Channel(_) => true,
+            To::Disabled => false,
+        }
     }
     /// Close the connection now, dropping what is still queued for it.
     pub fn close(&self) {
@@ -520,29 +589,51 @@ impl PlayerSender {
     pub fn send(&self, body: Vec<u8>) {
         self.send_body(body.into());
     }
-    fn send_body(&self, body: Body) {
+    pub(super) fn send_body(&self, body: Body) {
+        self.queue_body(body, true);
+    }
+    /// Admit a typed play ping in normal send order, without closing on backpressure.
+    /// Admission to a held queue or transaction is not a promise of delivery.
+    pub fn try_send_play_ping(&self, id: i32) -> bool {
+        self.is_live()
+            && play::Clientbound::Ping(cfg::Ping { id })
+                .try_encode()
+                .is_ok_and(|body| self.queue_body(body.into(), false))
+    }
+    fn queue_body(&self, body: Body, close_on_full: bool) -> bool {
         if matches!(self.to, To::Disabled) {
-            return;
+            return false;
         }
         let cost = io_pool::charge(body.retained());
-        let Err(body) = transaction_packets::capture(self, body, cost) else {
-            return;
+        let body = match transaction_packets::capture(self, body, cost) {
+            Ok(admitted) => return admitted,
+            Err(body) => body,
         };
         if !self.reserve_queued(cost) {
-            self.close();
-            return;
+            if close_on_full {
+                self.close();
+            }
+            return false;
         }
-        self.publish_reserved(body);
+        self.publish_reserved(body)
     }
-    fn publish_reserved(&self, body: Body) {
+    fn publish_reserved(&self, body: Body) -> bool {
         if HOLDING.get() {
             self.held().push(body);
+            true
         } else {
             self.flush();
             match &self.to {
-                To::Disabled => {}
-                To::Channel(tx) => drop(tx.send(Out::Packet(body.into_vec()))),
-                To::Pool(outbox, _) => outbox.send(vec![body], None),
+                To::Disabled => false,
+                To::Channel(tx) => {
+                    let cost = io_pool::body_charge(&body);
+                    if tx.send(Out::Packet(body.into_vec())).is_err() {
+                        self.pending.fetch_sub(cost, Ordering::Relaxed);
+                        return false;
+                    }
+                    true
+                }
+                To::Pool(outbox, _) => outbox.try_send(vec![body], None),
             }
         }
     }
@@ -620,6 +711,59 @@ impl PlayerSender {
             }
         }
     }
+
+    /// Tracking output is cut only at complete bundles or individual non-bundled
+    /// packets. In particular, a late pairing is a single publication even when
+    /// the tick no longer holds output: reliable publishers cannot split it.
+    pub(super) fn send_tracking_bodies(&self, bodies: &mut Vec<Body>) {
+        if matches!(self.to, To::Disabled) {
+            bodies.clear();
+            return;
+        }
+        if bodies.is_empty() {
+            return;
+        }
+        let prepared = bodies.iter().any(Body::is_prepared);
+        let cost = bodies.iter().map(io_pool::body_charge).sum();
+        if HOLDING.get() && !prepared {
+            let mut held = self.held();
+            if self.reserve_queued(cost) {
+                held.append(bodies);
+            } else {
+                drop(held);
+                bodies.clear();
+                self.close();
+            }
+            return;
+        }
+        self.flush();
+        let mut bodies = std::mem::take(bodies);
+        let To::Pool(outbox, _) = &self.to else {
+            if let To::Channel(tx) = &self.to {
+                drop(tx.send(unshared(bodies)));
+            }
+            return;
+        };
+        if !self.reserve_queued(cost) {
+            self.close();
+            return;
+        }
+        // A pass can be deferred until tracking callbacks. Check the current epoch
+        // at publication, not only when the attachment bytes were prepared.
+        if prepared {
+            if let Some(epoch) = self.payload_transport.epoch() {
+                bodies.retain(|body| body.pairing_epoch().is_none_or(|e| Arc::ptr_eq(e, &epoch)));
+                let published =
+                    epoch.with_active(|| outbox.send(std::mem::take(&mut bodies), None));
+                if published.is_some() {
+                    return;
+                }
+            }
+            // Expiring mod attachments never suppress vanilla pairing packets.
+            bodies.retain(|body| !body.is_prepared());
+        }
+        outbox.send(bodies, None);
+    }
     /// Hand the held packets to the network thread.
     pub fn flush(&self) {
         let held = std::mem::take(&mut *self.held());
@@ -676,6 +820,19 @@ impl PreparedPayload {
         } else {
             Err(PayloadSendError::Disconnected)
         }
+    }
+    /// Transfer the existing reservation with the framed body into its pairing bundle.
+    pub(crate) fn into_prepared_body(
+        mut self,
+        epoch: Arc<crate::raw_payloads::connection::Epoch>,
+    ) -> Body {
+        let bytes = self.bytes.take().expect("prepared bytes");
+        Body::Prepared(Arc::new(super::body::PairingPayload {
+            bytes,
+            epoch,
+            pending: self.sender.pending.clone(),
+            cost: self.cost,
+        }))
     }
 }
 impl Drop for PreparedPayload {
@@ -864,10 +1021,50 @@ fn serve_connection(
                 );
                 return Ok(());
             }
-            serve_login(c, address, &shared, counted)
+            let handed_off = shared.handoffs.is_some() && shared.handshake_listeners.any();
+            let intention = if handed_off {
+                let id = counted.as_ref().map_or_else(
+                    || shared.next_connection.fetch_add(1, Ordering::Relaxed),
+                    |counted| counted.2,
+                );
+                let peer_ip = (!c.is_memory()).then_some(address.ip());
+                let Some(decision) = shared.hand_off(id, intention, peer_ip) else {
+                    return Ok(());
+                };
+                // A server draining its players for a stop keeps listening: `try_admit` refuses
+                // an accepted login there as it refuses one no listener heard.
+                if shared.stop.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                match decision {
+                    Ok(accepted) => accepted,
+                    Err(reason_json) => {
+                        let _ = c.send(
+                            &login::Clientbound::Disconnect(login::Disconnect { reason_json })
+                                .encode(),
+                        );
+                        return Ok(());
+                    }
+                }
+            } else {
+                intention
+            };
+            serve_login(c, intention, handed_off, address, &shared, counted)
         }
         other => Err(format!("unknown intent {other}")),
     }
+}
+
+/// Keep the destination of an accepted login or transfer, without proxy or loader data: the
+/// host before its first NUL, empty or not, and the port, as the handshake sent them. A memory
+/// connection's handshake names its address and port 0, as `Minecraft.doWorldLoad`'s does.
+fn login_virtual_host(intention: handshake::Intention) -> VirtualHost {
+    let handshake::Intention { host, port, .. } = intention;
+    let host = match host.split_once('\0') {
+        Some((prefix, _)) => prefix.to_owned(),
+        None => host,
+    };
+    VirtualHost { host, port }
 }
 
 fn serve_status(c: &mut Connection, shared: &Shared) -> Result<(), String> {
@@ -954,7 +1151,7 @@ fn authenticate(
     name: &str,
     address: std::net::SocketAddr,
     user: &str,
-) -> Result<Result<(u128, Vec<login::Property>), String>, String> {
+) -> Result<Result<(u128, Vec<sunrise_core::profile::AccountProperty>), String>, String> {
     let e = |e: sunrise_protocol::Error| e.to_string();
     let mut challenge = [0u8; 4];
     sunrise_protocol::crypto::random_bytes(&mut challenge).map_err(e)?;
@@ -1037,16 +1234,25 @@ fn authenticate(
 
 fn serve_login(
     mut c: Connection,
+    // The accepted intention, after any `player_handshake` rewrite, is the player's virtual host.
+    intention: handshake::Intention,
+    handed_off: bool,
     address: std::net::SocketAddr,
     shared: &Arc<Shared>,
     counted: Option<super::Counted>,
 ) -> Result<(), String> {
+    let virtual_host = Some(login_virtual_host(intention));
     let e = |e: sunrise_protocol::Error| e.to_string();
     let (id, payload) = c.recv().map_err(e)?;
     let hello = match login::Serverbound::decode(id, &payload).map_err(e)? {
         login::Serverbound::Hello(h) => h,
         _ => return Err("expected a login hello".into()),
     };
+    // A peer that left while the server tick decided its handshake may have left a whole
+    // Hello behind: its connection is gone before authentication or admission sees it.
+    if handed_off && c.reader.peer_closed() {
+        return Ok(());
+    }
     if !valid_name(&hello.name) {
         // handleHello's validState throws; Connection.exceptionCaught sends the
         // exception as the login disconnect.
@@ -1139,7 +1345,15 @@ fn serve_login(
     let result = login_and_configure(&mut c, shared, uuid, &name, &user, properties);
     match result {
         Ok(Some(parts)) => {
-            play(c, shared, parts, address, counted, expected.is_some());
+            play(
+                c,
+                shared,
+                parts,
+                address,
+                counted,
+                expected.is_some(),
+                virtual_host,
+            );
             Ok(())
         }
         Ok(None) => {
@@ -1159,13 +1373,15 @@ fn serve_login(
 }
 
 struct Parts {
+    sync: Arc<SyncData>,
     payload_transport: Arc<Transport>,
     uuid: u128,
     name: String,
-    properties: Vec<login::Property>,
+    properties: Vec<sunrise_core::profile::AccountProperty>,
     info: ClientInformation,
     brand: String,
     datapack_offer: Option<Vec<u8>>,
+    configured: Option<super::configuration_tasks::Configured>,
     channels: super::config_payloads::EngineChannels,
 }
 
@@ -1175,9 +1391,13 @@ fn login_and_configure(
     uuid: u128,
     name: &str,
     user: &str,
-    properties: Vec<login::Property>,
+    properties: Vec<sunrise_core::profile::AccountProperty>,
 ) -> Result<Option<Parts>, String> {
     let e = |e: sunrise_protocol::Error| e.to_string();
+    // `player_login_profile`: the login's properties, as a mod edits them, go to both login
+    // success and the player list.
+    let properties =
+        super::login_profile::edited(shared.login_profiles.as_ref(), uuid, name, properties);
     // ServerLoginPacketListenerImpl: memory connections are not compressed.
     let threshold = shared.config.compression_threshold;
     if threshold >= 0 && !c.is_memory() {
@@ -1230,7 +1450,7 @@ fn login_and_configure(
         cfg::Clientbound::CustomPayload(cfg::CustomPayload {
             channel: "minecraft:brand".into(),
             data: {
-                let mut w = sunrise_protocol::buf::Writer::new();
+                let mut w = ::sunrise_core::vanilla_bytes::Writer::new();
                 // MinecraftServer.getServerModName: "vanilla" there; a modded
                 // server names itself, and Sunrise's says "sunrise", as its client does.
                 w.string("sunrise");
@@ -1533,7 +1753,7 @@ fn login_and_configure(
         lost(shared, &format!("{name} ({})", uuid_string(uuid)), &text);
         return Ok(None);
     }
-    configuration_tasks::configure(
+    let configured = configuration_tasks::configure(
         c,
         shared,
         uuid,
@@ -1570,6 +1790,7 @@ fn login_and_configure(
     let channels = std::mem::take(&mut c.channels);
     c.finish()?;
     Ok(Some(Parts {
+        sync: sync_data,
         channels,
         payload_transport,
         uuid,
@@ -1578,6 +1799,7 @@ fn login_and_configure(
         info,
         brand,
         datapack_offer,
+        configured,
     }))
 }
 
@@ -1969,6 +2191,7 @@ fn play(
     address: std::net::SocketAddr,
     counted: Option<super::Counted>,
     expected: bool,
+    virtual_host: Option<VirtualHost>,
 ) {
     let Some(conn) = shared.next_id() else {
         shared.release(parts.uuid);
@@ -2007,6 +2230,7 @@ fn play(
         to: To::Pool(outbox.clone(), watch.clone()),
         wire: Some(c.reader.counters.clone()),
         payload_transport: parts.payload_transport.clone(),
+        virtual_host: virtual_host.map(Arc::new),
         datapack_offer: parts.datapack_offer.map(Into::into),
         announced: parts.channels.announced.clone().unwrap_or_default(),
         viewed_levels: parts.channels.viewed_levels.answer(),
@@ -2018,6 +2242,7 @@ fn play(
         .as_ref()
         .is_some_and(|p| p.required);
     let session = PlayConn {
+        sync: parts.sync,
         payload_sender: sender.clone(),
         payload_transport: parts.payload_transport,
         conn,
@@ -2048,7 +2273,7 @@ fn play(
     let mut session = Box::new(session);
     if shared
         .events
-        .send(NetEvent::Joined(Box::new(joined)))
+        .send(NetEvent::Joined(Box::new(joined), parts.configured))
         .is_err()
     {
         session.left("server closed".to_owned());
@@ -2061,6 +2286,7 @@ fn play(
 
 /// A player's play state on its network thread.
 struct PlayConn {
+    sync: Arc<SyncData>,
     payload_sender: PlayerSender,
     payload_transport: Arc<Transport>,
     conn: u32,
@@ -2108,10 +2334,13 @@ impl io_pool::Session for PlayConn {
         if let Some(average) = self.rate.as_mut().and_then(|r| r.received(now)) {
             return kick(rate_exceeded(&self.shared, average));
         }
-        match play::Serverbound::decode_with_payload_codecs(
+        match play::Serverbound::decode_reader(
             id,
-            &payload,
-            &self.payload_transport.local.codecs,
+            sunrise_protocol::buf::Reader::with_payload_codecs(
+                &payload,
+                &self.payload_transport.local.codecs,
+            )
+            .with_names(&self.sync.dynamic),
         )
         .and_then(checked_play)
         {
@@ -2193,6 +2422,7 @@ impl io_pool::Session for PlayConn {
                                 }
                                 return Verdict::Go;
                             }
+                            Ok(crate::raw_payloads::Classified::Skipped) => return Verdict::Go,
                             Ok(crate::raw_payloads::Classified::Other(payload))
                                 if self
                                     .payload_sender
@@ -2230,7 +2460,11 @@ impl io_pool::Session for PlayConn {
         self.payload_tick(now)
     }
     fn left(&mut self, reason: String) {
-        let _ = self.shared.events.send(NetEvent::Left(self.conn, reason));
+        // Publish logout before releasing the profile, even if gameplay filled its queue.
+        let _ = self
+            .shared
+            .events
+            .send_terminal(NetEvent::Left(self.conn, reason));
         self.shared.closing.fetch_add(1, Ordering::AcqRel);
     }
     fn closed(&mut self) {
@@ -2449,6 +2683,46 @@ impl KeepAliveWatch {
 mod tests {
     include!("profession_join_tests.rs");
 
+    #[test]
+    fn login_virtual_host_uses_the_packet_destination() {
+        for (intent, host, port, expected) in [
+            (
+                handshake::LOGIN,
+                "Play.Example.test.\0proxy\0marker",
+                25572,
+                ("Play.Example.test.", 25572),
+            ),
+            (
+                handshake::TRANSFER,
+                "next.example.test",
+                65535,
+                ("next.example.test", 65535),
+            ),
+            // ClientIntentionPacket accepts an empty host name.
+            (handshake::LOGIN, "", 25565, ("", 25565)),
+            (handshake::LOGIN, "\0proxy", 25565, ("", 25565)),
+        ] {
+            let packet = handshake::Serverbound::Intention(handshake::Intention {
+                protocol: PROTOCOL_VERSION,
+                host: host.to_owned(),
+                port,
+                intent,
+            })
+            .encode();
+            let handshake::Serverbound::Intention(intention) =
+                handshake::Serverbound::decode(i32::from(packet[0]), &packet[1..]).unwrap()
+            else {
+                panic!("expected an intention packet");
+            };
+            let destination = login_virtual_host(intention);
+            assert_eq!(
+                (destination.host.as_str(), destination.port),
+                expected,
+                "intent {intent}, host {host:?}, port {port}",
+            );
+        }
+    }
+
     /// Bodies shared between players reach each of them as the same bytes, in the order
     /// they were sent among the player's own.
     #[test]
@@ -2538,7 +2812,7 @@ mod tests {
         accept_code_of_conduct(&mut io, "Be kind.", &mut info, &transport, &mut negotiation)
             .unwrap();
         let announced = io.channels.announced.as_ref().map(|list| list.list());
-        assert_eq!(announced, Some(vec!["voicechat:secret".to_owned()]));
+        assert_eq!(announced.unwrap().as_ref(), ["voicechat:secret"]);
     }
 
     #[test]
@@ -2731,7 +3005,7 @@ mod tests {
         login_profile(&mut c, "Owner");
         c.send(&login::Serverbound::LoginAcknowledged(sunrise_protocol::packets::Empty).encode())
             .unwrap();
-        let mut brand = sunrise_protocol::buf::Writer::new();
+        let mut brand = ::sunrise_core::vanilla_bytes::Writer::new();
         brand.string("sunrise");
         c.send(
             &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
@@ -2813,7 +3087,7 @@ mod tests {
                 &login::Serverbound::LoginAcknowledged(sunrise_protocol::packets::Empty).encode(),
             )
             .unwrap();
-            let mut brand = sunrise_protocol::buf::Writer::new();
+            let mut brand = ::sunrise_core::vanilla_bytes::Writer::new();
             brand.string("sunrise");
             c.send(
                 &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
@@ -3015,7 +3289,7 @@ mod tests {
         login_profile(&mut c, "Owner");
         c.send(&login::Serverbound::LoginAcknowledged(sunrise_protocol::packets::Empty).encode())
             .unwrap();
-        let mut data = sunrise_protocol::buf::Writer::new();
+        let mut data = ::sunrise_core::vanilla_bytes::Writer::new();
         data.string("vanilla");
         c.send(
             &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
@@ -3072,7 +3346,7 @@ mod tests {
         login_profile(&mut c, "Owner");
         c.send(&login::Serverbound::LoginAcknowledged(sunrise_protocol::packets::Empty).encode())
             .unwrap();
-        let mut brand = sunrise_protocol::buf::Writer::new();
+        let mut brand = ::sunrise_core::vanilla_bytes::Writer::new();
         brand.string("sunrise");
         c.send(
             &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
@@ -3142,7 +3416,7 @@ mod tests {
         assert!(cfg::Serverbound::decode(id, &config(32_767)[1..]).is_ok());
         assert!(cfg::Serverbound::decode(id, &config(32_768)[1..]).is_err());
         let suggestion = |len: usize| {
-            let mut w = sunrise_protocol::buf::Writer::new();
+            let mut w = ::sunrise_core::vanilla_bytes::Writer::new();
             w.varint(7);
             w.string(&"a".repeat(len));
             play::Serverbound::Unknown(COMMAND_SUGGESTION, w.data)
@@ -3494,6 +3768,7 @@ mod tests {
         };
         let lan = crate::lan::Lan::start_with(Arc::new(SyncData::empty()), config).unwrap();
         let mut c = PlayConn {
+            sync: Arc::new(SyncData::empty()),
             payload_sender: PlayerSender::disabled(),
             payload_transport: Transport::empty(),
             conn: 1,
@@ -3632,6 +3907,7 @@ mod tests {
         };
         let lan = crate::lan::Lan::start_with(Arc::new(SyncData::empty()), config).unwrap();
         let conn = |uuid: u128, pending: Option<i64>| PlayConn {
+            sync: Arc::new(SyncData::empty()),
             payload_sender: PlayerSender::disabled(),
             payload_transport: Transport::empty(),
             conn: 1,
@@ -3685,6 +3961,7 @@ mod tests {
         };
         let lan = crate::lan::Lan::start_with(Arc::new(SyncData::empty()), config).unwrap();
         let conn = |uuid: u128| PlayConn {
+            sync: Arc::new(SyncData::empty()),
             payload_sender: PlayerSender::disabled(),
             payload_transport: Transport::empty(),
             conn: 1,
@@ -3741,6 +4018,7 @@ mod outgoing_budget_tests {
                 .unwrap();
         PlayerSender {
             payload_transport: Transport::empty(),
+            virtual_host: None,
             undrained: Arc::default(),
             pending,
             cap: io_pool::MAX_PENDING,
@@ -3760,6 +4038,40 @@ mod outgoing_budget_tests {
             menu_extra_rev: 0,
         }
     }
+    #[test]
+    fn play_ping_reports_queue_admission() {
+        let mut s = sender(Framing::Network(None));
+        s.cap = 0;
+        assert!(!s.try_send_play_ping(-1));
+        assert!(s.is_live());
+        let transaction = transaction_packets::Scope::begin();
+        assert!(!s.try_send_play_ping(-1));
+        assert!(transaction_packets::Scope::refused());
+        drop(transaction);
+        assert_eq!(s.queued(), (0, 0));
+        assert!(s.is_live());
+
+        s.cap = io_pool::MAX_PENDING;
+        let transaction = transaction_packets::Scope::begin();
+        assert!(s.try_send_play_ping(42));
+        assert_eq!(s.queued().0, 0, "tentative packets cannot reach the outbox");
+        drop(transaction);
+        assert_eq!(s.queued(), (0, 0));
+        assert!(
+            s.try_send_play_ping(42),
+            "admission does not require a worker wake"
+        );
+        assert_eq!(s.queued().0, 1);
+        s.close();
+        assert!(!s.try_send_play_ping(43));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let channel = PlayerSender::new(tx, Arc::default());
+        drop(rx);
+        assert!(!channel.try_send_play_ping(44));
+        assert_eq!(channel.queued(), (0, 0));
+    }
+
     #[test]
     fn empty_prepared_journal_records_are_bounded_and_fully_refunded() {
         let s = sender(Framing::Memory);
@@ -3827,6 +4139,42 @@ mod outgoing_budget_tests {
         assert!(s.pending.load(Ordering::Relaxed) > before + 20000);
         drop(reserved);
     }
+    #[test]
+    fn a_pairing_attachment_keeps_its_prepaid_credit_and_play_epoch() {
+        for stale in [false, true] {
+            let transport = Transport::capture(crate::raw_payloads::Side::Server).unwrap();
+            transport
+                .accept(transport.local.manifest.entries())
+                .unwrap();
+            transport.finish_configuration().unwrap();
+            let (sender, inspect) = PlayerSender::payload_executor_test_sender(transport.clone());
+            let prepared = sender
+                .prepare_payload(vec![2], &PayloadId("test:attachment".into()))
+                .unwrap();
+            let prepaid = sender.pending.load(Ordering::Relaxed);
+            assert!(prepaid > 0);
+            let mut out = vec![
+                vec![0].into(),
+                prepared.into_prepared_body(transport.epoch().unwrap()),
+                vec![0].into(),
+            ];
+            assert_eq!(sender.pending.load(Ordering::Relaxed), prepaid);
+            if stale {
+                transport.begin_configuration();
+            }
+            sender.send_tracking_bodies(&mut out);
+            assert!(out.is_empty());
+            let expected = if stale {
+                vec![vec![0], vec![0]]
+            } else {
+                vec![vec![0], vec![2], vec![0]]
+            };
+            assert_eq!(inspect(), expected);
+            let expected_charge = 2 * io_pool::charge(1) + if stale { 0 } else { prepaid };
+            assert_eq!(sender.pending.load(Ordering::Relaxed), expected_charge);
+        }
+    }
+
     /// #3423: a join's first view can queue more than the limit in one burst; a memory
     /// connection (single player) outlasts it, a network client past it is closed.
     #[test]

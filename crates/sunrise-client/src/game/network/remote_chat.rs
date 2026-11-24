@@ -33,34 +33,6 @@ enum CommandCheck {
     PermissionsRequired,
 }
 
-impl Game<'_> {
-    /// `ChatListener.showMessageToPlayer`'s line and narration of a player
-    /// message: none when its sender is hidden in the Social Interactions
-    /// screen (`Minecraft.isBlocked`) or the server filtered all of it; a
-    /// partial filter mask shows and narrates `applyWithFormatting(signedContent)`
-    /// instead of the decorated `line` and `narration`.
-    pub(super) fn shown_player_chat(
-        &mut self,
-        p: &play::PlayerChat,
-        line: Text,
-        narration: String,
-    ) -> Option<(Text, String)> {
-        use super::remote::Decoration;
-        let filtered = sunrise_client::chat::filtered_message(&p.content, &p.filter)?;
-        if self.social_hides(p.sender) {
-            return None;
-        }
-        if p.filter.0 != 2 {
-            return Some((line, narration));
-        }
-        Some((
-            self.decorate_chat(&p.chat_type, &filtered, Decoration::Chat),
-            self.decorate_chat(&p.chat_type, &filtered, Decoration::Narration)
-                .plain(),
-        ))
-    }
-}
-
 /// ClientPacketListener.verifyCommand over the tree the server sent.
 fn verify_command(tree: &Dispatcher, registries: &Registries, command: &str) -> CommandCheck {
     let parse = tree.parse(command, registries);
@@ -135,6 +107,10 @@ pub(super) struct SecureChat {
 impl SecureChat {
     pub(super) fn signed(&self) -> bool {
         self.session.is_some()
+    }
+    #[cfg(test)]
+    pub(super) fn tracker_mut(&mut self) -> &mut LastSeenTracker {
+        &mut self.tracker
     }
     /// handleDeleteChat: a deleted message that is still pending is not
     /// acknowledged.
@@ -330,14 +306,16 @@ impl Game<'_> {
     /// asks first, and one with a message argument is never sent from here:
     /// the player can only send it themselves, from the chat box. So neither
     /// a server nor a mod can have the player sign a message they never saw.
-    pub(super) fn send_unattended_command(&mut self, command: &str) {
+    /// Returns true when sent without a confirmation, so a dialog can open
+    /// its screen after the command.
+    pub(super) fn send_unattended_command(&mut self, command: &str) -> bool {
         let command = command.trim();
         let command = command.strip_prefix('/').unwrap_or(command);
         if command.is_empty() || !self.chat_abilities().allows(&format!("/{command}")) {
-            return;
+            return false;
         }
         let Some(r) = self.remote.as_ref() else {
-            return;
+            return false;
         };
         // Vanilla's dispatcher is empty until the server sends its tree.
         let check = if r.chat_tree_received {
@@ -352,7 +330,7 @@ impl Game<'_> {
                 // Verification above excludes message arguments. Use the ordinary sender so
                 // releases without an unsigned command packet still acknowledge seen chat.
                 self.send_command(command);
-                return;
+                return true;
             }
             CommandCheck::ParseErrors => (
                 "multiplayer.confirm_command.parse_errors",
@@ -382,6 +360,7 @@ impl Game<'_> {
             });
             game.capture(false);
         });
+        false
     }
 
     /// The command just clicked left this screen: if it asks, no returns there.
@@ -449,6 +428,7 @@ impl Game<'_> {
         let mut layout = self.command_prompt_layout(prompt, (w, h));
         layout.declare_no(1);
         layout.draw(batch, atlas, self.cursor, &labels);
+        self.draw_overlay_mounted_widgets(batch, "command_prompt");
     }
 
     /// The confirmation's answer; on no, what was behind it is back.
@@ -476,6 +456,7 @@ impl Game<'_> {
             (false, _, Some(Behind::Dialog(dialog))) => self.reopen_dialog(dialog),
             (false, _, None) => {}
         }
+        self.refresh_screen_widgets();
         if self.screen == Screen::Playing && !self.screen_over_playing() {
             self.capture(true);
         }
@@ -483,34 +464,39 @@ impl Game<'_> {
 
     /// ConfirmScreen.keyPressed, and what its buttons take from the keyboard
     /// (Screen's focus navigation, AbstractButton's Enter and Space).
-    pub(super) fn command_prompt_key(&mut self, key: KeyCode) {
+    pub(super) fn command_prompt_key(&mut self, key: KeyCode) -> bool {
         let (size, shift) = (self.gui_size(), self.has_shift_down());
         let Some(prompt) = &self.command_prompt else {
-            return;
+            return false;
         };
         let mut choice = self.command_prompt_layout(prompt, size);
         match key {
-            KeyCode::Escape => return self.answer_command_prompt(false),
+            KeyCode::Escape => {
+                self.answer_command_prompt(false);
+                return true;
+            }
             KeyCode::Tab => choice.tab(shift),
             KeyCode::ArrowLeft | KeyCode::ArrowRight => choice.arrow(key == KeyCode::ArrowLeft),
             KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
                 if let Some(button) = choice.pressed() {
                     self.audio.play_button_click();
                     self.answer_command_prompt(button == 0);
+                    return true;
                 }
-                return;
+                return false;
             }
-            _ => return,
+            _ => return false,
         }
         let focus = choice.focus;
         if let Some(prompt) = self.command_prompt.as_mut() {
             prompt.focus = focus;
         }
+        false
     }
 
-    pub(super) fn command_prompt_click(&mut self) {
+    pub(super) fn command_prompt_click(&mut self) -> bool {
         let Some(prompt) = &self.command_prompt else {
-            return;
+            return false;
         };
         let pressed = self
             .command_prompt_layout(prompt, self.gui_size())
@@ -519,6 +505,7 @@ impl Game<'_> {
             self.audio.play_button_click();
             self.answer_command_prompt(button == 0);
         }
+        pressed.is_some()
     }
 
     /// markMessageAsProcessed, when the chat takes a signed message (past

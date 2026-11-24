@@ -8,8 +8,9 @@ entities of that type share the part, not their attachments.
 `can_rider_interact` mirrors NeoForge's `IEntityExtension.canRiderInteract`. Attach an
 `EntityPart` to the candidate's entity type and set `event.allowed = true` to let a
 rider pick it like an unrelated entity. The output starts false; parts run in
-dependency order and the last write wins. The hook has version 1 and exposes
-`event.entity: EntityRef` and a writable `event.allowed: bool` with a `ClientHost`.
+dependency order and the last write wins. The hook exposes `event.subject: EntityClientScope<'_>`
+(borrow the candidate's read-only `EntityClientView` with `with_view`, or `&mut dyn ClientHost`
+sequentially with `host()`) and a writable `event.allowed: bool`.
 
 The ordinary client pick excludes entities sharing the camera's root vehicle,
 including other passengers, not just the directly ridden entity. The shared
@@ -24,6 +25,25 @@ and never ask this hook. Server interaction checks remain reach-only.
 
 The existing family traversal order is retained; exact vanilla section and
 within-section insertion ordering is a separate engine correction.
+
+## Entity tags
+
+On the server, `entity.tags(host)` lends an `EntityTags<'_>` view of the entity's scoreboard
+tags (`Entity.entityTags()`), not its entity-type registry tags. A live entity without tags
+gives an empty view (`tags.is_empty()`); a stale handle, client or snapshot without live tags
+gives `None`. A goal can read its own mob's tags and the tags of other live mobs lent to the tick.
+
+Use `entity.tags(host).is_some_and(|tags| tags.contains("mymod:marked"))` for an exact match
+without allocating. View equality compares exact UTF-16 tag membership, ignoring order and
+repeated entries. `tags.iter_utf16()` still yields tags in saved order, so use
+`a.iter_utf16().eq(b.iter_utf16())` when the order matters. To keep the old `Vec<String>`
+equality, including replacement characters for unpaired surrogates, compare
+`a.iter_utf16().map(String::from_utf16_lossy).eq(b.iter_utf16().map(String::from_utf16_lossy))`.
+
+Use `String::from_utf16(units)` to reject unpaired surrogates, `String::from_utf16_lossy(units)`
+for the same replacement characters as `/tag ... list`, or `units.to_vec()` to keep the exact
+units after the host borrow ends. For the old replacement-character membership check, use
+`tags.iter_utf16().any(|units| String::from_utf16_lossy(units) == name)`.
 
 ## Goals
 
@@ -76,6 +96,12 @@ Clearing a fox's target ends defending without changing its trusted entities. An
 target controls its creepy flag and attacking speed modifier; clearing it also clears its stared-at
 flag. A zombified piglin schedules its first anger sound and next alert when it acquires a target
 from none, not when switching between targets. Targeting a player does not count as player damage.
+A goal moves its own mob with `set_delta_movement([x, y, z])` and `add_delta_movement([x, y, z])`
+(`Entity.setDeltaMovement` and `addDeltaMovement`, in blocks a tick), and reads the current value with
+`delta_movement()`, as `LeapAtTargetGoal` and `DolphinJumpGoal` do. The write applies at once, inside the
+mob's AI step, so the travel that follows in the same tick uses it, and clients see it through ordinary motion
+tracking. A component that is not finite (in the delta or the sum) answers false and leaves the velocity
+unchanged; nothing is clamped.
 
 
 ## Part state
@@ -100,7 +126,8 @@ let full = Robot::edit_state(host, robot, |_, charge| {
 ```
 
 - `state` and `state_existing` read a snapshot and insert nothing; `edit_state` runs in a nested
-  transaction of its own, as for block entities.
+  transaction of its own, as for block entities. If the transaction cannot open, it returns
+  `PartStateError::Unavailable` without calling the edit closure.
 - Every call checks the handle first:
   - a handle of another world open, or of an entity that was removed (or whose removal waits for
     the root commit), unloaded or moved under a new id, gives `PartStateError::Stale`, and
@@ -121,7 +148,8 @@ let full = Robot::edit_state(host, robot, |_, charge| {
   (boats, minecarts, items, projectiles, armor stands...) and an unknown id refuse the load with
   `PartStateRefusal::EntityKind`, naming the type. `entity_part` itself checks no type.
 - The declaration is refused at the call as for block entities, copying on death included. Part
-  state is server-side.
+  state is server-side. Its registration errors, residency checks and state errors are
+  local values; only the attachment's state value is saved through its codec.
 
 ## Brain behaviors
 

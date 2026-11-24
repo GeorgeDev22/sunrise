@@ -10,6 +10,8 @@ pub(super) struct WorldRequest {
     pub creative: bool,
     pub create: Option<sunrise_client::title::WorldOptions>,
     pub rule_registry: Arc<sunrise_client::gamerules::RuleRegistry>,
+    /// Where the server's region workers send their notices.
+    pub(super) chunk_reports: Arc<sunrise_client::chunk_io::Reports>,
     /// The account the world opens under, for an integrated server
     /// (`IntegratedServer.getSingleplayerProfile`): its name and UUID.
     owner: Option<(String, u128)>,
@@ -89,6 +91,20 @@ fn prepare_level_data(
     Ok(())
 }
 
+/// `MinecraftServer.getServerDirectory` and its integrated override.
+fn chunk_report_root<'a>(
+    role: execution_role::ExecutionRole,
+    game_dir: Option<&'a std::path::Path>,
+    working_dir: &'a std::path::Path,
+) -> &'a std::path::Path {
+    if role == execution_role::ExecutionRole::IntegratedServer {
+        // `Options::read` may already have made the configured game directory the cwd.
+        game_dir.unwrap_or(working_dir)
+    } else {
+        working_dir
+    }
+}
+
 impl WorldRequest {
     pub fn new(
         folder: &str,
@@ -106,6 +122,7 @@ impl WorldRequest {
             creative,
             create: create.cloned(),
             rule_registry,
+            chunk_reports: sunrise_client::chunk_io::PROCESS_REPORTS.clone(),
             owner: None,
         })
     }
@@ -135,6 +152,7 @@ impl WorldRequest {
             creative,
             create,
             rule_registry,
+            chunk_reports,
             owner,
         } = self;
         let name = name.as_deref();
@@ -304,6 +322,26 @@ impl WorldRequest {
             &level.enabled_features,
             &pack.additional_data,
         );
+        let integrated = options.execution_role == execution_role::ExecutionRole::IntegratedServer;
+        // Resolving the report path must not prevent the world from opening.
+        let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let server_root = chunk_report_root(
+            options.execution_role,
+            options.game_dir.as_deref(),
+            &working_dir,
+        );
+        // The dedicated request carries the absolute storage path as `folder`, and
+        // its configured level id as `name`. Integrated requests carry the id as `folder`.
+        let level_id = if options.execution_role.is_dedicated_server() {
+            name.unwrap_or(&folder)
+        } else {
+            &folder
+        };
+        let save_reporter = Arc::new(sunrise_client::chunk_io::SaveFailureReporter::new(
+            integrated,
+            server_root,
+            level_id,
+        ));
         let (mut streaming, save, locator) = make_streaming(
             res,
             pack,
@@ -316,6 +354,8 @@ impl WorldRequest {
             &level,
             biomes.clone(),
             None,
+            chunk_reports,
+            save_reporter,
         )?;
         drop(streaming_step);
         streaming.radius = settings.render_distance;
@@ -381,7 +421,8 @@ impl WorldLoader {
         settings: Settings,
         upgrade: Arc<sunrise_world::datafix::progress::UpgradeProgress>,
     ) -> Result<Self> {
-        let handle = sunrise_guest_stack::builder()
+        let handle = std::thread::Builder::new()
+            .stack_size(sunrise_threads::GAME_THREAD_STACK_BYTES)
             .name("World initialization".into())
             .spawn(move || {
                 request
@@ -438,7 +479,8 @@ pub(super) fn preload_world_data(
         Preload::Idle if on_world_screens => {
             let resources = resources.to_owned();
             let data_source = data_source.clone();
-            let spawned = sunrise_guest_stack::builder()
+            let spawned = std::thread::Builder::new()
+                .stack_size(sunrise_threads::GAME_THREAD_STACK_BYTES)
                 .name("World data preload".into())
                 .spawn(move || {
                     sunrise_threads::behind_server();
@@ -500,7 +542,8 @@ pub(super) fn preload_launch_world(
     let resources = resources.to_owned();
     let data_source = data_source.clone();
     let additional = additional.to_vec();
-    let spawned = sunrise_guest_stack::builder()
+    let spawned = std::thread::Builder::new()
+        .stack_size(sunrise_threads::GAME_THREAD_STACK_BYTES)
         .name("World data preload".into())
         .spawn(move || {
             // Not behind the server: the world's opening waits for it.
@@ -963,6 +1006,8 @@ pub(super) fn make_streaming(
     level: &Level,
     biomes: Arc<Biomes>,
     runtime: Option<&super::runtime_levels::Generate>,
+    chunk_reports: Arc<sunrise_client::chunk_io::Reports>,
+    save_reporter: Arc<sunrise_client::chunk_io::SaveFailureReporter>,
 ) -> Result<(Streaming, Arc<SaveDir>, Option<Arc<VanillaTerrain>>)> {
     use sunrise_client::save::WorldGen;
     let enabled_features = &level.enabled_features;
@@ -974,6 +1019,12 @@ pub(super) fn make_streaming(
         Some(res.shared_items()),
     );
     save.enable_trusted_fluid_load();
+    save.set_save_reporting(
+        world_root.to_path_buf(),
+        dim.id(),
+        save_reporter,
+        chunk_reports,
+    );
     let save = Arc::new(save);
     if dim == Dim::End {
         // Migrate before any chunk reader can cache the old block entities. A side file it
@@ -1283,6 +1334,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn report_root_follows_the_server_role() {
+        use execution_role::ExecutionRole::{DedicatedServer, IntegratedServer};
+        use std::path::Path;
+
+        let cwd = Path::new("server");
+        let game = Path::new("game");
+        assert_eq!(chunk_report_root(DedicatedServer, Some(game), cwd), cwd);
+        assert_eq!(chunk_report_root(IntegratedServer, Some(game), cwd), game);
+        assert_eq!(chunk_report_root(IntegratedServer, None, cwd), cwd);
+    }
+
+    #[test]
     fn unreadable_level_backup_refuses_before_biome_adoption() {
         use sunrise_client::save;
         use sunrise_core::nbt::Tag;
@@ -1537,6 +1600,7 @@ mod tests {
         with_game(|game| {
             let request = WorldRequest {
                 owner: None,
+                chunk_reports: sunrise_client::chunk_io::PROCESS_REPORTS.clone(),
                 save_root: dir.clone(),
                 folder: "test".into(),
                 name: Some("test".into()),
@@ -1981,6 +2045,7 @@ mod tests {
                     with_game_role(root.clone(), role, |game| {
                         let request = WorldRequest {
                             owner: None,
+                            chunk_reports: sunrise_client::chunk_io::PROCESS_REPORTS.clone(),
                             save_root: world.clone(),
                             folder: "world".into(),
                             name: Some("Region fixture".into()),
@@ -2106,6 +2171,7 @@ mod unused_feature_startup_tests {
                 creative: false,
                 create: None,
                 owner: None,
+                chunk_reports: sunrise_client::chunk_io::PROCESS_REPORTS.clone(),
                 rule_registry: Level::default().rule_registry,
             };
             let result = request.prepare(
@@ -2221,6 +2287,7 @@ mod unused_feature_preservation_tests {
             creative: false,
             create: None,
             owner: None,
+            chunk_reports: sunrise_client::chunk_io::PROCESS_REPORTS.clone(),
             rule_registry: Level::default().rule_registry,
         };
         assert!(

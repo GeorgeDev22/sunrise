@@ -135,9 +135,9 @@ FriendlyByteBuf.toString	skip:java		Netty buffer text
 FriendlyByteBuf.retain	skip:java		Netty reference counting
 FriendlyByteBuf.touch	skip:java		Netty leak detection
 HashedPatchMap.create	port	crates/sunrise-protocol/src/item.rs::Hashed::of	component hashes are sent for every component the client keeps (item/hash/); gap: minor: a container or bundle_contents predicate whose nested exact components hold a byte no Codec.BOOL field names is left unhashed
-HashedPatchMap.matches	port	crates/sunrise-client/src/lan/containers.rs::Hub::hashed_matches	gap: minor: compares item id and count only, not the component patch
+HashedPatchMap.matches	port	crates/sunrise-protocol/src/item/hash.rs::Hashed::matches_projected	compares the added component hashes and removed IDs as maps and sets
 HashedStack.create	port	crates/sunrise-protocol/src/item.rs::Hashed::of	component hashes are sent for every component the client keeps (item/hash/); gap: minor: a container or bundle_contents predicate whose nested exact components hold a byte no Codec.BOOL field names is left unhashed
-HashedStack.ActualItem.matches	port	crates/sunrise-client/src/lan/containers.rs::Hub::hashed_matches	gap: minor: compares item id and count only, not the component patch
+HashedStack.ActualItem.matches	port	crates/sunrise-protocol/src/item/hash.rs::Hashed::matches_with_admitted	compares item ID, count and the full patch; reuses the admitted encoded effect values
 HiddenByteBuf.pack	skip:java		Netty in-memory channel wrapper
 HiddenByteBuf.unpack	skip:java		Netty in-memory channel wrapper
 HiddenByteBuf.retain	skip:java		Netty reference counting

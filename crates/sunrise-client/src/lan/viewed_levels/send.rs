@@ -201,7 +201,7 @@ impl Hub {
         self.broadcast_light_changes(world);
         self.broadcast_block_changes(world);
         self.send_viewed(ctx);
-        self.track_entities(ctx);
+        self.track_entities(ctx, None);
         true
     }
 

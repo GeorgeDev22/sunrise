@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Baris sembang baharu meluncur masuk dari kiri semasa ia memudar, bukannya kelihatan keseluruhan.",
   "sunrise.extras.chat_indicator": "Penunjuk mesej",
   "sunrise.extras.chat_indicator.tooltip": "Bar berwarna di sebelah kiri baris sembang.",
-  "sunrise.extras.discord_presence": "Kehadiran Kaya Discord",
-  "sunrise.extras.discord_presence.tooltip": "Menunjukkan Playing Sunrise pada profil Discord anda semasa Discord berjalan: menu, pemain tunggal atau berbilang pemain, dimensi dan masa dimainkan. Jangan sekali-kali nama dunia atau alamat pelayan.",
   "sunrise.extras.dynamic_lights": "Lampu dinamik",
   "sunrise.extras.dynamic_lights.tooltip": "Obor dan sumber cahaya lain yang dipegang, dijatuhkan atau dibakar menyalakan blok di sekelilingnya.",
   "sunrise.extras.fullbright": "Terang penuh",

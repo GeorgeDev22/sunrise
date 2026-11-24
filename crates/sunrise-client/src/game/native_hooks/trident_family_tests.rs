@@ -1,6 +1,5 @@
 //! `WitherBoss.hurtServer` and `Shulker.hurtServer` inspect the direct AbstractArrow,
 //! not the damage type: ThrownTrident extends AbstractArrow but /damage does not.
-#![cfg(test)]
 use crate::game::Game;
 use crate::game::api_values::TryIntoApi;
 use crate::game::native_entity_refs::tests::{bind_local_player, with_game};
@@ -104,7 +103,7 @@ fn victim(game: &mut Game<'_>, name: &str) -> f32 {
     let mut mob = Mob::new(41, kind, Vec3::new(6.0, 80.0, 4.5), 0.0);
     mob.persistent = true;
     mob.no_ai = true;
-    mob.on_ground = true;
+    mob.ground.on_ground = true;
     mob.extra.counter = 0;
     if name == "minecraft:wither" {
         mob.health = mob.attrs.max_health / 2.0;

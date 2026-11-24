@@ -233,7 +233,7 @@ fn a_seen_advancements_packet_carries_its_tab_only_when_one_was_opened() {
         action: 0,
         tab: Some("minecraft:story/root".into()),
     };
-    let mut w = crate::buf::Writer::new();
+    let mut w = ::sunrise_core::vanilla_bytes::Writer::new();
     w.varint(0);
     w.string("minecraft:story/root");
     assert_eq!(
@@ -1126,12 +1126,17 @@ fn spectator_action_is_an_optional_entity_id() {
 
 #[test]
 fn unknown_packets_keep_their_payload() {
-    let p = Clientbound::decode(crate::ids::play::clientbound::DEBUG_SAMPLE, &[1, 2, 3]).unwrap();
+    let p = Clientbound::decode(crate::ids::play::clientbound::DEBUG_EVENT, &[1, 2, 3]).unwrap();
     assert_eq!(
         p,
-        Clientbound::Unknown(crate::ids::play::clientbound::DEBUG_SAMPLE, vec![1, 2, 3])
+        Clientbound::Unknown(crate::ids::play::clientbound::DEBUG_EVENT, vec![1, 2, 3])
     );
     assert_eq!(p.encode()[1..], [1, 2, 3]);
+    let unregistered = crate::ids::play::clientbound::NAMES.len() as i32;
+    for bad_id in [-1, unregistered, 9999] {
+        let err = Clientbound::decode(bad_id, &[]).unwrap_err();
+        assert!(err.is_unknown_packet_id(), "id {bad_id}: {err:?}");
+    }
 }
 
 #[test]
@@ -1464,4 +1469,101 @@ fn jigsaw_packets_round_trip() {
         Serverbound::encode,
         Serverbound::decode,
     );
+}
+
+// Expected bytes hand-derived from the 26.3 codecs (javap of the jar, not captured from a run):
+// `FriendlyByteBuf.writeLongArray` (VarInt length, big-endian longs) + `writeEnum` (VarInt
+// ordinal); `ByteBufCodecs.registry` ids in a VarInt-counted collection.
+// Bytes confirmed against vanilla 26.3 STREAM_CODECs by tools/test_protocol_debug_packets_parity.py.
+#[test]
+fn debug_sample_is_a_long_array_and_a_type() {
+    let payload = [
+        &[2u8][..],
+        &50_000_000i64.to_be_bytes(),
+        &(-1i64).to_be_bytes(),
+        &[0],
+    ]
+    .concat();
+    let packet = Clientbound::DebugSample(DebugSample {
+        sample: vec![50_000_000, -1],
+        kind: 0,
+    });
+    assert_eq!(
+        Clientbound::decode(crate::ids::play::clientbound::DEBUG_SAMPLE, &payload).unwrap(),
+        packet
+    );
+    assert_eq!(packet.encode()[1..], payload);
+    round_trip(packet, Clientbound::encode, Clientbound::decode);
+}
+
+#[test]
+fn debug_subscription_request_is_a_registry_id_set() {
+    let packet = Serverbound::DebugSubscriptionRequest(DebugSubscriptionRequest {
+        subscriptions: vec![0],
+    });
+    assert_eq!(
+        Serverbound::decode(
+            crate::ids::play::serverbound::DEBUG_SUBSCRIPTION_REQUEST,
+            &[1, 0]
+        )
+        .unwrap(),
+        packet
+    );
+    assert_eq!(packet.encode()[1..], [1, 0]);
+    let empty = Serverbound::DebugSubscriptionRequest(DebugSubscriptionRequest {
+        subscriptions: vec![],
+    });
+    assert_eq!(empty.encode()[1..], [0]);
+    round_trip(packet, Serverbound::encode, Serverbound::decode);
+}
+
+#[test]
+fn debug_sample_decodes_the_full_array_but_refuses_another_kind() {
+    use crate::ids::play::clientbound::DEBUG_SAMPLE;
+    let body = |count: u8, kind: u8| {
+        let mut b = vec![count];
+        b.extend((0..count).flat_map(|_| 7i64.to_be_bytes()));
+        b.push(kind);
+        b
+    };
+    assert!(Clientbound::decode(DEBUG_SAMPLE, &body(4, 0)).is_ok());
+    assert!(Clientbound::decode(DEBUG_SAMPLE, &body(0, 0)).is_ok());
+    assert_eq!(
+        Clientbound::decode(DEBUG_SAMPLE, &body(5, 0)).unwrap(),
+        Clientbound::DebugSample(DebugSample {
+            sample: vec![7; 5],
+            kind: 0
+        })
+    );
+    assert!(Clientbound::decode(DEBUG_SAMPLE, &body(1, 1)).is_err());
+    // A VarInt -1 is no ordinal either.
+    let mut negative = body(1, 0);
+    *negative.last_mut().unwrap() = 0xff;
+    negative.extend([0xff, 0xff, 0xff, 0x0f]);
+    assert!(Clientbound::decode(DEBUG_SAMPLE, &negative).is_err());
+}
+
+#[test]
+fn debug_subscription_request_is_a_set_of_registered_ids_of_at_most_32() {
+    use crate::ids::play::serverbound::DEBUG_SUBSCRIPTION_REQUEST as ID;
+    let ids = |body: &[u8]| match Serverbound::decode(ID, body) {
+        Ok(Serverbound::DebugSubscriptionRequest(p)) => Ok(p.subscriptions),
+        Ok(other) => panic!("{other:?}"),
+        Err(e) => Err(e),
+    };
+    assert_eq!(ids(&[0]).unwrap(), Vec::<i32>::new());
+    assert_eq!(ids(&[1, 0]).unwrap(), [0]);
+    assert_eq!(ids(&[1, 15]).unwrap(), [15]);
+    // Duplicates collapse (a set), in any order.
+    assert_eq!(ids(&[4, 3, 0, 3, 0]).unwrap(), [0, 3]);
+    // Not in the 16-entry registry.
+    assert!(ids(&[1, 16]).is_err());
+    assert!(ids(&[1, 0xff, 0xff, 0xff, 0xff, 0x0f]).is_err());
+    // 32 ids pass (all one member), 33 are over the limit.
+    let mut body = vec![32];
+    body.extend([0; 32]);
+    assert_eq!(ids(&body).unwrap(), [0]);
+    let mut body = vec![33];
+    body.extend([0; 33]);
+    assert!(ids(&body).is_err());
 }

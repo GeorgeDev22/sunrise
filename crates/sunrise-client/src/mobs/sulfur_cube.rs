@@ -18,7 +18,7 @@ use sunrise_world::attributes::{Modifier, Operation};
 
 // Sulfur cube state (on top of `cube`'s `size`, `counter` jump delay,
 // `flag` aggressive, `flag2` was on ground, `vector[0]` direction):
-// `head` the swallowed block, `counter2` the fuse plus one (0 unprimed),
+// `head` the swallowed block, `sulfur_fuse` the fuse and its synced `MAX_FUSE`,
 // `ints[3]` the pickup timer, `scratch[1]` the sounds pending (1 a fuse just
 // lit, 2 a hit),
 // `scratch[2]` the push sound cooldown, `scratch[3]` from a bucket,
@@ -625,8 +625,39 @@ pub fn physics(m: &Mob) -> Option<&'static Archetype> {
         None
     }
 }
+/// `SulfurCube.fuse` (the countdown) and `MAX_FUSE` (the synced value it was last set from), each
+/// the full signed `int` vanilla stores; -1, unprimed, by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fuse {
+    pub fuse: i32,
+    pub max: i32,
+}
+impl Default for Fuse {
+    fn default() -> Self {
+        Self { fuse: -1, max: -1 }
+    }
+}
+impl Fuse {
+    /// `setFuse` and `entityData.set(MAX_FUSE, ...)` together, as the load and `primeTime` do.
+    pub fn set(value: i32) -> Self {
+        Self {
+            fuse: value,
+            max: value,
+        }
+    }
+    /// `tickFuse`'s countdown: a positive fuse goes down by one, any other stays.
+    fn count_down(&mut self) {
+        if self.fuse > 0 {
+            self.fuse -= 1;
+        }
+    }
+}
 pub fn fuse(m: &Mob) -> i32 {
-    m.extra.counter2 - 1
+    m.extra.sulfur_fuse.fuse
+}
+/// `SulfurCube.MAX_FUSE`, the synced data value.
+pub fn max_fuse(m: &Mob) -> i32 {
+    m.extra.sulfur_fuse.max
 }
 pub fn primed(m: &Mob) -> bool {
     fuse(m) >= 0
@@ -671,7 +702,7 @@ mod burning_arrow_tests {
         assert_eq!(fuse(&m), fuse_ticks);
         assert!(m.invulnerable_flag);
         // lit once: a second arrow leaves the fuse alone.
-        m.extra.counter2 -= 5;
+        m.extra.sulfur_fuse.fuse -= 5;
         assert!(!burning_arrow_hit(&mut m));
         assert_eq!(fuse(&m), fuse_ticks - 5);
     }
@@ -755,9 +786,7 @@ mod burning_arrow_tests {
 /// Client copy of `tickFuse`: count the fuse down for the renderer. The
 /// server alone explodes (`tick_fuse`); a guest never fires `Explode` here.
 pub fn client_tick(m: &mut Mob) {
-    if m.extra.counter2 > 1 {
-        m.extra.counter2 -= 1;
-    }
+    m.extra.sulfur_fuse.count_down();
 }
 fn can_explode(m: &Mob) -> bool {
     archetype(m).is_some_and(|a| a.explosion.is_some()) && m.alive() && !primed(m)
@@ -955,7 +984,7 @@ pub fn prime_with_fuse(m: &mut Mob, imminent: bool, fuse: i32) -> bool {
         fuse
     };
     m.invulnerable_flag = true;
-    m.extra.counter2 = t + 1;
+    m.extra.sulfur_fuse = Fuse::set(t);
     m.extra.scratch[1] |= 1;
     true
 }
@@ -1212,9 +1241,7 @@ pub fn knockback(
 /// `SulfurCube.tickFuse`: count down and discard at zero before the living
 /// tick, including NoAI cubes. Pickup and push cooldowns belong to AI instead.
 pub fn tick_fuse(m: &mut Mob, events: &mut Vec<MobEvent>) {
-    if m.extra.counter2 > 1 {
-        m.extra.counter2 -= 1;
-    }
+    m.extra.sulfur_fuse.count_down();
     if fuse(m) == 0
         && let Some((_, power, _)) = archetype(m).and_then(|a| a.explosion)
     {
@@ -1345,7 +1372,7 @@ fn player_push(m: &mut Mob, p: &super::PlayerView, w: &MobWorld, events: &mut Ve
     let speed = (p.velocity.length() * 2.0 * f64::from(0.3f32)).clamp(0.0, 0.5);
     let push = Vec3::new(
         dx / len * kb * speed,
-        if m.on_ground {
+        if m.ground.on_ground {
             kb * f64::from(0.3f32) * speed
         } else {
             0.0
@@ -1529,16 +1556,15 @@ pub fn from_nbt(m: &mut Mob, tag: &sunrise_core::nbt::Tag) {
             }
         }
     }
-    // The saved Health, not the one the living load's Health Boost clamp cut
-    // to the unsized maximum: vanilla sizes the cube before `setHealth`.
-    m.health = crate::save::float(tag.get("Health")).map_or(m.attrs.max_health, |h| h as f32);
+    // The saved Health, clamped to the sized maximum: vanilla sizes the cube before `setHealth`.
+    m.health = crate::entity_nbt::loaded_health(m, crate::save::float(tag.get("Health")));
     m.extra.flag2 = int("wasOnGround").unwrap_or(0) != 0;
     m.extra.ints[3] = int("pickup_timer").unwrap_or(0);
     m.extra.scratch[3] = int("from_bucket").unwrap_or(0);
-    m.extra.counter2 = int("fuse").unwrap_or(-1).max(-1) + 1;
-    if primed(m) {
-        m.invulnerable_flag = true;
-    }
+    // `setFuse(input.getIntOr("fuse", -1))` stores any numeric value (narrowed, floats floored),
+    // `MAX_FUSE` takes it too, and the load leaves `Invulnerable` as `Entity.load` read it.
+    let fuse = tag.get("fuse").and_then(crate::nbt_path::int_value);
+    m.extra.sulfur_fuse = Fuse::set(fuse.unwrap_or(-1));
 }
 
 #[cfg(test)]
@@ -1557,6 +1583,61 @@ mod tnt_rule_tests {
         m
     }
 
+    /// Vanilla 26.3 server witness (`VanillaSulfurCubeFuseOracle`, `tools/test_sulfur_cube_fuse_parity.py`).
+    #[test]
+    #[ignore = "run by tools/test_sulfur_cube_fuse_parity.py"]
+    fn a_loaded_fuse_is_kept_as_it_is_and_leaves_invulnerable_alone() {
+        use sunrise_core::nbt::{JavaString, Tag, parse_snbt};
+        let dir = std::env::var_os("SUNRISE_SULFUR_CUBE_FUSE_WITNESS_DIR").unwrap_or_else(|| {
+            panic!(
+                "SUNRISE_SULFUR_CUBE_FUSE_WITNESS_DIR is unset; run tools/test_sulfur_cube_fuse_parity.py"
+            )
+        });
+        let path = std::path::PathBuf::from(dir).join("sulfur_cube_fuse_server.txt");
+        let witness = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "failed to read witness {} (run tools/test_sulfur_cube_fuse_parity.py): {e}",
+                    path.display()
+                )
+            })
+            .replace("\r\n", "\n");
+        let mut checked = 0usize;
+        for line in witness.lines().filter(|line| !line.starts_with('#')) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields[2], "loaded", "{line}");
+            assert_eq!(fields[7], "saved", "{line}");
+            let (fuse_snbt, inv_snbt) = (fields[0], fields[1]);
+            let expected_fuse: i32 = fields[3].parse().unwrap();
+            let expected_max: i32 = fields[4].parse().unwrap();
+            let expected_inv: bool = fields[5].parse().unwrap();
+            let expected_primed: bool = fields[6].parse().unwrap();
+            let expected_saved_fuse: i32 = fields[8].parse().unwrap();
+            let mut m = tnt_cube();
+            // `Entity.load` parses `Invulnerable` before `SulfurCube.readAdditionalSaveData`.
+            m.invulnerable_flag = inv_snbt == "1b";
+            let snbt = match fuse_snbt {
+                "absent" => "{}".to_owned(),
+                value => format!("{{fuse:{value}}}"),
+            };
+            let tag = parse_snbt(&snbt).unwrap().0;
+            from_nbt(&mut m, &tag);
+            assert_eq!(fuse(&m), expected_fuse, "{line}");
+            assert_eq!(max_fuse(&m), expected_max, "{line}");
+            assert_eq!(m.invulnerable_flag, expected_inv, "{line}");
+            assert_eq!(primed(&m), expected_primed, "{line}");
+            let mut saved = crate::entity_nbt::EntityTagWriter::new(None);
+            to_nbt(&m, &mut saved);
+            assert_eq!(
+                saved.get(&JavaString::from("fuse")),
+                Some(&Tag::Int(expected_saved_fuse)),
+                "{line}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "empty witness");
+    }
+
     #[test]
     #[ignore = "daily"]
     fn mob_tick_counts_the_fuse_but_keeps_noai_cooldowns_still() {
@@ -1568,7 +1649,7 @@ mod tnt_rule_tests {
                 m.no_ai = no_ai;
                 m.no_gravity = true;
                 m.persistent = true;
-                m.extra.counter2 = 4; // loaded fuse 3
+                m.extra.sulfur_fuse = Fuse::set(3);
                 m.extra.ints[3] = 100;
                 m.extra.scratch[2] = 10;
                 let mut events = Vec::new();
@@ -1649,7 +1730,7 @@ mod tnt_rule_tests {
         let ran = crate::mobs::world::with_test_world(&[], |_, _| {
             let mut m = tnt_cube();
             assert!(prime(&mut m, false));
-            m.extra.counter2 = 2; // fuse 1, 0 after this tick
+            m.extra.sulfur_fuse = Fuse::set(1); // 0 after this tick
             set_tnt_explodes(false);
             tick_fuse(&mut m, &mut events);
             set_tnt_explodes(true);
@@ -1701,15 +1782,14 @@ mod fuse_anim_tests {
     #[test]
     fn client_fuse_counts_down_without_going_negative() {
         let mut m = cube();
-        m.extra.counter2 = 5; // fuse() == 4
+        m.extra.sulfur_fuse = Fuse::set(4);
         assert!(primed(&m));
         client_tick(&mut m);
         assert_eq!(fuse(&m), 3);
         for _ in 0..10 {
             client_tick(&mut m);
         }
-        // Stops at counter2 == 1 → fuse 0 (primed until the server removes it).
-        assert_eq!(m.extra.counter2, 1);
+        // Stops at fuse 0 (primed until the server removes it).
         assert_eq!(fuse(&m), 0);
     }
 

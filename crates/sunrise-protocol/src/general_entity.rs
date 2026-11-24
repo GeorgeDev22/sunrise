@@ -1,5 +1,5 @@
 //! General entity spawn: how a Sunrise server tells a Sunrise client that it now tracks one row
-//! of a mod's general entity type (docs/design/mod-api/general-entity-types.md, stage 5).
+//! of a mod's general entity type.
 //!
 //! A general type's key is not in the synced `minecraft:entity_type` registry, so the vanilla
 //! `AddEntity` cannot name it. Pairing sends this message in its place; after it, the vanilla
@@ -10,11 +10,9 @@
 //! The channel is an engine declaration in the negotiated payload table: only a peer that
 //! offers it at [`VERSION`] is sent anything. A vanilla peer never offers it, and is never
 //! paired with a general row.
-use crate::{
-    Error, Result,
-    buf::{Reader, Writer},
-};
+use crate::{Error, Result, buf::Reader};
 use sunrise_core::identifier::Identifier;
+use sunrise_core::vanilla_bytes::Writer;
 
 /// The custom payload channel, clientbound only.
 pub const CHANNEL: &str = "sunrise:general_entity";

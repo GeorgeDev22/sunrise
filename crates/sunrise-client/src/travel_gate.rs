@@ -12,9 +12,7 @@ use sunrise_world::travel::TravelMode as GameTravelMode;
 
 /// The `living_travel` hook's target (#2414): the generated dispatch the
 /// catalog's generator requires of a target, with the loop's own reader as
-/// the context. Its declaration carries `isolate`, so the same generated
-/// walk is the one the travel gate dispatches through - no alias, no second
-/// route.
+/// the context. The travel gate uses the same generated dispatch.
 pub fn native_living_travel(
     context: &LoopContext,
     entity: u32,
@@ -63,10 +61,9 @@ fn mode_of(mode: GameTravelMode) -> TravelMode {
 /// returns: one with a component that is not a finite number, or outside
 /// its budget, is refused whole, naming the mod and the field, and the
 /// pair the preceding listeners left stands (the values the game resolved
-/// before any), never clamped. A listener that unwinds keeps
-/// those resolved values, not a replacement an earlier listener had
-/// proposed, and is switched off for this hook for the session - the
-/// generated isolated dispatch does that - and the travel carries on.
+/// before any), never clamped. If a listener unwinds, only its proposal is
+/// discarded and the callback is disabled for this hook for the session.
+/// Earlier results stand and later eligible listeners still get the travel.
 ///
 /// Returns whether the travel runs; `input` and `velocity` are the values
 /// the branch starts from.

@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Jauna tērzēšanas līnija ieslīd no kreisās puses, kamēr tā pazūd, nevis tiek rādīta vesela.",
   "sunrise.extras.chat_indicator": "Ziņojuma indikators",
   "sunrise.extras.chat_indicator.tooltip": "Krāsaina josla pa kreisi no tērzēšanas līnijas.",
-  "sunrise.extras.discord_presence": "Discord bagātinātā klātbūtne",
-  "sunrise.extras.discord_presence.tooltip": "Discord darbības laikā tiek rādīts Playing Sunrise jūsu Discord profilā: izvēlnes, viena spēlētāja vai vairāku spēlētāju spēle, izmērs un atskaņošanas laiks. Nekad pasaules nosaukums vai servera adrese.",
   "sunrise.extras.dynamic_lights": "Dinamiskās gaismas",
   "sunrise.extras.dynamic_lights.tooltip": "Lāpas un citi gaismas avoti turēja, nometa vai aizdedzināja blokus ap tiem.",
   "sunrise.extras.fullbright": "Pilns apgaismojums",

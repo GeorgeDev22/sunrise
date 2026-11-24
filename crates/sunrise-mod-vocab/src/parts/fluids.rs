@@ -37,12 +37,23 @@ pub trait FluidsRegistrar {
     /// Request a fluid by canonical registry id, checked when the registry loads.
     fn fluid_key(&mut self, id: &str) -> crate::FluidKey;
 
-    /// Declare a tank-only fluid and return its key.
+    /// Declare a tank-only fluid and return its key. Its
+    /// `data/<namespace>/sunrise/fluid/<path>.json`, if any, says how it looks, names its
+    /// `bucket_item` (an item the mod declares, which an empty bucket fills to and
+    /// `fluid_bucket` answers; none by default) and states its `FluidType` numbers:
+    /// `temperature` and `density` (any `i32`, defaults 300 and 1000), `viscosity` (0 or more,
+    /// default 1000) and `light_level` (0 to 15, default 0), read back through
+    /// `FluidTypeProperties`.
     fn declare_fluid(&mut self, path: &str) -> crate::FluidKey;
 
     /// Declare a fluid that exists in the world (NeoForge's `RegisterEvent` for a `FluidType`),
-    /// with its block and, as `fluid` says, its bucket. Its
-    /// `data/<namespace>/sunrise/fluid/<path>.json`, if any, says how it looks.
+    /// with its block, its flowing form and, as `fluid` says, its bucket, under the ids `fluid`
+    /// names. A name outside the fluid's namespace, a generated bucket outside it, or a flowing
+    /// form named as the fluid itself, is refused.
+    /// Its `data/<namespace>/sunrise/fluid/<path>.json`, if any, says how it looks and states its
+    /// `temperature`, `density`, `viscosity` and `light_level`, as for
+    /// [`declare_fluid`](Self::declare_fluid); its `bucket_item` applies when `fluid` names none
+    /// and registers no bucket.
     fn declare_world_fluid(&mut self, path: &str, fluid: crate::WorldFluid) -> crate::FluidKey;
 
     /// Declare what a liquid block of `interaction.source` turns into beside another fluid or

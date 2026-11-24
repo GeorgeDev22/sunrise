@@ -77,7 +77,19 @@ pub fn custom_particle_options(tag: &Tag) -> Option<ParticleOptions> {
     let Some(Tag::String(name)) = map.get(&"type".into()) else {
         return None;
     };
-    particle_options(ParticleType::from_name(&name.to_string_lossy())?, map)
+    let name = name.to_string_lossy();
+    if let Some(ty) = ParticleType::from_name(&name) {
+        return particle_options(ty, map);
+    }
+    let mut fields = map.clone();
+    fields.remove(&"type".into());
+    match mod_api::__private::decode_particle_map(&name, &fields)? {
+        Ok(value) => ParticleOptions::typed(value),
+        Err(error) => {
+            log::warn!("Cannot decode particle {name}: {error}");
+            None
+        }
+    }
 }
 /// `ParticleTypes.CODEC`'s payload for `ty`: the type's own options codec. A
 /// type that carries a block or an item, or one that does not decode, gives
@@ -171,6 +183,57 @@ pub fn particle_options(ty: ParticleType, map: &Compound) -> Option<ParticleOpti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_dispatch_round_trips_registered_fields() {
+        struct Register;
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for Register {
+            fn register(
+                &self,
+                registrar: &mut dyn mod_api::Registrar,
+                _: &mod_api::RegistrationContext,
+            ) {
+                registrar.register_particle_type(
+                    "pulse",
+                    false,
+                    mod_api::ParticleMapCodec::new(
+                        |fields, _| match fields.get(&"strength".into()) {
+                            Some(Tag::Int(value)) if !fields.contains_key(&"type".into()) => {
+                                Ok(*value)
+                            }
+                            _ => Err("strength is required; type is not a field".into()),
+                        },
+                        |value, _| Ok(Compound::from([("strength".into(), Tag::Int(*value))])),
+                    ),
+                    mod_api::ParticleStreamCodec::wire(),
+                );
+            }
+        }
+        let entries = [mod_api::ModEntry::new("test", Box::new(Register))];
+        mod_platform::__private::part_tests::install_parts_fixture(&entries).unwrap();
+        mod_api::__private::resolve_particles([], |_| {
+            Some(mod_api::__private::ParticleKind::Custom)
+        })
+        .unwrap();
+        let fields = Compound::from([
+            ("type".into(), Tag::String("test:pulse".into())),
+            ("strength".into(), Tag::Int(231)),
+        ]);
+        let options = custom_particle_options(&Tag::Compound(fields.clone())).unwrap();
+        let (typed, _) = options.typed_particle.unwrap();
+        assert_eq!(
+            mod_api::__private::encode_particle_map(&typed).unwrap(),
+            fields
+        );
+        assert!(
+            custom_particle_options(&Tag::Compound(Compound::from([(
+                "type".into(),
+                Tag::String("test:pulse".into())
+            )])))
+            .is_none()
+        );
+    }
 
     fn flt(v: f32) -> Tag {
         Tag::Float(v.to_bits())

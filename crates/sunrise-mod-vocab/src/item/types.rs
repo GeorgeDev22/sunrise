@@ -46,7 +46,8 @@ impl ItemKey {
 }
 
 /// A menu type (`minecraft:generic_9x3`) in the built-in menu registry, in
-/// registration order. A key stays valid until the game exits.
+/// registration order. A key stays valid until the game exits; `key.id(host)`
+/// pins its namespaced name, if available.
 // no wire: decoding validates the u32 slot with MenuKey::from_slot on the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: only the load-owned table creates keys
@@ -55,30 +56,37 @@ pub struct MenuKey(pub(crate) u32);
 /// An enchantment (`minecraft:sharpness`) in the data-loaded enchantment
 /// registry, in registry order. Keys keep their identity across reloads; a
 /// reload changes which entries the table lists, not what an existing slot names.
+/// `key.id(host)` pins the name, if available, independently of a later reload.
 // no wire: decoding validates the u32 slot with EnchantmentKey::from_slot on the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: only the load-owned table creates keys
 pub struct EnchantmentKey(pub(crate) u32);
 
-/// The registry facts a recipe viewer needs for an enchantment.
+/// The registry facts a client mod reads for an enchantment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
 pub struct EnchantmentInfo {
     /// Registry name, including namespace.
     pub id: String,
-    /// Largest supported level.
+    /// Largest supported level (`Enchantment.getMaxLevel`).
     pub max_level: u32,
-    /// Whether the enchantment is in the curse tag.
+    /// Selection weight (`Enchantment.getWeight`, 1 to 1024).
+    pub weight: u32,
+    /// Base anvil combination cost (`Enchantment.getAnvilCost`).
+    pub anvil_cost: u32,
+    /// Whether the enchantment is in the curse tag (`#minecraft:curse`).
     pub curse: bool,
 }
 
 impl EnchantmentInfo {
     /// Construct registry facts for an enchantment.
-    pub fn new(id: String, max_level: u32, curse: bool) -> Self {
+    pub fn new(id: String, max_level: u32, weight: u32, anvil_cost: u32, curse: bool) -> Self {
         Self {
             id,
             max_level,
+            weight,
+            anvil_cost,
             curse,
         }
     }
@@ -103,8 +111,9 @@ pub struct ArmorHurt {
 }
 
 // no wire: type alias inherits the Wire policy of its tuple or Result target.
-/// A dispenser hook's answer: the slot's remainder (None empties it) and the
-/// level event to play, `CLICK` (1000), `FAIL` (1001) or 0 for none.
+/// A dispenser hook's answer: the detached remainder (None empties the slot)
+/// and the level event to play, `CLICK` (1000), `FAIL` (1001) or 0 for none.
+/// The remainder keeps its count until the final slot write applies its placement limit.
 pub type Dispensed = (Option<ItemStack>, i32);
 
 // no wire: borrowed call-scoped view; transport uses owned snapshots.
@@ -122,7 +131,8 @@ pub struct ContainerLootFilled<'a> {
     pub block: Option<[i32; 3]>,
     /// The container entity id, for a vehicle target.
     pub entity: Option<u32>,
-    /// The UUID of the player whose open starts the fill; None otherwise.
+    /// The UUID of the player whose open starts the fill. None for other accesses,
+    /// including vehicle slot reads during a player action.
     pub opener: Option<u128>,
 }
 
@@ -160,8 +170,11 @@ pub struct LootDrops<'a> {
     pub weapon: Option<&'a ItemStack>,
     /// The breaking or using tool (`LootContextParams.TOOL`). Always None for
     /// entity deaths. For the attacker's live hand, resolve `damage_source.causing`
-    /// through `host.entity`, then `host.living`, and read `living.hand_item(host, Hand::Main)`.
-    /// This reads when called, including changes made by earlier loot listeners.
+    /// through `host.entity`, then `host.living`, and read
+    /// `living.with_hand_item(host, Hand::Main, |stack| stack.item())`. To retain the
+    /// hand stack or inspect its components, call [`crate::ItemStackView::project`] in
+    /// the callback and handle a refused projection. This reads when called, including
+    /// changes made by earlier loot listeners.
     pub tool: Option<&'a ItemStack>,
     /// The radius of the explosion that broke the block.
     pub explosion: Option<f32>,
@@ -183,7 +196,8 @@ impl LootDrops<'_> {
     /// stack, preserving components even after the shooter changes hands.
     /// Otherwise reads the direct entity's weapon when called: a player's recorded
     /// auto-spin stack during Riptide, otherwise the live main hand.
-    /// Returns None for non-death drops or an absent or unavailable weapon.
+    /// Returns an owned snapshot, or `None` for non-death drops or a weapon that is absent,
+    /// unavailable or cannot be projected into an owned stack.
     pub fn weapon_item(&self, host: &dyn Host) -> Option<ItemStack> {
         let source = self.damage_source?;
         if let Some(weapon) = self.weapon {
@@ -191,7 +205,9 @@ impl LootDrops<'_> {
         }
         let entity = host.entity(u32::try_from(source.direct).ok().filter(|id| *id != 0)?)?;
         let living = host.living(entity)?;
-        backend_of(host)?.living_weapon_item(living)
+        living
+            .with_weapon_item(host, |stack| stack.project())
+            .flatten()
     }
 }
 
@@ -638,6 +654,8 @@ pub enum ToolAbility {
     ShovelDouse,
     /// A hoe tills soil.
     HoeTill,
+    /// A fire starter (flint and steel, a fire charge) lights a campfire, candle or candle cake.
+    FirestarterLight,
 }
 
 /// Read-only context for a tool modification.
@@ -746,7 +764,7 @@ pub enum UsePhase {
     ItemBeforeBlock,
     /// `BlockBehaviour.useItemOn`, before the block's Part and template.
     Block,
-    /// `Item.useOn`, after the block passed and before the item's Part.
+    /// `Item.useOn`, after the block passes or is skipped and before the item's Part.
     ItemAfterBlock,
 }
 

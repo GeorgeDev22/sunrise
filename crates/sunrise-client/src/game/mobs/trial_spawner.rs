@@ -16,7 +16,6 @@ use sunrise_client::{
         },
     },
 };
-use sunrise_core::nbt::Tag;
 use sunrise_core::{
     geometry::Vec3,
     random::{LegacyRandom, LevelRandom, RandomSource},
@@ -199,16 +198,8 @@ impl Game<'_> {
             let seed = self.level.seed;
             let mut spawn = |l: &GameLevel, rng: &mut LevelRandom, r: &SpawnerSpawn| {
                 let added = l.game.plan_spawner_mob(l, r, source, &mut planned, rng)?;
-                let uuid = match planned.last_mut() {
-                    Some(Planned::Loaded(Tag::Compound(tag), _, _)) => {
-                        let tag_uuid =
-                            sunrise_client::entity_nbt::uuid(&Tag::Compound(tag.clone()));
-                        tag_uuid.unwrap_or_else(|| {
-                            let uuid = sunrise_client::save::random_uuid();
-                            tag.insert("UUID".into(), Tag::IntArray(uuid.to_vec()));
-                            uuid
-                        })
-                    }
+                let uuid = match planned.last() {
+                    Some(Planned::Loaded(tree, _, _)) => tree.root_uuid(),
                     _ => sunrise_client::save::random_uuid(),
                 };
                 uuids.push((added.id, uuid));

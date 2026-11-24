@@ -65,6 +65,10 @@ impl ProjectileWorld for ProjWorld<'_, '_> {
         self.w.fluids(bounds, bounds.max_position().y).in_water
     }
     #[inline]
+    fn in_lava_box(&self, bounds: Aabb) -> bool {
+        self.w.fluids(bounds, bounds.max_position().y).in_lava
+    }
+    #[inline]
     fn pushed_by_currents(&self, bounds: Aabb, velocity: Vec3) -> Vec3 {
         self.w.pushed_by_currents(bounds, velocity)
     }

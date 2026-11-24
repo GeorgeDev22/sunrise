@@ -150,8 +150,10 @@ impl Cost {
             per_level: per_level.unwrap_or(0),
         }
     }
+    /// `Enchantment.Cost.calculate`: arithmetic wraps like Java `int`.
     pub fn calculate(self, level: u32) -> i32 {
-        self.base + self.per_level * (level as i32 - 1)
+        self.base
+            .wrapping_add(self.per_level.wrapping_mul((level as i32).wrapping_sub(1)))
     }
 }
 #[derive(Clone, Debug)]
@@ -198,7 +200,7 @@ pub struct Enchantments {
     custom_damage: HashMap<Arc<str>, Vec<DamageValueEffect>>,
     /// Enchantment tags in vanilla `HolderSet` order (nested tags expanded in place).
     pub tags: HashMap<String, Vec<Arc<str>>>,
-    pub entity_tags: HashMap<String, HashSet<String>>,
+    pub entity_tags: Arc<HashMap<String, HashSet<String>>>,
     pub damage_tags: HashMap<String, HashSet<String>>,
     pub props: HashMap<Arc<str>, ItemProps>,
     lang: HashMap<String, String>,
@@ -433,6 +435,18 @@ impl Enchantments {
         overlay: &sunrise_world::loot::PackOverlay,
         defaults: &sunrise_world::item_defaults::ItemDefaults,
     ) -> crate::Result<Self> {
+        let mut enchantments = Self::load_definitions(root, overlay, defaults)?;
+        use crate::items::ingredient_defaults::{LoadEntityTags, component_tables};
+        let (_, tags) = component_tables(root, overlay, LoadEntityTags::Prepared)?;
+        enchantments.entity_tags = tags.members().clone();
+        Ok(enchantments)
+    }
+
+    pub(crate) fn load_definitions(
+        root: &Path,
+        overlay: &sunrise_world::loot::PackOverlay,
+        defaults: &sunrise_world::item_defaults::ItemDefaults,
+    ) -> crate::Result<Self> {
         // The registry lists entries sorted by id, like the data-pack loader.
         let mut files: BTreeMap<String, Value> =
             crate::items::data_files(root, "enchantment", overlay)
@@ -468,7 +482,6 @@ impl Enchantments {
         .into_iter()
         .map(|(name, ids)| (name, ids.into_iter().map(Arc::from).collect()))
         .collect();
-        let entity_tags = crate::items::load_tags(root, "entity_type", overlay)?;
         let damage_tags = match sunrise_world::damage_source::Catalog::load(root, overlay) {
             Ok(catalog) => catalog
                 .tags()
@@ -579,7 +592,7 @@ impl Enchantments {
             index,
             custom_damage,
             tags,
-            entity_tags,
+            entity_tags: Default::default(),
             damage_tags,
             props,
             lang,
@@ -1117,14 +1130,66 @@ impl Enchantments {
                 .sum()
         })
     }
+    /// A resolved entity-type tag from the same pack stack as these enchantments.
+    pub fn entity_in_tag(&self, entity: &str, tag: &str) -> bool {
+        self.entity_tags
+            .get(tag)
+            .is_some_and(|set| set.contains(entity))
+    }
+
+    /// `EnchantmentHelper.runIterationOnEquipment`, restricted to enchantments
+    /// that can answer `isImmuneToDamage`.
+    pub fn damage_immunities<'a>(
+        &'a self,
+        equipment: impl IntoIterator<Item = (&'a [(Arc<str>, u32)], &'a str)> + 'a,
+    ) -> impl Iterator<Item = (&'a Arc<str>, u32)> + 'a {
+        equipment.into_iter().flat_map(move |(levels, slot)| {
+            levels.iter().filter_map(move |(id, level)| {
+                let enchantment = self.get(id)?;
+                let matches_slot = enchantment.slots.iter().any(|group| match group.as_str() {
+                    "any" => true,
+                    "armor" => matches!(slot, "head" | "chest" | "legs" | "feet" | "body"),
+                    "hand" => matches!(slot, "mainhand" | "offhand"),
+                    group => group == slot,
+                });
+                (matches_slot
+                    && enchantment
+                        .effects
+                        .get("minecraft:damage_immunity")
+                        .is_some())
+                .then_some((id, *level))
+            })
+        })
+    }
+
+    /// `Enchantment.isImmuneToDamage`: a registered, active enchantment must
+    /// match the current source, not just declare a damage immunity effect.
+    pub fn is_damage_immune<'a>(
+        &self,
+        active: impl IntoIterator<Item = (&'a Arc<str>, u32)>,
+        context: &EffectContext<'_>,
+        random: &mut LegacyRandom,
+    ) -> bool {
+        active.into_iter().any(|(id, level)| {
+            self.get(id).is_some_and(|enchantment| {
+                enchantment.effects["minecraft:damage_immunity"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|entry| {
+                        entry.get("requirements").is_none_or(|requirement| {
+                            self.condition(requirement, level, context, random)
+                        })
+                    })
+            })
+        })
+    }
+
     fn entity_matches(&self, spec: &Value, entity: Option<&str>) -> bool {
         let Some(entity) = entity else { return false };
         match spec.as_str() {
             Some(s) => match s.strip_prefix('#') {
-                Some(tag) => self
-                    .entity_tags
-                    .get(tag)
-                    .is_some_and(|t| t.contains(entity)),
+                Some(tag) => self.entity_in_tag(entity, tag),
                 None => s == entity,
             },
             None => string_list(spec).iter().any(|s| s == entity),
@@ -1575,6 +1640,7 @@ pub mod tests {
             ("tags/wpenchant:enchantment/fixture".to_owned(), vec![tag]),
         ];
         write("items.json", &json!({}));
+        write("entity-types.json", &json!({"minecraft:pig": {}}));
         let defaults = sunrise_world::item_defaults::read(&root).unwrap();
         let base = Enchantments::load(&root, &defaults).unwrap();
         let loaded = Enchantments::load_with(
@@ -1924,7 +1990,7 @@ pub mod tests {
             index,
             custom_damage: HashMap::new(),
             tags,
-            entity_tags,
+            entity_tags: Arc::new(entity_tags),
             damage_tags,
             props,
             lang: HashMap::new(),
@@ -2076,6 +2142,15 @@ pub mod tests {
             .calculate(5),
             45
         );
+    }
+
+    #[test]
+    fn enchantment_cost_wraps_like_java_int() {
+        let cost = Cost {
+            base: i32::MAX,
+            per_level: 1,
+        };
+        assert_eq!(cost.calculate(2), i32::MIN);
     }
 
     #[test]

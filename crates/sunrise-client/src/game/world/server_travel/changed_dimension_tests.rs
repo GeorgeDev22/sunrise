@@ -158,21 +158,15 @@ fn light(game: &mut Game<'_>, cx: i32, cz: i32) {
 /// the destination around the trip's target.
 fn finish_trip(game: &mut Game<'_>, dim: Dim) {
     let home = game.dim;
-    game.enter_level(dim).unwrap();
-    let at = game
-        .server_trips
-        .iter()
-        .find(|trip| trip.conn == CONN)
-        .expect("the player is on a trip")
-        .target;
-    light(game, (at.x.floor() as i32) >> 4, (at.z.floor() as i32) >> 4);
     for _ in 0..20 {
-        let (target_dim, target) = game
-            .server_trips
-            .iter()
-            .find(|trip| trip.conn == CONN)
-            .map(|trip| (trip.dim, trip.target))
-            .unwrap_or((game.dim, at));
+        let Some(trip) = game.server_trips.iter().find(|trip| trip.conn == CONN) else {
+            break;
+        };
+        let (target_dim, target) = (trip.dim, trip.target);
+        let waiting_for = trip
+            .spawn_search
+            .as_ref()
+            .and_then(|search| search.waiting_for);
         if game.dim != target_dim {
             game.enter_level(target_dim).unwrap();
         }
@@ -181,13 +175,13 @@ fn finish_trip(game: &mut Game<'_>, dim: Dim) {
             (target.x.floor() as i32) >> 4,
             (target.z.floor() as i32) >> 4,
         );
-        if !game.on_server_trip(CONN) {
-            break;
+        if let Some((x, z)) = waiting_for {
+            light(game, x, z);
         }
         game.tick_server_travel();
     }
     assert!(
-        !game.on_server_trip(CONN),
+        !game.has_pending_travel(CONN),
         "the trip into {dim:?} never ended (current {:?}, trips {:?})",
         game.dim,
         game.server_trips
@@ -440,7 +434,7 @@ fn a_failed_cross_level_trip_closes_the_retired_client_window() {
                     g.carried = Some(ItemStack::new("minecraft:gold_ingot", 5));
                 });
                 if via_portal {
-                    game.start_server_trip(CONN, Dim::Nether, None, false);
+                    game.start_server_trip(CONN, Dim::Nether, None);
                 } else {
                     run_as_player(
                         game,
@@ -597,14 +591,7 @@ fn credits_world_spawn_fallback_resets_player_tick_count() {
         .unwrap();
         prepare_end_exit(game, false);
         game.handle_server_portal(CONN);
-        game.lan
-            .as_mut()
-            .unwrap()
-            .play
-            .get_mut(&CONN)
-            .unwrap()
-            .respawn_requested = true;
-        game.handle_server_portal(CONN);
+        game.guest_respawn(CONN);
         finish_trip(game, Dim::Overworld);
         assert_eq!(entity.tick_count(game), Some(0));
     });
@@ -623,14 +610,7 @@ fn credits_respawn_position_unchanged_resets_player_tick_count() {
             .unwrap();
             prepare_end_exit(game, false);
             game.handle_server_portal(CONN);
-            game.lan
-                .as_mut()
-                .unwrap()
-                .play
-                .get_mut(&CONN)
-                .unwrap()
-                .respawn_requested = true;
-            game.handle_server_portal(CONN);
+            game.guest_respawn(CONN);
             finish_trip(game, Dim::Overworld);
             assert_eq!(entity.tick_count(game), Some(0));
         });
@@ -652,15 +632,12 @@ fn credits_missing_respawn_point_resets_player_tick_count() {
         .unwrap();
         prepare_end_exit(game, false);
         game.handle_server_portal(CONN);
-        game.lan
-            .as_mut()
-            .unwrap()
-            .play
-            .get_mut(&CONN)
-            .unwrap()
-            .respawn_requested = true;
-        game.handle_server_portal(CONN);
-        finish_trip(game, Dim::Nether);
+        game.guest_respawn(CONN);
+        finish_trip(game, Dim::Overworld);
+        assert_eq!(
+            game.command_guest(CONN).unwrap().dimension,
+            Dim::Overworld.id()
+        );
         assert_eq!(entity.tick_count(game), Some(0));
     });
 }
@@ -678,14 +655,7 @@ fn credits_respawn_position_redirect_resets_player_tick_count() {
             .unwrap();
             prepare_end_exit(game, false);
             game.handle_server_portal(CONN);
-            game.lan
-                .as_mut()
-                .unwrap()
-                .play
-                .get_mut(&CONN)
-                .unwrap()
-                .respawn_requested = true;
-            game.handle_server_portal(CONN);
+            game.guest_respawn(CONN);
             finish_trip(game, Dim::Overworld);
             assert_eq!(entity.tick_count(game), Some(0));
         });
@@ -705,15 +675,12 @@ fn credits_respawn_position_cross_dimension_resets_player_tick_count() {
             .unwrap();
             prepare_end_exit(game, false);
             game.handle_server_portal(CONN);
-            game.lan
-                .as_mut()
-                .unwrap()
-                .play
-                .get_mut(&CONN)
-                .unwrap()
-                .respawn_requested = true;
-            game.handle_server_portal(CONN);
-            finish_trip(game, Dim::Overworld);
+            game.guest_respawn(CONN);
+            finish_trip(game, Dim::Nether);
+            assert_eq!(
+                game.command_guest(CONN).unwrap().dimension,
+                Dim::Nether.id()
+            );
             assert_eq!(entity.tick_count(game), Some(0));
         });
     });
@@ -744,14 +711,7 @@ fn credits_configured_respawn_keeps_permanent_player_attributes() {
         .unwrap();
         prepare_end_exit(game, false);
         game.handle_server_portal(CONN);
-        game.lan
-            .as_mut()
-            .unwrap()
-            .play
-            .get_mut(&CONN)
-            .unwrap()
-            .respawn_requested = true;
-        game.handle_server_portal(CONN);
+        game.guest_respawn(CONN);
         game.enter_level(Dim::Nether).unwrap();
         place_anchor(game, [8, 70, 8]);
         finish_trip(game, Dim::Nether);

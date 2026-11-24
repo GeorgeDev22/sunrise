@@ -3,9 +3,10 @@ mod tests {
     use crate::game::native_entity_refs::tests::{
         fixture_root, run_fresh_cases, with_game, with_game_at,
     };
+    use crate::game::remote::RemoteDimensionEntry;
     use mod_api::{
-        Block, BlockEntityOnLoadEvent, BlockEntityPart, BlockEntityTicksEvent, BlocksEvent, Hooks,
-        Host, HostSide, ModEntry, Registrar, RegistrationContext,
+        Block, BlockEntityOnLoadEvent, BlockEntityPart, BlockEntitySideScope,
+        BlockEntityTicksEvent, BlocksEvent, Hooks, Host, ModEntry, Registrar, RegistrationContext,
     };
     use std::sync::{Arc, Mutex};
     use sunrise_client::{
@@ -23,29 +24,29 @@ mod tests {
             event.ticks = true;
         }
 
-        fn block_entity_tick(
-            &self,
-            _: &mut dyn mod_api::ServerHost,
-            event: &mut mod_api::BlockEntityTickEvent<'_>,
-        ) {
-            self.0.lock().unwrap().push((event.pos[0], -1));
+        fn block_entity_tick(&self, event: &mut mod_api::BlockEntityTickEvent<'_>) {
+            event.subject.with_view(|entity| {
+                self.0.lock().unwrap().push((entity.position()[0], -1));
+            });
         }
 
-        fn block_entity_on_load(&self, host: HostSide, event: &mut BlockEntityOnLoadEvent) {
-            let (pos, data) = match host {
-                HostSide::Server(h) => (
-                    event.entity.position(h).unwrap(),
-                    event.entity.data(h).unwrap(),
-                ),
-                HostSide::Client(h) => (
-                    event.entity.position(h).unwrap(),
-                    event.entity.data(h).unwrap(),
-                ),
-            };
-            let Some(mod_api::Tag::Int(count)) = data.get(&"count".into()) else {
-                panic!("saved count missing")
-            };
-            self.0.lock().unwrap().push((pos[0], *count));
+        fn block_entity_on_load(&self, event: &mut BlockEntityOnLoadEvent<'_>) {
+            let (pos, count) = match &mut event.subject {
+                BlockEntitySideScope::Server(scope) => scope.with_view(|view| {
+                    let Some(mod_api::Tag::Int(count)) = view.nbt().get(&"count".into()) else {
+                        panic!("saved count missing")
+                    };
+                    (view.position(), *count)
+                }),
+                BlockEntitySideScope::Client(scope) => scope.with_view(|view| {
+                    let Some(mod_api::Tag::Int(count)) = view.nbt().get(&"count".into()) else {
+                        panic!("saved count missing")
+                    };
+                    (view.position(), *count)
+                }),
+            }
+            .expect("live resident block entity");
+            self.0.lock().unwrap().push((pos[0], count));
         }
     }
     struct User(Log, &'static [&'static str]);
@@ -123,6 +124,7 @@ mod tests {
                 game.world.block_entities.insert((1, 64, 1), holder(11));
                 game.fire_pending_block_entity_loads();
                 assert!(log.lock().unwrap().is_empty());
+                game.world.set(3, 64, 1, block).unwrap();
                 game.world.block_entities.insert((3, 64, 1), holder(0));
                 game.fire_pending_block_entity_loads();
                 game.fire_pending_block_entity_loads();
@@ -180,7 +182,7 @@ mod tests {
                         portal_cooldown: 0,
                         sea_level: 63,
                     };
-                    game.enter_remote_dimension(&spawn, false, Reason::Other);
+                    game.enter_remote_dimension(&spawn, RemoteDimensionEntry::Login, Reason::Other);
                     game.remote.as_mut().unwrap().logged_in = true;
                     game.world
                         .chunks

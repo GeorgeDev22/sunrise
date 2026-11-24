@@ -5,39 +5,14 @@ use crate::{
     EntityTypeKey, FluidKey, IntGameRuleKey, ItemKey, MenuKey, TagKey, UnresolvedFluid,
 };
 
-impl Wire for crate::ItemResource {
-    layout_fields!("stack" => crate::ItemStack);
-    const MIN: usize = crate::ItemStack::MIN;
+impl Wire for EntityTypeKey {
+    layout_via!(u32, "registered-entity-type-slot:v1");
+    const MIN: usize = <u32 as Wire>::MIN;
     fn put(&self, out: &mut Writer) {
-        out.put(&self.0);
+        out.put(&u32::from(self));
     }
     fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        Ok(Self::of(&input.take()?))
-    }
-}
-impl Wire for crate::StoragePage {
-    layout_fields!("entries" => Vec<(crate::ItemResource, u64)>, "limit" => u64);
-    const MIN: usize = 12;
-    fn put(&self, out: &mut Writer) {
-        let (entries, limit) = self.wire_parts();
-        out.put(&entries.to_vec());
-        out.put(&(limit as u64));
-    }
-    fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        // The host's cap bounds what a guest's encoded length may allocate.
-        let entries = input.list_with(crate::MAX_STORAGE_PAGE, Wire::take)?;
-        let limit = input.take()?;
-        Self::from_wire(entries, limit).ok_or(WireError::Invalid("a storage page past its limit"))
-    }
-}
-impl Wire for crate::FluidResource {
-    layout_fields!("stack" => crate::FluidStack);
-    const MIN: usize = crate::FluidStack::MIN;
-    fn put(&self, out: &mut Writer) {
-        out.put(&self.0);
-    }
-    fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        Ok(Self::of(&input.take()?))
+        Self::try_from(input.take::<u32>()?).map_err(|_| WireError::Invalid("EntityTypeKey"))
     }
 }
 
@@ -151,7 +126,7 @@ slot_keys!(registries;
         crate::content::registry_keys::ENCHANTMENTS.read().ok()?.as_ref()?.identifiers.get(id).copied()
     };
     EntityTypeKey => as_entity_type_key, "entity_type", |id: &crate::Identifier| {
-        crate::content::registry_keys::resolved_entity_types().get()?.identifiers.get(id).copied()
+        crate::content::registry_keys::resolved_entity_types().get()?.names().identifiers.get(id).copied()
     };
     FluidKey => as_fluid_key, "fluid", |id: &crate::Identifier| {
         crate::parts::resolved_fluids().get()?.identifiers.get(id).copied()
@@ -169,25 +144,32 @@ slot_keys!(registries;
 slot_keys!(u64; UnresolvedFluid);
 
 impl Wire for crate::Identifier {
-    layout_fields!("namespace" => String, "path" => String);
+    layout_fields!(ordinary_only "validated-identifier:v1"; "namespace" => String, "path" => String);
     const MIN: usize = 8;
     fn put(&self, out: &mut Writer) {
-        out.put_str(self.namespace());
-        out.put_str(self.path());
+        if out.ordinary_only() {
+            out.put_str(self.namespace());
+            out.put_str(self.path());
+        }
     }
     fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        Self::from_parts(&input.take::<String>()?, &input.take::<String>()?)
+        input.ordinary_only()?;
+        Self::from_parts(input.take_str()?, input.take_str()?)
             .map_err(|_| WireError::Invalid("invalid identifier"))
     }
 }
 impl Wire for crate::LevelKey {
-    layout_fields!("text" => String);
+    layout_fields!(ordinary_only "interned-level-key:v1"; "text" => String);
     const MIN: usize = 4;
     fn put(&self, out: &mut Writer) {
-        out.put_str(&String::from(self));
+        if out.ordinary_only() {
+            out.put_str(self.id());
+        }
     }
     fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        Self::try_from(input.take::<String>()?).map_err(|_| WireError::Invalid("invalid level key"))
+        // The level key's process-wide interner cannot charge this payload's budget.
+        input.ordinary_only()?;
+        Self::parse(input.take_str()?).map_err(|_| WireError::Invalid("invalid level key"))
     }
 }
 impl Wire for crate::ConfigPath {
@@ -206,45 +188,30 @@ impl Wire for crate::ConfigPath {
     }
 }
 impl Wire for crate::SpawnerKey {
-    layout_fields!("text" => String);
+    layout_fields!(ordinary_only "validated-spawner-key:v1"; "text" => String);
     const MIN: usize = 4;
     fn put(&self, out: &mut Writer) {
-        out.put_str(self.as_str());
+        if out.ordinary_only() {
+            out.put_str(self.as_str());
+        }
     }
     fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        Self::new(&input.take::<String>()?).ok_or(WireError::Invalid("invalid spawner key"))
+        input.ordinary_only()?;
+        Self::new(input.take_str()?).ok_or(WireError::Invalid("invalid spawner key"))
     }
 }
 impl Wire for crate::CustomSpawners {
-    layout_fields!("entries" => Vec<crate::SpawnerEntry>);
+    layout_fields!(ordinary_only "unique-spawner-entries:v1"; "entries" => Vec<crate::SpawnerEntry>);
     const MIN: usize = 4;
     fn put(&self, out: &mut Writer) {
-        out.put(&Vec::from(self));
+        if out.ordinary_only() {
+            crate::SpawnerEntry::put_list(self.entries(), out);
+        }
     }
     fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
+        input.ordinary_only()?;
         Self::try_from(input.take::<Vec<crate::SpawnerEntry>>()?)
             .map_err(|_| WireError::Invalid("duplicate spawner"))
-    }
-}
-impl Wire for crate::FileToIdConverter {
-    layout_fields!("prefix" => String, "extension" => String);
-    const MIN: usize = 8;
-    fn put(&self, out: &mut Writer) {
-        out.put(&<(String, String)>::from(self));
-    }
-    fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        Self::try_from(input.take::<(String, String)>()?)
-            .map_err(|_| WireError::Invalid("invalid file converter"))
-    }
-}
-impl Wire for crate::ReloadResourceError {
-    layout_fields!("id" => crate::Identifier, "message" => String);
-    const MIN: usize = 12;
-    fn put(&self, out: &mut Writer) {
-        out.put(&<(crate::Identifier, String)>::from(self));
-    }
-    fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        Ok(Self::from(input.take::<(crate::Identifier, String)>()?))
     }
 }
 
@@ -266,10 +233,10 @@ impl Wire for sunrise_core::nbt::JavaString {
     layout_fields!("units" => Vec<u16>);
     const MIN: usize = <Vec<u16> as Wire>::MIN;
     fn put(&self, out: &mut Writer) {
-        out.put_u16s(&self.0);
+        out.put(&self.0);
     }
     fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        input.nested(|input| input.take_u16s().map(Self))
+        input.record(|input| input.take::<Vec<u16>>().map(Self))
     }
 }
 
@@ -280,7 +247,10 @@ impl Wire for crate::ItemStack {
         out.put(&self.item());
         out.put(&self.count());
         out.put(&self.damage_component());
-        out.put(&self.components().cloned());
+        let components = self.components();
+        if components.is_none() || out.charge_with(|budget| budget.arc::<crate::Components>(1)) {
+            out.put_opt(components);
+        }
     }
     fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
         let mut stack = Self::new(input.take()?, input.take()?)
@@ -289,8 +259,9 @@ impl Wire for crate::ItemStack {
             stack.set_damage(damage);
         }
         if let Some(components) = input.take::<Option<crate::Components>>()? {
+            input.charge_with(|budget| budget.arc::<crate::Components>(1))?;
             stack
-                .set_components(components.as_nbt().clone())
+                .set_components(components.into_nbt())
                 .map_err(|_| WireError::Invalid("invalid item components"))?;
         }
         Ok(stack)
@@ -341,16 +312,6 @@ impl Wire for crate::InstanceGroupRef {
         Self::from_parts(input.take()?, input.take()?).map_err(WireError::Invalid)
     }
 }
-impl Wire for crate::TicketController {
-    layout_fields!("0" => u32);
-    const MIN: usize = 4;
-    fn put(&self, out: &mut Writer) {
-        out.put(&self.slot());
-    }
-    fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        Self::from_slot(input.take()?).ok_or(WireError::Invalid("unknown ticket controller"))
-    }
-}
 
 impl Wire for crate::BlockUpdateFlags {
     layout_fields!("0" => u32);
@@ -390,173 +351,6 @@ impl Wire for crate::Reduction {
         })
     }
 }
-impl Wire for crate::ReductionChange {
-    layout_fields!("tag" => u8, "0:Add" => f32, "1:Scale" => f32, "2:AtLeast" => f32, "3:AtMost" => f32);
-    const MIN: usize = 5;
-    fn put(&self, out: &mut Writer) {
-        let (kind, value) = match *self {
-            Self::Add(v) => (0u8, v),
-            Self::Scale(v) => (1, v),
-            Self::AtLeast(v) => (2, v),
-            Self::AtMost(v) => (3, v),
-        };
-        out.put(&kind);
-        out.put(&value);
-    }
-    fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        let kind: u8 = input.take()?;
-        let value = input.take()?;
-        Ok(match kind {
-            0 => Self::Add(value),
-            1 => Self::Scale(value),
-            2 => Self::AtLeast(value),
-            3 => Self::AtMost(value),
-            _ => return Err(WireError::Invalid("invalid reduction change")),
-        })
-    }
-}
-
-impl Wire for crate::ItemPlace {
-    layout_fields!("tag" => u32, "0:PlayerSlot.player" => u128, "0:PlayerSlot.slot" => i32, "1:PlayerHand.player" => u128, "1:PlayerHand.hand" => crate::Hand, "2:PlayerCursor.menu" => crate::MenuRef, "3:BlockEntity.level" => crate::LevelRef, "3:BlockEntity.pos" => [i32;3], "3:BlockEntity.side" => Option<crate::Direction>, "3:BlockEntity.slot" => usize, "4:ItemEntity.id" => u32, "5:EntitySlot.entity" => u32, "5:EntitySlot.slot" => usize, "6:Nested.parent" => Box<crate::ItemPlace>, "6:Nested.slot" => usize, "7:MenuSlot.menu" => crate::MenuRef, "7:MenuSlot.slot" => usize, "8:Mod.provider" => String, "8:Mod.key" => u64, "9:Equipment.entity" => u32, "9:Equipment.slot" => crate::EquipmentSlot, "10:Scratch.0" => u64, "11:Strict.0" => Box<crate::ItemPlace>, "12:OneByOne.0" => Box<crate::ItemPlace>, "13:InfiniteMaterials.player" => u128, "13:InfiniteMaterials.inner" => Box<crate::ItemPlace>, "14:ScratchSlots.0" => u64);
-    const MIN: usize = 4;
-    fn put(&self, out: &mut Writer) {
-        out.nested(|out| {
-            use crate::ItemPlace::*;
-            match self {
-                PlayerSlot { player, slot } => {
-                    out.put(&0u32);
-                    out.put(player);
-                    out.put(slot)
-                }
-                PlayerHand { player, hand } => {
-                    out.put(&1u32);
-                    out.put(player);
-                    out.put(hand)
-                }
-                PlayerCursor { menu } => {
-                    out.put(&2u32);
-                    out.put(menu)
-                }
-                BlockEntity {
-                    level,
-                    pos,
-                    side,
-                    slot,
-                } => {
-                    out.put(&3u32);
-                    out.put(level);
-                    out.put(pos);
-                    out.put(side);
-                    out.put(slot)
-                }
-                ItemEntity { id } => {
-                    out.put(&4u32);
-                    out.put(id)
-                }
-                EntitySlot { entity, slot } => {
-                    out.put(&5u32);
-                    out.put(entity);
-                    out.put(slot)
-                }
-                Nested { parent, slot } => {
-                    out.put(&6u32);
-                    out.put(parent);
-                    out.put(slot)
-                }
-                MenuSlot { menu, slot } => {
-                    out.put(&7u32);
-                    out.put(menu);
-                    out.put(slot)
-                }
-                Equipment { entity, slot } => {
-                    out.put(&9u32);
-                    out.put(entity);
-                    out.put(slot)
-                }
-                Mod { provider, key } => {
-                    out.put(&8u32);
-                    out.put_str(provider);
-                    out.put(key)
-                }
-                Scratch(id) => {
-                    out.put(&10u32);
-                    out.put(id)
-                }
-                Strict(inner) => {
-                    out.put(&11u32);
-                    out.put(inner)
-                }
-                OneByOne(inner) => {
-                    out.put(&12u32);
-                    out.put(inner)
-                }
-                InfiniteMaterials { player, inner } => {
-                    out.put(&13u32);
-                    out.put(player);
-                    out.put(inner)
-                }
-                ScratchSlots(id) => {
-                    out.put(&14u32);
-                    out.put(id)
-                }
-            }
-        });
-    }
-    fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        use crate::ItemPlace::*;
-        input.nested(|input| {
-            Ok(match input.take::<u32>()? {
-                0 => PlayerSlot {
-                    player: input.take()?,
-                    slot: input.take()?,
-                },
-                1 => PlayerHand {
-                    player: input.take()?,
-                    hand: input.take()?,
-                },
-                2 => PlayerCursor {
-                    menu: input.take()?,
-                },
-                3 => BlockEntity {
-                    level: input.take()?,
-                    pos: input.take()?,
-                    side: input.take()?,
-                    slot: input.take()?,
-                },
-                4 => ItemEntity { id: input.take()? },
-                5 => EntitySlot {
-                    entity: input.take()?,
-                    slot: input.take()?,
-                },
-                6 => Nested {
-                    parent: input.take()?,
-                    slot: input.take()?,
-                },
-                7 => MenuSlot {
-                    menu: input.take()?,
-                    slot: input.take()?,
-                },
-                9 => Equipment {
-                    entity: input.take()?,
-                    slot: input.take()?,
-                },
-                8 => Mod {
-                    provider: crate::wire::intern(&input.take::<String>()?)?,
-                    key: input.take()?,
-                },
-                10 => Scratch(input.take()?),
-                11 => Strict(input.take()?),
-                12 => OneByOne(input.take()?),
-                13 => InfiniteMaterials {
-                    player: input.take()?,
-                    inner: input.take()?,
-                },
-                14 => ScratchSlots(input.take()?),
-                n => return Err(WireError::Tag(n)),
-            })
-        })
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -577,13 +371,6 @@ mod tests {
         round(crate::SpawnerKey::new("example:spawner").unwrap());
         round(crate::CustomSpawners::vanilla());
         round(crate::Identifier::parse("example:thing").unwrap());
-        round(crate::ItemPlace::Nested {
-            parent: Box::new(crate::ItemPlace::Mod {
-                provider: "example:provider",
-                key: 3,
-            }),
-            slot: 4,
-        });
         let mut out = Writer::new();
         out.put_str("../escape");
         assert!(Reader::decode::<crate::ConfigPath>(out.bytes()).is_err());
@@ -596,12 +383,9 @@ mod tests {
             crate::SpawnerEntry::Builtin(crate::SpawnerKind::Cat),
         ]);
         assert!(Reader::decode::<crate::CustomSpawners>(out.bytes()).is_err());
-        assert!(crate::wire::intern(&"x".repeat(257)).is_err());
         for len in 0..64 {
             let bytes: Vec<u8> = (0..len).map(|i| (i * 37 + len * 11) as u8).collect();
-            let _ = Reader::decode::<crate::ItemPlace>(&bytes);
             let _ = Reader::decode::<crate::ItemStack>(&bytes);
-            let _ = Reader::decode::<crate::ParticleOptions>(&bytes);
         }
     }
     #[test]
@@ -709,25 +493,37 @@ mod depth_tests {
 
 // Compound is defined in sunrise-core and cannot carry the vocabulary's Wire
 // derive there. Encode the public map (length, then key/value pairs in traversal
-// order), not the private hash table's storage.
+// order), not the private hash table's storage. The typed decoder charges for
+// compound storage, not BTreeMap nodes.
 impl Wire for sunrise_core::nbt::Compound {
-    layout_via!(std::collections::BTreeMap<sunrise_core::nbt::JavaString, crate::Tag>);
+    layout_via!(
+        std::collections::BTreeMap<sunrise_core::nbt::JavaString, crate::Tag>,
+        "nbt-compound:u32-le-length:v1"
+    );
     const MIN: usize = 4;
     fn put(&self, out: &mut Writer) {
-        out.put_len(self.len());
-        for (key, value) in self {
-            out.put(key);
-            out.put(value);
-        }
+        out.payload_nested(|out| {
+            if !out.charge_with(|budget| budget.compound(self.len())) {
+                return;
+            }
+            out.put_len(self.len());
+            for (key, value) in self {
+                out.put(key);
+                out.put(value);
+            }
+        });
     }
     fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        let len = input.take_len(sunrise_core::nbt::JavaString::MIN + crate::Tag::MIN)?;
-        let mut map = Self::new();
-        for _ in 0..len {
-            let key = input.take()?;
-            map.insert(key, input.take()?);
-        }
-        Ok(map)
+        input.payload_nested(|input| {
+            let len = input.take_len(sunrise_core::nbt::JavaString::MIN + crate::Tag::MIN)?;
+            input.charge_with(|budget| budget.compound(len))?;
+            let mut map = Self::new();
+            for _ in 0..len {
+                let key = input.take()?;
+                map.insert(key, input.take()?);
+            }
+            Ok(map)
+        })
     }
 }
 
@@ -743,9 +539,12 @@ impl crate::wire::Wire for crate::Tag {
     }
 }
 impl crate::wire::Wire for serde_json::Value {
-    layout_fields!("json" => String);
+    layout_via!(String, "validated-json-value:v1", ordinary_only);
     const MIN: usize = 4;
     fn put(&self, out: &mut crate::wire::Writer) {
+        if !out.ordinary_only() {
+            return;
+        }
         if !super::json_tree::value_depth([self], 0) {
             out.fail(WireError::Depth);
             return;
@@ -801,7 +600,7 @@ impl crate::wire::Wire for crate::BlockPos {
     fn take(
         input: &mut crate::wire::Reader<'_>,
     ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        input.nested(|input| {
+        input.record(|input| {
             Ok(Self {
                 x: input.take()?,
                 y: input.take()?,
@@ -880,7 +679,7 @@ impl crate::wire::Wire for crate::NeighbourUpdate {
     fn take(
         input: &mut crate::wire::Reader<'_>,
     ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        input.nested(|input| {
+        input.record(|input| {
             Ok(match input.take::<u32>()? {
                 0 => Self::OutputSignal,
                 1 => Self::Neighbours,
@@ -900,7 +699,7 @@ impl crate::wire::Wire for crate::ChunkPos {
     fn take(
         input: &mut crate::wire::Reader<'_>,
     ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        input.nested(|input| {
+        input.record(|input| {
             Ok(Self {
                 x: input.take()?,
                 z: input.take()?,
@@ -918,7 +717,7 @@ impl crate::wire::Wire for crate::BoundingBox {
     fn take(
         input: &mut crate::wire::Reader<'_>,
     ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        input.nested(|input| {
+        input.record(|input| {
             Ok(Self {
                 min: input.take()?,
                 max: input.take()?,
@@ -927,9 +726,12 @@ impl crate::wire::Wire for crate::BoundingBox {
     }
 }
 impl crate::wire::Wire for crate::LevelDimension {
-    layout_fields!("tag" => u32, "0:Overworld" => (), "1:Nether" => (), "2:End" => (), "3:Custom" => crate::LevelKey);
+    layout_fields!(ordinary_only "level-dimension:v1"; "tag" => u32, "0:Overworld" => (), "1:Nether" => (), "2:End" => (), "3:Custom" => crate::LevelKey);
     const MIN: usize = 4;
     fn put(&self, out: &mut crate::wire::Writer) {
+        if !out.ordinary_only() {
+            return;
+        }
         match self {
             Self::Overworld => out.put(&0u32),
             Self::Nether => out.put(&1u32),
@@ -943,7 +745,8 @@ impl crate::wire::Wire for crate::LevelDimension {
     fn take(
         input: &mut crate::wire::Reader<'_>,
     ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        input.nested(|input| {
+        input.ordinary_only()?;
+        input.record(|input| {
             Ok(match input.take::<u32>()? {
                 0 => Self::Overworld,
                 1 => Self::Nether,
@@ -955,9 +758,12 @@ impl crate::wire::Wire for crate::LevelDimension {
     }
 }
 impl crate::wire::Wire for serde_json::Map<String, serde_json::Value> {
-    layout_fields!("json" => String);
+    layout_via!(String, "validated-json-object:v1", ordinary_only);
     const MIN: usize = 4;
     fn put(&self, out: &mut crate::wire::Writer) {
+        if !out.ordinary_only() {
+            return;
+        }
         if !super::json_tree::value_depth(self.values(), 1) {
             out.fail(WireError::Depth);
             return;
@@ -1039,98 +845,6 @@ impl crate::wire::Wire for crate::ConnectionKind {
 }
 
 #[allow(unreachable_patterns, unused_variables)]
-impl crate::wire::Wire for crate::AttachmentRowError {
-    layout_fields!("tag" => u32, "0:Value" => crate::AttachmentError, "1:StaleHolder" => (), "2:HolderBusy" => (), "3:UnsupportedHolder" => &'static str);
-    const MIN: usize = 4;
-    fn put(&self, out: &mut crate::wire::Writer) {
-        match self {
-            Self::Value(f0) => {
-                out.put(&0u32);
-                out.put(f0);
-            }
-            Self::StaleHolder => out.put(&1u32),
-            Self::HolderBusy => out.put(&2u32),
-            Self::UnsupportedHolder(kind) => {
-                out.put(&3u32);
-                out.put(kind);
-            }
-            _ => {
-                out.fail(crate::wire::WireError::Invalid(
-                    "unknown AttachmentRowError",
-                ));
-            }
-        }
-    }
-    fn take(
-        input: &mut crate::wire::Reader<'_>,
-    ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        input.nested(|input| {
-            Ok(match input.take::<u32>()? {
-                0 => Self::Value(input.take()?),
-                1 => Self::StaleHolder,
-                2 => Self::HolderBusy,
-                3 => Self::UnsupportedHolder(input.take()?),
-                tag => return Err(crate::wire::WireError::Tag(tag)),
-            })
-        })
-    }
-}
-#[allow(unreachable_patterns, unused_variables)]
-impl crate::wire::Wire for crate::AttachmentError {
-    layout_fields!("tag" => u32, "0:MissingHolder" => (), "1:TypeMismatch" => (), "2:Decode" => (), "3:Encode" => (), "4:InvalidNamespace" => (), "5:InvalidCopyPolicy" => (), "6:InvalidSyncPolicy" => (), "7:HolderBusy" => (), "8:UnsupportedHolder" => &'static str, "9:Undeclared.package_id" => String, "9:Undeclared.attachment_id" => String);
-    const MIN: usize = 4;
-    fn put(&self, out: &mut crate::wire::Writer) {
-        out.put(&match self {
-            Self::MissingHolder => 0u32,
-            Self::TypeMismatch => 1u32,
-            Self::Decode => 2u32,
-            Self::Encode => 3u32,
-            Self::InvalidNamespace => 4u32,
-            Self::InvalidCopyPolicy => 5u32,
-            Self::InvalidSyncPolicy => 6u32,
-            Self::HolderBusy => 7u32,
-            Self::UnsupportedHolder(kind) => {
-                out.put(&8u32);
-                out.put(kind);
-                return;
-            }
-            Self::Undeclared {
-                package_id,
-                attachment_id,
-            } => {
-                out.put(&9u32);
-                out.put(package_id);
-                out.put(attachment_id);
-                return;
-            }
-            _ => {
-                out.fail(crate::wire::WireError::Invalid("unknown AttachmentError"));
-                return;
-            }
-        });
-    }
-    fn take(
-        input: &mut crate::wire::Reader<'_>,
-    ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        Ok(match input.take::<u32>()? {
-            0 => Self::MissingHolder,
-            1 => Self::TypeMismatch,
-            2 => Self::Decode,
-            3 => Self::Encode,
-            4 => Self::InvalidNamespace,
-            5 => Self::InvalidCopyPolicy,
-            6 => Self::InvalidSyncPolicy,
-            7 => Self::HolderBusy,
-            8 => Self::UnsupportedHolder(input.take()?),
-            9 => Self::Undeclared {
-                package_id: input.take()?,
-                attachment_id: input.take()?,
-            },
-            tag => return Err(crate::wire::WireError::Tag(tag)),
-        })
-    }
-}
-#[allow(unreachable_patterns, unused_variables)]
 impl crate::wire::Wire for crate::TicketOwner {
     layout_fields!("tag" => u32, "0:Block" => [i32;3], "1:Entity" => u128);
     const MIN: usize = 4;
@@ -1149,129 +863,12 @@ impl crate::wire::Wire for crate::TicketOwner {
     fn take(
         input: &mut crate::wire::Reader<'_>,
     ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        input.nested(|input| {
+        input.record(|input| {
             Ok(match input.take::<u32>()? {
                 0 => Self::Block(input.take()?),
                 1 => Self::Entity(input.take()?),
                 tag => return Err(crate::wire::WireError::Tag(tag)),
             })
-        })
-    }
-}
-#[allow(unreachable_patterns, unused_variables)]
-impl crate::wire::Wire for crate::Holder {
-    layout_fields!("tag" => u32, "0:Entity" => u32, "1:Player" => u128, "2:BlockEntity" => [i32;3], "3:Chunk" => [i32;2], "4:Level" => (), "5:OriginalPlayer" => u64);
-    const MIN: usize = 4;
-    fn put(&self, out: &mut crate::wire::Writer) {
-        match self {
-            Self::Entity(f0) => {
-                out.put(&0u32);
-                out.put(f0);
-            }
-            Self::Player(f0) => {
-                out.put(&1u32);
-                out.put(f0);
-            }
-            Self::BlockEntity(f0) => {
-                out.put(&2u32);
-                out.put(f0);
-            }
-            Self::Chunk(f0) => {
-                out.put(&3u32);
-                out.put(f0);
-            }
-            Self::Level => out.put(&4u32),
-            Self::OriginalPlayer(f0) => {
-                out.put(&5u32);
-                out.put(f0);
-            }
-            _ => {
-                out.fail(crate::wire::WireError::Invalid("unknown Holder"));
-            }
-        }
-    }
-    fn take(
-        input: &mut crate::wire::Reader<'_>,
-    ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        input.nested(|input| {
-            Ok(match input.take::<u32>()? {
-                0 => Self::Entity(input.take()?),
-                1 => Self::Player(input.take()?),
-                2 => Self::BlockEntity(input.take()?),
-                3 => Self::Chunk(input.take()?),
-                4 => Self::Level,
-                5 => Self::OriginalPlayer(input.take()?),
-                tag => return Err(crate::wire::WireError::Tag(tag)),
-            })
-        })
-    }
-}
-#[allow(unreachable_patterns, unused_variables)]
-impl crate::wire::Wire for crate::AttachmentForm {
-    layout_fields!("encoded" => Option<sunrise_core::nbt::Compound>, "policy" => crate::AttachmentPolicy, "write" => crate::AttachmentWrite);
-    const MIN: usize =
-        <::std::option::Option<sunrise_core::nbt::Compound> as crate::wire::Wire>::MIN
-            + <crate::AttachmentPolicy as crate::wire::Wire>::MIN
-            + <crate::AttachmentWrite as crate::wire::Wire>::MIN;
-    fn put(&self, out: &mut crate::wire::Writer) {
-        out.put(&self.encoded);
-        out.put(&self.policy);
-        out.put(&self.write);
-    }
-    fn take(
-        input: &mut crate::wire::Reader<'_>,
-    ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        input.nested(|input| {
-            Ok(Self {
-                encoded: input.take()?,
-                policy: input.take()?,
-                write: input.take()?,
-            })
-        })
-    }
-}
-#[allow(unreachable_patterns, unused_variables)]
-impl crate::wire::Wire for crate::AttachmentPolicy {
-    layout_fields!("copy_on_death" => bool, "sync" => bool);
-    const MIN: usize = <bool as crate::wire::Wire>::MIN + <bool as crate::wire::Wire>::MIN;
-    fn put(&self, out: &mut crate::wire::Writer) {
-        out.put(&self.copy_on_death);
-        out.put(&self.sync);
-    }
-    fn take(
-        input: &mut crate::wire::Reader<'_>,
-    ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        input.nested(|input| {
-            Ok(Self {
-                copy_on_death: input.take()?,
-                sync: input.take()?,
-            })
-        })
-    }
-}
-#[allow(unreachable_patterns, unused_variables)]
-impl crate::wire::Wire for crate::AttachmentWrite {
-    layout_fields!("tag" => u32, "0:Decoded" => (), "1:Default" => (), "2:Set" => ());
-    const MIN: usize = 4;
-    fn put(&self, out: &mut crate::wire::Writer) {
-        out.put(&match self {
-            Self::Decoded => 0u32,
-            Self::Default => 1u32,
-            Self::Set => 2u32,
-            _ => {
-                out.fail(crate::wire::WireError::Invalid("unknown AttachmentWrite"));
-                return;
-            }
-        });
-    }
-    fn take(
-        input: &mut crate::wire::Reader<'_>,
-    ) -> ::std::result::Result<Self, crate::wire::WireError> {
-        Ok(match input.take::<u32>()? {
-            0 => Self::Decoded,
-            1 => Self::Default,
-            2 => Self::Set,
-            tag => return Err(crate::wire::WireError::Tag(tag)),
         })
     }
 }

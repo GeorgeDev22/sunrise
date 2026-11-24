@@ -51,7 +51,10 @@ fn with_loading_client(run: impl FnOnce(&mut Game<'_>)) {
 #[ignore = "daily"]
 fn a_client_start_joins_the_world_rest_worker_before_it_resolves_the_renderers() {
     with_loading_client(|game| {
-        game.publish_initial_client_models().unwrap();
+        game.publish_initial_client_models(vec![
+            crate::game::client_reload::PreparedClientReload::Vanilla(()),
+        ])
+        .unwrap();
         assert!(game.rest_loader.is_none(), "the worker was joined");
         assert!(game.res.rest.get().is_some(), "the rest tables are there");
         assert!(

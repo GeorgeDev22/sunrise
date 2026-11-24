@@ -555,25 +555,28 @@ fn preset_row(state: &State, cursor: (f32, f32), size: (f32, f32)) -> Option<usi
 }
 
 /// A press on the list, the share box or its scrollbar.
-pub(super) fn click(state: &mut State, cursor: (f32, f32), size: (f32, f32)) {
+pub(super) fn click(state: &mut State, cursor: (f32, f32), size: (f32, f32)) -> bool {
     let (top, bottom, left, content) = list_area(state, size);
     let bar = left + ROW_WIDTH + 6.0;
     match state.page {
         Page::Layers => {
             if state.scroll.press(cursor, bar, top, bottom, content) {
-                return;
+                return true;
             }
             state.selected = layer_row(state, cursor, size);
+            state.selected.is_some()
         }
         Page::Presets => {
             let field = share_field(size);
             state.share_focused = ui::hovered(cursor, field[0], field[1], field[2], field[3]);
             if state.preset_scroll.press(cursor, bar, top, bottom, content) {
-                return;
+                return true;
             }
             if let Some(row) = preset_row(state, cursor, size) {
                 state.select_preset(row);
+                return true;
             }
+            state.share_focused
         }
     }
 }
@@ -611,28 +614,31 @@ pub(super) fn row_target(name: &str, rect: [f32; 4], top: f32, bottom: f32) {
         crate::widgets::target_as(rect, crate::widgets::Kind::Row);
     }
 }
-pub(super) fn wheel(state: &mut State, delta: f32, cursor: (f32, f32), size: (f32, f32)) {
+pub(super) fn wheel(state: &mut State, delta: f32, cursor: (f32, f32), size: (f32, f32)) -> bool {
     let (top, bottom, _, content) = list_area(state, size);
     if cursor.1 < top || cursor.1 >= bottom {
-        return;
+        return false;
     }
     match state.page {
         Page::Layers => state.scroll.wheel(delta, LAYER_ROW, top, bottom, content),
         Page::Presets => state
             .preset_scroll
             .wheel(delta, PRESET_ROW, top, bottom, content),
-    }
+    };
+    true
 }
-pub(super) fn drag(state: &mut State, cursor: (f32, f32), size: (f32, f32)) {
+pub(super) fn drag(state: &mut State, cursor: (f32, f32), size: (f32, f32)) -> bool {
     let (top, bottom, _, content) = list_area(state, size);
     match state.page {
         Page::Layers => state.scroll.drag(cursor.1, top, bottom, content),
         Page::Presets => state.preset_scroll.drag(cursor.1, top, bottom, content),
     }
 }
-pub(super) fn release(state: &mut State) {
+pub(super) fn release(state: &mut State) -> bool {
+    let handled = state.scroll.held() || state.preset_scroll.held();
     state.scroll.release();
     state.preset_scroll.release();
+    handled
 }
 
 pub(super) fn draw(
@@ -943,6 +949,7 @@ fn draw_presets(
 /// The item environment of the layer icons: only the grass colormap is needed
 /// (`minecraft:grass` tint of the grass block), as the inventory draws it.
 struct GrassEnv<'a>(&'a ItemRenderer);
+impl item_render::ItemDrawEnv for GrassEnv<'_> {}
 impl ItemEnv for GrassEnv<'_> {
     fn grass_color(&self, temperature: f64, downfall: f64) -> i32 {
         self.0.grass_color(temperature, downfall)
@@ -1089,7 +1096,7 @@ mod tests {
         FlatSettings, Page, Preset, State, click, focus_row, layer_item, list_area,
         selection_after_removal,
     };
-    use crate::item_render::ItemRenderer;
+    use crate::item_render::{ItemRenderer, LayerTints};
     use std::path::Path;
 
     /// Vanilla keeps the deleted row's position selected: the layer that slid
@@ -1151,7 +1158,12 @@ mod tests {
         let tinted: Vec<i32> = super::layer_state(&renderer, "minecraft:grass_block")
             .layers
             .iter()
-            .flat_map(|layer| layer.tints.clone())
+            .flat_map(|layer| match &layer.tints {
+                LayerTints::Owned(tints) => tints.iter().copied(),
+                LayerTints::Special(_) => {
+                    panic!("expected ordinary grass model tints")
+                }
+            })
             .collect();
         assert!(
             !tinted.is_empty() && !tinted.contains(&-65281),

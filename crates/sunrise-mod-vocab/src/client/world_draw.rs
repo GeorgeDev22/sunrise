@@ -75,8 +75,6 @@ pub enum DrawError {
     InvalidWidth,
     /// The batch would exceed this view's setup-time capacity.
     CapacityExceeded,
-    /// A label's text is deeper than 512 component nodes (`MAX_TEXT_DEPTH`).
-    TextTooDeep,
     /// A label's text is otherwise refused at the boundary (`TextFormError`).
     TextRefused,
 }

@@ -20,9 +20,12 @@ pub mod packet_source;
 pub mod parallel;
 pub mod powder_snow;
 #[cfg(test)]
+mod rule_replacements;
+#[cfg(test)]
 mod test_log;
 #[cfg(test)]
 mod test_resources;
+pub use sunrise_client_render::moving_colliders;
 pub use sunrise_client_render::{
     assets, atlas_sources, audio, auth, autotune, ban_notice, bidi, biome, block_edit,
     block_entities, block_entity_anim, block_entity_render, block_sprites, block_states, bluemap,
@@ -189,6 +192,7 @@ pub mod tick_chunk_membership;
 pub mod ticket_levels;
 pub mod title;
 pub mod toasts;
+pub mod tooltip_components;
 pub mod travel_gate;
 pub mod ui_theme;
 pub mod vanillagen;
@@ -218,7 +222,6 @@ pub use sunrise_client_input::gamepad;
 pub use sunrise_client_input::gameplay_guide;
 pub use sunrise_client_input::held;
 pub use sunrise_client_input::input;
-pub use sunrise_client_input::input_queue;
 pub use sunrise_client_input::input_source;
 pub use sunrise_client_input::interaction_input;
 pub use sunrise_client_input::key_names;

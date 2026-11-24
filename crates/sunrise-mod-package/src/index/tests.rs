@@ -798,3 +798,20 @@ fn installing_a_native_mod_checks_its_runtime_files_against_the_manifest() {
     let error = refused.unwrap_err();
     assert!(error.contains("runtime/nav.bin"), "{error}");
 }
+
+#[test]
+fn a_stable_tag_is_only_its_canonical_form() {
+    assert_eq!(stable_tag("26.3-0.1.0"), Some(("26.3", 0)));
+    assert_eq!(stable_tag("26.3.1-1.2.0"), Some(("26.3.1", 1)));
+    for tag in [
+        "026.3-0.1.0",
+        "26.03-0.1.0",
+        "26.3.1.2-0.1.0",
+        "26-0.1.0",
+        "26.3-0.1.0-rc.1",
+        "26.3-0.1",
+        "26.3-0.1.0+build",
+    ] {
+        assert_eq!(stable_tag(tag), None, "{tag}");
+    }
+}

@@ -690,8 +690,7 @@ impl Game<'_> {
                 };
                 let ty = self.target_type(t);
                 // `EntityType.getDefaultLootTable`, in the type's namespace.
-                let (namespace, path) = ty.split_once(':').unwrap_or(("minecraft", ty.as_str()));
-                let table = format!("{namespace}:entities/{path}");
+                let table = sunrise_client::mobs::drops::entity_type_loot_table(&ty);
                 if t == Target::Player || !world_items!(self).has_loot_table(&table) {
                     return Err(err(
                         "commands.drop.no_loot_table.entity",

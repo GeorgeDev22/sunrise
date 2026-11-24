@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Жаңа сөйлесу сызығы тұтас болып көрінудің орнына, өшіп жатқанда, сол жақтан сырғытады.",
   "sunrise.extras.chat_indicator": "Хабарлама көрсеткіші",
   "sunrise.extras.chat_indicator.tooltip": "Сөйлесу жолының сол жағындағы түсті жолақ.",
-  "sunrise.extras.discord_presence": "Discord толық күйі",
-  "sunrise.extras.discord_presence.tooltip": "Discord жұмыс істеп тұрған кезде Discord профиліңізде Sunrise ойнатуды көрсетеді: мәзірлер, жалғыз ойыншы немесе көп ойыншы, өлшем және ойнау уақыты. Ешқашан әлемнің атауы немесе сервер мекенжайы.",
   "sunrise.extras.dynamic_lights": "Динамикалық шамдар",
   "sunrise.extras.dynamic_lights.tooltip": "Ұстап тұрған, түсірілген немесе жанып тұрған шамдар және басқа да жарық көздері олардың айналасындағы блоктарды жағады.",
   "sunrise.extras.fullbright": "Fullbright",

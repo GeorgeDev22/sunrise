@@ -890,37 +890,104 @@ mod tests {
     }
 
     #[test]
-    fn declaration_boundaries_apply_to_dependencies_and_pair_rules() {
+    fn long_policy_reasons_are_preserved_for_dependencies_and_pair_rules() {
+        let reason = "Some context. ".repeat(100);
+        let entry = format!("target={{version='^1',reason='{reason}'}}");
+        let source = manifest(
+            "owner",
+            &format!("[dependencies]\n{entry}\n[incompatible]\n{entry}\n[discouraged]\n{entry}"),
+        );
+        let dependency = from_manifest(&source.dependencies, Side::Client);
+        assert_eq!(dependency[0].reason.as_deref(), Some(reason.as_str()));
+        let pairs = rules(&source, Side::Client);
+        assert_eq!(pairs.len(), 2);
+        for rule in pairs {
+            assert_eq!(rule.reason.as_deref(), Some(reason.as_str()));
+        }
+    }
+
+    #[test]
+    fn policy_schema_errors_are_refused_when_the_manifest_is_parsed() {
+        let assert_location = |result: Result<crate::Manifest, String>, line, column| {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains(&format!(" (line {line}, column {column})")),
+                "{error}"
+            );
+        };
         for table in ["dependencies", "incompatible", "discouraged"] {
             let manifest = |entry: &str| {
                 crate::Manifest::parse(&format!(
-                    "id='owner'\nname='Owner'\nversion='1'\napi='0.2'\ncapabilities=['registries']\n[{table}]\n{entry}"
+                    "id='owner'\nname='Owner'\nversion='1'\n[{table}]\n{entry}"
                 ))
             };
-            assert!(
-                manifest(&format!(
-                    "target={{version='^1',reason='{}',url='https://example.test'}}",
-                    "a".repeat(512)
-                ))
-                .is_ok()
+            assert_location(
+                manifest("target={version='^1',url='http://example.test'}"),
+                5,
+                26,
             );
-            let error = manifest(&format!(
-                "target={{version='^1',reason='{}'}}",
-                "a".repeat(513)
-            ))
-            .unwrap_err();
-            assert!(error.contains("target") && error.contains("reason over 512 bytes"));
-            assert!(
-                manifest("target={version='^1',url='http://example.test'}")
-                    .unwrap_err()
-                    .contains("url is not https://")
+            assert_location(
+                crate::Manifest::parse(&format!(
+                    "id='owner'\nname='Owner'\nversion='1'\n[{table}.target]\nversion='^1'\nreason='Why'\nurl='http://example.test'\n"
+                )),
+                7,
+                5,
             );
-            assert!(
-                manifest("'bad id'='^1'")
-                    .unwrap_err()
-                    .contains("invalid dependency id")
-            );
+            assert_location(manifest("target={version='^1',reason=42}"), 5, 29);
+            assert_location(manifest("'bad id'='^1'"), 5, 1);
             assert!(manifest("target='not a semver requirement'").is_err());
+        }
+        assert_location(
+            crate::Manifest::parse(
+                "id='owner'\nname='Owner'\nversion='1'\nload_before = ['first', 'bad id']\n",
+            ),
+            4,
+            25,
+        );
+        assert_location(
+            crate::Manifest::parse(
+                "id='owner'\nname='Owner'\nversion='1'\n\
+                 dependencies = { first = { version = '*', url = 'https://a.test' }, second = { version = '*', url = 'http://b.test' } }\n",
+            ),
+            4,
+            101,
+        );
+        assert_location(
+            crate::Manifest::parse(
+                "id='owner'\nname='Owner'\nversion='1'\n[dependencies]\ntarget={optional=true}\n",
+            ),
+            5,
+            8,
+        );
+        assert_location(
+            crate::Manifest::parse(
+                "id='owner'\nname='Owner'\nversion='1'\n[dependencies.target]\noptional=true\n",
+            ),
+            4,
+            1,
+        );
+    }
+
+    #[test]
+    fn positional_policy_arrays_are_refused() {
+        for (table, fields) in [
+            (
+                "dependencies",
+                "'^1', false, 'both', 'Context', 'https://example.test', 'after'",
+            ),
+            (
+                "incompatible",
+                "'<2', 'Conflicts', 'https://example.test/old', 'client'",
+            ),
+            (
+                "discouraged",
+                "'*', 'Slow', 'https://example.test/slow', 'server'",
+            ),
+        ] {
+            let parsed = crate::Manifest::parse(&format!(
+                "id='owner'\nname='Owner'\nversion='1'\n[{table}]\ntarget = [{fields}]"
+            ));
+            assert!(parsed.is_err(), "{table} accepted an array");
         }
     }
 

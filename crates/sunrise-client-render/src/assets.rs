@@ -90,6 +90,8 @@ pub struct RenderAssets {
     pub model_gallery: Vec<Value>,
     pub animations: Vec<crate::sprites::SpriteAnimation>,
     pub sprite_layers: std::collections::BTreeMap<String, u32>,
+    /// The first block sprite name at each layer, in `sprite_layers`' name order.
+    pub(crate) sprite_names: Vec<Option<String>>,
     /// The layers of the texture files read on their own (emissive overlays), by raw name.
     pub file_layers: std::collections::BTreeMap<String, u32>,
     /// OptiFine's emissive block overlays: base sprite and overlay sprite names.
@@ -115,6 +117,35 @@ pub struct RenderAssets {
     pub generation: u64,
 }
 impl RenderAssets {
+    /// The empty render generation before the first reload's apply.
+    pub fn unpublished() -> Self {
+        Self {
+            sprite_size: 1,
+            sprite_minimum_size: 1,
+            pixels: SpritePixels::new(Vec::new()),
+            texture_layers: 0,
+            model_catalog: Default::default(),
+            model_library: Err("models have not been published".into()),
+            model_placements: Vec::new(),
+            model_gallery: Vec::new(),
+            animations: Vec::new(),
+            sprite_layers: Default::default(),
+            sprite_names: Vec::new(),
+            file_layers: Default::default(),
+            emissive: Vec::new(),
+            translucent_layers: Vec::new(),
+            sprite_mips: Vec::new(),
+            pbr_normals: Vec::new(),
+            pbr_specular: Vec::new(),
+            pbr_size: 0,
+            connected: Default::default(),
+            fusion: Default::default(),
+            mod_animations: Default::default(),
+            mod_pipelines: Default::default(),
+            generation: 0,
+        }
+    }
+
     /// Resolve a registered standalone model in this published store.
     pub fn model(
         &self,
@@ -138,6 +169,22 @@ impl RenderAssets {
         id: &mod_api::Identifier,
     ) -> std::result::Result<mod_api::RenderPipelineRef, mod_api::RenderPipelineError> {
         self.mod_pipelines.resolve(id)
+    }
+
+    /// Validate a handle for an API that only accepts registered standalone models.
+    pub fn validate_standalone_model(
+        &self,
+        model: mod_api::ModelRef,
+    ) -> std::result::Result<(), mod_api::ModelError> {
+        use mod_api::__private::game::Fields;
+        let fields = model.fields();
+        if fields.generation != self.generation {
+            return Err(mod_api::ModelError::StaleModel);
+        }
+        if !self.model_catalog.is_standalone_slot(fields.slot) {
+            return Err(mod_api::ModelError::UnknownModel);
+        }
+        Ok(())
     }
 
     /// Validate a handle once at consumption, before appending any geometry.
@@ -333,8 +380,7 @@ impl Assets {
     ) -> Result<RenderAssets> {
         RenderAssets::load_with_parsed(root, self, true, Some(parsed))
     }
-    /// [`Assets::reload`] for a server, which draws nothing: the sprites'
-    /// layers, without the block or item models or the textures' pixels.
+    /// [`Assets::reload`] for a server, which has no sprites or baked models.
     pub fn reload_for_server(
         &self,
         root: &crate::resource_source::ResourceRoot,
@@ -366,10 +412,12 @@ impl RenderAssets {
         let mut sprites = if draws {
             crate::sprites::Sprites::with_disk_cache(root)
         } else {
-            crate::sprites::Sprites::for_server(root.source().clone())
+            crate::sprites::Sprites::default()
         };
-        for name in MATERIALS {
-            sprites.insert(&format!("minecraft:block/{name}"))?;
+        if draws {
+            for name in MATERIALS {
+                sprites.insert(&format!("minecraft:block/{name}"))?;
+            }
         }
         // A server draws no block and no item: its block models (about 24 MB
         // baked) and item model library (7 MB) stay empty.
@@ -406,35 +454,37 @@ impl RenderAssets {
             let _step = crate::spans::startup::step("core.item_library");
             parsed.into_item_library()
         };
-        // Fluids are drawn by the fluid renderer, not block models; breaking
-        // progress uses the destroy-stage overlays.
-        for name in [
-            "water_still",
-            "water_flow",
-            "water_overlay",
-            "lava_still",
-            "lava_flow",
-        ] {
-            sprites.insert_in_blocks(&format!("minecraft:block/{name}"))?;
-        }
-        for model in crate::fluid_models::resolved() {
+        if draws {
+            // Fluids are drawn by the fluid renderer, not block models; breaking
+            // progress uses the destroy-stage overlays.
             for name in [
-                Some(&model.still),
-                Some(&model.flowing),
-                model.overlay.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                sprites.insert_in_blocks(name)?;
+                "water_still",
+                "water_flow",
+                "water_overlay",
+                "lava_still",
+                "lava_flow",
+            ] {
+                sprites.insert_in_blocks(&format!("minecraft:block/{name}"))?;
             }
-        }
-        if crate::fluid_models::any_flat_look() {
-            sprites.insert_flat(crate::fluid_models::FLAT_SPRITE)?;
-        }
-        for stage in 0..10 {
-            sprites.insert(&format!("minecraft:block/destroy_stage_{stage}"))?;
-            sprites.insert(&format!("minecraft:block/destroy_oit_stage_{stage}"))?;
+            for model in crate::fluid_models::resolved() {
+                for name in [
+                    Some(&model.still),
+                    Some(&model.flowing),
+                    model.overlay.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    sprites.insert_in_blocks(name)?;
+                }
+            }
+            if crate::fluid_models::any_flat_look() {
+                sprites.insert_flat(crate::fluid_models::FLAT_SPRITE)?;
+            }
+            for stage in 0..10 {
+                sprites.insert(&format!("minecraft:block/destroy_stage_{stage}"))?;
+                sprites.insert(&format!("minecraft:block/destroy_oit_stage_{stage}"))?;
+            }
         }
         let fusion = if draws {
             let _step = crate::spans::startup::step("core.fusion");
@@ -502,14 +552,18 @@ impl RenderAssets {
         if draws {
             emissive = crate::native_emissive::load_optifine(root.source(), &mut sprites);
         }
-        sprites.save_disk_cache();
         if draws {
+            sprites.save_disk_cache();
             sprites.finish();
-        } else {
-            sprites.finish_without_pixels();
         }
         // `finish` grows the buffer by doubling: keep only the bytes in use.
         sprites.pixels.shrink_to_fit();
+        // Multiple block sprites can share one layer. Keep the same first name that looking up
+        // the layer in the name-sorted map would give.
+        let mut sprite_names = vec![None; sprites.count()];
+        for (name, &layer) in &sprites.layers {
+            sprite_names[layer as usize].get_or_insert_with(|| name.clone());
+        }
         let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         Ok(Self {
             sprite_size: sprites.size,
@@ -522,6 +576,7 @@ impl RenderAssets {
             model_gallery: models.states,
             animations: sprites.animations,
             sprite_layers: sprites.layers,
+            sprite_names,
             file_layers: sprites.files,
             emissive,
             translucent_layers: sprites.translucent,
@@ -531,9 +586,17 @@ impl RenderAssets {
             pbr_size: sprites.pbr_size,
             connected,
             fusion,
-            mod_animations: crate::mod_animations::Animations::load(root.source()),
+            mod_animations: if draws {
+                crate::mod_animations::Animations::load(root.source())
+            } else {
+                Default::default()
+            },
             // A required pipeline that doesn't build fails the load: nothing of it is published.
-            mod_pipelines: crate::mod_pipelines::Pipelines::load(root.source(), generation)?,
+            mod_pipelines: if draws {
+                crate::mod_pipelines::Pipelines::load(root.source(), generation)?
+            } else {
+                Default::default()
+            },
             generation,
         })
     }
@@ -666,7 +729,13 @@ mod tests {
         assert_eq!((drink.ticks(), drink.animation), (32, UseAnimation::Drink));
         assert_eq!(drink.sound, "minecraft:entity.generic.drink");
         assert!(!drink.particles);
-        assert_eq!(milk.use_remainder.as_deref(), Some("minecraft:bucket"));
+        let remainder = |info: &sunrise_items::items::ItemInfo| {
+            info.component_prototype
+                .data()?
+                .template_stack("minecraft:use_remainder")
+                .map(|stack| stack.item)
+        };
+        assert_eq!(remainder(milk).as_deref(), Some("minecraft:bucket"));
         let honey = items.get("minecraft:honey_bottle").expect("honey bottle");
         let sip = honey.consumable.as_ref().unwrap();
         assert_eq!(sip.ticks(), 40);
@@ -677,15 +746,12 @@ mod tests {
                 "minecraft:poison".into()
             ])]
         );
-        assert_eq!(
-            honey.use_remainder.as_deref(),
-            Some("minecraft:glass_bottle")
-        );
+        assert_eq!(remainder(honey).as_deref(), Some("minecraft:glass_bottle"));
         let kelp = items.get("minecraft:dried_kelp").unwrap();
         let bite = kelp.consumable.as_ref().unwrap();
         assert_eq!((bite.ticks(), bite.animation), (16, UseAnimation::Eat));
         assert_eq!(bite.sound, "minecraft:entity.generic.eat");
-        assert!(bite.particles && kelp.use_remainder.is_none());
+        assert!(bite.particles && remainder(kelp).is_none());
         let chorus = items.get("minecraft:chorus_fruit").unwrap();
         assert_eq!(
             chorus.consumable.as_ref().unwrap().effects,

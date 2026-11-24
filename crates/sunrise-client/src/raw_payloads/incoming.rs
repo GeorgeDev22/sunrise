@@ -34,8 +34,10 @@ pub struct Incoming {
 const _: () = assert!(std::mem::size_of::<Incoming>() <= 256);
 pub enum Classified {
     Application(Incoming),
-    /// A raw channel's message, once for each declaring mod in load order.
+    /// A raw channel's message, once per non-poisoned receiver in load order.
     Raw(Vec<Incoming>),
+    /// A negotiated packet whose receiving callback has already panicked.
+    Skipped,
     Other(CustomPayload),
 }
 #[derive(Debug)]
@@ -73,6 +75,9 @@ impl Incoming {
             Classified::Raw(mut incoming) if incoming.len() == 1 => Ok(incoming.remove(0)),
             Classified::Raw(_) => Err(PayloadSendError::EncodeFailed(
                 "a raw channel has several receivers".into(),
+            )),
+            Classified::Skipped => Err(PayloadSendError::EncodeFailed(
+                "the receiving callback was skipped".into(),
             )),
             Classified::Other(packet) => {
                 Err(PayloadSendError::UnknownPayload(PayloadId(packet.channel)))
@@ -113,12 +118,16 @@ impl Incoming {
             return Ok(Classified::Other(packet));
         }
         let receiver = match epoch.peer.receiver(phase, &packet.channel) {
-            Ok(receiver) => receiver.clone(),
+            Ok(receiver) => receiver,
             Err(PayloadSendError::UnknownPayload(_)) => {
                 return Self::raw(transport, &epoch, phase, packet);
             }
             Err(error) => return Err(fail(error, packet)),
         };
+        // Negotiation still applies to a poisoned channel, but no callback credit is needed.
+        if receiver.poisoned() {
+            return Ok(Classified::Skipped);
+        }
         // A client over the serverbound byte budget loses the send, counted, never the session.
         if epoch.peer.local.has_droppable()
             && epoch.peer.side == super::Side::Server
@@ -142,6 +151,7 @@ impl Incoming {
             id: PayloadId(packet.channel.clone()),
             error,
         })?;
+        let receiver = receiver.clone();
         let main = epoch.main_task();
         Ok(Classified::Application(Self {
             epoch,
@@ -170,6 +180,9 @@ impl Incoming {
         }
         let mut deliveries = Vec::with_capacity(receivers.len());
         for receiver in receivers {
+            if receiver.poisoned() {
+                continue;
+            }
             let owned = packet.channel.capacity().saturating_add(packet.data.len());
             let lease = transport.reserve_ingress(owned).map_err(|error| Failure {
                 id: PayloadId(packet.channel.clone()),

@@ -1,4 +1,3 @@
-// game-module-cfg: always
 //! The game-test runner: `GameTestInfo`, `GameTestRunner`, `GameTestTicker`,
 //! `MultipleTestTracker`, `ReportGameListener`, `TestCommand.trackAndStartRunner`
 //! and the two test instance types (`BlockBasedTestInstance` and
@@ -180,6 +179,7 @@ impl Info {
 pub(super) struct Batch {
     pub(super) index: i32,
     pub(super) environment: String,
+    dimension: String,
     pub(super) infos: Vec<Info>,
 }
 
@@ -232,33 +232,25 @@ struct Tracked {
     failed: bool,
 }
 
-/// `GameTestBatchFactory.fromGameTestInfo(size)`: one batch per environment
-/// (and dimension), `size` to a batch.
+/// `GameTestBatchFactory.fromGameTestInfo(size)`: partition each environment
+/// and definition dimension into batches of up to `size`.
 fn batch_infos(infos: Vec<Info>, size: usize) -> Vec<Batch> {
     let mut batches: Vec<Batch> = Vec::new();
-    let mut counts: Vec<(String, i32)> = Vec::new();
     for info in infos {
-        let env = info.def.environment.clone();
-        let open = batches
-            .iter_mut()
-            .find(|b| b.environment == env && b.infos.len() < size);
-        if let Some(batch) = open {
-            batch.infos.push(info);
-            continue;
-        }
-        let index = match counts.iter_mut().find(|(e, _)| *e == env) {
-            Some((_, n)) => {
-                *n += 1;
-                *n
+        let index = match batches.iter_mut().rev().find(|batch| {
+            batch.environment == info.def.environment && batch.dimension == info.def.dimension
+        }) {
+            Some(batch) if batch.infos.len() < size => {
+                batch.infos.push(info);
+                continue;
             }
-            None => {
-                counts.push((env.clone(), 0));
-                0
-            }
+            Some(full) => full.index + 1,
+            None => 0,
         };
         batches.push(Batch {
             index,
-            environment: env,
+            environment: info.def.environment.clone(),
+            dimension: info.def.dimension.clone(),
             infos: vec![info],
         });
     }
@@ -289,6 +281,7 @@ pub(super) fn verify_batches(infos: &[Info], mut next_id: impl FnMut() -> u32) -
             batches.push(Batch {
                 index: ordinal as i32,
                 environment: info.def.environment.clone(),
+                dimension: info.def.dimension.clone(),
                 infos: copies,
             });
         }
@@ -1351,11 +1344,12 @@ impl Game<'_> {
         if !passed && counted {
             self.game_tests.failed.push(info.key.clone());
         }
-        // The runner's batch listener.
+        // GameTestRunner's batch listener clears forces in testInfo.getLevel(),
+        // the level tick_test runs with in place.
         if passed {
             self.remove_test_barriers(info.pos);
         } else if halt {
-            self.release_forced_chunks();
+            self.streaming.clear_forced();
             self.clear_game_tests();
             return;
         }
@@ -1365,7 +1359,7 @@ impl Game<'_> {
         runner.batch_pending = runner.batch_pending.saturating_sub(1);
         if runner.batch_pending == 0 {
             let next = runner.current + 1;
-            self.release_forced_chunks();
+            self.streaming.clear_forced();
             self.run_batch(next);
         }
     }
@@ -1541,7 +1535,7 @@ impl Game<'_> {
             self.console_broadcast = Some(true);
             self.broadcast_to_admins(text);
             self.console_broadcast = None;
-            self.send_admin_feedback(None);
+            self.send_admin_feedback();
             self.admin_feedback.clear();
         }
     }
@@ -1560,11 +1554,7 @@ impl Game<'_> {
                 });
             });
             if delivered.is_some() {
-                let issuer = match recipient {
-                    Target::Guest(conn) => Some(conn),
-                    _ => None,
-                };
-                self.send_admin_feedback(issuer);
+                self.send_admin_feedback();
             }
         } else if !context.source.silent {
             self.with_source(context.source, |g| {

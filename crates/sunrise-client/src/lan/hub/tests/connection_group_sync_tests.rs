@@ -321,7 +321,7 @@ fn viewed_group_bundle_keeps_a_normal_scoped_run_first_and_omits_metadata_withou
         for packet in packets {
             match packet {
                 viewed_levels::ScopedPacket::Play(id, data) => {
-                    let mut w = sunrise_protocol::buf::Writer::new();
+                    let mut w = sunrise_core::vanilla_bytes::Writer::new();
                     w.varint(id);
                     w.bytes(data);
                     vanilla.push(w.data);

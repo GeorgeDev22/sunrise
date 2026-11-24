@@ -920,7 +920,7 @@ impl B {
                 {
                     return false;
                 }
-                if !m.on_ground
+                if !m.ground.on_ground
                     || m.fluids.in_water
                     || super::breeze::pose(m) != super::breeze::STANDING
                 {
@@ -1292,7 +1292,7 @@ fn shoot_tick(m: &mut Mob, cx: &mut Bx) {
 }
 /// `LongJump.canRun`.
 fn long_jump_can_run(m: &mut Mob, cx: &mut Bx) -> bool {
-    if !m.on_ground && !m.fluids.in_water {
+    if !m.ground.on_ground && !m.fluids.in_water {
         return false;
     }
     if m.floats() {
@@ -1379,7 +1379,7 @@ fn long_jump_tick(m: &mut Mob, cx: &mut Bx) {
         return;
     }
     let landed_in_water = m.fluids.in_water && !mem(m).breeze_leaving_water.present();
-    if pose == super::breeze::LONG_JUMPING && (m.on_ground || landed_in_water) {
+    if pose == super::breeze::LONG_JUMPING && (m.ground.on_ground || landed_in_water) {
         breeze_sound(m, cx, "entity.breeze.land", 1.0);
         super::breeze::set_pose(m, super::breeze::STANDING);
         let hurt = mem(m).hurt_by.present();

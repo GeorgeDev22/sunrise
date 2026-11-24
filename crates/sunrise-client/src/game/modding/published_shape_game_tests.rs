@@ -291,7 +291,7 @@ fn pathfinding_stands_on_the_published_collision_top() {
             assert_eq!(finder.static_floor(2, 65, 2), 64.5);
             drop(finder);
             // `MoveControl.tick`: standing on the published top, walking on, it doesn't jump.
-            zombie.on_ground = true;
+            zombie.ground.on_ground = true;
             zombie.ai.mov.wanted = [5.5, 64.5, 2.5];
             zombie.ai.mov.speed_modifier = 1.0;
             zombie.ai.mov.operation = sunrise_client::mobs::control::Operation::MoveTo;
@@ -434,17 +434,18 @@ fn an_aborted_publish_restores_the_shape_and_notifies_the_neighbours() {
                 .unwrap()
         );
         let entity = game.block_entity(level, pos).unwrap();
-        let abort = game.transaction_open();
-        assert_eq!(
-            game.block_entity_set_shapes(entity, Some(shapes(&[LOW], &[TALL]))),
-            Ok(true)
-        );
-        // What the publish scheduled is dropped, so only the abort's notice can schedule again.
-        let chunk = sunrise_core::position::ChunkPos::new(0, 0);
-        game.block_ticks.remove_chunk(chunk);
-        game.block_ticks.add_empty_chunk(chunk).unwrap();
-        assert_eq!(game.block_ticks.fluids.count(), 0);
-        game.transaction_close(&abort, false);
+        game.storage_scope(|game, _| {
+            assert_eq!(
+                game.block_entity_set_shapes(entity, Some(shapes(&[LOW], &[TALL]))),
+                Ok(true)
+            );
+            // What the publish scheduled is dropped, so only the abort's notice can schedule again.
+            let chunk = sunrise_core::position::ChunkPos::new(0, 0);
+            game.block_ticks.remove_chunk(chunk);
+            game.block_ticks.add_empty_chunk(chunk).unwrap();
+            assert_eq!(game.block_ticks.fluids.count(), 0);
+            ((), false)
+        });
         assert_eq!(
             game.level_block_shape(level, state, pos, BlockShapeKind::Collision),
             Some(vec![HALF])

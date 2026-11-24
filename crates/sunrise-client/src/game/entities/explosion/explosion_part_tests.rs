@@ -139,7 +139,16 @@ fn block_parts_xp_and_explosion_contract() {
                         tool: Option<&sunrise_client::items::ItemStack>,
                         override_xp| {
                 game.with_level(|_, level, _| {
-                    level.block_dropped(pos, state, None, tool, Vec::new(), override_xp)
+                    let block_entity = level.resident_block_entity(pos);
+                    level.block_dropped(
+                        pos,
+                        state,
+                        None,
+                        tool,
+                        block_entity,
+                        Vec::new(),
+                        override_xp,
+                    )
                 })
                 .experience
             };
@@ -173,7 +182,12 @@ fn block_parts_xp_and_explosion_contract() {
             assert_eq!(drop(game, ore, Some(&silk), xp), 3);
             *game.held_mut() = None;
             assert_eq!(drop(game, spawner, Some(&silk), None), 7);
-            for (answer, expected) in [(-1, 0), (i32::MAX, 32767), (7, 7)] {
+            for (answer, expected) in [
+                (-1, 0),
+                (50_000, 50_000),
+                (i32::MAX, i32::MAX as u32),
+                (7, 7),
+            ] {
                 amount.store(answer, Ordering::Relaxed);
                 assert_eq!(drop(game, ore, None, None), expected);
             }
@@ -229,7 +243,7 @@ fn block_parts_xp_and_explosion_contract() {
             let chest_handle = game
                 .block_entity(game.level("minecraft:overworld").unwrap(), [1, 64, 1])
                 .unwrap();
-            let mut drops = ExplosionDrops::default();
+            let mut drops = Vec::new();
             for x in 1..=4 {
                 game.explosion_hit_block(
                     [x, 64, 1],
@@ -260,7 +274,7 @@ fn block_parts_xp_and_explosion_contract() {
                     sunrise_client::containers::BlockEntity::Chest(contents),
                 );
                 blast.1.store(mode, Ordering::Relaxed);
-                let mut drops = ExplosionDrops::default();
+                let mut drops = Vec::new();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     game.explosion_hit_block(
                         [1, 64, 1],
@@ -513,7 +527,7 @@ fn block_parts_answer_drops_from_explosions() {
         let start = blast();
         // Each row: the block at x 2 (its part answers) and x 3 (unanswered).
         let hit = |game: &mut Game<'_>, state, z| {
-            let mut drops = ExplosionDrops::default();
+            let mut drops = Vec::new();
             for x in 2..=3 {
                 game.world.set(x, 64, z, state).unwrap();
                 if state == dirt {
@@ -541,7 +555,7 @@ fn block_parts_answer_drops_from_explosions() {
                 .unwrap();
                 assert_eq!(game.world.block(x, 64, z), game.world.air);
             }
-            drops.stacks
+            drops
         };
         // Refused dirt drops nothing; the dirt beside it drops one.
         let stacks = hit(game, dirt, 1);
@@ -592,7 +606,11 @@ impl BlockPart for SkullProof {
         host: &dyn mod_api::Host,
         event: &mut CanEntityDestroyEvent,
     ) -> Option<bool> {
-        let kind = event.entity.kind(host).map(|kind| kind.id(host).to_owned());
+        let kind = event
+            .entity
+            .kind(host)
+            .and_then(|kind| kind.id(host))
+            .map(|name| name.as_str().to_owned());
         let position = event.entity.position(host);
         let skull = kind.as_deref() == Some("minecraft:wither_skull")
             && position.is_some_and(|p| (1.0..=2.5).contains(&p[0]));

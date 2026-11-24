@@ -140,7 +140,24 @@ impl Game<'_> {
     /// factory chooses the type based on the attacker; an explicit registry
     /// type must not. Other registered types keep their id and tags as `Named`.
     pub(in crate::game) fn damage_kind(catalog: &DamageCatalog, ty: &str) -> DamageKind {
-        match ty.strip_prefix("minecraft:").unwrap_or(ty) {
+        Self::builtin_damage_kind(ty)
+            .or_else(|| NamedDamage::registered(catalog, ty).map(DamageKind::Named))
+            .unwrap_or(DamageKind::Generic)
+    }
+
+    /// Resolve a mod-supplied source against the world's registry, with no default on a miss.
+    pub(in crate::game) fn registered_damage_kind(
+        catalog: &DamageCatalog,
+        ty: &str,
+    ) -> Option<DamageKind> {
+        match Self::builtin_damage_kind(ty) {
+            Some(kind) => catalog.id(ty).map(|_| kind),
+            None => NamedDamage::registered(catalog, ty).map(DamageKind::Named),
+        }
+    }
+
+    fn builtin_damage_kind(ty: &str) -> Option<DamageKind> {
+        Some(match ty.strip_prefix("minecraft:").unwrap_or(ty) {
             "player_attack" => DamageKind::PlayerAttack,
             "mace_smash" => DamageKind::MaceSmash,
             "spear" => DamageKind::Spear,
@@ -181,10 +198,8 @@ impl Game<'_> {
             "wind_charge" => DamageKind::WindCharge,
             "wither" => DamageKind::Wither,
             "generic" => DamageKind::Generic,
-            _ => {
-                NamedDamage::registered(catalog, ty).map_or(DamageKind::Generic, DamageKind::Named)
-            }
-        }
+            _ => return None,
+        })
     }
     /// `DamageCommand.damage`: apply its source and report an accepted hit.
     pub(super) fn cmd_damage(&mut self, ctx: &Context) -> R<i32> {
@@ -270,6 +285,7 @@ impl Game<'_> {
                 .and_then(|target| self.network_entity_id(target))
                 .unwrap_or(0),
         );
+        attack.direct_type = direct.map(|target| self.target_type(target));
         match direct {
             Some(Target::Projectile(id)) => {
                 if let Some(shot) = self.creatures.projectiles.iter().find(|shot| shot.id == id) {
@@ -280,6 +296,7 @@ impl Game<'_> {
                 if let Some(shot) = self.tridents.iter().find(|shot| shot.id == id) {
                     attack.projectile = Some(id as i32);
                     attack.projectile_kind = DirectEntity::Arrow;
+                    attack.projectile_type = Some("minecraft:trident");
                     Self::set_projectile_weapon(&mut attack, Some(&shot.stack));
                 }
             }
@@ -517,25 +534,28 @@ impl Game<'_> {
     /// `Zombie.hurtServer`'s reinforcement requests before the command returns.
     /// Health-changing hits also raise their damage vibration before return.
     fn command_damage_mob(&mut self, id: u32, amount: f32, damage: Damage) -> bool {
+        let Some(index) = self.mob_index.find(&self.mobs, id) else {
+            return false;
+        };
         let plan = self.prepare_knockback_credit(id as i32, damage.attacker, self.combat.attack());
         let attack = self.combat.attack();
         let mut credit = plan.lend(&mut self.last_hurt_by_player);
-        let mut reinforcements = Vec::new();
-        let mut health_changed = false;
-        let hurt = self.mobs.iter_mut().find(|m| m.id == id).is_some_and(|m| {
-            let queued = m.outbox.len();
-            let old_health = m.health;
-            let hurt = m.damage(
-                crate::game::entity::damage_level_of!(self, attack, &mut credit, None),
-                amount,
-                damage,
-            );
-            health_changed = hurt && m.health != old_health;
-            if hurt {
-                reinforcements = take_new_reinforcements(&mut m.outbox, queued);
-            }
-            hurt
-        });
+        let mob = &mut self.mobs[index];
+        let (queued, old_health) = (mob.outbox.len(), mob.health);
+        let hurt = mob.damage(
+            crate::game::entity::damage_level_of!(self, attack, &mut credit, None),
+            amount,
+            damage,
+        );
+        let Some((index, hurt)) = self.complete_mob_hurt(index, hurt) else {
+            return false;
+        };
+        let health_changed = hurt && self.mobs[index].health != old_health;
+        let reinforcements = if hurt {
+            take_new_reinforcements(&mut self.mobs[index].outbox, queued)
+        } else {
+            Vec::new()
+        };
         if hurt {
             if damage.attacker == Some(Who::Player) {
                 self.remember_mob_player_credit(id);
@@ -554,11 +574,11 @@ impl Game<'_> {
                 self.mob_damage_event(id);
             }
         }
+        self.finish_mob_damage_at(index);
         for (mob, target) in reinforcements {
             self.call_reinforcements(mob, target);
         }
-        // Warden.hurtServer's anger and target update, refused hit or not, before return.
-        self.settle_warden_hurt(id);
+        self.settle_mob_hurt(id);
         // Enderman.hurtServer's teleport, refused hit or not, before the command returns.
         if let Err(e) = self.settle_hurt_teleports() {
             log::warn!("Sunrise: /damage: enderman teleport: {e}");
@@ -750,16 +770,44 @@ impl Game<'_> {
         source: usize,
         seed: i64,
     ) {
+        self.send_player_sound(t, sound, at, volume, pitch, source, seed, false);
+    }
+    /// Direct packet delivery for a committed `PlayerRef::play_sound`, bypassing `guest_packets`
+    /// during a guest turn so packet order matches commit order across all effect kinds.
+    pub(in crate::game) fn deliver_player_sound(
+        &mut self,
+        t: Target,
+        sound: &str,
+        at: [f64; 3],
+        volume: f32,
+        pitch: f32,
+        source: usize,
+        seed: i64,
+    ) {
+        self.send_player_sound(t, sound, at, volume, pitch, source, seed, true);
+    }
+    fn send_player_sound(
+        &mut self,
+        t: Target,
+        sound: &str,
+        at: [f64; 3],
+        volume: f32,
+        pitch: f32,
+        source: usize,
+        seed: i64,
+        committing: bool,
+    ) {
         let guest = match t {
             Target::Guest(conn) => Some(conn),
-            _ => self.lan_acting,
+            Target::Player => self.lan_acting,
+            _ => return,
         };
         match guest.and_then(|conn| Some((conn, self.lan.as_ref()?))) {
             Some((conn, host)) => {
                 let packet = host
                     .hub
                     .sound_packet(sound, at, volume, pitch, source as i32, seed);
-                if t == Target::Player {
+                if t == Target::Player && !committing {
                     self.guest_packets.push(packet);
                 } else {
                     host.hub.send_to(conn, &packet);
@@ -777,22 +825,45 @@ impl Game<'_> {
         sound: Option<&str>,
         source: Option<usize>,
     ) {
+        self.send_player_stop_sound(targets, sound, source, false);
+    }
+    /// Direct packet delivery for a committed `PlayerRef::stop_sound`, bypassing `guest_packets`
+    /// during a guest turn so packet order matches commit order across all effect kinds.
+    pub(in crate::game) fn deliver_player_stop_sound(
+        &mut self,
+        t: Target,
+        sound: Option<&str>,
+        source: Option<usize>,
+    ) {
+        self.send_player_stop_sound(&[t], sound, source, true);
+    }
+    fn send_player_stop_sound(
+        &mut self,
+        targets: &[Target],
+        sound: Option<&str>,
+        source: Option<usize>,
+        committing: bool,
+    ) {
         let packet = C::StopSound(play::StopSound {
             source: source.map(|s| s as i32),
             sound: sound.map(str::to_owned),
         });
         for &t in targets {
-            match t {
-                Target::Player if self.lan_acting.is_some() => {
+            let guest = match t {
+                Target::Guest(conn) => Some(conn),
+                Target::Player => self.lan_acting,
+                _ => continue,
+            };
+            match guest {
+                Some(_) if t == Target::Player && !committing => {
                     self.guest_packets.push(packet.clone());
                 }
-                Target::Player => self.audio.stop_sounds(sound, source),
-                Target::Guest(conn) => {
+                Some(conn) => {
                     if let Some(host) = self.lan.as_ref() {
                         host.hub.send_to(conn, &packet);
                     }
                 }
-                _ => {}
+                None => self.audio.stop_sounds(sound, source),
             }
         }
     }
@@ -828,100 +899,120 @@ impl Game<'_> {
 
     pub(super) fn cmd_particle(&mut self, ctx: &Context) -> R<i32> {
         use sunrise_client::particles::{ParticleOptions, ParticleType};
-        let Some(Arg::Str(spec)) = ctx.get("name").cloned() else {
-            return Ok(0);
-        };
-        // ParticleArgument: `id` then optional SNBT options (`dust{color:[1,0,0],scale:2}`).
-        let (name, options_text) = match spec.find('{') {
-            Some(i) => (&spec[..i], &spec[i..]),
-            None => (spec.as_str(), ""),
-        };
-        let ty = ParticleType::from_name(name).ok_or_else(|| err("particle.notFound", &[&name]))?;
-        let opts = match sunrise_client::command::snbt::parse_fully(options_text) {
-            Ok(Tag::Compound(c)) if !options_text.is_empty() => Some(c),
-            _ => None,
-        };
-        let field = |key: &str| opts.as_ref().and_then(|c| c.get(&key.into()).cloned());
-        let string = |t: &Tag| match t {
-            Tag::String(s) => Some(s.to_string_lossy()),
-            _ => None,
-        };
-        // The block state of a block particle, for its packet.
-        let mut block_state = None;
-        let options = match ty {
-            // ItemParticleOption: an item id, or a stack {id, ...}.
-            ParticleType::Item => {
-                let id = match field("item") {
-                    Some(Tag::String(s)) => s.to_string_lossy(),
-                    Some(Tag::Compound(c)) => {
-                        c.get(&"id".into()).and_then(string).unwrap_or_default()
-                    }
-                    _ => String::new(),
-                };
-                let id = if id.contains(':') {
-                    id
-                } else {
-                    format!("minecraft:{id}")
-                };
-                self.item_particle(&sunrise_client::items::ItemStack::new(&id, 1))
+        let (name, options, block_state) = match ctx.get("name") {
+            Some(Arg::Particle(opts)) => {
+                use crate::game::api_values::TryIntoEngine;
+                let options = opts
+                    .try_into_engine(self.items())
+                    .map_err(|_| err("particle.invalidOptions", &[]))?;
+                let name = options
+                    .mod_particle
+                    .as_deref()
+                    .unwrap_or(options.ty.name())
+                    .to_owned();
+                (name, options, None)
             }
-            ParticleType::ItemSlime | ParticleType::ItemSnowball | ParticleType::ItemCobweb => {
-                self.ensure_item_particle_sprites();
-                ParticleOptions::simple(ty)
-            }
-            ParticleType::Block
-            | ParticleType::BlockCrumble
-            | ParticleType::FallingDust
-            | ParticleType::DustPillar
-            | ParticleType::BlockMarker => {
-                // BlockParticleOption: a block id, or {Name, Properties}.
-                let text = match field("block_state") {
-                    Some(Tag::String(s)) => s.to_string_lossy(),
-                    Some(Tag::Compound(c)) => {
-                        let name = c.get(&"Name".into()).and_then(string).unwrap_or_default();
-                        let props: Vec<String> = match c.get(&"Properties".into()) {
-                            Some(Tag::Compound(p)) => p
-                                .iter()
-                                .filter_map(|(k, v)| {
-                                    string(v).map(|v| format!("{}={v}", k.to_string_lossy()))
-                                })
-                                .collect(),
-                            _ => Vec::new(),
+            Some(Arg::Str(spec)) => {
+                // ParticleArgument: `id` then optional SNBT options (`dust{color:[1,0,0],scale:2}`).
+                let (name, options_text) = match spec.find('{') {
+                    Some(i) => (&spec[..i], &spec[i..]),
+                    None => (spec.as_str(), ""),
+                };
+                let ty = ParticleType::from_name(name)
+                    .ok_or_else(|| err("particle.notFound", &[&name]))?;
+                let opts = match sunrise_client::command::snbt::parse_fully(options_text) {
+                    Ok(Tag::Compound(c)) if !options_text.is_empty() => Some(c),
+                    _ => None,
+                };
+                let field = |key: &str| opts.as_ref().and_then(|c| c.get(&key.into()).cloned());
+                let string = |t: &Tag| match t {
+                    Tag::String(s) => Some(s.to_string_lossy()),
+                    _ => None,
+                };
+                // The block state of a block particle, for its packet.
+                let mut block_state = None;
+                let options = match ty {
+                    // ItemParticleOption: an item id, or a stack {id, ...}.
+                    ParticleType::Item => {
+                        let id = match field("item") {
+                            Some(Tag::String(s)) => s.to_string_lossy(),
+                            Some(Tag::Compound(c)) => {
+                                c.get(&"id".into()).and_then(string).unwrap_or_default()
+                            }
+                            _ => String::new(),
                         };
-                        if props.is_empty() {
-                            name
+                        let id = if id.contains(':') {
+                            id
                         } else {
-                            format!("{name}[{}]", props.join(","))
+                            format!("minecraft:{id}")
+                        };
+                        self.item_particle(&sunrise_client::items::ItemStack::new(&id, 1))
+                    }
+                    ParticleType::ItemSlime
+                    | ParticleType::ItemSnowball
+                    | ParticleType::ItemCobweb => {
+                        self.ensure_item_particle_sprites();
+                        ParticleOptions::simple(ty)
+                    }
+                    ParticleType::Block
+                    | ParticleType::BlockCrumble
+                    | ParticleType::FallingDust
+                    | ParticleType::DustPillar
+                    | ParticleType::BlockMarker => {
+                        // BlockParticleOption: a block id, or {Name, Properties}.
+                        let text = match field("block_state") {
+                            Some(Tag::String(s)) => s.to_string_lossy(),
+                            Some(Tag::Compound(c)) => {
+                                let name =
+                                    c.get(&"Name".into()).and_then(string).unwrap_or_default();
+                                let props: Vec<String> = match c.get(&"Properties".into()) {
+                                    Some(Tag::Compound(p)) => p
+                                        .iter()
+                                        .filter_map(|(k, v)| {
+                                            string(v)
+                                                .map(|v| format!("{}={v}", k.to_string_lossy()))
+                                        })
+                                        .collect(),
+                                    _ => Vec::new(),
+                                };
+                                if props.is_empty() {
+                                    name
+                                } else {
+                                    format!("{name}[{}]", props.join(","))
+                                }
+                            }
+                            _ => String::new(),
+                        };
+                        let mut reader = sunrise_client::command::Reader::new(&text);
+                        let block = sunrise_client::command::args::ArgType::BlockState
+                            .parse(&mut reader, &self.ui.registries);
+                        match block {
+                            Ok(Arg::Block(b)) => {
+                                let state = self.block_state(&b)?;
+                                block_state = Some(state);
+                                let at = self
+                                    .position_arg(ctx, "pos")
+                                    .unwrap_or_else(|| self.source_position())
+                                    .map(|c| c.floor() as i32);
+                                let (sprite, tint) = self
+                                    .particle_sprite(state, at)
+                                    .unwrap_or_else(|| ("block/stone".into(), 0xFFFFFF));
+                                ParticleOptions::block(ty, sprite, tint)
+                            }
+                            _ => ParticleOptions::simple(ty),
                         }
                     }
-                    _ => String::new(),
+                    // Every other type with options decodes its own codec
+                    // (`ParticleTypes.CODEC`): dust, spells, sculk charge, shriek,
+                    // geysers. A type without options keeps the defaults.
+                    _ => opts
+                        .as_ref()
+                        .and_then(|c| crate::game::potions::particle_options(ty, c))
+                        .unwrap_or_else(|| ParticleOptions::simple(ty)),
                 };
-                let mut reader = sunrise_client::command::Reader::new(&text);
-                let block = sunrise_client::command::args::ArgType::BlockState
-                    .parse(&mut reader, &self.ui.registries);
-                match block {
-                    Ok(Arg::Block(b)) => {
-                        let state = self.block_state(&b)?;
-                        block_state = Some(state);
-                        let at = self
-                            .position_arg(ctx, "pos")
-                            .unwrap_or_else(|| self.source_position())
-                            .map(|c| c.floor() as i32);
-                        let (sprite, tint) = self
-                            .particle_sprite(state, at)
-                            .unwrap_or_else(|| ("block/stone".into(), 0xFFFFFF));
-                        ParticleOptions::block(ty, sprite, tint)
-                    }
-                    _ => ParticleOptions::simple(ty),
-                }
+                (name.to_owned(), options, block_state)
             }
-            // Every other type with options decodes its own codec
-            // (`ParticleTypes.CODEC`): dust, spells, sculk charge, shriek,
-            // geysers. A type without options keeps the defaults.
-            _ => opts
-                .as_ref()
-                .and_then(|c| crate::game::potions::particle_options(ty, c))
-                .unwrap_or_else(|| ParticleOptions::simple(ty)),
+            _ => return Ok(0),
         };
         let pos = self
             .position_arg(ctx, "pos")
@@ -962,6 +1053,21 @@ impl Game<'_> {
         let reached: Vec<Target> = viewers
             .into_iter()
             .filter(|&t| {
+                if options.mod_particle.is_some() {
+                    let conn = match t {
+                        Target::Player => self.lan_acting,
+                        Target::Guest(conn) => Some(conn),
+                        _ => None,
+                    };
+                    if conn.is_some_and(|conn| {
+                        self.lan
+                            .as_ref()
+                            .and_then(|host| host.hub.guest(conn))
+                            .is_none_or(|g| !g.is_sunrise())
+                    }) {
+                        return false;
+                    }
+                }
                 self.target_position(t).is_some_and(|p| {
                     let c = p.map(|v| v.floor() + 0.5);
                     (c[0] - pos[0]).powi(2) + (c[1] - pos[1]).powi(2) + (c[2] - pos[2]).powi(2)
@@ -990,28 +1096,39 @@ impl Game<'_> {
                 })
             });
         let mut local = false;
-        for &t in &reached {
+        let mut sent = 0;
+        for t in reached {
             match (t, &packet) {
-                (Target::Player, Some(p)) if self.lan_acting.is_some() => {
-                    self.guest_packets.push(p.clone());
+                (Target::Player, _) if self.lan_acting.is_none() => {
+                    local = true;
+                    sent += 1;
                 }
-                (Target::Player, _) => local = true,
+                (Target::Player, Some(p)) => {
+                    self.guest_packets.push(p.clone());
+                    sent += 1;
+                }
                 (Target::Guest(conn), Some(p)) => {
-                    if let Some(host) = self.lan.as_ref() {
+                    if let Some(host) = &self.lan {
                         host.hub.send_to(conn, p);
+                        sent += 1;
                     }
                 }
                 _ => {}
             }
         }
-        let reached = reached.len() as i32;
-        if !local {
-        } else if count <= 0 {
+        if sent == 0 {
+            return Err(err("commands.particle.failed", &[]));
+        }
+        if local && count <= 0 {
             // handleParticleEvent, count 0: one particle, the speed times
             // the delta as velocity (both sent as floats, multiplied as floats).
-            self.particles
-                .create(&options, pos, delta.map(|d| f64::from(speed * d as f32)));
-        } else {
+            self.particles.create_with_world(
+                Some(&self.world),
+                &options,
+                pos,
+                delta.map(|d| f64::from(speed * d as f32)),
+            );
+        } else if local {
             for _ in 0..count {
                 let r = self.particles.random();
                 let p = [
@@ -1024,14 +1141,19 @@ impl Game<'_> {
                     r.next_gaussian() * f64::from(speed),
                     r.next_gaussian() * f64::from(speed),
                 ];
-                self.particles.create(&options, p, v);
+                if !self
+                    .particles
+                    .create_with_world(Some(&self.world), &options, p, v)
+                {
+                    break;
+                }
             }
         }
         self.feedback(Text::translate(
             "commands.particle.success",
-            &[Text::literal(name.to_owned())],
+            &[Text::literal(name)],
         ));
-        Ok(reached)
+        Ok(sent)
     }
 
     // ---- /attribute ---------------------------------------------------------------------
@@ -1044,6 +1166,8 @@ impl Game<'_> {
     /// Read arms follow `AttributeCommand.getAttributeValue` and
     /// `AttributeCommand.getAttributeModifier`: effective values include modeled
     /// transient modifiers; base reads still use the unmodified base.
+    /// `AttributeCommand` writes the instance without delivering its dirty
+    /// callbacks; the living entity refreshes them at its own lifecycle boundary.
     pub(super) fn cmd_attribute(&mut self, id: &str, ctx: &Context) -> R<i32> {
         let targets = self.entities(ctx, "target", false)?;
         let Some(target) = targets.first().copied() else {
@@ -1147,12 +1271,6 @@ impl Game<'_> {
                     "attribute.base.set" => {
                         self.write_attribute(target, attribute, AttributeWrite::Base(value_arg))
                             .ok_or_else(|| no_attribute(&name, &description))?;
-                        // onAttributeUpdated: a lowered max_health clamps health.
-                        if attribute == "minecraft:max_health"
-                            && let Some(player) = self.player.as_mut()
-                        {
-                            let _ = player.clamp_health_to_max();
-                        }
                         Ok(Some((
                             1,
                             Text::translate(
@@ -1167,13 +1285,7 @@ impl Game<'_> {
                         let v = self
                             .player
                             .as_mut()
-                            .and_then(|p| {
-                                let v = p.attributes.value(Some(key), ValueKind::Base).ok();
-                                if attribute == "minecraft:max_health" {
-                                    let _ = p.clamp_health_to_max();
-                                }
-                                v
-                            })
+                            .and_then(|p| p.attributes.value(Some(key), ValueKind::Base).ok())
                             .unwrap_or(0.0);
                         Ok(Some((
                             1,
@@ -1202,12 +1314,6 @@ impl Game<'_> {
                                     name.clone(),
                                 ],
                             ));
-                        }
-                        // onAttributeUpdated: a lowered max_health clamps health.
-                        if attribute == "minecraft:max_health"
-                            && let Some(player) = self.player.as_mut()
-                        {
-                            let _ = player.clamp_health_to_max();
                         }
                         Ok(Some((
                             1,
@@ -1640,6 +1746,11 @@ impl Game<'_> {
             match target {
                 Target::Player => self.stop_riding(),
                 Target::Mob(rider) => self.dismount_mob(rider),
+                Target::Bolt(rider) => {
+                    if let Some(i) = self.bolts.iter().position(|b| b.id == rider) {
+                        self.bolts.update(i, |b| b.mount = None);
+                    }
+                }
                 _ => {}
             }
             self.feedback(Text::translate(
@@ -1740,6 +1851,7 @@ impl Game<'_> {
             Target::Player => self.riding?,
             Target::Guest(conn) => self.command_guest(conn)?.vehicle?,
             Target::Mob(id) => self.mobs.iter().find(|m| m.id == id)?.extra.mount?,
+            Target::Bolt(id) => self.bolts.iter().find(|b| b.id == id)?.mount?,
             _ => return None,
         };
         Some(if self.boats.iter().any(|b| b.id == id) {
@@ -2310,7 +2422,7 @@ mod allay_owner_damage_tests {
                     game.mobs.push(mob);
                     let source = Damage::player([20.5, 102.0, 20.5]);
                     let accepted = if melee {
-                        game.hurt_by_player(0, 2.0, source)
+                        game.hurt_by_player(0, 2.0, source).0
                     } else {
                         // The command entry point lends its resolved attacker to the damage path.
                         let attack = game.attack_of_who(source.attacker);
@@ -2329,10 +2441,10 @@ mod allay_owner_damage_tests {
 
 #[cfg(test)]
 #[path = "registered_damage_tests.rs"]
-mod registered_damage_tests;
+pub(in crate::game) mod registered_damage_tests;
 
 #[cfg(test)]
-mod datapack_damage_tests {
+pub(in crate::game) mod datapack_damage_tests {
     use crate::game::{commands::Target, native_entity_refs::tests::with_game};
     use sunrise_client::mobs::Mob;
     use sunrise_core::geometry::Vec3;
@@ -2382,6 +2494,7 @@ mod datapack_damage_tests {
     }
 
     fn pig(game: &mut crate::game::Game<'_>, id: u32, at: Vec3) {
+        game.next_entity = game.next_entity.max(id);
         let kind = game.res.mob_types().get("minecraft:pig").unwrap().clone();
         let mut pig = Mob::new(id, kind, at, 0.0);
         pig.no_ai = true;
@@ -2395,6 +2508,10 @@ mod datapack_damage_tests {
     #[test]
     #[ignore = "daily"]
     fn a_datapack_damage_type_hurts_a_mob() {
+        run_a_datapack_damage_type_hurts_a_mob();
+    }
+
+    pub(in crate::game) fn run_a_datapack_damage_type_hurts_a_mob() {
         with_game(|game| {
             with_pack(game);
             pig(game, 1, Vec3::new(0.5, 64.0, 0.5));
@@ -2413,6 +2530,10 @@ mod datapack_damage_tests {
     #[test]
     #[ignore = "daily"]
     fn a_datapack_types_tags_reach_the_mob_hurt_path() {
+        run_a_datapack_types_tags_reach_the_mob_hurt_path();
+    }
+
+    pub(in crate::game) fn run_a_datapack_types_tags_reach_the_mob_hurt_path() {
         with_game(|game| {
             with_pack(game);
             pig(game, 1, Vec3::new(0.5, 64.0, 0.5));
@@ -2454,20 +2575,21 @@ mod datapack_damage_tests {
     #[test]
     #[ignore = "daily"]
     fn a_datapack_explosion_type_removes_a_crystal_quietly_and_hurts_the_dragon() {
+        run_a_datapack_explosion_type_removes_a_crystal_quietly_and_hurts_the_dragon();
+    }
+
+    pub(in crate::game) fn run_a_datapack_explosion_type_removes_a_crystal_quietly_and_hurts_the_dragon()
+     {
         with_game(|game| {
             with_pack(game);
             let crystal = |game: &mut crate::game::Game<'_>, id: u32| {
-                game.crystals.push(crate::game::dragon::Crystal {
-                    attachment_lifetime: Default::default(),
-                    join: Default::default(),
+                game.next_entity = game.next_entity.max(id);
+                game.crystals.push(crate::game::dragon::Crystal::new(
                     id,
-                    position: Vec3::new(0.5, 64.0, 0.5),
-                    show_bottom: false,
-                    time: 0,
-                    beam: None,
-                    invulnerable: false,
-                    fall: (false, 0.0),
-                });
+                    Vec3::new(0.5, 64.0, 0.5),
+                    false,
+                    0,
+                ));
             };
             pig(game, 1, Vec3::new(2.5, 64.0, 0.5));
             crystal(game, 50);

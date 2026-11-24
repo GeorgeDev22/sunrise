@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Chapdan yangi chat chizig‘i to‘liq ko‘rinish o‘rniga o‘chib, chap tomondan siljiydi.",
   "sunrise.extras.chat_indicator": "Xabar ko'rsatkichi",
   "sunrise.extras.chat_indicator.tooltip": "Suhbat chizig'ining chap tomonidagi rangli chiziq.",
-  "sunrise.extras.discord_presence": "Discord Rich Presence",
-  "sunrise.extras.discord_presence.tooltip": "Discord ishlayotgan vaqtda sizning Discord profilingizdagi Sunrise oʻynashni koʻrsatadi: menyular, bitta oʻyinchi yoki koʻp oʻyinchi, oʻlcham va oʻynaladigan vaqt. Hech qachon dunyo nomi yoki server manzili.",
   "sunrise.extras.dynamic_lights": "Dinamik chiroqlar",
   "sunrise.extras.dynamic_lights.tooltip": "Mash'alalar va boshqa yorug'lik manbalari tutilgan, tushirilgan yoki olovda yonib turgan bloklarni yoritadi.",
   "sunrise.extras.fullbright": "To'liq yorqinlik",

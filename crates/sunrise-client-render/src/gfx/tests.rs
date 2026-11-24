@@ -216,19 +216,51 @@ fn gpu_culling_is_offered_where_counts_are_drawn_and_vanilla_never_draws_flat() 
 
 /// The pack-flat rule: with Translucent Batching translucent quads have an arena of
 /// their own, unless a shader pack's terrain programs or its shadow pass alone can
-/// draw flat (a pack picked and not loaded yet counts as drawing terrain).
+/// draw flat (a pack picked and not loaded yet counts as drawing terrain), or a
+/// `shaders/` pack's per-section draws read the section arena's pages.
 #[test]
 fn translucent_quads_stay_in_the_section_arena_while_a_pack_can_draw_flat() {
-    // (batching, flat draws, the pack's terrain, its shadow pass)
+    // (batching, flat draws, pages read per section, the pack's terrain, its shadow pass)
     let split = super::translucent_split;
-    assert!(split(true, true, false, false));
-    assert!(!split(true, true, true, false));
-    assert!(!split(true, true, false, true));
-    assert!(!split(true, true, true, true));
-    // Without flat draws, or with them off, the pack draws per section, from either.
-    assert!(split(true, false, true, true));
-    assert!(!split(false, true, false, false));
-    assert!(!split(false, false, false, false));
+    assert!(split(true, true, false, false, false));
+    assert!(!split(true, true, false, true, false));
+    assert!(!split(true, true, false, false, true));
+    assert!(!split(true, true, false, true, true));
+    // Without flat draws, or with them off, the pack draws per section: from either arena
+    // as attributes alone, from the section arena while it reads the pages.
+    assert!(split(true, false, false, true, true));
+    assert!(!split(true, false, true, true, true));
+    assert!(!split(false, true, false, false, false));
+    assert!(!split(false, false, false, false, false));
+}
+
+/// Without a shader pack reading them, the section arena's pages are vertex buffers alone, as
+/// before per-section terrain read its pages: on a device whose storage bindings (128 MiB) are
+/// smaller than `PAGE_BYTES`, a page still holds 256 MiB of 24-byte vertices, in whole blocks
+/// (11184640); only pages storage too are cut to the binding (5592320).
+#[test]
+fn arena_pages_are_storage_only_while_flat_draws_or_a_pack_read_them() {
+    use super::arena::{Arena, PAGE_BYTES};
+    let limits = wgpu::Limits {
+        max_buffer_size: 1 << 30,
+        max_storage_buffer_binding_size: 128 << 20,
+        ..Default::default()
+    };
+    let stride = std::mem::size_of::<crate::mesher::TerrainVertex>() as u64;
+    let page = |storage: bool| {
+        let usage = if storage {
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE
+        } else {
+            wgpu::BufferUsages::VERTEX
+        };
+        Arena::page_limit(&limits, stride, usage, PAGE_BYTES)
+    };
+    // (flat draws, a pack's per-section draws reading the pages)
+    assert!(!super::arena_storage(false, false));
+    assert_eq!(page(super::arena_storage(false, false)), 11184640);
+    assert!(super::arena_storage(true, false));
+    assert!(super::arena_storage(false, true));
+    assert_eq!(page(super::arena_storage(false, true)), 5592320);
 }
 
 /// No large translucent page starts to shrink until `SHRINK_SETTLE` after terrain
@@ -619,7 +651,12 @@ fn special_material_batches_preserve_quad_order_and_offsets() {
     let mut batch = super::EntityBatch::default();
     let counts = batch.update(&entities, &quad(3, 5), &quad(0, 6), &quad(0, 8), false);
     let vertices = &batch.combined;
-    assert_eq!(counts, [4, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        counts,
+        [
+            4, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ]
+    );
     assert_eq!(
         vertices
             .as_chunks::<4>()
@@ -780,8 +817,9 @@ fn shaders_translate_to_hlsl_for_directx_12_and_glsl_for_opengl() {
         } else if name == "rt_unpack.wgsl" {
             // Appended to terrain.wgsl (`ray_scene`'s `Unpacker`), on ray tracing devices.
             continue;
+        } else if name == "entity.wgsl" {
+            sources.push((path, super::entity_shader()));
         } else if name == "terrain.wgsl"
-            || name == "entity.wgsl"
             || name == "stars.wgsl"
             || name == "custom_sky.wgsl"
             || name == "border.wgsl"
@@ -1244,7 +1282,7 @@ fn a_fade_ends_by_its_deadline_and_never_comes_back() {
 fn fading_sections_go_to_the_cpu_and_come_back() {
     use super::{
         FadeInputs, SectionGpu, SectionKey, decide_fade, forget_records, gpu_culling, hold_fading,
-        mark_fades,
+        mark_fades, section_fade,
     };
     use crate::fast_hash::{FxHashMap, FxHashSet};
     use std::time::{Duration, Instant};
@@ -1257,7 +1295,7 @@ fn fading_sections_go_to_the_cpu_and_come_back() {
     struct Sim {
         sections: super::resident::Resident<SectionGpu>,
         records: gpu_culling::Records,
-        fades: gpu_culling::Fades,
+        fades: section_fade::Fades,
         uploaded: FxHashMap<SectionKey, Instant>,
         retiring: FxHashSet<SectionKey>,
     }

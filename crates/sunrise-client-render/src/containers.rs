@@ -746,6 +746,14 @@ impl BlockEntity {
     }
     pub fn id(&self) -> &str {
         match self {
+            Self::Mod(m) => m.id(),
+            // Every other kind is vanilla's, which `vanilla_id` names.
+            _ => self.vanilla_id().unwrap_or_default(),
+        }
+    }
+    /// The type ID of a vanilla block entity; `None` for a mod's.
+    pub fn vanilla_id(&self) -> Option<&'static str> {
+        Some(match self {
             Self::Chest(items) => StockItemContainer::Chest(items.len()).type_id(),
             Self::Furnace(f) => StockItemContainer::Furnace(f.kind).type_id(),
             Self::Brewing(_) => StockItemContainer::Brewing.type_id(),
@@ -774,13 +782,13 @@ impl BlockEntity {
             Self::Campfire(_) => "minecraft:campfire",
             Self::ChiseledBookshelf(_) => StockItemContainer::Bookshelf.type_id(),
             Self::Shelf(_) => StockItemContainer::Shelf.type_id(),
-            Self::Mod(m) => m.id(),
+            Self::Mod(_) => return None,
             Self::PotentSulfur(_) => "minecraft:potent_sulfur",
             Self::StructureBlock(_) => "minecraft:structure_block",
             Self::JigsawBlock(_) => "minecraft:jigsaw",
             Self::TestBlock(_) => "minecraft:test_block",
             Self::TestInstanceBlock(_) => "minecraft:test_instance_block",
-        }
+        })
     }
     pub fn contents(&self) -> Vec<ItemStack> {
         match self {

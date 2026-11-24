@@ -1,7 +1,6 @@
 use super::*;
 use crate::game::native_entity_refs::tests::{fixture_root, with_client_game, with_game_role};
 use crate::game::{execution_role::ExecutionRole, lan::LanHost};
-use mod_api::__private::PhaseOwner;
 use mod_api::prelude::ItemsHost;
 use mod_api::{BuildCreativeModeTabContentsEvent, Hooks, HostSide, ModEntry};
 use std::sync::Mutex;
@@ -118,9 +117,9 @@ impl Hooks for Edit {
                 .edit
                 .remove(host, &absent, CreativeTabVisibility::Both),
             Err(CreativeTabEditError::Stack(
-                mod_api::StackWriteError::DamageExceeded {
-                    maximum: i32::MAX as u32
-                }
+                mod_api::StackWriteError::InvalidComponents {
+                    reason: mod_api::StackError::InvalidDamage,
+                },
             )),
         );
         assert_eq!(
@@ -326,23 +325,6 @@ fn creative_catalog_builds_lazily_and_edits_before_filtering_on_both_sides() {
     let check = |game: &mut Game<'_>, side| {
         game.creative_screen = Creative::from_json(&catalog).unwrap();
         assert!(!game.creative_screen.has_contents());
-        for phase in [ModPhase::Setup, ModPhase::Reloading] {
-            // Enter through the generated native forwarding methods, not Game's impls.
-            let _phase = PhaseOwner::scope(phase);
-            if side == LogicalSide::Client {
-                let host: &mut dyn mod_api::ClientHost = game;
-                assert!(host.creative_search_items().is_empty());
-            }
-            let host: &mut dyn mod_api::Host = game;
-            assert_eq!(
-                host.creative_tabs(CreativeTabPermissions::Normal),
-                Err(CreativeTabReadError::Unavailable)
-            );
-            assert_eq!(
-                host.built_creative_tabs(),
-                Err(CreativeTabReadError::Unavailable)
-            );
-        }
         let flags = |game: &mut Game<'_>, ids: [&str; 2]| {
             let flags = ids.map(str::to_owned);
             if let Some(remote) = &mut game.remote {
@@ -410,21 +392,18 @@ fn creative_catalog_builds_lazily_and_edits_before_filtering_on_both_sides() {
         let cached = host.creative_tabs(CreativeTabPermissions::Normal).unwrap();
         assert!(Arc::ptr_eq(&normal, &cached));
         let old = seen.lock().unwrap().token.unwrap();
-        for phase in [ModPhase::Setup, ModPhase::Reloading] {
-            let _phase = PhaseOwner::scope(phase);
-            assert_eq!(
-                old.entries(host, CreativeTabList::Search),
-                Err(CreativeTabEditError::Stale)
-            );
-            assert_eq!(
-                old.remove(
-                    host,
-                    &stack("minecraft:stone", 1),
-                    CreativeTabVisibility::Both
-                ),
-                Err(CreativeTabEditError::Stale)
-            );
-        }
+        assert_eq!(
+            old.entries(host, CreativeTabList::Search),
+            Err(CreativeTabEditError::Stale)
+        );
+        assert_eq!(
+            old.remove(
+                host,
+                &stack("minecraft:stone", 1),
+                CreativeTabVisibility::Both
+            ),
+            Err(CreativeTabEditError::Stale)
+        );
         let operator = host
             .creative_tabs(CreativeTabPermissions::Operator)
             .unwrap();
@@ -474,7 +453,6 @@ fn creative_catalog_builds_lazily_and_edits_before_filtering_on_both_sides() {
         seen.lock().unwrap().events.clear();
     };
     mod_platform::testing::with_mods(setups, || {
-        let _world = PhaseOwner::scope(ModPhase::World);
         let mut dedicated = None;
         with_game_role(fixture_root(), ExecutionRole::DedicatedServer, |game| {
             install_dedicated_holders(game, 2);
@@ -550,7 +528,6 @@ fn a_tab_reads_back_its_title_as_a_translatable_with_the_title_as_fallback() {
 #[ignore = "daily"]
 fn a_servers_creative_tabs_hold_vanillas_items() {
     mod_platform::testing::with_mods(Vec::new().into(), || {
-        let _world = PhaseOwner::scope(ModPhase::World);
         with_game_role(fixture_root(), ExecutionRole::DedicatedServer, |game| {
             use sunrise_client::save::{Level, write_dat};
 

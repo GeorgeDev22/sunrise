@@ -4,16 +4,17 @@ A mod opens a level of its own while the server runs and closes it again: an ins
 minigame arena, a pocket dimension per player. `host.runtime_levels()` has `open`, `unload`, `delete`
 and `is_open`.
 
+In `Hooks::register_commands`, bind an operator-only [server command](../entities/server-commands.md).
+Return `Ok(1)` after `open` accepts the request, or a failure message if it refuses:
+
 ```rust,ignore
-fn run_mod_command(&self, host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>) -> Flow {
+event.commands.push(Command::op("openarena", 2).executes(|host, _, _| {
     let level = RuntimeLevel::new("mymod:pocket", RuntimeGenerator::Mod("mymod:arena".into()), 4242);
-    match host.runtime_levels().open("mymod:instance/ab12", level) {
-        Ok(handle) => { /* the level opens after this tick's levels have ticked */ }
-        Err(RuntimeLevelError::CapReached) => { /* the server keeps no more open */ }
-        Err(_) => {}
-    }
-    Flow::Cancel
-}
+    // On success the level opens after this tick's levels have ticked.
+    host.runtime_levels().open("mymod:instance/ab12", level)
+        .map_err(|_| Text::translate("mymod.commands.arena_open_failed", vec![]))?;
+    Ok(1)
+}));
 ```
 
 ## What a level is made of
@@ -53,7 +54,10 @@ reopens what it keeps, and a player saved in a level that was not reopened keeps
 fallback. At server startup the Overworld, Nether and End are published in that order, each
 firing `level_load` before the next is available. The server then validates and activates their
 saved tickets and waits for the ticketed chunks before `server_started`, even if no player
-visits those levels.
+visits those levels. In `Hooks::validate_tickets`, a controller's owning mod can remove saved
+tickets through `event.validation`. The callback sees its removals immediately. As with
+[staged registration](../../concepts/load-phases.md#registration-and-setup), a panic or phase
+refusal discards those edits before the saved tickets take hold. Other controllers still validate.
 
 Success means queue admission, not apply completion. Apply failures are logged with the
 requesting mod and level id. A failed open rolls back publication and frees the id for retry;

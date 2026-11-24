@@ -22,7 +22,7 @@ impl Game<'_> {
     /// (`minecraft:fall`), from the source's `causing` entity
     /// (`DamageSource.getEntity`: the shooter of an arrow) and `direct` one
     /// (`getDirectEntity`: the arrow), 0 for none or not known yet
-    /// (docs/native-mods.md, API 50). Change `amount`, or set `canceled`,
+    /// (docs/modding/src/how-to/native-mods.md, API 50). Change `amount`, or set `canceled`,
     /// and nothing of `hurtServer` itself happens (no damage, hurt sound,
     /// knockback, invulnerable time, statistics or criteria); the caller acts
     /// as on a refused hit, except that a canceled hit on the ender dragon
@@ -39,7 +39,7 @@ impl Game<'_> {
     /// (`minecraft:zombie`, `minecraft:player`) `strength` away from the direction (`x`, `z`),
     /// on the raw strength, before the entity's knockback resistance takes its share and its motion
     /// changes
-    /// (docs/native-mods.md, API 125). Vanilla's direction points at the
+    /// (docs/modding/src/how-to/native-mods.md, API 125). Vanilla's direction points at the
     /// source of a hit (the attacker's side), and the entity is pushed the other way. Change
     /// `strength`, `x` or `z`, or set `canceled`, and the push follows them: canceled, the
     /// entity's motion is left alone. A `strength` of 0 or less after the hook is no push, and a

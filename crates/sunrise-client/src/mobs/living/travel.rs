@@ -1,7 +1,8 @@
 //! Resolve the mob's travel branch and fire `living_travel` at its entry.
 //! The same route names the mode and runs travel, including species overrides.
 use super::super::{Species, allay, aquatic, frog, guardian, nautilus, turtle, undead, vex};
-use super::{DamageLevel, Fluid, Mob, MobEvent, MobWorld, TravelTrample, Vec3};
+use super::{DamageLevel, Fluid, Mob, MobEvent, MobWorld, TravelPause, Vec3};
+use std::ops::ControlFlow;
 use sunrise_world::travel::TravelMode;
 
 enum TravelRoute {
@@ -41,16 +42,16 @@ impl TravelRoute {
 }
 
 impl Mob {
-    pub(in crate::mobs) fn travel_until_trample(
+    pub(in crate::mobs) fn travel_until_pause(
         &mut self,
         w: &MobWorld,
         level: &mut DamageLevel<'_>,
         mut input: Vec3,
         events: &mut Vec<MobEvent>,
         pause: bool,
-    ) -> Result<(), TravelTrample> {
+    ) -> ControlFlow<TravelPause> {
         let Some(route) = self.travel_route(w) else {
-            return Ok(());
+            return ControlFlow::Continue(());
         };
         let mut velocity = self.velocity;
         if !crate::travel_gate::decide(
@@ -61,13 +62,13 @@ impl Mob {
             &mut input,
             &mut velocity,
         ) {
-            return Ok(());
+            return ControlFlow::Continue(());
         }
         self.velocity = velocity;
         // Camel.travel: on the ground, a camel that sits or changes pose keeps
         // the vertical part of its motion and drops the horizontal input.
         if super::super::camel::is_camel(self.species())
-            && self.on_ground
+            && self.ground.on_ground
             && super::super::camel::refuse_to_move(self)
         {
             let vertical = Vec3::new(0.0, 1.0, 0.0);
@@ -85,7 +86,7 @@ impl Mob {
             TravelRoute::Allay => allay::travel(self, w, level, input, events, pause),
             TravelRoute::Vex => {
                 vex::travel(self, w);
-                Ok(())
+                ControlFlow::Continue(())
             }
             // Squid.travel moves by its current velocity alone, even out of water.
             TravelRoute::Squid => self.travel_move(w, level, events, pause, |_, _, _, _| {}),

@@ -105,20 +105,29 @@ mod world_text;
 use cull::occlusion_culling_requested;
 use entity_batch::EntityBatch;
 pub use entity_batch::{
-    ADDITIVE_PARTICLE_OVERLAY, DISSOLVE_OVERLAY, DRAGON_RAYS_OVERLAY, ENERGY_SWIRL_OVERLAY,
-    FLUID_OVERLAY, OIT_ENTITY, SHADOW_OVERLAY, TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY,
-    TERRAIN_MODEL_CUTOUT_OVERLAY, TERRAIN_MODEL_SOLID_OVERLAY, TERRAIN_MODEL_TRANSLUCENT_OVERLAY,
-    TEXT_POLYGON_OFFSET_OVERLAY, TRANSLUCENT_GLINT_ITEM_OVERLAY, TRANSLUCENT_ITEM_OVERLAY,
-    TRANSLUCENT_PARTICLE_OVERLAY, WATER_MASK_OVERLAY, WORLD_TEXT_OVERLAY,
-    WORLD_TEXT_POLYGON_OFFSET_OVERLAY, is_native_terrain, mark_oit,
+    ADDITIVE_PARTICLE_OVERLAY, BANNER_PATTERN_OVERLAY, DISSOLVE_OVERLAY, DRAGON_RAYS_OVERLAY,
+    ENERGY_SWIRL_OVERLAY, GLINT_ONLY_OVERLAY, SHADOW_OVERLAY, TRANSLUCENT_GLINT_ITEM_OVERLAY,
+    TRANSLUCENT_ITEM_OVERLAY, TRANSLUCENT_PARTICLE_OVERLAY,
+};
+pub use entity_batch::{
+    FLUID_OVERLAY, TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY, TERRAIN_MODEL_CUTOUT_OVERLAY,
+    TERRAIN_MODEL_SOLID_OVERLAY, TERRAIN_MODEL_TRANSLUCENT_OVERLAY, WATER_MASK_OVERLAY,
+    is_native_terrain,
+};
+pub use entity_batch::{
+    OIT_ENTITY, TEXT_NORMAL_SOLID_OVERLAY, TEXT_POLYGON_OFFSET_OVERLAY,
+    TEXT_POLYGON_OFFSET_SOLID_OVERLAY, TRANSLUCENT_DRAW_FLIP, WORLD_TEXT_OVERLAY,
+    WORLD_TEXT_POLYGON_OFFSET_OVERLAY, mark_oit,
 };
 use external::{shadow_box, shadow_runs};
 pub use frustum::{Cull, Frusta, JoinedFrusta, ShadowCull};
 use frustum::{block_entities_within_reach, frustum, shadow_casters, taa_frustum};
 pub use section_fade::{CHUNK_VISIBILITY_THRESHOLD, chunk_visibility, fade_millis};
 use section_fade::{FadeInputs, compiled_and_visible, section_instance, section_visibility};
+#[doc(hidden)]
+pub use section_upload::section_in_eye_view;
 pub use sunrise_render_core::SectionKey;
-pub use view::{View, ViewSet};
+pub use view::{View, ViewSet, cull_fov, cull_frustum};
 
 /// Whether Translucent Batching is offered (`graphics::offer_translucent_batching`): where
 /// indirect multi-draws (`multi_draw`) take its batches, but not OpenGL's, which loop over
@@ -154,13 +163,29 @@ pub(crate) fn texture_bytes(texture: &wgpu::Texture) -> u64 {
         * u64::from(size.depth_or_array_layers)
 }
 
+/// Whether the section arena's pages are storage too: where flat draws read them (`flat`), or
+/// while a `shaders/` pack's terrain programs read them per section (`pages`,
+/// `pack_atlas::TerrainDraws::Pages`). Otherwise they are vertex buffers alone, which the device's
+/// storage binding size does not cap (`Arena::page_limit`).
+fn arena_storage(flat: bool, pages: bool) -> bool {
+    flat || pages
+}
+
 /// Whether translucent quads have an arena of their own: with Translucent Batching
 /// (`batching`), unless a shader pack's frames can draw terrain flat (as for `flat_frame`),
 /// which reads them in the section arena through its tables: where flat draws exist and
 /// are on (`flat_draws`), for a `shaders/` pack's terrain programs (`terrain`) or a shadow
-/// pass (`shadow`: a `shaders/` pack's, or the `[shadow]` of one of Sunrise's own).
-fn translucent_split(batching: bool, flat_draws: bool, terrain: bool, shadow: bool) -> bool {
-    batching && !(flat_draws && (terrain || shadow))
+/// pass (`shadow`: a `shaders/` pack's, or the `[shadow]` of one of Sunrise's own). Nor while
+/// a `shaders/` pack's terrain or shadow programs read the section arena's pages in per-section
+/// draws (`pages`, `pack_atlas::TerrainDraws::Pages`): the translucent arena is no storage.
+fn translucent_split(
+    batching: bool,
+    flat_draws: bool,
+    pages: bool,
+    terrain: bool,
+    shadow: bool,
+) -> bool {
+    batching && !(flat_draws && (terrain || shadow)) && !pages
 }
 
 /// The compact layout of solid quads, unless `SUNRISE_PACKED_QUADS=0` (A/B checks).
@@ -173,13 +198,16 @@ mod arena;
 pub mod capture;
 mod celestial;
 mod census;
+pub use census::RendererMemorySnapshot;
 pub mod compositor;
 pub(crate) mod core_clouds;
 pub(crate) mod core_lightmap;
 pub use core_lightmap::SHADERS as LIGHTMAP_SHADERS;
 pub(crate) mod core_lines;
 mod core_particles;
+mod particle_draws;
 pub use core_particles::HEIGHTMAP_SIZE as POLYTONE_HEIGHTMAP_SIZE;
+pub(crate) use particle_draws::EXPLICIT_PARTICLE_OVERLAY;
 pub(crate) mod core_sky;
 pub(crate) mod core_text;
 mod cull;
@@ -199,6 +227,7 @@ mod hdr_start;
 mod hdr_stats;
 pub(crate) mod hud_coverage;
 mod in_flight;
+mod sourced_geometry;
 use display_watch::DisplayWatch;
 #[cfg(test)]
 use display_watch::{macos_hdr, os_reported};
@@ -228,6 +257,8 @@ mod oit_features;
 pub(crate) mod output;
 mod output_apply;
 mod pack_entities;
+#[doc(hidden)]
+pub mod visibility_probe;
 // The pack's programs' inputs and helpers, from `sunrise-render-shaderpack`: the client's frame
 // only tells them what a `Frame` and the game's own values are.
 pub use sunrise_render_shaderpack::{
@@ -969,11 +1000,8 @@ pub use view::test_frustum;
 /// fire_side's 0.01 pixel in front of its block, from z-fighting.
 /// The section the camera is in.
 fn camera_section(camera: DVec3, min_y: i32) -> SectionKey {
-    (
-        (camera.x.floor() as i32) >> 4,
-        (camera.y.floor() as i32 - min_y) >> 4,
-        (camera.z.floor() as i32) >> 4,
-    )
+    let (cx, cz) = resident::camera_column(camera);
+    (cx, resident::camera_section_y(camera, min_y), cz)
 }
 
 /// The near plane of the world's projection, in blocks.

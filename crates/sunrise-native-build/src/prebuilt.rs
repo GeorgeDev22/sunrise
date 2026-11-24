@@ -72,16 +72,13 @@ pub fn refusal(projects: &[api::Project<'_>]) -> Option<Refusal> {
 
 /// Why `project` alone can't build against the prebuilt game, or `None` when it can.
 pub fn project_refusal(project: &api::Project<'_>) -> Option<Refusal> {
-    refusal_with_script(project, project.bundle.dir.join("build.rs").is_file())
-}
-
-fn refusal_with_script(project: &api::Project<'_>, build_script: bool) -> Option<Refusal> {
     let mod_id = || project.bundle.manifest.id.clone();
     let cargo = &project.cargo;
     let package = cargo.get("package");
     let build = package.and_then(|p| p.get("build"));
     let has_script = build.is_some_and(|value| value.as_bool() != Some(false))
-        || (build.and_then(toml::Value::as_bool) != Some(false) && build_script)
+        || (build.and_then(toml::Value::as_bool) != Some(false)
+            && project.bundle.dir.join("build.rs").is_file())
         || cargo
             .get("build-dependencies")
             .and_then(toml::Value::as_table)
@@ -121,52 +118,6 @@ fn refusal_with_script(project: &api::Project<'_>, build_script: bool) -> Option
     None
 }
 
-/// A signed source package can accompany an independently built release library only if
-/// it can also use the API route on its own. This inspects the package; it never invokes Cargo.
-pub fn release_source(source: &sunrise_mod_package::index::native::Bundle) -> Result<(), String> {
-    let bundle = super::Bundle {
-        manifest: source.manifest.clone(),
-        dir: PathBuf::new(),
-    };
-    let cargo = source.files.get("Cargo.toml").ok_or("no Cargo.toml")?;
-    let cargo = std::str::from_utf8(cargo).map_err(|e| format!("Cargo.toml: {e}"))?;
-    let project = api::Project::parse_with(&bundle, cargo, |name| source.files.contains_key(name))
-        .map_err(|e| e.to_string())?;
-    require_release_api(&project, source.files.contains_key("build.rs"))?;
-    let lock = source
-        .files
-        .get("Cargo.lock")
-        .ok_or("the source package must carry Cargo.lock")?;
-    check_release_lock(lock)
-}
-
-/// Preflight a release build with the same inputs the source package's verifier uses.
-pub fn release_project(project: &api::Project<'_>) -> Result<(), String> {
-    require_release_api(project, project.bundle.dir.join("build.rs").is_file())
-}
-
-fn require_release_api(project: &api::Project<'_>, build_script: bool) -> Result<(), String> {
-    if let Some(refusal) = refusal_with_script(project, build_script) {
-        return Err(refusal.to_string());
-    }
-    if !matches!(Route::of(std::slice::from_ref(project)), Route::Api)
-        || !project.bundle.manifest.dependencies.is_empty()
-    {
-        return Err(
-            "a release library requires a standalone prebuilt-api mod without mod dependencies"
-                .into(),
-        );
-    }
-    Ok(())
-}
-
-pub fn check_release_lock(lock: &[u8]) -> Result<(), String> {
-    super::registry_lock::RegistryLock::parse(
-        std::str::from_utf8(lock).map_err(|e| format!("Cargo.lock: {e}"))?,
-    )?;
-    Ok(())
-}
-
 /// `name`'s sum in a `sha256sum` listing.
 pub fn expected_sum(listing: &str, name: &str) -> Option<String> {
     listing.lines().find_map(|line| {
@@ -188,9 +139,6 @@ pub struct Identity {
     rustc: String,
     target: String,
     side: String,
-    /// The game executable's link policy (the guest stack size). Only the executable's link takes
-    /// it: no mod compile reads it.
-    pub link_args: Vec<String>,
     #[serde(default)]
     pub registry_lock: Option<String>,
     #[serde(default)]
@@ -463,7 +411,7 @@ pub fn library(deps: &Path, krate: &str) -> Result<PathBuf, String> {
     match candidates.as_slice() {
         [path] => Ok(path.clone()),
         [] => Err(trf(
-            "The prebuilt game has no {crate}, a library this tool needs: the SDK it comes from is older than the tool. Pin a current build (`cargo sunrise-mod update --sunrise nightly`), or build with the tool in that SDK's own release (`sdk-<build>/tool-<target>.tar.xz`).",
+            "The prebuilt game has no {crate}, a library this tool needs: the SDK it comes from is older than the tool. Pin a current build (`cargo sunrise-mod pin nightly`), or build with the tool in that SDK's own release (`sdk-<build>/tool-<target>.tar.xz`).",
             &[("crate", krate)],
         )),
         _ => Err(facade_refused(krate)),
@@ -529,8 +477,7 @@ fn standard_library(rust: &dyn Toolchain) -> Result<PathBuf, String> {
 
 /// rustc with the prebuilt game's settings, its libraries and `out`'s on the search path, and the
 /// native libraries the game's build scripts link (`native/`: the `windows` crates' import
-/// libraries). The identity's `link_args` are the game executable's link policy and never reach a
-/// library.
+/// libraries).
 fn rustc(rust: &dyn Toolchain, game: &Path, out: &Path, edition: &str) -> Command {
     let mut cmd = rustc_with(
         rust,
@@ -664,7 +611,8 @@ pub fn compile(
     consent: Option<&dyn Fn(&super::RegistryInventory) -> bool>,
     // Each mod is its own library: told which one starts, and how far through them.
     on_mod: &dyn Fn(&str, usize, usize),
-) -> Result<(PathBuf, Vec<PathBuf>), String> {
+    check_only: bool,
+) -> Result<Option<(PathBuf, Vec<PathBuf>)>, String> {
     let mixins = MixinsIdentity::resolve(projects.iter().map(|project| project.bundle), None)?;
     let mut names = reserved_library_names();
     for item in fs::read_dir(package.runtime.join("deps")).map_err(|e| e.to_string())? {
@@ -687,8 +635,17 @@ pub fn compile(
     let key = kept_build(rust, package)?;
     if route == Route::Api {
         let out = &builds.join(format!("api-{key}"));
-        let built =
-            super::api_route::compile(rust, package, out, projects, declared, resolution, on_mod);
+        own_folder(builds, out)?;
+        own_folder(out, &out.join("staged"))?;
+        let built = super::api_route::compile(
+            rust,
+            package,
+            out,
+            projects,
+            declared,
+            resolution,
+            super::api_route::Options { on_mod, check_only },
+        );
         // Stamped after the route has made its folder again, failed or not.
         if out.exists() {
             crate::host::mark_used(out)?;
@@ -702,7 +659,7 @@ pub fn compile(
         fs::create_dir_all(&kept).map_err(|e| e.to_string())?;
         crate::host::mark_used(&kept)?;
         let stage = kept.join(format!("stage-{}", short_hash(&mods_key(mods)?)));
-        let built = super::registry_compile::compile(
+        let built = super::registry_compile::stage_and_cargo(
             rust,
             game,
             &stage,
@@ -715,6 +672,7 @@ pub fn compile(
                 adapter: &std::env::current_exe().map_err(|e| e.to_string())?,
                 mixins: &mixins,
             },
+            check_only,
         )?;
         // The Storage page's Build files row ages this unit by its last use.
         crate::host::mark_used(&kept)?;
@@ -729,6 +687,7 @@ pub fn compile(
         catalog.log_mixins(&project.bundle.manifest)?;
     }
     own_folder(builds, out)?;
+    own_folder(out, &out.join("staged"))?;
     crate::host::mark_used(out)?;
     let deps = game.join("deps");
     let sdk = identity(game)?;
@@ -800,6 +759,7 @@ pub fn compile(
                 &[],
             ),
             sdk.commit(),
+            check_only,
         )?;
         rlibs.insert(id, rlib);
         crate_names.insert(id, krate);
@@ -815,7 +775,11 @@ pub fn compile(
         &sdk,
         &mixins,
         |edition| rustc(rust, game, out, edition),
+        check_only,
     )?;
+    if check_only {
+        return Ok(None);
+    }
     let mut installed = runtime_libraries(rust, &sdk, game)?;
     for &index in &resolution.order {
         installed.push(rlibs[projects[index].bundle.manifest.id.as_str()].clone());
@@ -862,7 +826,10 @@ pub fn compile(
         super::library_record::stamp(&library, sdk.commit(), "sunrise_patch", "0", true)?;
         installed.push(library);
     }
-    Ok((package.runtime.join("bin").join(crate::CLIENT), installed))
+    Ok(Some((
+        package.runtime.join("bin").join(crate::CLIENT),
+        installed,
+    )))
 }
 
 pub fn refuse_closure_rlib(id: &str, name: &str, path: &Path) -> Result<(), String> {
@@ -910,9 +877,49 @@ pub fn library_entry(
         )
 }
 
-/// Compiles `project`'s crate as an rlib into `out` with `rustc` (given the edition: rustc with
-/// the route's search paths), its game packages from `library` and its installed mod dependencies
-/// from `rlibs`. Returns the rlib and the crate's name.
+/// Add the SDK entry to the staged crate. The configured root and its generated sibling must
+/// stay in the mod; neither is ever written through a link.
+pub(super) fn stage_entry(
+    staged: &Path,
+    lib_path: Option<&toml::Value>,
+    id: &str,
+    entry: &str,
+) -> Result<PathBuf, String> {
+    let path = lib_path
+        .map(|value| value.as_str().ok_or("[lib].path must be a string"))
+        .transpose()?
+        .unwrap_or("src/lib.rs");
+    let relative = super::crates::local_path(staged, Path::new(""), path)
+        .map_err(|error| format!("{id}: [lib].path {path:?}: {error}"))?;
+    let source = staged.join(&relative);
+    let mut root = fs::read_to_string(&source).map_err(|e| format!("{id}: {path}: {e}"))?;
+    check_entry_root(&root, id)?;
+    root.push_str(
+        "\n#[allow(unsafe_code)]\n#[path = \"__sunrise_entry.rs\"] mod __sunrise_entry;\n",
+    );
+    if source
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("__sunrise_entry.rs"))
+    {
+        return Err(format!(
+            "{id}: [lib].path names the reserved SDK entry file"
+        ));
+    }
+    for (destination, text) in [
+        (source.with_file_name("__sunrise_entry.rs"), entry),
+        (source, root.as_str()),
+    ] {
+        // Replace the directory entry rather than opening an existing file for writing.
+        let parent = destination.parent().expect("a library file below the mod");
+        let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut file, text.as_bytes()).map_err(|e| e.to_string())?;
+        file.persist(destination).map_err(|e| e.to_string())?;
+    }
+    Ok(relative)
+}
+
+/// Builds `project` against the route's SDK libraries and the compiled mod dependencies.
+/// A check emits only Rust metadata; a build emits a dylib. Returns the artifact and crate name.
 #[allow(clippy::too_many_arguments)]
 pub fn compile_mod<'a>(
     project: &api::Project<'_>,
@@ -923,6 +930,7 @@ pub fn compile_mod<'a>(
     rlibs: &std::collections::HashMap<&str, PathBuf>,
     entry: &str,
     build: &str,
+    check_only: bool,
 ) -> Result<(PathBuf, String), String> {
     let id = project.bundle.manifest.id.as_str();
     let edition = project
@@ -934,23 +942,14 @@ pub fn compile_mod<'a>(
     let krate = project.crate_name();
     // Compile an isolated copy of the mod crate.
     let staged = out.join("staged").join(id);
+    match fs::remove_dir_all(&staged) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
+        _ => (),
+    }
     super::copy_bundle(project.bundle, &staged)?;
-    let source = staged.join(
-        project
-            .cargo
-            .get("lib")
-            .and_then(|l| l.get("path"))
-            .and_then(toml::Value::as_str)
-            .unwrap_or("src/lib.rs"),
-    );
+    let lib_path = project.cargo.get("lib").and_then(|lib| lib.get("path"));
+    let source = staged.join(stage_entry(&staged, lib_path, id, entry)?);
     let mut cmd = rustc(edition);
-    fs::write(source.with_file_name("__sunrise_entry.rs"), entry).map_err(|e| e.to_string())?;
-    let mut root = fs::read_to_string(&source).map_err(|e| e.to_string())?;
-    check_entry_root(&root, id)?;
-    root.push_str(
-        "\n#[allow(unsafe_code)]\n#[path = \"__sunrise_entry.rs\"] mod __sunrise_entry;\n",
-    );
-    fs::write(&source, root).map_err(|e| e.to_string())?;
     // Diagnostics as JSON, which `run_diagnosed` shows at the author's files: the compiler's
     // inputs and outputs stay those of the staged copy.
     cmd.args([
@@ -985,7 +984,11 @@ pub fn compile_mod<'a>(
                 .arg(format!("feature=\"{}\"", dependency.id));
         }
     }
-    let library = out.join(dylib_name(&krate));
+    let library = if check_only {
+        out.join(format!("lib{krate}.rmeta"))
+    } else {
+        out.join(dylib_name(&krate))
+    };
     let mut hash = Sha256::new();
     hash.update(build);
     hash.update(entry);
@@ -1010,17 +1013,24 @@ pub fn compile_mod<'a>(
                 author: project.bundle.dir.clone(),
             }],
         );
-        cmd.arg("--out-dir").arg(out).arg(&source);
+        if check_only {
+            cmd.arg("--emit=metadata").arg("-o").arg(&library);
+        } else {
+            cmd.arg("--out-dir").arg(out);
+        }
+        cmd.arg(&source);
         super::run_diagnosed(cmd, &compiling(id), &sources)?;
     }
-    super::library_record::validate_exports(&library, id)?;
-    super::library_record::stamp(
-        &library,
-        build,
-        id,
-        &project.bundle.manifest.version.to_string(),
-        false,
-    )?;
+    if !check_only {
+        super::library_record::validate_exports(&library, id)?;
+        super::library_record::stamp(
+            &library,
+            build,
+            id,
+            &project.bundle.manifest.version.to_string(),
+            false,
+        )?;
+    }
     fs::write(saved, fingerprint).map_err(|e| e.to_string())?;
     Ok((library, krate))
 }
@@ -1227,9 +1237,32 @@ pub fn runtime_libraries(
 
 #[cfg(test)]
 mod tests {
-    /// A build folder, or the builds folder above it, that is a link to a folder elsewhere is
-    /// refused before anything inside it is cleared, so the build never deletes the other
-    /// folder's `patch-applied`.
+    #[test]
+    fn an_outside_library_root_is_refused_before_writing_generated_source() {
+        let work = tempfile::tempdir().unwrap();
+        let stage = work.path().join("mod");
+        fs::create_dir(&stage).unwrap();
+        let outside = work.path().join("outside.rs");
+        let entry = work.path().join("__sunrise_entry.rs");
+        fs::write(&outside, "fn untouched() {}\n").unwrap();
+        for (path, reason) in [
+            ("../outside.rs", "outside the mod"),
+            ("src/C:/x.rs", "outside the mod"),
+            (r"src\..\..", "portable separators"),
+        ] {
+            let path = toml::Value::String(path.into());
+            let error =
+                super::stage_entry(&stage, Some(&path), "example", "// generated").unwrap_err();
+            assert!(
+                error.contains("[lib].path") && error.contains(reason),
+                "{error}"
+            );
+            assert_eq!(fs::read_to_string(&outside).unwrap(), "fn untouched() {}\n");
+            assert!(!entry.exists());
+        }
+    }
+
+    /// A linked build directory is refused before the files in it are cleared.
     #[test]
     fn a_build_folder_linked_elsewhere_is_refused_and_the_other_folder_kept() {
         #[cfg(unix)]
@@ -1492,7 +1525,7 @@ mod tests {
         }
         let mut sdk: Identity = serde_json::from_value(serde_json::json!({
             "commit": "test", "rustc": "test", "target": "test", "side": "client",
-            "link_args": [], "facade_crates": ["sunrise_core"],
+            "facade_crates": ["sunrise_core"],
         }))
         .unwrap();
         assert_eq!(
@@ -1514,12 +1547,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mod_library_compile_holds_none_of_the_executables_link_policy() {
-        let sdk: Identity = serde_json::from_value(serde_json::json!({
-            "commit": "test", "rustc": "test", "target": "test", "side": "client",
-            "link_args": ["-Wl,-stack_size,0x1000000", "/STACK:16777216"],
-        }))
-        .unwrap();
+    fn a_mod_library_compile_uses_dynamic_linking_and_platform_rpath() {
         let toolchain = crate::rust::Unpacked {
             dir: "toolchain".into(),
             target: "test".into(),
@@ -1532,12 +1560,6 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        for policy in &sdk.link_args {
-            assert!(
-                !args.iter().any(|arg| arg.contains(policy.as_str())),
-                "{policy} in {args:?}"
-            );
-        }
         assert!(args.iter().any(|arg| arg == "prefer-dynamic"), "{args:?}");
         let rpath = match std::env::consts::OS {
             "linux" => Some("link-arg=-Wl,-rpath,$ORIGIN"),
@@ -1557,7 +1579,7 @@ mod tests {
         // library among them, which no fixed list carried), the identity, the executable and
         // windows-gnu import libraries, which never ship.
         let sdk: Identity = serde_json::from_value(serde_json::json!({
-            "commit": "test", "rustc": "test", "target": "test", "side": "client", "link_args": [],
+            "commit": "test", "rustc": "test", "target": "test", "side": "client",
             "slices": {"runtime": [
                 "bin/sunrise-client.exe", "deps/sunrise_mod_host.dll",
                 "deps/libsunrise_mod_host.dll.a", "deps/libmod_api.so",
@@ -1591,7 +1613,7 @@ mod tests {
             assert_eq!(runtime_libraries(&rust, &sdk, game).unwrap(), expected);
         }
         let unsliced: Identity = serde_json::from_value(serde_json::json!({
-            "commit": "test", "rustc": "test", "target": "test", "side": "client", "link_args": [],
+            "commit": "test", "rustc": "test", "target": "test", "side": "client",
         }))
         .unwrap();
         let rust = crate::rust::tests::unpacked(scratch.path(), crate::rust::tests::HOSTS[0]);
@@ -1618,7 +1640,7 @@ mod tests {
         let check = |commit: &str, rustc: &str, target: &str, side: &str| {
             let identity = serde_json::json!({
                 "package_format": sunrise_mod_package::sdk::PACKAGE_FORMAT,
-                "commit": commit, "rustc": rustc, "target": target, "side": side, "link_args": [],
+                "commit": commit, "rustc": rustc, "target": target, "side": side,
             });
             fs::write(dir.join(IDENTITY), identity.to_string()).unwrap();
             check_identity(&dir, "abc123", "x86_64-pc-windows-gnu", Target::Client)
@@ -1644,7 +1666,7 @@ mod tests {
         let write = |slices: serde_json::Value| {
             let identity = serde_json::json!({
                 "package_format": sunrise_mod_package::sdk::PACKAGE_FORMAT,
-                "commit": "abc123", "rustc": "", "target": "", "side": "client", "link_args": [],
+                "commit": "abc123", "rustc": "", "target": "", "side": "client",
                 "slices": slices,
             });
             fs::write(whole.join(IDENTITY), identity.to_string()).unwrap();

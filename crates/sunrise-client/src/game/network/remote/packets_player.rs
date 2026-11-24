@@ -11,13 +11,15 @@ impl Game<'_> {
         self.install_remote_tags();
         self.refresh_render_visibility();
         self.test_highlights.clear();
+        // handleLogin: `debugSubscriber.clear()`.
+        self.debug_charts.clear_subscriptions();
         self.forget_synced_recipes();
         self.level.hardcore = p.hardcore;
         // handleLogin: startWaitingForNewLevel with Reason.OTHER, which
         // replaces ServerReconfigScreen.
         if let Some(r) = self.remote.as_mut() {
             r.reconfiguring = None;
-            r.attachments.clear();
+            r.clear_attachments();
             r.viewed.clear();
             // A new ClientPacketListener owns a fresh clock manager.
             r.clocks.clear();
@@ -29,12 +31,21 @@ impl Game<'_> {
         // pairs a vehicle again with ClientboundSetPassengersPacket).
         self.selected = 0;
         self.potions.effects.clear();
+        // handleLogin creates a fresh LocalPlayer only when none exists yet.
+        if self.remote.as_ref().is_none_or(|r| !r.logged_in) {
+            self.post_effects.clear();
+        }
         self.riding = None;
         if let Some(player) = self.player.as_mut() {
             player.entity_id = p.player_id;
         }
+        self.native_net
+            .holds
+            .borrow_mut()
+            .clear_cauldron_continuations();
         if let Some(r) = self.remote.as_mut() {
             r.carried.set(Some(0));
+            r.pending_cauldrons.get_mut().clear();
             // handleLogin makes a new ClientLevel: its predictions count from 0.
             r.sequence = 0;
             r.own_invisible = false;
@@ -47,6 +58,7 @@ impl Game<'_> {
             r.local_entity_silent = false;
             // handleLogin: the new LocalPlayer is the camera.
             r.camera = None;
+            r.detached_camera = None;
             r.logged_in = true;
             r.view_distance = p.chunk_radius;
             r.simulation_distance = p.simulation_distance;
@@ -54,20 +66,20 @@ impl Game<'_> {
             r.reduced_debug_info = p.reduced_debug_info;
             r.do_limited_crafting = p.limited_crafting;
         }
+        self.clear_spectated_entity_post_effect();
         self.bind_local_player_residency();
         self.refresh_debug_renderers();
         // LocalPlayer.setReducedDebugInfo always rebuilds, also on a second login.
         self.debug_entries.invalidate();
-        self.streaming.radius = self
-            .settings
-            .render_distance
-            .min(p.chunk_radius.saturating_add(1))
-            .max(2);
+        self.streaming.radius = crate::game::entity_culling::streaming_radius_for(
+            self.settings.render_distance,
+            Some(p.chunk_radius),
+        );
 
         // handleLogin: startWaitingForNewLevel(.., Reason.OTHER).
         self.enter_remote_dimension(
             &p.spawn,
-            false,
+            RemoteDimensionEntry::Login,
             sunrise_client::level_loading::Reason::Other,
         );
         // No ClientInformation here: the configuration phase sent it,
@@ -81,6 +93,7 @@ impl Game<'_> {
 
     /// `C::Respawn`: its arms of `apply_packet`, guard and order kept.
     pub(super) fn apply_respawn_packet(&mut self, p: play::Respawn) {
+        self.reset_client_item_use();
         // The new LocalPlayer copies reduced debug info through its setter.
         self.debug_entries.invalidate();
         let old_player = self.remote.as_ref().map(|r| (r.entity_id, r.profile));
@@ -93,6 +106,7 @@ impl Game<'_> {
         // A new player, without effects (the server sends them
         // again) and with no item in use.
         self.potions.effects.clear();
+        self.post_effects.clear();
         // Every synced attachment but the player's is sent again; the viewed
         // levels go or stay with the level entered (`enter_respawn_level`).
         if let Some(r) = self.remote.as_mut() {
@@ -100,7 +114,6 @@ impl Game<'_> {
                 .retain(|holder, _| matches!(holder, Holder::Player(_)));
         }
         self.using = None;
-        self.end_mod_use();
         // After a death (no KEEP_ENTITY_DATA) the new LocalPlayer
         // rides nothing: the server pairs a vehicle again with its
         // passengers. A dimension change keeps the vehicle it travels in.
@@ -146,13 +159,23 @@ impl Game<'_> {
         }
         // handleRespawn makes a new ClientLevel for another dimension
         // key (a proxy's server switch too): its predictions count from 0.
-        if let Some(r) = self.remote.as_mut()
-            && r.level != p.spawn.dimension
-        {
-            r.sequence = 0;
+        self.native_net
+            .holds
+            .borrow_mut()
+            .clear_cauldron_continuations();
+        if let Some(r) = self.remote.as_mut() {
+            r.pending_cauldrons.get_mut().clear();
+            if r.level != p.spawn.dimension {
+                r.sequence = 0;
+            }
         }
         self.portals.respawn_attributes.respawn(p.keep & 1 != 0);
-        self.enter_respawn_level(&p, reason);
+        let entry = if died {
+            RemoteDimensionEntry::DeathRespawn
+        } else {
+            RemoteDimensionEntry::Respawn
+        };
+        self.enter_respawn_level(&p, entry, reason);
         // handleRespawn adds the new LocalPlayer after what the kept
         // level holds; a new level holds nothing yet.
         let before: std::collections::HashSet<u32> = self
@@ -176,7 +199,9 @@ impl Game<'_> {
             r.health = (20.0, 20, 5.0);
             // handleRespawn: the new LocalPlayer is the camera.
             r.camera = None;
+            r.detached_camera = None;
         }
+        self.clear_spectated_entity_post_effect();
         self.capture(true);
         if let Some((old_id, uuid)) = old_player {
             self.native_client_player_clone(
@@ -200,6 +225,9 @@ impl Game<'_> {
             pl.health.flash_health_change(p.health);
         }
         self.apply_remote_health();
+        if p.health <= 0.0 {
+            self.reset_client_item_use();
+        }
         // The death screen opens (or the respawn is asked for) with the
         // death packet when the rule hides it.
         let shown = self.remote.as_ref().is_none_or(|r| r.show_death_screen);
@@ -221,11 +249,16 @@ impl Game<'_> {
         }
     }
 
-    /// `C::PlayerAbilities`: its arms of `apply_packet`, guard and order kept.
+    /// `C::PlayerAbilities`: mutates `Remote::abilities` in arrival order, preserving `may_build`.
     pub(super) fn apply_player_abilities_packet(&mut self, p: play::PlayerAbilities) {
         self.creative = p.flags & 8 != 0;
         if let Some(r) = self.remote.as_mut() {
-            r.abilities = Some(p);
+            r.abilities.invulnerable = p.flags & 1 != 0;
+            r.abilities.flying = p.flags & 2 != 0;
+            r.abilities.may_fly = p.flags & 4 != 0;
+            r.abilities.instabuild = p.flags & 8 != 0;
+            r.abilities.flying_speed = p.flying_speed;
+            r.abilities.walking_speed = p.walking_speed;
         }
         self.apply_remote_abilities();
     }
@@ -301,8 +334,14 @@ impl Game<'_> {
         match p.slot {
             0..=35 => self.inventory[p.slot as usize] = stack,
             36..=39 => self.armor[3 - (p.slot - 36) as usize] = stack,
-            // Inventory.SLOT_OFFHAND.
+            // Inventory.EQUIPMENT_SLOT_MAPPING: SLOT_OFFHAND, SLOT_BODY_ARMOR, SLOT_SADDLE.
             40 => self.offhand = stack,
+            41 => {
+                self.equipment.set(sunrise_items::equipment::BODY, stack);
+            }
+            42 => {
+                self.equipment.set(sunrise_items::equipment::SADDLE, stack);
+            }
             _ => {}
         }
         self.remote_synced_since(&before);
@@ -336,45 +375,64 @@ impl Game<'_> {
                         r.tab_players.entry(e.uuid).or_insert_with(|| {
                             sunrise_client::tab_list::TabPlayer::new(e.uuid, name.clone())
                         });
+                        r.tab_game_modes
+                            .entry(e.uuid)
+                            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicI32::new(0)));
                         if let Some(t) = e.properties.iter().find(|p| p.name == "textures") {
-                            // Without the services' profile property keys a
-                            // signature can't be checked; a signed property
-                            // counts as genuine.
-                            use sunrise_client::skins::{self, Signature};
-                            let signature = if t.signature.is_some() {
-                                Signature::Signed
-                            } else {
-                                Signature::Unsigned
-                            };
-                            let textures =
-                                skins::unpack(&t.value, signature, skins::texture_uris());
-                            r.skin_textures.entry(e.uuid).or_insert(textures);
+                            // Keep the raw property until the services keys settle.
+                            r.skin_textures
+                                .entry(e.uuid)
+                                .or_insert_with(|| Arc::new(PlayerTextures::new(t.clone())));
                         }
                     }
                 }
             }
         }
         for e in p.entries {
-            if mod_api::__private::listened(mod_api::HookId::ClientPlayerChangeGameType)
-                && self.player.is_some()
-                && let Some(mode) = e.game_mode
-                && let Some(r) = self.remote.as_ref()
-                && r.profile == e.uuid
-                && let Some(info) = r.tab_players.get(&e.uuid)
-                && info.game_mode != mode
-            {
-                let current = info.game_mode;
-                self.native_client_player_change_game_type(
-                    self.own_entity_id(),
-                    e.uuid,
-                    current,
-                    mode,
-                );
+            let mode_change = e.game_mode.and_then(|mode| {
+                let r = self.remote.as_ref()?;
+                let info = r.tab_players.get(&e.uuid)?;
+                (info.game_mode != mode).then_some((info.game_mode, mode))
+            });
+            if let Some((current, mode)) = mode_change {
+                // LocalPlayer.onGameModeChanged(SPECTATOR) clears vertical motion before PlayerInfo.setGameMode.
+                if mode == 3
+                    && self.remote.as_ref().is_some_and(|r| {
+                        r.profile == e.uuid
+                            && (self.player.is_some() || r.has_logical_player || r.logged_in)
+                    })
+                {
+                    if let Some(player) = self.player.as_mut() {
+                        player.velocity.y = 0.0;
+                    }
+                    if let Some(vel) = self
+                        .remote
+                        .as_mut()
+                        .and_then(|r| r.respawn_velocity.as_mut())
+                    {
+                        vel.y = 0.0;
+                    }
+                }
+                if mod_api::__private::listened(mod_api::HookId::ClientPlayerChangeGameType) {
+                    let entity_id = self.remote.as_ref().and_then(|r| {
+                        if e.uuid == r.profile {
+                            (self.player.is_some() || r.has_logical_player || r.logged_in)
+                                .then_some(r.entity_id)
+                        } else {
+                            r.player_entity(e.uuid).map(|id| id as i32)
+                        }
+                    });
+                    self.native_client_player_change_game_type(entity_id, e.uuid, current, mode);
+                }
             }
             if let Some(r) = self.remote.as_mut() {
                 if let Some(t) = r.tab_players.get_mut(&e.uuid) {
                     if let Some(mode) = e.game_mode {
                         t.game_mode = mode;
+                        r.tab_game_modes
+                            .entry(e.uuid)
+                            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicI32::new(mode)))
+                            .store(mode, std::sync::atomic::Ordering::Relaxed);
                     }
                     if let Some(latency) = e.latency {
                         t.latency = latency;
@@ -401,6 +459,16 @@ impl Game<'_> {
                 if let Some(name) = e.name {
                     r.players.insert(e.uuid, name);
                 }
+                // `Player.isPickable` sees `AbstractClientPlayer.gameMode` as soon as
+                // `ClientPacketListener.applyPlayerInfoUpdate` publishes its new mode.
+                if mode_change.is_some()
+                    && let Some(id) = r.player_entity(e.uuid)
+                    && let Some(index) = self.mob_index.find(&self.mobs, id)
+                {
+                    let spectator = r.remote_player_info_game_mode(id as i32) == Some(SPECTATOR);
+                    self.mobs
+                        .update(index, |mob| mob.extra.spectator = spectator);
+                }
             }
         }
     }
@@ -411,6 +479,7 @@ impl Game<'_> {
             for u in p.uuids {
                 r.players.remove(&u);
                 r.tab_players.remove(&u);
+                r.tab_game_modes.remove(&u);
                 r.chat_sessions.remove(&u);
                 r.chat_validators.remove(&u);
                 r.skin_textures.remove(&u);
@@ -452,19 +521,13 @@ impl Game<'_> {
 
     /// `C::DisguisedChat`: its arms of `apply_packet`, guard and order kept.
     pub(super) fn apply_disguised_chat_packet(&mut self, p: play::DisguisedChat) {
-        let content = sunrise_client::scoreboard::tag_to_json(&p.message);
-        let narration = self
-            .decorate_chat(&p.chat_type, &content, Decoration::Narration)
-            .plain();
-        let line = self.decorate_chat(&p.chat_type, &content, Decoration::Chat);
-        self.handle_player_chat(QueuedChat {
-            line,
+        self.enqueue_chat(QueuedChat {
             signature: None,
-            trust: ChatTrust::Secure,
-            narration,
             sender: 0,
-            chat_type: p.chat_type.chat_type,
-            player: None,
+            kind: QueuedChatKind::Disguised {
+                chat_type: p.chat_type,
+                message: p.message,
+            },
         });
     }
 
@@ -520,6 +583,9 @@ impl Game<'_> {
         if let Some(r) = self.remote.as_mut() {
             r.death_message = Some(message);
         }
+        if me {
+            self.reset_client_item_use();
+        }
         // ClientPacketListener.handlePlayerCombatKill: the death
         // screen, whatever health was last sent, or `respawn()` at
         // once when it is hidden.
@@ -558,7 +624,6 @@ impl Game<'_> {
 
     /// `C::PlayerChat`: its arms of `apply_packet`, guard and order kept.
     pub(super) fn apply_player_chat_packet(&mut self, p: play::PlayerChat) -> Result<()> {
-        use sunrise_client::scoreboard::tag_to_json;
         // SignedMessageBody.Packed.unpack: the last seen it names must
         // be in the cache; then the message joins it
         // (MessageSignatureCache.push).
@@ -600,7 +665,7 @@ impl Game<'_> {
                 "Received player chat packet for unknown player with ID: {:032x}",
                 p.sender
             );
-            self.handle_chat_message_error(&p.chat_type, signature.as_ref());
+            self.handle_chat_message_error(p.sender, p.chat_type, signature);
             return Ok(());
         }
         let now = std::time::SystemTime::now()
@@ -620,52 +685,56 @@ impl Game<'_> {
             filter: &p.filter,
         };
         let Some(validated) = r.validate_chat(&incoming, now) else {
-            self.handle_chat_message_error(&p.chat_type, signature.as_ref());
+            self.handle_chat_message_error(p.sender, p.chat_type, signature);
             return Ok(());
         };
         let signature = signature.filter(|_| validated == secure_chat::Validated::Signed);
-        // ChatListener.handlePlayerChatMessage: Only Show Secure Chat
-        // shows the signed content, never the server's replacement.
-        // The narrator says the message's own decorated content
-        // (`narrateChatMessage(boundChatType, message.decoratedContent())`).
-        let decorated = p
-            .unsigned_content
-            .as_ref()
-            .map_or_else(|| serde_json::Value::from(p.content.as_str()), tag_to_json);
-        let content = if self.settings.file.bool("onlyShowSecureChat") {
+        if p.filter.0 == 1 {
+            // `FilterMask.FULLY_FILTERED` can never display or narrate; keep
+            // FIFO ordering and its deletion/ack key without text payloads.
+            self.enqueue_chat(QueuedChat {
+                signature,
+                sender: p.sender,
+                kind: QueuedChatKind::Filtered,
+            });
+            return Ok(());
+        }
+        // ChatListener.handlePlayerChatMessage: Only Show Secure Chat shows the
+        // signed content, never the server's replacement, so what the line shows is
+        // picked here, at receipt, with the receipt time. The line is decorated, its
+        // trust evaluated and shown when the queue accepts the message
+        // (`showMessageToPlayer`): a component translates when it is read
+        // (`TranslatableContents.decompose`), in the language of that moment.
+        let only_show_secure = self.settings.file.bool("onlyShowSecureChat");
+        let displayed = if only_show_secure {
             serde_json::Value::from(p.content.as_str())
         } else {
-            decorated.clone()
+            p.unsigned_content.as_ref().map_or_else(
+                || serde_json::Value::from(p.content.as_str()),
+                sunrise_client::scoreboard::tag_to_json,
+            )
         };
-        let narration = self
-            .decorate_chat(&p.chat_type, &decorated, Decoration::Narration)
-            .plain();
-        let line = self.decorate_chat(&p.chat_type, &content, Decoration::Chat);
-        let trust = self.chat_trust(
-            p.sender,
-            signature.is_some(),
-            p.timestamp,
-            &p.content,
-            p.unsigned_content.as_ref(),
-            &line,
-        );
-        // A hidden or fully filtered message counts as processed, not shown.
-        let Some((line, narration)) = self.shown_player_chat(&p, line, narration) else {
-            if let Some(signature) = &signature {
-                self.mark_message_processed(signature, false);
-            }
-            return Ok(());
-        };
+        let signed = signature.is_some();
         let listened = mod_api::__private::listened(mod_api::HookId::ClientChatReceived);
-        let player = listened.then(|| chat_received::player_chat_info(&p, signature.is_some()));
-        self.handle_player_chat(QueuedChat {
-            line,
+        let info = listened.then(|| Box::new(chat_received::player_chat_info(&p, signed)));
+        let received_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        self.enqueue_chat(QueuedChat {
             signature,
-            trust,
-            narration,
             sender: p.sender,
-            chat_type: p.chat_type.chat_type,
-            player,
+            kind: QueuedChatKind::Player {
+                chat_type: p.chat_type,
+                signed,
+                timestamp: p.timestamp,
+                received_ms,
+                only_show_secure,
+                displayed,
+                signed_content: p.content,
+                unsigned_content: p.unsigned_content,
+                filter: p.filter,
+                info,
+            },
         });
         Ok(())
     }
@@ -714,7 +783,9 @@ impl Game<'_> {
             self.remote_station_data(usize::try_from(p.id).unwrap_or(usize::MAX), p.value);
             return Ok(());
         }
-        if self.native_screen_data(p.container, usize::from(p.id as u16), i32::from(p.value)) {
+        if usize::try_from(p.id)
+            .is_ok_and(|index| self.native_screen_data(p.container, index, i32::from(p.value)))
+        {
             return Ok(());
         }
         let v = i32::from(p.value);

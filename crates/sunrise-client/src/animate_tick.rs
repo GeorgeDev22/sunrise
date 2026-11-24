@@ -15,7 +15,7 @@ use std::{
     collections::BTreeMap,
     path::Path,
     sync::{
-        OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicU8, Ordering},
     },
 };
@@ -25,6 +25,8 @@ use sunrise_core::{
 };
 use sunrise_world::{
     block_collision::BlockCollisionRegistry,
+    environment_attributes::AmbientParticle,
+    particle_options::ParticleOptions as PersistentOptions,
     registry::{BlockRegistry, BlockStateId},
     worldgen::tags::TagDefinitions,
 };
@@ -121,7 +123,24 @@ fn step(facing: &str) -> [i32; 3] {
         _ => [0, -1, 0],
     }
 }
+/// `ColoredFallingBlock.getDustColor` and `DragonEggBlock.getDustColor`.
+pub fn fixed_falling_dust_color(name: &str) -> Option<u32> {
+    Some(match name {
+        "minecraft:sand" => 0xDBD3A0,
+        "minecraft:red_sand" => 0xA95821,
+        "minecraft:gravel" => 0x807C7B,
+        "minecraft:dragon_egg" => 0x000000,
+        _ => return None,
+    })
+}
+
 fn classify(name: &str, prop: &dyn Fn(&str) -> Option<String>) -> Animate {
+    if let Some(color) = fixed_falling_dust_color(name) {
+        return Animate::Falling(
+            color,
+            matches!(name, "minecraft:sand" | "minecraft:red_sand"),
+        );
+    }
     let name = name.strip_prefix("minecraft:").unwrap_or(name);
     let lit = prop("lit").as_deref() == Some("true");
     let powered = prop("powered").as_deref() == Some("true");
@@ -164,13 +183,8 @@ fn classify(name: &str, prop: &dyn Fn(&str) -> Option<String>) -> Animate {
         "mycelium" => Animate::Mycelium,
         "brewing_stand" => Animate::BrewingStand,
         "ender_chest" => Animate::EnderChest,
-        "sand" => Animate::Falling(0xDBD3A0, true),
-        "red_sand" => Animate::Falling(0xA95821, true),
-        "gravel" => Animate::Falling(0x807C7B, false),
-        // AnvilBlock/ConcretePowderBlock.getDustColor is the map colour;
-        // DragonEggBlock's is black.
+        // AnvilBlock/ConcretePowderBlock.getDustColor is the map colour.
         "anvil" | "chipped_anvil" | "damaged_anvil" => Animate::Falling(0xA7A7A7, false),
-        "dragon_egg" => Animate::Falling(0x000000, false),
         _ if name.ends_with("_concrete_powder") => Animate::Falling(
             concrete_powder_color(name.trim_end_matches("_concrete_powder")),
             false,
@@ -472,6 +486,8 @@ pub struct AnimateContext<'a> {
     pub sky_darken: i32,
     /// Creative main-hand marker block and a resolver for each placed state's sprite.
     pub marker: Option<(&'a str, &'a dyn Fn(BlockStateId) -> Option<ParticleOptions>)>,
+    /// `ClientLevel.environmentAttributes().getValue(AMBIENT_PARTICLES, pos)`.
+    pub ambient_particles: Option<&'a dyn Fn([i32; 3]) -> Arc<[AmbientParticle]>>,
     /// `BlockState.getOffset` of a state at (x, z), for blocks with a random model offset.
     pub model_offset: &'a dyn Fn(BlockStateId, i32, i32) -> Option<[f64; 3]>,
     /// `TheEndGatewayBlockEntity.getParticleAmount` of the gateway state at a position.
@@ -599,7 +615,7 @@ fn redstone(engine: &mut ParticleEngine, p: [f64; 3]) {
 
 /// `ClientLevel.animateTick` around the player's block position. A pick whose block has a part
 /// (`AnimateContext::block_parts`) gets no part call here: the game runs the tick through
-/// [`AnimateSampling`] to call them.
+/// [`AnimateSampling`] to call them or resolve model-backed ambient options.
 pub fn animate_tick(
     tables: &AnimateTables,
     engine: &mut ParticleEngine,
@@ -620,6 +636,44 @@ pub struct AnimateSampling {
     picks: u32,
     /// The pick [`AnimateSampling::run`] stopped in for its part: its state and position.
     rest: Option<(BlockStateId, [i32; 3])>,
+    ambient: Option<AmbientEmissions>,
+}
+
+pub enum AnimateStep {
+    BlockPart(BlockStateId, [i32; 3]),
+    Ambient(Arc<PersistentOptions>, [f64; 3]),
+}
+
+struct AmbientEmissions {
+    pos: [i32; 3],
+    entries: Arc<[AmbientParticle]>,
+    next: usize,
+}
+
+impl AmbientEmissions {
+    /// Resume after each game-resolved particle so its limiter/provider draws happen
+    /// before testing the next entry's spawn chance.
+    fn emit(&mut self, engine: &mut ParticleEngine, world: &World) -> Option<AnimateStep> {
+        while let Some(entry) = self.entries.get(self.next) {
+            self.next += 1;
+            let random = engine.level_random();
+            // AmbientParticle.canSpawn includes equality, even at zero probability.
+            if random.next_float() <= entry.probability {
+                let [x, y, z] = self.pos.map(f64::from);
+                let at = [
+                    x + random.next_double(),
+                    y + random.next_double(),
+                    z + random.next_double(),
+                ];
+                if let Some(options) = ParticleOptions::from_persistent(&entry.particle) {
+                    engine.add_with_world(Some(world), &options, at, [0.0; 3], false, false);
+                } else {
+                    return Some(AnimateStep::Ambient(Arc::clone(&entry.particle), at));
+                }
+            }
+        }
+        None
+    }
 }
 
 impl AnimateSampling {
@@ -629,26 +683,35 @@ impl AnimateSampling {
             player,
             picks: 0,
             rest: None,
+            ambient: None,
         }
     }
     /// Some pick made already.
     pub fn started(&self) -> bool {
         self.picks > 0
     }
-    /// Picks on until one whose block has a part (`ctx.block_parts`), and returns its state and
-    /// position after the block's own effects: the caller calls the part, then runs again,
-    /// which ends that pick (the position's pack emitters, fluid, marker and biome ambience)
-    /// before making the next. `None` once the tick's picks are all done.
+    /// Run through the picks, stopping for a mod block part or a particle that needs a
+    /// game-side provider. `None` once the tick's picks and emissions are finished.
     pub fn run(
         &mut self,
         tables: &AnimateTables,
         engine: &mut ParticleEngine,
         ctx: &AnimateContext,
-    ) -> Option<(BlockStateId, [i32; 3])> {
-        if let Some((state, pos)) = self.rest.take() {
-            animate_rest(tables, engine, ctx, state, pos, true);
-        }
-        while self.picks < 2 * 667 {
+    ) -> Option<AnimateStep> {
+        loop {
+            if let Some(ambient) = self.ambient.as_mut()
+                && let Some(step) = ambient.emit(engine, ctx.world)
+            {
+                return Some(step);
+            }
+            self.ambient = None;
+            if let Some((state, pos)) = self.rest.take() {
+                self.ambient = animate_rest(tables, engine, ctx, state, pos, true);
+                continue;
+            }
+            if self.picks == 2 * 667 {
+                return None;
+            }
             let r = if self.picks.is_multiple_of(2) { 16 } else { 32 };
             self.picks += 1;
             let pos = pick(engine, self.player, r);
@@ -657,11 +720,10 @@ impl AnimateSampling {
             };
             if part {
                 self.rest = Some((state, pos));
-                return Some((state, pos));
+                return Some(AnimateStep::BlockPart(state, pos));
             }
-            animate_rest(tables, engine, ctx, state, pos, true);
+            self.ambient = animate_rest(tables, engine, ctx, state, pos, true);
         }
-        None
     }
 }
 
@@ -685,7 +747,7 @@ pub fn animate_scene(
     }
     for _ in 0..picks {
         let pos = blocks[next_int(engine.random(), count) as usize];
-        animate_at(tables, engine, ctx, pos, pos, false);
+        let _ = animate_at(tables, engine, ctx, pos, pos, false);
     }
 }
 fn next_int(r: &mut LegacyRandom, bound: i32) -> i32 {
@@ -693,7 +755,7 @@ fn next_int(r: &mut LegacyRandom, bound: i32) -> i32 {
 }
 /// `ClientLevel.doAnimateTick`'s position: within `r` of `center` on each axis.
 fn pick(engine: &mut ParticleEngine, center: [i32; 3], r: i32) -> [i32; 3] {
-    let random = engine.random();
+    let random = engine.level_random();
     let x = center[0] + next_int(random, r) - next_int(random, r);
     let y = center[1] + next_int(random, r) - next_int(random, r);
     let z = center[2] + next_int(random, r) - next_int(random, r);
@@ -709,7 +771,9 @@ fn do_animate_tick(
     level: bool,
 ) {
     let pos = pick(engine, center, r);
-    animate_at(tables, engine, ctx, pos, center, level);
+    if let Some(mut ambient) = animate_at(tables, engine, ctx, pos, center, level) {
+        assert!(ambient.emit(engine, ctx.world).is_none());
+    }
 }
 
 /// One picked position's animate tick: its block's and fluid's, and with `level` the
@@ -721,10 +785,9 @@ fn animate_at(
     pos: [i32; 3],
     center: [i32; 3],
     level: bool,
-) {
-    if let Some((state, _)) = animate_block(tables, engine, ctx, pos, center) {
-        animate_rest(tables, engine, ctx, state, pos, level);
-    }
+) -> Option<AmbientEmissions> {
+    let (state, _) = animate_block(tables, engine, ctx, pos, center)?;
+    animate_rest(tables, engine, ctx, state, pos, level)
 }
 
 /// A picked position's block's own animate tick: its state, and whether a mod block's part
@@ -759,7 +822,7 @@ fn animate_rest(
     state: BlockStateId,
     pos: [i32; 3],
     level: bool,
-) {
+) -> Option<AmbientEmissions> {
     let [x, y, z] = pos;
     // Resource packs' Polytone block emitters (#11486): nothing without such a pack.
     if level {
@@ -782,7 +845,12 @@ fn animate_rest(
             facts.fluid_level,
             facts.fluid_falling,
         );
-        if next_int(engine.random(), 10) == 0 {
+        let random = if level {
+            engine.level_random()
+        } else {
+            engine.random()
+        };
+        if next_int(random, 10) == 0 {
             let drip = if facts.fluid == Fluid::Water {
                 T::DrippingWater
             } else {
@@ -792,11 +860,11 @@ fn animate_rest(
             // the fluid block's own down face, not whether it is a full cube (a
             // waterlogged bottom slab's face is sturdy and has no fluid below).
             let top_solid = facts.sturdy_full & 1 != 0;
-            try_spawn_drip(tables, engine, ctx, [x, y - 1, z], drip, top_solid);
+            try_spawn_drip(tables, engine, ctx, [x, y - 1, z], drip, top_solid, level);
         }
     }
     if !level {
-        return;
+        return None;
     }
     if let Some((block, options)) = ctx.marker
         && ctx.registry.state(state).is_some_and(|s| s.name == block)
@@ -804,30 +872,15 @@ fn animate_rest(
     {
         engine.add(&options, pos.map(|v| f64::from(v) + 0.5), [0.0; 3]);
     }
-    if !facts.full_collision {
-        let biome = ctx
-            .world
-            .chunks
-            .get(&(x >> 4, z >> 4))
-            .map_or(0, |c| c.biome(x, y, z));
-        let particles = ctx
-            .biomes
-            .list
-            .get(usize::from(biome))
-            .map_or(&[][..], |info| info.ambient_particles.as_slice());
-        for &(ty, probability) in particles {
-            // AmbientParticle.canSpawn: random.nextFloat() <= probability.
-            let random = engine.random();
-            if random.next_float() <= probability {
-                let p = [
-                    f64::from(x) + random.next_double(),
-                    f64::from(y) + random.next_double(),
-                    f64::from(z) + random.next_double(),
-                ];
-                add(engine, ty, p, [0.0; 3]);
-            }
-        }
+    if facts.full_collision {
+        return None;
     }
+    let entries = ctx.ambient_particles?(pos);
+    (!entries.is_empty()).then_some(AmbientEmissions {
+        pos,
+        entries,
+        next: 0,
+    })
 }
 /// `ClientLevel.trySpawnDripParticles`.
 fn try_spawn_drip(
@@ -837,6 +890,7 @@ fn try_spawn_drip(
     pos: [i32; 3],
     drip: T,
     top_solid: bool,
+    level: bool,
 ) {
     let state = ctx.state(pos);
     if ctx.facts.get(state).fluid != Fluid::None {
@@ -846,7 +900,11 @@ fn try_spawn_drip(
         return;
     };
     let spawn = |engine: &mut ParticleEngine, x1: f64, x2: f64, z1: f64, z2: f64, y: f64| {
-        let r = engine.random();
+        let r = if level {
+            engine.level_random()
+        } else {
+            engine.random()
+        };
         let (a, b) = (r.next_double(), r.next_double());
         add(
             engine,
@@ -2092,58 +2150,65 @@ pub fn campfire_particles<'a>(
     cooking: &dyn Fn([i32; 3]) -> [bool; 4],
 ) {
     for &(pos, state) in blocks {
-        if !tables.is_lit_campfire(state) {
+        campfire_particle_tick(tables, engine, ctx.registry, pos, state, cooking(pos));
+    }
+}
+/// `CampfireBlockEntity.particleTick` of the campfire at `pos` in `state`, if it is lit.
+pub fn campfire_particle_tick(
+    tables: &AnimateTables,
+    engine: &mut ParticleEngine,
+    registry: &BlockRegistry,
+    pos: [i32; 3],
+    state: u32,
+    occupied: [bool; 4],
+) {
+    if !tables.is_lit_campfire(state) {
+        return;
+    }
+    let properties = registry.state(BlockStateId(state)).map(|s| &s.properties);
+    let prop = |k: &str| properties.and_then(|p| p.get(k)).map(String::as_str);
+    let signal = prop("signal_fire") == Some("true");
+    // Direction.get2DDataValue: south, west, north, east.
+    let rotation = match prop("facing") {
+        Some("west") => 1,
+        Some("north") => 2,
+        Some("east") => 3,
+        _ => 0,
+    };
+    let r = engine.level_random();
+    if r.next_float() < 0.11 {
+        // `for (int i = 0; i < random.nextInt(2) + 2; i++)`: the iteration
+        // bound is drawn again on every pass, so the loop keeps asking the
+        // random whether to make one more puff.
+        let mut made = 0;
+        loop {
+            let count = next_int(engine.level_random(), 2) + 2;
+            if made >= count {
+                break;
+            }
+            make_campfire_smoke(engine, pos, signal, false);
+            made += 1;
+        }
+    }
+    // The smoke over each cooking item, at the slot's corner of the fire.
+    for (slot, _) in occupied.iter().enumerate().filter(|(_, held)| **held) {
+        if engine.level_random().next_float() >= 0.2 {
             continue;
         }
-        let properties = ctx
-            .registry
-            .state(BlockStateId(state))
-            .map(|s| &s.properties);
-        let prop = |k: &str| properties.and_then(|p| p.get(k)).map(String::as_str);
-        let signal = prop("signal_fire") == Some("true");
-        // Direction.get2DDataValue: south, west, north, east.
-        let rotation = match prop("facing") {
-            Some("west") => 1,
-            Some("north") => 2,
-            Some("east") => 3,
-            _ => 0,
+        // Direction.from2DDataValue((slot + rotation) % 4) and its clockwise side.
+        let (step, clockwise) = match (slot + rotation) % 4 {
+            0 => ([0.0, 1.0], [-1.0, 0.0]),
+            1 => ([-1.0, 0.0], [0.0, -1.0]),
+            2 => ([0.0, -1.0], [1.0, 0.0]),
+            _ => ([1.0, 0.0], [0.0, 1.0]),
         };
-        let r = engine.random();
-        if r.next_float() < 0.11 {
-            // `for (int i = 0; i < random.nextInt(2) + 2; i++)`: the iteration
-            // bound is drawn again on every pass, so the loop keeps asking the
-            // random whether to make one more puff.
-            let mut made = 0;
-            loop {
-                let count = next_int(engine.random(), 2) + 2;
-                if made >= count {
-                    break;
-                }
-                make_campfire_smoke(engine, pos, signal, false);
-                made += 1;
-            }
-        }
-        // The smoke over each cooking item, at the slot's corner of the fire.
-        let occupied = cooking(pos);
-        for (slot, _) in occupied.iter().enumerate().filter(|(_, held)| **held) {
-            if engine.random().next_float() >= 0.2 {
-                continue;
-            }
-            // Direction.from2DDataValue((slot + rotation) % 4) and its clockwise side.
-            let (step, clockwise) = match (slot + rotation) % 4 {
-                0 => ([0.0, 1.0], [-1.0, 0.0]),
-                1 => ([-1.0, 0.0], [0.0, -1.0]),
-                2 => ([0.0, -1.0], [1.0, 0.0]),
-                _ => ([1.0, 0.0], [0.0, 1.0]),
-            };
-            let at = [
-                f64::from(pos[0]) + 0.5 - step[0] * 0.3125 + clockwise[0] * 0.3125,
-                f64::from(pos[1]) + 0.5,
-                f64::from(pos[2]) + 0.5 - step[1] * 0.3125 + clockwise[1] * 0.3125,
-            ];
-            for _ in 0..4 {
-                add(engine, T::Smoke, at, [0.0, 5.0e-4, 0.0]);
-            }
+        let at = [
+            f64::from(pos[0]) + 0.5 - step[0] * 0.3125 + clockwise[0] * 0.3125,
+            f64::from(pos[1]) + 0.5,
+            f64::from(pos[2]) + 0.5 - step[1] * 0.3125 + clockwise[1] * 0.3125,
+        ];
+        for _ in 0..4 {
+            add(engine, T::Smoke, at, [0.0, 5.0e-4, 0.0]);
         }
     }
 }
@@ -2157,7 +2222,7 @@ pub fn make_campfire_smoke(
     signal: bool,
     smoking: bool,
 ) {
-    let r = engine.random();
+    let r = engine.level_random();
     let sign = |r: &mut LegacyRandom| if r.next_boolean() { 1.0 } else { -1.0 };
     let dx = r.next_double() / 3.0;
     let x = f64::from(pos[0]) + 0.5 + dx * sign(r);
@@ -2177,7 +2242,7 @@ pub fn make_campfire_smoke(
         true,
     );
     if smoking {
-        let r = engine.random();
+        let r = engine.level_random();
         let dx = r.next_double() / 4.0 * sign(r);
         let dz = r.next_double() / 4.0 * sign(r);
         let at = [
@@ -2276,11 +2341,26 @@ mod tests {
         assert_eq!(run(0, near), (20, 20), "All");
         assert_eq!(run(2, near), (20, 0), "Minimal");
         assert_eq!(run(0, [100.5, 65.0, 0.5]), (20, 0), "100 blocks away");
-        // Decreased: per puff the cosy smoke's roll, then the plain smoke's.
+        // Decreased: per puff the level random draws the cosy smoke's place, rolls it, draws the
+        // plain smoke's place, then rolls that.
         let mut level = LegacyRandom::new(9);
         let kept = (0..20)
             .filter(|_| {
+                for draw in [0, 1, 0, 0, 0, 1] {
+                    if draw == 0 {
+                        level.next_double();
+                    } else {
+                        level.next_boolean();
+                    }
+                }
                 level.next_int_bound(3).unwrap();
+                for draw in [0, 1, 0, 1] {
+                    if draw == 0 {
+                        level.next_double();
+                    } else {
+                        level.next_boolean();
+                    }
+                }
                 level.next_int_bound(3).unwrap() != 0
             })
             .count();
@@ -2384,6 +2464,7 @@ mod tests {
                 creaking_active: false,
                 sky_darken: 0,
                 marker: None,
+                ambient_particles: None,
                 model_offset: &no_offset,
                 gateway_particles: &no_gateway,
                 thundering: false,

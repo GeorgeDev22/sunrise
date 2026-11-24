@@ -49,7 +49,6 @@ fn one_travel_fires_once_and_its_move_beside_and_noai_fires_nobody() {
             game.native_level_opened(crate::game::Dim::Overworld);
             game.build_registries();
             game.reset_entity_residency();
-            let _world = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
             game.set_allow_commands(true);
             let registry = &game.pack.assets.registry;
             let stone = registry.default_state("minecraft:stone").unwrap();
@@ -107,7 +106,6 @@ fn a_replaced_travel_velocity_steer_its_tick() {
             game.native_level_opened(crate::game::Dim::Overworld);
             game.build_registries();
             game.reset_entity_residency();
-            let _world = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
             game.set_allow_commands(true);
             let registry = &game.pack.assets.registry;
             let stone = registry.default_state("minecraft:stone").unwrap();
@@ -177,7 +175,6 @@ fn a_move_veto_still_holds_a_travel_that_ran() {
             game.native_level_opened(crate::game::Dim::Overworld);
             game.build_registries();
             game.reset_entity_residency();
-            let _world = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
             game.set_allow_commands(true);
             let registry = &game.pack.assets.registry;
             let stone = registry.default_state("minecraft:stone").unwrap();

@@ -853,6 +853,7 @@ mod tick_parity {
                 block_entity: false,
                 render_shape: RenderShape::Model,
                 destroy_overlay: true,
+                spawn_terrain_particles: true,
                 full_collision: true,
                 friction: 0.6,
                 explosion_resistance: 1.0,

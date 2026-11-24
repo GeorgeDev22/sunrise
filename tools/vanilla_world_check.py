@@ -34,8 +34,12 @@ SUSPICIOUS = re.compile(
 BENIGN = re.compile(r'(Unpacking |OFFLINE/INSECURE|online-mode|authenticate usernames|hackers|'
                     r'Failed to load properties|Failed to load eula)')
 LOG_TIME = re.compile(r'^\[\d{2}:\d{2}:\d{2}\] ')
-DISCOVERY_WARNING = '[Minecraft Services Discovery/WARN]: Failed to connect'
+DISCOVERY_WARNINGS = {
+    '[Minecraft Services Discovery/WARN]: Failed to connect',
+    '[Minecraft Services Discovery/WARN]: Services are unavailable, unable to fetch uri for AUTHENTICATION/getPublicKeys',
+}
 DISCOVERY_HOST = 'discovery.minecraftservices.com'
+PUBLIC_KEY_FAILURE = 'Failed to request Minecraft Services public key'
 DISCOVERY_EXCEPTION = 'com.mojang.authlib.exceptions.MinecraftClientException: '
 DISCOVERY_DETAILS = {
     DISCOVERY_EXCEPTION + f'Failed to read from https://{DISCOVERY_HOST}/minecraft/client due to {DISCOVERY_HOST}',
@@ -48,13 +52,14 @@ RANDOM_HARDWARE_ADDRESS = re.compile(
     r'using random bytes: (?:[0-9a-f]{2}:){7}[0-9a-f]{2}')
 
 
-def log_problems(lines):
+def log_problems(lines, *, suspicious=SUSPICIOUS, benign=BENIGN):
+    """Find problems in an offline fixture's console output."""
     problems = []
     discovery = False
     for line in lines:
         if timestamp := LOG_TIME.match(line):
             message = line[timestamp.end():]
-            discovery = message == DISCOVERY_WARNING
+            discovery = message in DISCOVERY_WARNINGS
             # Auth discovery is optional in offline mode. Netty's random address
             # only identifies its channels; it cannot change the saved world.
             if discovery or RANDOM_HARDWARE_ADDRESS.fullmatch(message):
@@ -63,7 +68,7 @@ def log_problems(lines):
             if line in DISCOVERY_DETAILS or JAVA_STACK_LINE.fullmatch(line):
                 continue
             discovery = False
-        if SUSPICIOUS.search(line) and not BENIGN.search(line):
+        if line != PUBLIC_KEY_FAILURE and suspicious.search(line) and not benign.search(line):
             problems.append(line)
     return problems
 

@@ -55,7 +55,14 @@ impl Hooks for VeinMiner {
         let pos = [event.pos.x, event.pos.y, event.pos.z];
         if self.busy.load(Ordering::Relaxed) && self.vein.lock().unwrap().contains(&pos) {
             let mut kept = self.kept.lock().unwrap();
-            kept.0.extend(event.drops.drain(..).map(|drop| drop.stack));
+            event.drops.retain(|drop| {
+                if let Some(stack) = drop.stack().and_then(|stack| stack.project()) {
+                    kept.0.push(stack);
+                    false
+                } else {
+                    true
+                }
+            });
             kept.1 += std::mem::take(&mut event.experience);
         }
         Flow::Continue

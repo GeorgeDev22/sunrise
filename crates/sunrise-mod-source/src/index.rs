@@ -317,6 +317,9 @@ struct GlobLookup {
     indexed: Option<Found>,
 }
 
+type ModuleLoader<'a> = dyn FnMut(&str, &[String]) -> Result<Vec<Item>, String> + 'a;
+type ItemFilter<'a> = dyn Fn(&Item) -> bool + 'a;
+
 /// The indexed crates' modules, parsed as they are first reached.
 pub struct Index<'a> {
     root: &'a Path,
@@ -337,6 +340,8 @@ pub struct Index<'a> {
     /// Cargo names for dependencies whose source is in this index, by importing crate.
     dependency_aliases: HashMap<String, HashMap<String, String>>,
     default_features: HashMap<String, HashSet<String>>,
+    load_module: Option<Box<ModuleLoader<'a>>>,
+    item_enabled: Option<Box<ItemFilter<'a>>>,
 }
 
 /// The file a module's `#[path = "..."]` names.
@@ -393,6 +398,8 @@ impl<'a> Index<'a> {
             root_files: HashMap::new(),
             dependency_aliases: HashMap::new(),
             default_features: HashMap::new(),
+            load_module: None,
+            item_enabled: None,
         }
     }
 
@@ -423,6 +430,29 @@ impl<'a> Index<'a> {
         self.default_features.extend(features.clone());
     }
 
+    /// Resolve function items using the caller's view of the active module tree.
+    pub fn loading_functions(
+        mut self,
+        load: impl FnMut(&str, &[String]) -> Result<Vec<Item>, String> + 'a,
+    ) -> Self {
+        self.load_module = Some(Box::new(load));
+        self
+    }
+
+    /// Filter items lazily when name resolution actually matches them, rather than when a module
+    /// is loaded.
+    pub fn filtering_items(mut self, enabled: impl Fn(&Item) -> bool + 'a) -> Self {
+        self.item_enabled = Some(Box::new(enabled));
+        self
+    }
+
+    fn item_active(&self, module: usize, item: &Item, attrs: &[Attribute]) -> bool {
+        match &self.item_enabled {
+            Some(enabled) => enabled(item),
+            None => self.default_build(module, attrs),
+        }
+    }
+
     /// Whether an item's attributes admit the default build of its owning crate.
     pub fn default_build(&self, module: usize, attrs: &[Attribute]) -> bool {
         let features = self.default_features.get(&self.modules[module].krate);
@@ -435,12 +465,15 @@ impl<'a> Index<'a> {
         let krate = self.modules[module].krate.clone();
         let root = self.module(&krate, &[])?;
         let spelling = self.modules[root].items.iter().find_map(|item| {
-            let Item::ExternCrate(item) = item else {
+            let Item::ExternCrate(extern_item) = item else {
                 return None;
             };
-            let alias = item.rename.as_ref().map_or(&item.ident, |(_, name)| name);
-            (self.default_build(root, &item.attrs) && *alias == name)
-                .then(|| item.ident.to_string())
+            let alias = extern_item
+                .rename
+                .as_ref()
+                .map_or(&extern_item.ident, |(_, name)| name);
+            (*alias == name && self.item_active(root, item, &extern_item.attrs))
+                .then(|| extern_item.ident.to_string())
         });
         if spelling.as_deref() == Some("self") {
             return Ok(Some(krate));
@@ -523,16 +556,29 @@ impl<'a> Index<'a> {
         if let Some(&id) = self.by_path.get(&(krate.clone(), path.to_vec())) {
             return Ok(id);
         }
-        let items = match path.split_last() {
+        let items = if let Some(load) = &mut self.load_module {
+            load(&krate, path)?
+        } else {
+            self.parse_module(&krate, path)?
+        };
+        let id = self.modules.len();
+        self.modules.push(Module {
+            krate: krate.clone(),
+            path: path.to_vec(),
+            items,
+        });
+        self.by_path.insert((krate, path.to_vec()), id);
+        Ok(id)
+    }
+
+    fn parse_module(&mut self, krate: &str, path: &[String]) -> Result<Vec<Item>, String> {
+        Ok(match path.split_last() {
             None => {
-                let file = self
-                    .root_files
-                    .get(krate.as_str())
-                    .map_or("lib.rs", String::as_str);
-                self.parse(&krate, file)?
+                let file = self.root_files.get(krate).map_or("lib.rs", String::as_str);
+                self.parse(krate, file)?
             }
             Some((last, parent)) => {
-                let parent = self.module(&krate, parent)?;
+                let parent = self.module(krate, parent)?;
                 let declarations = &self.modules[parent].items;
                 let has_declaration = declarations
                     .iter()
@@ -544,7 +590,7 @@ impl<'a> Index<'a> {
                     {
                         Some((
                             item.content.clone(),
-                            path_attribute(&item.attrs, self.default_features.get(&krate)),
+                            path_attribute(&item.attrs, self.default_features.get(krate)),
                         ))
                     }
                     _ => None,
@@ -560,32 +606,24 @@ impl<'a> Index<'a> {
                     Some((Some((_, items)), _)) => self.expand_includes(items)?,
                     // A generated `#[path]` is absolute.
                     Some((None, Some(file))) if Path::new(&file).is_absolute() => {
-                        self.parse(&krate, &file)?
+                        self.parse(krate, &file)?
                     }
                     // `#[path]` is relative to the declaring file's directory: `parent.rs`
                     // sits beside it, `parent/mod.rs` below.
                     Some((None, Some(file))) => {
                         let beside = parent_dir(&path[..path.len() - 1]);
                         let below = parent_dir(path);
-                        self.parse(&krate, &format!("{beside}{file}"))
-                            .or_else(|_| self.parse(&krate, &format!("{below}{file}")))?
+                        self.parse(krate, &format!("{beside}{file}"))
+                            .or_else(|_| self.parse(krate, &format!("{below}{file}")))?
                     }
                     _ => {
                         let dir = path.join("/");
-                        self.parse(&krate, &format!("{dir}.rs"))
-                            .or_else(|_| self.parse(&krate, &format!("{dir}/mod.rs")))?
+                        self.parse(krate, &format!("{dir}.rs"))
+                            .or_else(|_| self.parse(krate, &format!("{dir}/mod.rs")))?
                     }
                 }
             }
-        };
-        let id = self.modules.len();
-        self.modules.push(Module {
-            krate: krate.clone(),
-            path: path.to_vec(),
-            items,
-        });
-        self.by_path.insert((krate, path.to_vec()), id);
-        Ok(id)
+        })
     }
 
     fn parse(&self, krate: &str, file: &str) -> Result<Vec<Item>, String> {
@@ -776,8 +814,8 @@ impl<'a> Index<'a> {
         let mut shadowed = false;
         for (item, definition_item) in items.iter().enumerate() {
             if let Some((attrs, visibility)) = definition(definition_item)
-                && self.default_build(module, attrs)
                 && defines(definition_item, name, namespace)
+                && self.item_active(module, definition_item, attrs)
             {
                 if reachable(visibility) {
                     if let Item::Mod(child) = definition_item {
@@ -796,29 +834,41 @@ impl<'a> Index<'a> {
         let mut named = Vec::new();
         for item in items {
             match item {
-                Item::Use(item) if self.default_build(module, &item.attrs) => {
-                    let open = reachable(&item.vis);
+                Item::Use(use_item) => {
+                    let open = reachable(&use_item.vis);
+                    let leading_colon = use_item.leading_colon.is_some();
+                    let mut matched_named = Vec::new();
+                    let mut matched_globs = Vec::new();
                     uses(
-                        &item.tree,
+                        &use_item.tree,
                         &mut Vec::new(),
                         &mut |path, alias| match alias {
                             Some(alias) if alias == name => {
-                                named.push((path, item.leading_colon.is_some(), open));
+                                matched_named.push((path, leading_colon, open));
                             }
-                            None if open => globs.push((path, item.leading_colon.is_some())),
+                            None if open => matched_globs.push((path, leading_colon)),
                             _ => {}
                         },
                     );
+                    if (!matched_named.is_empty() || !matched_globs.is_empty())
+                        && self.item_active(module, item, &use_item.attrs)
+                    {
+                        named.extend(matched_named);
+                        globs.extend(matched_globs);
+                    }
                 }
-                Item::ExternCrate(item) if self.default_build(module, &item.attrs) => {
-                    let alias = item.rename.as_ref().map_or(&item.ident, |(_, alias)| alias);
-                    if *alias == name {
-                        let (source, rooted) = if item.ident == "self" {
+                Item::ExternCrate(extern_item) => {
+                    let alias = extern_item
+                        .rename
+                        .as_ref()
+                        .map_or(&extern_item.ident, |(_, alias)| alias);
+                    if *alias == name && self.item_active(module, item, &extern_item.attrs) {
+                        let (source, rooted) = if extern_item.ident == "self" {
                             ("crate".to_owned(), false)
                         } else {
-                            (item.ident.to_string(), true)
+                            (extern_item.ident.to_string(), true)
                         };
-                        named.push((vec![source], rooted, reachable(&item.vis)));
+                        named.push((vec![source], rooted, reachable(&extern_item.vis)));
                     }
                 }
                 _ => {}
@@ -883,6 +933,44 @@ impl<'a> Index<'a> {
                     .is_some_and(|(owner, prefix)| owner == *krate && path.starts_with(&prefix))
             }
         }
+    }
+
+    /// What `path`, written inside a block with local `use` items `imports`, names.
+    pub fn resolve_with_imports(
+        &mut self,
+        module: usize,
+        path: &[String],
+        imports: &[&UseTree],
+    ) -> Result<Found, String> {
+        if imports.is_empty() {
+            return self.resolve_path(module, path);
+        }
+        let mut path = path.to_vec();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(first) = path.first() {
+            let mut named = None;
+            for tree in imports {
+                uses(tree, &mut Vec::new(), &mut |prefix, alias| {
+                    if named.is_none() && alias.as_ref() == Some(first) {
+                        named = Some(prefix);
+                    }
+                });
+                if named.is_some() {
+                    break;
+                }
+            }
+            let Some(mut prefix) = named else { break };
+            if !seen.insert(first.clone()) {
+                return Err(format!("{first} imports itself"));
+            }
+            let same_name = prefix.first() == Some(first);
+            prefix.extend_from_slice(&path[1..]);
+            path = prefix;
+            if same_name {
+                break;
+            }
+        }
+        self.resolve_path(module, &path)
     }
 
     /// What the path `path`, written in `module`, names.
@@ -1080,7 +1168,7 @@ impl<'a> Index<'a> {
                 m.path[..m.path.len().checked_sub(1)?].to_vec(),
             ),
             name if m.items.iter().any(|item| {
-                matches!(item, Item::Mod(item) if item.ident == name && self.default_build(module, &item.attrs))
+                matches!(item, Item::Mod(mod_item) if mod_item.ident == name && self.item_active(module, item, &mod_item.attrs))
             }) =>
             {
                 let mut path = m.path.clone();

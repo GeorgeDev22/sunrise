@@ -294,7 +294,8 @@ impl dyn Registrar + '_ {
     /// stands there (NeoForge's `RegisterCapabilitiesEvent.registerBlock`): a trash can that voids
     /// what it is given, a machine's port block passing a pipe on to its controller. `provider`
     /// is given the position and side asked about, the block state there and the block entity,
-    /// if any: `r.block_capability(&ITEMS, &bin, |_, _, _, _| Some(Box::new(Voids)))`. Asked
+    /// if any, and a read-only level. Call `offer.offer(|| Box::new(Voids))` to answer, or
+    /// leave the offer untouched to decline. Asked
     /// in one list with the providers of the block entity type there, as
     /// [`LevelRef::capability`](crate::LevelRef::capability) orders them.
     pub fn block_capability<T: ?Sized + 'static>(
@@ -302,16 +303,21 @@ impl dyn Registrar + '_ {
         key: &CapabilityKey<T>,
         block: &crate::BlockKey,
         provider: impl Fn(
-            &mut dyn ServerHost,
+            &dyn crate::LevelHost,
             BlockSide,
             crate::BlockState,
             Option<crate::BlockEntityRef>,
-        ) -> Option<Box<T>>
-        + Send
+            &mut crate::BlockCapabilityOffer<'_, T>,
+        ) + Send
         + Sync
         + 'static,
     ) {
-        self.provide_block_capability(key.name, block, false, block_provider(*block, provider));
+        self.provide_block_capability(
+            key.name,
+            block,
+            false,
+            BlockProviderOf::of(Arc::new(provider)),
+        );
     }
     /// `block_capability`, asked ahead of the game's own provider.
     pub fn block_capability_before_game<T: ?Sized + 'static>(
@@ -319,44 +325,22 @@ impl dyn Registrar + '_ {
         key: &CapabilityKey<T>,
         block: &crate::BlockKey,
         provider: impl Fn(
-            &mut dyn ServerHost,
+            &dyn crate::LevelHost,
             BlockSide,
             crate::BlockState,
             Option<crate::BlockEntityRef>,
-        ) -> Option<Box<T>>
-        + Send
+            &mut crate::BlockCapabilityOffer<'_, T>,
+        ) + Send
         + Sync
         + 'static,
     ) {
-        self.provide_block_capability(key.name, block, true, block_provider(*block, provider));
+        self.provide_block_capability(
+            key.name,
+            block,
+            true,
+            BlockProviderOf::of(Arc::new(provider)),
+        );
     }
-}
-
-/// A block provider as the table keeps it: one asked by position and side, which reads the block
-/// state and block entity there for `provider`. A position whose block can't be read (a stale
-/// level, an unloaded chunk), or is no longer `block`, has no answer.
-fn block_provider<T: ?Sized + 'static>(
-    block: crate::BlockKey,
-    provider: impl Fn(
-        &mut dyn ServerHost,
-        BlockSide,
-        crate::BlockState,
-        Option<crate::BlockEntityRef>,
-    ) -> Option<Box<T>>
-    + Send
-    + Sync
-    + 'static,
-) -> BlockProviderOf {
-    BlockProviderOf::of(Arc::new(move |host: &mut dyn ServerHost, at: BlockSide| {
-        // The block may have changed since the lookup chose this provider: an earlier provider
-        // replaced it, say. Then it is another block's position, and this one has no answer.
-        if at.level.block(host, at.pos)? != block {
-            return None;
-        }
-        let state = at.level.block_state(host, at.pos)?;
-        let entity = host.block_entity(at.level, at.pos);
-        provider(host, at, state, entity)
-    }) as Arc<dyn BlockCapabilityProvider<T>>)
 }
 
 /// Registrar operations for blocks.
@@ -384,44 +368,6 @@ pub trait BlocksRegistrar {
         before_game: bool,
         provider: BlockProviderOf,
     );
-}
-
-/// CapabilityProviders operations for blocks.
-// hidden: per-kind lookup implementation, exposed for generated provider bindings
-#[doc(hidden)]
-pub trait BlocksCapabilityProviders {
-    /// The next enabled provider of block capability `name` at a position: those registered for
-    /// block entity type `kind` standing there and for block `block`, as one list in
-    /// [`LevelRef::capability`](crate::LevelRef::capability)'s order, with its mod and whether it
-    /// is asked ahead of the game. `index` starts at zero and advances past every visited
-    /// registration, including disabled ones.
-    fn block_provider(
-        &self,
-        name: &str,
-        kind: Option<crate::BlockEntityTypeKey>,
-        block: Option<crate::BlockKey>,
-        index: &mut u32,
-    ) -> Option<(BlockProviderOf, &'static str, bool)>;
-}
-
-impl BlocksCapabilityProviders for InstalledProviders {
-    fn block_provider(
-        &self,
-        name: &str,
-        kind: Option<crate::BlockEntityTypeKey>,
-        block: Option<crate::BlockKey>,
-        index: &mut u32,
-    ) -> Option<(BlockProviderOf, &'static str, bool)> {
-        use crate::content::registry_keys::{block_entity_type_name, block_id};
-        let keys = &installed()?.keys;
-        let kind = kind.and_then(block_entity_type_name);
-        let block = block.and_then(block_id);
-        next_merged(
-            providers_at(&keys.capabilities, name, kind),
-            providers_at(&keys.block_capabilities, name, block),
-            index,
-        )
-    }
 }
 
 /// `table`'s providers of capability `name` for `id`: none for no id.

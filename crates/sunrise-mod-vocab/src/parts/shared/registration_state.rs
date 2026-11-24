@@ -9,6 +9,7 @@ pub(crate) struct Installed {
     pub(crate) dependencies: Arc<crate::__private::EffectiveDependencies>,
     pub(crate) namespace_authority: Arc<crate::parts::NamespaceAuthority>,
     pub(crate) effect_ticks: crate::parts::effects::ResolvedEffectTicks,
+    pub(crate) menu_screen_factories: HashMap<String, crate::parts::menus::MenuScreenRegistration>,
     pub(crate) menu_recipe_books: HashMap<String, crate::parts::menus::MenuBookDeclaration>,
     pub(crate) recipe_book_types: HashMap<String, String>,
     pub(crate) recipe_book_fields: HashMap<String, (String, String)>,
@@ -44,25 +45,32 @@ pub(crate) struct Installed {
     pub(crate) fluids: OnceLock<sunrise_mod_runtime::registry_keys::Names>,
     pub(crate) resolved_items: OnceLock<sunrise_mod_runtime::registry_keys::Names>,
     pub(crate) resolved_game_events: OnceLock<sunrise_mod_runtime::registry_keys::Names>,
-    pub(crate) resolved_entity_types: OnceLock<sunrise_mod_runtime::registry_keys::Names>,
+    pub(crate) resolved_entity_types: OnceLock<sunrise_mod_runtime::registry_keys::EntityTypes>,
+    /// Attribute suppliers from the accepted core tables, paired with this installation's keys.
+    pub(crate) entity_type_defaults:
+        std::sync::RwLock<Option<Arc<crate::entity::entity_type_defaults::Suppliers>>>,
     // Re-resolution retains slots within one installation, never across fixture epochs.
     pub(crate) resolved_menus: std::sync::RwLock<Option<sunrise_mod_runtime::registry_keys::Names>>,
     pub(crate) resolved_blocks: OnceLock<Arc<sunrise_mod_runtime::block_definitions::Blocks>>,
     pub(crate) particles: OnceLock<sunrise_mod_runtime::registry_keys::Particles>,
     /// The ticket controllers the mods registered; a [`TicketController`]'s slot indexes it.
     pub(crate) controllers: Vec<ControllerInfo>,
+    pub(crate) consume_effects: Vec<crate::parts::RegisteredConsumeEffect>,
     pub(crate) arm_poses: Vec<crate::client::arm_pose::PoseInfo>,
     pub(crate) structure_types: Vec<crate::world::structure_type::StructureTypeInfo>,
+    pub(crate) pool_element_types: Vec<crate::world::pool_element::PoolElementTypeInfo>,
     pub(crate) feature_types: Vec<crate::world::feature_type::FeatureTypeInfo>,
     pub(crate) loot_modifier_serializers:
         Vec<crate::parts::loot_modifiers::LootModifierSerializerInfo>,
     pub(crate) loot_function_types: Vec<crate::parts::loot_types::LootFunctionTypeInfo>,
     pub(crate) loot_condition_types: Vec<crate::parts::loot_types::LootConditionTypeInfo>,
     pub(crate) dimensions: Vec<crate::world::dimension::DimensionInfo>,
+    /// The world clocks the mods registered, as `namespace:path` ids.
+    pub(crate) world_clocks: Vec<Box<str>>,
     pub(crate) chunk_generators: Vec<crate::world::chunk_generator::ChunkGeneratorInfo>,
     pub(crate) biome_sources: Vec<crate::world::biome_source::BiomeSourceInfo>,
-    /// Loading warnings, by owning mod id, in registration order.
-    pub(crate) warnings: Vec<(String, crate::LoadingMessage)>,
+    /// Loading warnings for each owning mod, in registration order.
+    pub(crate) warnings: Vec<(&'static str, Vec<crate::LoadingMessage>)>,
     pub(crate) hook_bits: Vec<bool>,
     pub(crate) tag_hook_bits: Vec<bool>,
 }

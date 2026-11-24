@@ -64,9 +64,10 @@ same report for two published builds.
 
 ## CI and local audits
 
-CI exports the stable API plus published loops using `--with-loops`, then compares its merge base with its head.
-Loop records are for comparison, never shipped in the SDK's `surface.json`; `loops.json` and `internals.json`
-remain separate build data. The audit reads the same declarations:
+CI compares the stable API and published loops of its merge base and head. Each revision's own `sunrise-stage`
+exports its stable API, so changes to generated types and signatures are visible in the diff. The head's tool reads
+both trees' engine catalogs. Loop records are for comparison, never shipped in the SDK's `surface.json`; `loops.json`
+and `internals.json` remain separate build data. The audit reads the same declarations:
 
 - A loop's id is `loop:<name>`, using its `[[native.loop]]` name. The report compares its entry path, generic method,
   slot trait and side.
@@ -79,26 +80,27 @@ removals and changes, and names removed or changed items, subject to its length 
 only when:
 
 - the head's tree cannot be exported;
-- the base can be read neither by the head's `sunrise-stage` nor by the base's own (which the report builds when the
-  head's cannot read it), or the base's own writes a surface the head's cannot compare;
+- the base's own `sunrise-stage` cannot be built or cannot export the base, or the head's tool cannot read the
+  base's catalogs or compare its exported surface;
 - a change note cannot be read, or names an item that did not change;
 - a breaking change has no change note: every breaking record the report lists, members included (a removed field is
   its own line), must be named by a note the pull request adds. Conditional, additive and advisory changes need none.
   The gate is `gate = true` in `tools/ci/surface.toml`.
 
-For a local audit, export **both** trees with `sunrise-stage surface ROOT OUT --with-internals`, then pass the two
-exports to `sunrise-stage surface-diff`. Or run the CI report locally using the `sunrise-stage` binary:
+To run the CI report locally, set `SUNRISE_STAGE_TOOL` to the `sunrise-stage` binary built from `HEAD`. If the
+compared revisions use different generators, pass `--build-base-tool`:
 
 ```sh
+cargo build --locked -p sunrise-stage
 SUNRISE_STAGE_TOOL=target/debug/sunrise-stage \
-  python3 tools/ci/surface_report.py --with-internals --trees BASE HEAD
+  python3 tools/ci/surface_report.py --trees BASE HEAD --build-base-tool
 ```
 
-`BASE` and `HEAD` are source directories, such as two Git worktrees. The option adds advisory internal changes to
-the report without changing the gate. The audit only reads both trees. When this `sunrise-stage` cannot read an older
-`BASE`, add `--build-base-tool` to build `BASE`'s own `sunrise-stage` from that tree and export it with that. This
-compiles and runs `BASE`'s code, so use it only on a whole checkout you trust. The build needs POSIX file locking
-(Linux or macOS); elsewhere it refuses and the report says so.
+`BASE` and `HEAD` are source directories, such as two Git worktrees. The flag always builds and uses `BASE`'s own
+`sunrise-stage`, even if `HEAD`'s tool could read `BASE`. Use it only with a whole checkout you trust: it compiles
+and runs `BASE`'s code, including build scripts. The build requires POSIX file locking (Linux or macOS).
+When both trees use the same generator, omit `--build-base-tool` for a source-only audit with the supplied binary.
+Add `--with-internals` to include advisory internal changes without changing the gate.
 
 ## Command completion layouts
 
@@ -137,7 +139,7 @@ that did not change is refused. `changes/history/` holds backfilled notes in the
 scan that directory, so they neither waive the gate nor appear in the SDK diff. CI checks engine notes against the
 catalogs it compares, but SDK publishing leaves engine ids out of its API-only comparison. If a note names both
 API and engine ids, publishing still checks its API ids and carries the note for those that changed. `sdk.json`
-holds these notes since the previous SDK (`surface.notes`); `cargo sunrise-mod update` prints a changed item's
+holds these notes since the previous SDK (`surface.notes`); `cargo sunrise-mod pin` prints a changed item's
 `migrate` line beside it.
 
 ## Behaviours
@@ -167,5 +169,5 @@ diagnostics or behaviour that vanilla fixes.
 A hook's `version` changes when a listener can see a different meaning under the same signature: its answer now
 decides the action, or the order or timing it observes changed. It stays when the engine is only corrected to the
 contract the hook already documents. Every bump comes with a change note in the same change, so `sdk diff` and
-`cargo sunrise-mod update` say what a listener must now do; the version is outside the hook's hash, so the diff
+`cargo sunrise-mod pin` say what a listener must now do; the version is outside the hook's hash, so the diff
 counts a bump as a conditional change for the mods that name that version.

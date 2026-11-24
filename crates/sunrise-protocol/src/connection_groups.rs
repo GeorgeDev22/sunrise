@@ -4,8 +4,9 @@
 //! entry's `None` clears that cell.
 use crate::{
     Error, Result,
-    buf::{Codec, Reader, SectionPos, Writer},
+    buf::{Codec, Reader, SectionPos},
 };
+use sunrise_core::vanilla_bytes::Writer;
 
 pub const CHANNEL: &str = "sunrise:connection_groups";
 pub const VERSION: &str = "2";

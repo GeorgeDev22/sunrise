@@ -14,8 +14,11 @@ name stops startup with a message naming your mod.
 ## Generating a start
 
 `StructureType::find_generation_point(&self, context: &mut dyn GenerationContext)` returns
-`Some(FoundStructure { position, pieces })` for a start, or `None` to skip the chunk. Supply at
-least one piece, each an `Arc<dyn StructurePiece>`.
+`Some(FoundStructure { position, pool_pieces, pieces })` for a start, or `None` to skip the
+chunk. Each of `pieces` is an `Arc<dyn StructurePiece>`; `pool_pieces` are pool element pieces
+your type laid out itself (below). The start needs at least one piece, counting the jigsaw pieces
+below. `FoundStructure` implements `Default`, so `..Default::default()` leaves out what you
+don't use.
 
 World generation has no `Host`. Starts run on worker threads, and pieces place per chunk. Your
 `StructureType` must be `Send + Sync`, stateless and deterministic: the same seed produces the
@@ -29,12 +32,84 @@ same pieces, even when workers generate neighbouring chunks concurrently.
 | `noise_biome`, `column_has_valid_biome` | Opaque biome identities and the structure's valid-biome test |
 | `metadata` | Borrowed immutable block metadata |
 | `config` | The structure JSON converted to a shared `Arc<Tag>` |
+| `assemble_jigsaw` | Lay out pieces from the data pack's template pools (below) |
+| `template_pool`, `elements` | Read a template pool, and its elements' jigsaws and boxes, to lay pieces out yourself (below) |
 
 Config conversion runs when definitions load or reload, not per start. Nested JSON nulls are
 refused at load. The engine handles structure-set spacing, `biomes` and `terrain_adaptation`.
 
 Both contexts are traits, and `random` hands you a `&mut dyn RandomSource`: see
 [Randomness](../../concepts/randomness.md) for its draws.
+
+## Laying out from template pools
+
+`context.assemble_jigsaw(&settings, position)` runs vanilla's `JigsawPlacement.addPieces` from the
+data pack's template pools, as a NeoForge structure type calls it from its own
+`findGenerationPoint`. Build the settings with `JigsawSettings::new(start_pool, max_depth)`, then
+set the fields your type decodes from its config:
+
+| Field | Vanilla setting |
+|---|---|
+| `start_jigsaw_name` | `start_jigsaw_name` |
+| `use_expansion_hack` | `use_expansion_hack` |
+| `project_start_to_heightmap` | `project_start_to_heightmap` |
+| `max_distance_from_center` | `max_distance_from_center` (`JigsawReach { horizontal, vertical }`) |
+| `pool_aliases` | `pool_aliases` (`PoolAliasBinding::Direct`, `Random`, `RandomGroup`) |
+| `dimension_padding` | `dimension_padding` (`DimensionPadding { bottom, top }`) |
+| `liquid_settings` | `liquid_settings` |
+
+Your type chooses its own depth and reach: the limits `minecraft:jigsaw`'s codec puts on `size`
+(0 to 20) and `max_distance_from_center` (1 to 128 across) belong to that type only. Every
+placement check of the layout is vanilla's. Aliases are drawn from the world seed at `position`.
+A depth of 0 or below places no piece, as in vanilla.
+
+The call draws from `context.random()` and returns a `JigsawLayout` with the start position and
+every piece's box, or `None` when no start fits there. The game keeps the laid-out pieces itself:
+they join your start, ahead of your own pieces, when `find_generation_point` returns `Some`, and
+they save, load and place as `minecraft:jigsaw` pieces do. Return `layout.position` as the
+start's position to match vanilla's `JigsawStructure`.
+
+### Laying out by hand
+
+A type with its own layout rules reads the pools itself. `context.template_pool(&name)` returns
+the data pack's `TemplatePool`, or `None` when the data pack has none by that name; aliases are
+not applied. It offers vanilla's `StructureTemplatePool` reads: `templates`,
+`shuffled_templates`, `random_template`, `fallback`, `size` and `max_size`. Each element is a
+`PoolElementRef`, whatever its type. `context.elements()` gives any element's jigsaws
+(`getShuffledJigsawBlocks`) and box. `JigsawBlock::can_attach` is vanilla's
+`JigsawBlock.canAttach`. Draw from `context.random()` in vanilla's order when you mean to match
+it.
+
+Hand the pieces back as `FoundStructure::pool_pieces`, each a `PoolPiece::new(element, position,
+ground_level_delta, rotation, bounding_box, liquid)`, with `junctions` set when terrain should
+blend towards them. The game keeps them as it keeps `assemble_jigsaw`'s pieces: after those and
+before your own `pieces`, saved, loaded and placed as `minecraft:jigsaw` pieces are.
+
+## Pool element types
+
+Register a `PoolElementType` with `r.register_pool_element_type("corridor", MyCorridor)` (NeoForge's
+`STRUCTURE_POOL_ELEMENT` registry). A template pool entry whose `element` has
+`"element_type": "mymod:corridor"` then decodes through `PoolElementType::decode`, which gets the
+`element` value as NBT. The ID rules are those of structure types. The element works in every
+structure that draws from that pool, `minecraft:jigsaw` included.
+
+`decode` returns an `Arc<dyn PoolElement>` or a `StructureError`. An error leaves the whole pool
+out and is logged; every structure that uses the pool then stops generating. To wrap another
+element, decode it with `context.element(&tag)`, which accepts any element type, and keep the tag
+to save it back.
+
+| `PoolElement` method | Vanilla's `StructurePoolElement` |
+|---|---|
+| `shuffled_jigsaws` | `getShuffledJigsawBlocks`; shuffle with the random it gets |
+| `bounding_box` | `getBoundingBox` |
+| `place` | `place`, through the chunk's `PieceContext` and an `ElementPlacement` |
+| `projection` | `getProjection`: the element's own |
+| `ground_level_delta` | `getGroundLevelDelta`, default 1 |
+| `save` | The codec's fields; the game adds `element_type` |
+
+Elements are decoded at load and used on worker threads: keep them immutable. A list element's
+projection replaces its children's, a mod element's included, as `ListPoolElement` sets it on each
+child; `place` reads the projection in effect from `ElementPlacement::projection`.
 
 ## Placing pieces
 
@@ -71,6 +146,8 @@ Use `PieceContext` to work within the chunk:
 | `solid_render` | Check whether a state renders as a solid block. |
 | `entity` | Queue saved entity NBT, including its `id`, `Pos` and other fields. |
 | `block_entity` | Place block entity NBT at a position. |
+| `place_feature`, `place_placed_feature` | Place a configured feature (as `FeaturePoolElement` does) or a placed feature, by ID, drawing from the piece's random. An ID the data pack lacks answers `Ok(false)`. |
+| `place_element` | Place any pool element in this chunk, drawing from the piece's random. |
 
 Entities remain in the generating chunk until it joins the world. Keep the `"sunrise:finalize"`
 byte carried by structure-template entities to request `Mob.finalizeSpawn` with the `STRUCTURE`

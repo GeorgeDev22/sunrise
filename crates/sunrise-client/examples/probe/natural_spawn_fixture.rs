@@ -46,7 +46,7 @@ use sunrise_client::{
         },
         spawner::{
             SpawnDataExt, Spawner, SpawnerAdded, SpawnerEvent, SpawnerExt, SpawnerLevel,
-            SpawnerSpawn,
+            SpawnerSpawn, SpawnerTypeFacts,
         },
         species::{self, Baby},
         trial_spawner::{
@@ -99,8 +99,8 @@ struct Shared<'a> {
     structures: &'a StructureSpawns,
     collision: &'a BlockCollisionRegistry<'a>,
     air: BlockStateId,
-    /// Every entity type id (`entity-types.json`).
-    entity_types: &'a HashSet<String>,
+    /// Every entity type's registry row (`entity-types.json`).
+    entity_types: &'a HashMap<String, SpawnerTypeFacts>,
 }
 struct World<'a> {
     border: sunrise_core::geometry::border::BorderGeometry,
@@ -335,11 +335,14 @@ impl NaturalLevel for World<'_> {
                 .any(|(id, b)| id == "minecraft:shulker" && b.intersects(grown))
     }
     fn unobstructed(&self, bounds: Aabb) -> bool {
+        let Ok(shape) = sunrise_core::geometry::VoxelShape::from_box(bounds) else {
+            return false;
+        };
         !self
             .entities
             .borrow()
             .iter()
-            .any(|(_, b)| b.intersects(bounds))
+            .any(|(_, b)| spawn_selection::blocks_spawn_shape(&shape, bounds, *b))
     }
     fn spawn_mobs(&self) -> bool {
         self.spawn_mobs
@@ -368,8 +371,8 @@ impl SpawnerLevel for World<'_> {
     fn spawner_blocks_work(&self) -> bool {
         self.spawners_work
     }
-    fn entity_exists(&self, id: &str) -> bool {
-        self.s.types.types.contains_key(id) || self.s.entity_types.contains(id)
+    fn spawner_type(&self, id: &str) -> Option<SpawnerTypeFacts> {
+        self.s.entity_types.get(id).copied()
     }
     fn count_entities(&self, id: &str, bounds: Aabb) -> usize {
         self.entities
@@ -529,8 +532,9 @@ pub fn main() -> sunrise_client::Result<()> {
     let facts = BlockFacts::load(root, registry)?;
     let data = MobData::load(
         &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
-        &facts,
-    );
+        facts.states.len(),
+        false,
+    )?;
     let defaults = sunrise_world::item_defaults::read(root)?;
     let items = Items::catalog(root, &PackOverlay::NONE, &defaults)?;
     // Trial spawner rewards: the loot tables and the configs.
@@ -550,17 +554,15 @@ pub fn main() -> sunrise_client::Result<()> {
     ))?;
     let structures = StructureSpawns::load(root);
     let collision = collisions::load(root, registry)?;
-    let entity_types: HashSet<String> = fs::read(root.join("entity-types.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|v| {
-            v.as_object().map(|o| {
-                o.keys()
-                    .map(|k| sunrise_client::command::args::normalize(k))
-                    .collect()
-            })
-        })
-        .unwrap_or_default();
+    let builtin = sunrise_protocol::registry::Builtin::load(&root.join("registries.json"))?;
+    let ids = &builtin
+        .get("minecraft:entity_type")
+        .ok_or("missing entity type registry")?
+        .names;
+    let entity_types = SpawnerTypeFacts::load_registered(
+        root,
+        ids.iter().map(String::as_str).filter(|id| !id.is_empty()),
+    )?;
     let shared = Shared {
         facts: &facts,
         data: &data,
@@ -788,7 +790,6 @@ pub fn main() -> sunrise_client::Result<()> {
             let bounds = neutral_box(l, r);
             l.entities.borrow_mut().push((r.entity.to_owned(), bounds));
             Some(Spawned {
-                bounds,
                 school: true,
                 cluster_size: None,
             })
@@ -975,7 +976,6 @@ fn spawner_case(
                 ));
                 Some(SpawnerAdded {
                     id: spawned.len() as u32,
-                    bounds,
                     mob: true,
                 })
             };

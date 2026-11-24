@@ -676,7 +676,7 @@ impl Menu {
         while stack.count > 0 {
             let slot = self
                 .slot_with_space(env, stack)
-                .or_else(|| (0..36).find(|&i| self.state.containers[PLAYER][i].is_none()));
+                .or_else(|| super::free_slot(&self.state.containers[PLAYER][..36]));
             let Some(slot) = slot else {
                 let dropped = std::mem::replace(
                     stack,

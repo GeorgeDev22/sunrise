@@ -146,6 +146,7 @@ pub fn build(
     sdk: &Identity,
     mixins: &MixinsIdentity,
     rustc: impl Fn(&str) -> std::process::Command,
+    check_only: bool,
 ) -> Result<Option<Patch>, String> {
     let Some(prepared) = prepare(rust, game, out, projects, sdk, mixins)? else {
         return Ok(None);
@@ -153,7 +154,8 @@ pub fn build(
     // The patched crates, against the prebuilt game and the mods.
     let mut compiled = Vec::new();
     for name in &prepared.names {
-        let rlib = out.join(format!("lib{name}.rlib"));
+        let extension = if check_only { "rmeta" } else { "rlib" };
+        let rlib = out.join(format!("lib{name}.{extension}"));
         let mut hash = sha2::Sha256::new();
         use sha2::Digest;
         hash.update(sdk.commit());
@@ -182,6 +184,9 @@ pub fn build(
         .arg("-o")
         .arg(&rlib)
         .arg(prepared.dir.join(name).join("src/lib.rs"));
+        if check_only {
+            cmd.arg("--emit=metadata");
+        }
         game_cfg(&mut cmd, sdk);
         // An `@` file, one argument per line: an extern per SDK crate passes Windows'
         // 32,767-character command-line limit.

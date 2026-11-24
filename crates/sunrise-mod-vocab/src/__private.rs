@@ -71,9 +71,9 @@ pub fn block_hook_inert(hook: HookId, state: BlockState) -> bool {
         .is_some()
 }
 
-/// Resolve a listener's owner once at load, for dispatch through [`mod_index_on`].
+/// Resolve a listener's owner by id, for dispatch through [`mod_index_on`].
 pub fn mod_index(id: &str) -> Option<usize> {
-    crate::mods().iter().position(|entry| entry.id == id)
+    crate::runtime::installed()?.by_id.get(id).copied()
 }
 
 /// Whether a resolved listener's owner is currently enabled.
@@ -92,16 +92,40 @@ pub fn install(mods: Mods) {
     crate::install(mods);
 }
 
+// no wire: process-local diagnostic report, never crosses the wire.
+// exhaustive: internal two-field report for the game client's toast queue.
+/// One mod callback panic queued for the game client's error toast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HookPanicReport {
+    /// The `[mod] id` of the panicking mod.
+    pub mod_id: &'static str,
+    /// The hook or retained callback operation that panicked.
+    pub hook: &'static str,
+}
+
+/// Drain queued mod callback panic reports for the game client's error toast.
+pub fn take_hook_panics() -> Vec<HookPanicReport> {
+    crate::runtime::take_hook_panics()
+}
+
+/// Active hook-dispatch panic-containment nesting depth on this thread.
+pub fn hook_dispatch_depth() -> u32 {
+    crate::runtime::hook_dispatch_depth()
+}
+
+/// Run one mod's startup `Hooks::register` callback under the unified hook-dispatch failure rule.
+pub fn invoke_registration(mod_id: &'static str, call: impl FnOnce()) -> bool {
+    crate::runtime::invoke_registration(mod_id, call)
+}
+
+/// Discard one startup batch's values independently under the owning `register` callback's policy.
+pub fn discard_startup_registrations<T>(mod_id: &'static str, values: impl IntoIterator<Item = T>) {
+    crate::runtime::discard_startup_registrations(mod_id, values);
+}
+
 /// Revision of the enabled mod set, for engine caches of hook answers.
 pub fn mods_switched() -> u64 {
     crate::runtime::mods_switched()
-}
-
-/// Start a new tick's output diagnostics on the authoritative game thread.
-pub fn reset_output_refusals() {
-    if let Some(backend) = crate::dispatch_scope::backend() {
-        (backend.diagnostics.reset_output_refusals)();
-    }
 }
 
 /// Whether an installed mod subscribes to `hook`.
@@ -118,6 +142,27 @@ pub fn poisoned_listeners(hook: HookId) -> usize {
 /// Whether at least one enabled mod subscribes to `hook`, visiting only its subscribers.
 pub fn enabled_listened(hook: HookId) -> bool {
     crate::runtime::enabled_listened(hook)
+}
+
+/// A live listener query bound to the creating thread's installed dispatch table.
+// no wire: a process-local view of the installed dispatch table, never sent.
+pub struct EnabledListeners {
+    installed: Option<&'static crate::runtime::Installed>,
+    hook: HookId,
+}
+
+impl EnabledListeners {
+    pub fn capture(hook: HookId) -> Self {
+        Self {
+            installed: crate::runtime::installed(),
+            hook,
+        }
+    }
+
+    pub fn any(&self) -> bool {
+        self.installed
+            .is_some_and(|installed| crate::runtime::has_enabled_listener(installed, self.hook))
+    }
 }
 
 /// Whether any part subscribed to the scoped entity hook `hook` is attached to
@@ -162,14 +207,29 @@ pub fn installed_code_ids() -> impl Iterator<Item = &'static str> {
 
 /// What the installed code mod `id` carries that a joining client must have, as the end of a
 /// sentence about the mod: its first subscription to a client-side hook, its first part that
-/// subscribes to one, a synced attachment, or a required payload channel sent to clients. The engine refuses
-/// a `side = "server"` mod that has one. Read once the parts are installed.
+/// subscribes to one, a required client menu screen, a synced attachment, or a required
+/// payload channel sent to clients. The engine refuses a `side = "server"` mod that has one. Read once the parts are installed.
 pub fn client_requirement(id: &str) -> Option<String> {
     let mine = || crate::mods().iter().filter(|entry| entry.id == id);
     if let Some(hook) = mine().find_map(|entry| entry.client_hook()) {
         return Some(format!("listens to the client hook {hook}"));
     }
     let installed = crate::parts::installed()?;
+    if let Some(index) = mod_index(id)
+        && installed
+            .menu_screen_factories
+            .values()
+            .any(|reg| reg.index == index)
+    {
+        return Some("registers a client menu screen factory".into());
+    }
+    if installed
+        .menu_recipe_books
+        .values()
+        .any(|book| book.owner == id)
+    {
+        return Some("binds a recipe book that requires a client menu screen".into());
+    }
     if let Some((part, hook)) = installed.client_part(id) {
         return Some(format!(
             "attaches the part {part}, which listens to the client hook {hook}"
@@ -245,21 +305,9 @@ pub mod built {
     pub fn model_ref(generation: u64, slot: u32) -> crate::ModelRef {
         crate::ModelRef(generation, slot)
     }
-    /// An empty baked model copy the game fills field by field.
-    pub fn baked_model_view() -> crate::BakedModelView {
-        crate::BakedModelView {
-            ambient_occlusion: true,
-            particle: None,
-            quads: Vec::new(),
-        }
-    }
     /// What a mod may still create of its dynamic textures: `images` and `bytes` of pixels left.
     pub fn dynamic_texture_budget(images: u32, bytes: u64) -> crate::DynamicTextureBudget {
         crate::DynamicTextureBudget { images, bytes }
-    }
-    /// Wrap a slot of the baked model store's published generation.
-    pub fn baked_model_key(generation: u64, slot: u32) -> crate::BakedModelKey {
-        crate::BakedModelKey(generation, slot)
     }
     /// Wrap a slot in the pipeline set's published generation.
     pub fn render_pipeline_ref(generation: u64, slot: u32) -> crate::RenderPipelineRef {
@@ -280,6 +328,13 @@ pub mod game {
         where
             Self: 'a;
         fn fields(&self) -> Self::Fields<'_>;
+    }
+
+    /// Borrow the attachment frame tracker exposed by a game-owned host or level.
+    pub fn attachment_read_scope(
+        scopes: &sunrise_mod_runtime::attachments::AttachmentQueryScopes,
+    ) -> AttachmentReadScope<'_> {
+        AttachmentReadScope(Some(scopes))
     }
 
     /// A block entity handle the game names.
@@ -498,14 +553,9 @@ pub mod game {
         }
     }
 
-    pub fn original_player_ref(token: u64) -> OriginalPlayerRef {
-        OriginalPlayerRef { token }
-    }
-    impl Fields for OriginalPlayerRef {
-        type Fields<'a> = u64;
-        fn fields(&self) -> u64 {
-            self.token
-        }
+    /// Allocate a fresh delayed task id for `schedule_task`, without exposing its raw value.
+    pub fn allocate_task_id() -> Option<TaskId> {
+        TaskId::allocate()
     }
 
     pub struct ModEntryFields<'a> {
@@ -562,6 +612,19 @@ pub mod game {
         }
     }
 
+    /// Engine-only per-listener checked declaration staging.
+    // no wire: lends one registration sink for the duration of a callback.
+    pub type DeclarationListener<'a, D> = dyn FnMut(&mut dyn FnMut(crate::Answered<D>) -> Result<(), crate::DeclarationError>) -> bool
+        + 'a;
+
+    /// Lend a registration snapshot to the named listener, including on scoped workers.
+    pub fn bind_registration_context(
+        context: &RegistrationContext,
+        mod_id: &'static str,
+    ) -> RegistrationContext {
+        context.for_mod(mod_id)
+    }
+
     pub trait ReloadContextNew {
         fn new(files: crate::world::reload::ReloadFiles) -> Self;
     }
@@ -596,16 +659,11 @@ pub mod game {
     }
     pub trait ServerReloadListenersOrder {
         fn new() -> Self;
-        /// The engine has registered this builtin and linked the preceding anchor.
-        fn set_last_vanilla_listener(&mut self, id: Identifier);
         fn finish(
             self,
         ) -> Result<crate::world::server_reload::OrderedServerReload, ReloadOrderError>;
     }
     impl ServerReloadListenersOrder for crate::world::server_reload::ServerListenerRegistry {
-        fn set_last_vanilla_listener(&mut self, id: Identifier) {
-            self.default_anchor = id;
-        }
         fn new() -> Self {
             crate::world::server_reload::ServerListenerRegistry::new()
         }
@@ -641,11 +699,19 @@ pub mod game {
     }
 
     pub trait ServerReloadResourcesInstall {
-        fn install(&mut self, retained: Vec<crate::world::server_reload::RetainedEntry>);
+        fn install(
+            &mut self,
+            retained: Vec<crate::world::server_reload::RetainedEntry>,
+            skipped: &std::collections::BTreeSet<Identifier>,
+        );
     }
     impl ServerReloadResourcesInstall for crate::world::server_reload::RetainedListeners {
-        fn install(&mut self, retained: Vec<crate::world::server_reload::RetainedEntry>) {
-            crate::world::server_reload::RetainedListeners::install(self, retained)
+        fn install(
+            &mut self,
+            retained: Vec<crate::world::server_reload::RetainedEntry>,
+            skipped: &std::collections::BTreeSet<Identifier>,
+        ) {
+            crate::world::server_reload::RetainedListeners::install(self, retained, skipped)
         }
     }
 
@@ -673,25 +739,6 @@ pub mod game {
     impl<'a> ClientBackendMutRefOf<'a> for ClientBackendMutRef<'a> {
         fn of(inner: &'a mut dyn ClientBackendMut) -> Self {
             ClientBackendMutRef::of(inner)
-        }
-    }
-
-    mod modblockentityviewnew {
-        #[allow(unused_imports)]
-        use crate::*;
-        #[allow(unused_imports)]
-        use serde_json::{Map, Value};
-        #[allow(unused_imports)]
-        use std::sync::{Arc, OnceLock};
-        #[allow(unused_imports)]
-        use std::time::Duration;
-        pub trait ModBlockEntityViewNew<'a>: Sized {
-            fn new(entity: &'a mut ModBlockEntity) -> Self;
-        }
-        impl<'a> ModBlockEntityViewNew<'a> for ModBlockEntityView<'a> {
-            fn new(entity: &'a mut ModBlockEntity) -> Self {
-                ModBlockEntityView::new(entity)
-            }
         }
     }
 

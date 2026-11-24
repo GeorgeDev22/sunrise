@@ -1,4 +1,10 @@
 use super::*;
+use crate::game::host::draw::GameDrawContext;
+use mod_api::{__private::game::CallbackOwner, ClientHost, DrawContext, GuiLayerWrapContext};
+use sunrise_client::{
+    gui_layers::{self, GuiLayerBody, VanillaGuiLayer},
+    hud::HudPaintCheckpoint,
+};
 
 #[allow(dead_code)]
 impl Game<'_> {
@@ -19,8 +25,7 @@ impl Game<'_> {
         {
             return false;
         }
-        let changed =
-            self.with_level(|_, level, ticks| level.native_set_block(ticks, pos, state, flags));
+        let changed = self.set_block_live(pos, state, flags, true);
         let _ = self.process_level_events();
         changed
     }
@@ -55,8 +60,7 @@ impl Game<'_> {
     }
     /// Runs `change` on the mod block entity at `pos` (a generator charging
     /// the machine beside it) and returns what it returns; none for any
-    /// other block entity, and for the one ticking now, which is out of the
-    /// world. Afterwards, as its `setChanged` would, its chunk is saved next
+    /// other block entity. Afterwards, as its `setChanged` would, its chunk is saved next
     /// time and, when its items changed, comparators read it again.
     pub(in crate::game) fn native_with_mod_block_entity<R>(
         &mut self,
@@ -67,9 +71,6 @@ impl Game<'_> {
         let Some(BlockEntity::Mod(m)) = self.world.block_entities.get_mut(&key) else {
             return None;
         };
-        if m.id().is_empty() {
-            return None;
-        }
         let items = m.items.clone();
         let out = change(m);
         let moved = m.items != items;
@@ -105,60 +106,6 @@ impl Game<'_> {
         if self.mod_clear_particles.take() {
             self.clear_client_particles();
         }
-    }
-    /// Draws one vanilla HUD layer between the mods' hooks: first the mods' layers
-    /// placed below it (`draw_mod_gui_layers`), then `native_gui_layer_pre` (which
-    /// may hide it), the layer, then `native_gui_layer_post`. `None` when a mod hid
-    /// the layer.
-    pub(in crate::game) fn gui_layer<R>(
-        &mut self,
-        layer: &str,
-        batch: &mut HudBatch,
-        draw: impl FnOnce(&mut Self, &mut HudBatch) -> R,
-    ) -> Option<R> {
-        self.draw_mod_gui_layers(Some(layer), batch);
-        let mut canceled = false;
-        self.native_gui_layer_pre(layer, batch, &mut canceled);
-        let drawn = (!canceled).then(|| draw(self, batch));
-        self.native_gui_layer_post(layer, batch);
-        drawn
-    }
-    /// `GuiLayerManager.renderInner` for the mods' layers (`native_register_gui_layers`) not
-    /// drawn yet this frame and placed below vanilla layer `until`, or for all that are left
-    /// with `None`, at the HUD's end. Each fires `native_gui_layer_pre` (which may hide it),
-    /// `native_gui_layer_draw`, then `native_gui_layer_post`, as a vanilla layer does. So a
-    /// vanilla layer that is not drawn this frame keeps its place: the mods' layers around it
-    /// draw at the next layer that is. Nothing while the HUD is hidden, and nothing to look up
-    /// when no mod registered a layer.
-    pub(in crate::game) fn draw_mod_gui_layers(
-        &mut self,
-        until: Option<&str>,
-        batch: &mut HudBatch,
-    ) {
-        let order = sunrise_client::gui_layers::order();
-        let Some(next) = self.hud_layer_next.filter(|_| order.has_mod_layers()) else {
-            return;
-        };
-        let end = match until {
-            Some(layer) => match order.position(layer) {
-                Some(at) => at,
-                None => return,
-            },
-            None => order.len(),
-        };
-        for at in next..end {
-            let Some(layer) = order.mod_layer(at) else {
-                continue;
-            };
-            let mut canceled = false;
-            self.native_gui_layer_pre(layer, batch, &mut canceled);
-            if !canceled {
-                self.native_gui_layer_draw(layer, batch);
-            }
-            self.native_gui_layer_post(layer, batch);
-        }
-        // Past `until` itself: it is drawn next, by `gui_layer`.
-        self.hud_layer_next = Some(next.max(end + usize::from(until.is_some())));
     }
     /// Whether a box in `corner` shows: F3's debug screen takes both top
     /// corners (its left and right columns), and a bottom corner while one
@@ -196,7 +143,7 @@ impl Game<'_> {
             ScreenDecision::Open
         };
         match decision {
-            ScreenDecision::Keep => return,
+            ScreenDecision::Keep => (),
             ScreenDecision::ModScreen(mod_id) => self.apply_screen(Screen::Mod, Some(mod_id)),
             ScreenDecision::Vanilla(target) => self.open_screen_target(target),
             ScreenDecision::Open => {
@@ -206,7 +153,165 @@ impl Game<'_> {
                 self.apply_screen(Screen::Playing, None);
             }
         }
-        self.screen_state.observed = self.observed_now();
-        self.shown_init_post();
+    }
+}
+
+// The vanilla paint procedure belongs to the caller's frame, not the frozen layer order.
+type VanillaGuiDraw<'p, 'g> = dyn FnMut(&mut Game<'g>, &mut HudBatch) + 'p;
+
+struct GuiLayerWrapFrame<'a, 'p, 'g> {
+    game: &'a mut Game<'g>,
+    batch: &'a mut HudBatch,
+    previous: &'a GuiLayerBody,
+    vanilla: Option<&'a mut VanillaGuiDraw<'p, 'g>>,
+    paint: &'a mut HudPaintCheckpoint,
+}
+
+impl GuiLayerWrapContext for GuiLayerWrapFrame<'_, '_, '_> {
+    fn host(&self) -> &dyn ClientHost {
+        &*self.game
+    }
+
+    fn with_draw(&mut self, draw: &mut dyn FnMut(&mut dyn DrawContext)) {
+        draw(&mut GameDrawContext::new(self.game, self.batch));
+    }
+
+    fn draw_previous(&mut self) {
+        let start = self.batch.vertices.len();
+        self.game
+            .draw_gui_layer_body(self.batch, self.previous, self.vanilla.as_deref_mut());
+        self.paint
+            .preserve_delegated(start..self.batch.vertices.len());
+    }
+}
+
+impl<'g> Game<'g> {
+    /// Dispatches a vanilla slot after flushing inserted layers below it. Replacing or wrapping
+    /// a body leaves the slot's ID, order and hooks unchanged. The original body's eligibility
+    /// applies only to the original paint, including when a wrapper delegates to it.
+    pub(in crate::game) fn gui_layer(
+        &mut self,
+        layer: VanillaGuiLayer,
+        batch: &mut HudBatch,
+        draw: &mut dyn FnMut(&mut Game<'g>, &mut HudBatch),
+    ) {
+        self.draw_mod_gui_layers(Some(layer), batch);
+        self.run_gui_layer(
+            layer.id(),
+            batch,
+            gui_layers::order().map_or(&GuiLayerBody::Vanilla, |order| {
+                &order.slots()[order.position(layer)].body
+            }),
+            Some(draw),
+            matches!(
+                layer,
+                VanillaGuiLayer::PlayerHealth
+                    | VanillaGuiLayer::ArmorLevel
+                    | VanillaGuiLayer::FoodLevel
+                    | VanillaGuiLayer::VehicleHealth
+                    | VanillaGuiLayer::AirLevel
+            ),
+        );
+    }
+
+    /// Draws inserted layers not drawn yet this frame, below `until` or to the end with `None`.
+    /// A skipped vanilla layer keeps its place; its neighbours draw at the next paint site.
+    /// Inserted layers don't draw while the HUD is hidden.
+    pub(in crate::game) fn draw_mod_gui_layers(
+        &mut self,
+        until: Option<VanillaGuiLayer>,
+        batch: &mut HudBatch,
+    ) {
+        let Some(next) = self.hud_layer_next else {
+            return;
+        };
+        let Some(order) = gui_layers::order() else {
+            return;
+        };
+        let slots = order.slots();
+        let end = until.map_or(slots.len(), |layer| order.position(layer));
+        // An earlier anchor can still paint later (e.g. deferred subtitles). Don't redraw slots.
+        for slot in &slots[next.min(end)..end] {
+            if slot.vanilla_anchor().is_none() {
+                self.run_gui_layer(slot.id(), batch, &slot.body, None, false);
+            }
+        }
+        // Past `until` itself: its paint site draws it, not the cursor.
+        self.hud_layer_next = Some(next.max(end + usize::from(until.is_some())));
+    }
+
+    fn run_gui_layer(
+        &mut self,
+        id: &str,
+        batch: &mut HudBatch,
+        body: &GuiLayerBody,
+        vanilla: Option<&mut VanillaGuiDraw<'_, 'g>>,
+        status_row: bool,
+    ) {
+        let mut canceled = false;
+        self.native_gui_layer_pre(id, batch, &mut canceled);
+        if canceled {
+            return;
+        }
+        let start = batch.vertices.len();
+        self.draw_gui_layer_body(batch, body, vanilla);
+        if status_row {
+            self.keep_status_rows(&batch.vertices[start..], batch.width, batch.height);
+        }
+        self.native_gui_layer_post(id, batch);
+    }
+
+    fn draw_gui_layer_body(
+        &mut self,
+        batch: &mut HudBatch,
+        body: &GuiLayerBody,
+        vanilla: Option<&mut VanillaGuiDraw<'_, 'g>>,
+    ) {
+        match body {
+            GuiLayerBody::Vanilla => {
+                // Only a vanilla slot can contain this node; its paint site lends the closure.
+                if let Some(draw) = vanilla {
+                    CallbackOwner::call_engine(|| draw(self, batch));
+                }
+            }
+            GuiLayerBody::Native { owner, draw } => {
+                if let Some(owner) = owner.as_ref().filter(|owner| owner.is_enabled()) {
+                    let paint = batch.paint_checkpoint();
+                    if owner
+                        .call("HUD layer", "gui_layer_draw", || {
+                            draw(self, &mut GameDrawContext::new(self, batch));
+                        })
+                        .is_err()
+                    {
+                        paint.discard(batch);
+                    }
+                }
+            }
+            GuiLayerBody::Wrapped {
+                owner,
+                wrap,
+                previous,
+            } => {
+                let Some(owner) = owner.as_ref().filter(|owner| owner.is_enabled()) else {
+                    self.draw_gui_layer_body(batch, previous, vanilla);
+                    return;
+                };
+                let mut paint = batch.paint_checkpoint();
+                if owner
+                    .call("HUD layer", "gui_layer_wrapper", || {
+                        wrap(&mut GuiLayerWrapFrame {
+                            game: self,
+                            batch,
+                            previous,
+                            vanilla,
+                            paint: &mut paint,
+                        });
+                    })
+                    .is_err()
+                {
+                    paint.discard(batch);
+                }
+            }
+        }
     }
 }

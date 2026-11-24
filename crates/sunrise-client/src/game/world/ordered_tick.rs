@@ -1,7 +1,7 @@
-//! PURPOSE: ticks experience orbs, primed TNT and falling blocks in the order
-//! they joined the level, between the other kinds' batches.
+//! PURPOSE: ticks experience orbs, primed TNT, falling blocks and the dragon
+//! in the order they joined the level, between the other kinds' batches.
 //! WHY: `ServerLevel.tick` ticks every entity in join order, one kind among
-//! the rest; these three used to tick as three fixed batches (orbs after the
+//! the rest; the mobile entities used to tick as fixed batches (orbs after the
 //! mobs, falling blocks and TNT after the gateways), so a TNT that joined
 //! before a boat blew up after the boat moved (#6509, tick order slice 2).
 //! REFS: vanilla `ServerLevel.tick` (`entityTickList.forEach`),
@@ -16,7 +16,7 @@ use sunrise_client::random_source;
 use sunrise_core::geometry::Vec3;
 use sunrise_core::random::RandomSource as _;
 
-/// What this tick has ticked of the three kinds.
+/// Progress through this level tick's ordered entity turns.
 #[derive(Default, Clone)]
 pub(super) struct OrderedTicks {
     /// Joins at or above this started after the tick began; they tick next tick.
@@ -36,9 +36,16 @@ pub(super) struct OrderedTicks {
     /// entity lists can change between passes, so this only retains capacity;
     /// entries are rebuilt from the live lists every time.
     pending_buf: Vec<(JoinSeq, Pending)>,
+    /// Stand turns that belong after a shulker's turn, kept in join order.
+    pub(super) armor_stands: std::collections::VecDeque<JoinSeq>,
     /// The falling blocks (id, join) that ended a tick still falling with a part listening to
     /// `falling_tick`, delivered after the pass.
     pub(super) falling_ticked: Vec<(u32, JoinSeq)>,
+    /// Only consecutive falling ticks without mod callbacks may defer compaction.
+    pub(super) defer_landings: bool,
+    /// The terminal slots awaiting compaction at the end of that run.
+    pub(super) landed: sunrise_core::fast_hash::FxHashSet<JoinSeq>,
+    pub(super) landing_time: sunrise_client::spans::SpanTotal,
     /// Whether the entity tick hooks are heard this tick, and which types are told alone: the
     /// server's unsimulated entities of those types are told at their place in this order
     /// (game/modding/native_ticks.rs).
@@ -51,6 +58,7 @@ pub(super) enum Batch {
     ArmorStands,
     Boats,
     Carts,
+    Fishing,
     Tridents,
     Rockets,
     Items,
@@ -64,7 +72,7 @@ pub(super) enum Batch {
 }
 
 impl Batch {
-    const COUNT: usize = 9;
+    const COUNT: usize = 10;
 }
 
 #[derive(Clone, Copy)]
@@ -72,6 +80,7 @@ enum Pending {
     Orb,
     Tnt,
     Falling,
+    Dragon,
     /// An entity the server keeps without simulating it (a display, a marker, an interaction),
     /// of a type a mod named: only told its tick.
     Other,
@@ -87,6 +96,9 @@ impl Game<'_> {
     pub(super) fn begin_ordered_ticks(&mut self) {
         let _span = sunrise_client::spans::guard("ordered_ticks");
         let pending_buf = std::mem::take(&mut self.ordered.pending_buf);
+        let landed = std::mem::take(&mut self.ordered.landed);
+        let mut armor_stands = std::mem::take(&mut self.ordered.armor_stands);
+        armor_stands.clear();
         let mut falling_ticked = std::mem::take(&mut self.ordered.falling_ticked);
         falling_ticked.clear();
         let told = self.native_tick_told();
@@ -94,6 +106,7 @@ impl Game<'_> {
             first_join(&self.armor_stands),
             first_join(&self.boats),
             first_join(&self.carts),
+            self.hook.as_ref().map(Joined::join_seq),
             first_join(&self.tridents),
             first_join(&self.rockets),
             first_join(&self.dropped),
@@ -116,13 +129,16 @@ impl Game<'_> {
             suffix_min,
             lava_random: None,
             pending_buf,
+            armor_stands,
             falling_ticked,
+            defer_landings: false,
+            landed,
+            landing_time: Default::default(),
             told,
         };
     }
 
-    /// Ticks, one at a time in join order, every orb, primed TNT and falling
-    /// block that joined before `cut` and has not ticked this tick.
+    /// Ticks each ordered entity that joined before `cut` and has not ticked yet.
     pub(super) fn run_ordered_ticks(&mut self, cut: JoinSeq, late: bool) -> Result<()> {
         let _span = sunrise_client::spans::guard("ordered_ticks");
         let mut first_error = None;
@@ -144,8 +160,8 @@ impl Game<'_> {
             // Orbs are announced after their tick, always; TNT and falling
             // blocks that joined since the last packets wait for them.
             let right_pass = match kind {
-                Pending::Orb | Pending::Other => !late,
-                _ => late == (j >= announced),
+                Pending::Orb | Pending::Dragon | Pending::Other => !late,
+                Pending::Tnt | Pending::Falling => late == (j >= announced),
             };
             if right_pass && wanted(j) {
                 pending.push((j, kind));
@@ -156,6 +172,9 @@ impl Game<'_> {
         self.falling
             .iter()
             .for_each(|e| offer(e.join, Pending::Falling));
+        if let Some(dragon) = self.dragon.as_ref() {
+            offer(dragon.join, Pending::Dragon);
+        }
         // Only while a mod hears entity ticks and named the type: otherwise none is offered.
         let told = self.ordered.told;
         if told.listening() {
@@ -170,10 +189,32 @@ impl Game<'_> {
         // run and again after an explosion, which can move or remove them.
         let mut obstacles: Option<sunrise_client::entities::ObstacleGrid> = None;
         let mut nearby = Vec::new();
-        for (join, kind) in pending.drain(..) {
+        self.ordered.defer_landings = mod_api::__private::mods().is_empty();
+        'entity: for (join, kind) in pending.drain(..) {
+            // TNT, orbs and mod tick callbacks may observe the falling list.
+            if !matches!(kind, Pending::Falling) {
+                self.remove_landed_falling();
+            }
             self.ordered.done = Some(join);
             // ServerLevel.tick: only entities in entity-ticking chunks tick.
             match kind {
+                Pending::Dragon => {
+                    let Some(dragon) = self.dragon.as_ref().filter(|d| d.join == join) else {
+                        continue;
+                    };
+                    let at = dragon.position;
+                    if entity_ticking(at.x.floor() as i32, at.z.floor() as i32) {
+                        self.tick_dragon();
+                        if let Some(dragon) = self.dragon.as_ref().filter(|d| d.join == join) {
+                            self.entity_section_step(
+                                dragon.id,
+                                at.components(),
+                                dragon.position.components(),
+                            );
+                        }
+                        obstacles = None;
+                    }
+                }
                 Pending::Tnt => {
                     let Some(i) = self.tnts.locate(join) else {
                         continue;
@@ -206,8 +247,7 @@ impl Game<'_> {
                     if entity_ticking(at.x.floor() as i32, at.z.floor() as i32) {
                         events = true;
                         let f = &self.falling[i];
-                        let area = sunrise_client::falling_block::bounds(f.position)
-                            .expand_towards(f.velocity);
+                        let area = f.bounds().expand_towards(f.velocity);
                         obstacles
                             .get_or_insert_with(|| {
                                 sunrise_client::entities::ObstacleGrid::new(
@@ -264,39 +304,130 @@ impl Game<'_> {
                         .near(area.inflate(Vec3::new(1.0, 1.0, 1.0)), &mut nearby);
                     let orb_id = self.orbs[i].id;
                     let vanilla = self.saved_refuses_damage(orb_id, "minecraft:lava", false);
+                    let server = self.remote.is_none();
+                    let lava_random = &mut self.ordered.lava_random;
+                    // ExperienceOrb's lava section uses the orb tick's own random, not level random.
+                    let mut next_float = || {
+                        lava_random
+                            .get_or_insert_with(random_source::entity)
+                            .next_float()
+                    };
+                    let side = game_side!(self);
+                    let motion = sunrise_client::motion::BodyMotion {
+                        world: &self.world,
+                        collision: self.collision,
+                        facts: self.res.facts(),
+                        blocks: Some(&self.res.motion().blocks),
+                        context: &self.loop_context,
+                        side: Some(&side),
+                    };
+                    let tick = self.orbs[i].move_before_fall(
+                        motion,
+                        target,
+                        server,
+                        &mut next_float,
+                        Some(self.border.geometry()),
+                        &self.res.motion().fluids,
+                        &nearby,
+                    );
+                    if server {
+                        self.orb_fall(i, tick.step, tick.movement.effect);
+                    }
+                    let Some(i) = self.orbs.locate(join) else {
+                        continue;
+                    };
+                    let response =
+                        self.orbs[i].move_restitution(self.body_motion(&game_side!(self)), tick);
+                    let entity = (orb_id, "minecraft:experience_orb");
+                    let mut velocity =
+                        self.finish_body_restitution(entity, self.orbs[i].position, response);
+                    let Some(mut i) = self.orbs.locate(join) else {
+                        continue;
+                    };
+                    let orb = &self.orbs[i];
+                    let (footprint, ground) = ((orb.position, orb.bounds()), orb.ground);
+                    self.body_motion(&game_side!(self))
+                        .apply_block_speed(orb.position, &mut velocity);
+                    if !tick.burnt_out {
+                        let writes = self.body_step_on(entity, footprint, &ground, &mut velocity);
+                        for write in writes {
+                            match write {
+                                mod_api::EntityWrite::Hurt {
+                                    damage_type,
+                                    amount,
+                                } => {
+                                    let Some(name) =
+                                        mod_api::__private::parts_installation::damage_type_name(
+                                            damage_type,
+                                        )
+                                    else {
+                                        continue;
+                                    };
+                                    let Some(kind) = self.health_resources.damage.id(name) else {
+                                        continue;
+                                    };
+                                    let source = sunrise_client::health::HurtSource {
+                                        damage_type: name,
+                                        causing: 0,
+                                        direct: 0,
+                                        position: None,
+                                    };
+                                    let vanilla = self
+                                        .resident_item_or_orb_immune(orb_id, entity.1, kind, false);
+                                    let invulnerable = self.native_nonliving_invulnerable(
+                                        orb_id, entity.1, source, vanilla,
+                                    );
+                                    let Some(current) = self.orbs.locate(join) else {
+                                        continue 'entity;
+                                    };
+                                    i = current;
+                                    if !invulnerable && self.orbs[i].hurt(amount) {
+                                        self.orbs.remove(i);
+                                        continue 'entity;
+                                    }
+                                }
+                                mod_api::EntityWrite::Push([x, y, z]) => {
+                                    velocity = velocity.add_vector(Vec3::new(x, y, z))
+                                }
+                                mod_api::EntityWrite::SetMovement([x, y, z]) => {
+                                    velocity = Vec3::new(x, y, z)
+                                }
+                                mod_api::EntityWrite::ResetFallDistance => {
+                                    self.orbs[i].fall_distance = 0.0
+                                }
+                                mod_api::EntityWrite::SetFireTicks(ticks) => {
+                                    self.orbs[i].fire_ticks = ticks
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     let registry = self.pack.assets.registry;
                     let tags = world_items!(self);
                     let block_registries = &self.pack.block_registries;
                     let hooks = &self.damage_hooks;
                     let side = game_side!(self);
                     let o = &mut self.orbs[i];
-                    // An orb has no random of its own here: lava draws from one
-                    // made on first use, apart from the level stream.
-                    let random = &mut self.ordered.lava_random;
+                    o.velocity = velocity;
+                    let audio = &mut self.audio;
+                    let lava_random = &mut self.ordered.lava_random;
                     let mut next_float = || {
-                        random
+                        lava_random
                             .get_or_insert_with(random_source::entity)
                             .next_float()
                     };
-                    let (stays, step) = {
-                        let audio = &mut self.audio;
-                        let mut on_sound = |pos: [f64; 3], pitch: f32| {
-                            audio.play("minecraft:entity.generic.burn", Some(pos), 0.4, pitch);
-                        };
-                        o.tick_among_with_hook(
-                            &mut self.world,
-                            self.res.facts(),
-                            self.collision,
-                            target,
-                            self.remote.is_none(),
-                            &mut next_float,
-                            Some(self.border.geometry()),
-                            &self.res.motion().fluids,
-                            &self.loop_context,
-                            &side,
-                            &mut on_sound,
-                            &nearby,
-                            &mut |world| {
+                    let stays = o.finish_tick(
+                        &mut &mut self.world,
+                        (self.collision, self.res.facts(), &self.loop_context, &side),
+                        &self.res.motion().fluids,
+                        tick,
+                        server,
+                        sunrise_client::entities::OrbLavaEffects {
+                            next_float: &mut next_float,
+                            on_sound: &mut |pos, pitch| {
+                                audio.play("minecraft:entity.generic.burn", Some(pos), 0.4, pitch)
+                            },
+                            invulnerable: &mut |world| {
                                 let source = sunrise_client::health::HurtSource {
                                     damage_type: "minecraft:lava",
                                     causing: 0,
@@ -320,8 +451,8 @@ impl Game<'_> {
                                     vanilla,
                                 )
                             },
-                        )
-                    };
+                        },
+                    );
                     // PowderSnowBlock.entityInside during the move, before an
                     // orb that is done is removed.
                     let snow = (o.previous, o.position, o.bounds(), o.velocity);
@@ -329,13 +460,15 @@ impl Game<'_> {
                     // Its move is filed at once, also for an orb about to go.
                     let (from, to) = (snow.0, snow.1);
                     self.entity_section_step(orb_id, [from.x, from.y, from.z], [to.x, to.y, to.z]);
-                    self.orb_moved(i, step);
                     if !stays {
                         self.orbs.remove(i);
                     }
                 }
             }
         }
+        self.ordered.defer_landings = false;
+        self.remove_landed_falling();
+        std::mem::take(&mut self.ordered.landing_time).record("fall_finish");
         self.ordered.pending_buf = pending;
         self.deliver_falling_ticks();
         if events && let Err(e) = self.process_level_events() {
@@ -344,8 +477,17 @@ impl Game<'_> {
         first_error.map_or(Ok(()), Err)
     }
 
-    /// Before a batch of another kind ticks: the three kinds' entities that
-    /// joined before everything still to tick in the batches from this one on.
+    /// Close a run of falling blocks before the next entity can observe the list.
+    fn remove_landed_falling(&mut self) {
+        if !self.ordered.landed.is_empty() {
+            let landed = &mut self.ordered.landed;
+            self.falling.retain(|block| !landed.contains(&block.join));
+            landed.clear();
+        }
+    }
+
+    /// Before a batch ticks, run the ordered entities that joined before
+    /// everything still to tick in the batches from this one on.
     pub(super) fn ordered_before(&mut self, batch: Batch) -> Result<()> {
         let cut = self.ordered.suffix_min[batch as usize];
         if cut == JoinSeq::MAX {
@@ -356,26 +498,37 @@ impl Game<'_> {
 }
 
 impl Game<'_> {
-    /// `Entity.move`'s fall bookkeeping after orb `i`'s move: a move of a
-    /// block or more casts for a reset block or water, `checkFallDamage` adds
-    /// the drop outside water and, on the ground after a fall, posts
-    /// HIT_GROUND, then forgets it. `Block.fallOn` (farmland's random draw,
-    /// honey's slide) is not run for an orb yet, nor for the other entities
-    /// that are not living.
+    #[cfg(test)]
     pub(super) fn orb_moved(&mut self, i: usize, step: sunrise_client::entities::OrbMove) {
+        let o = &self.orbs[i];
+        let effect = self
+            .body_motion(&game_side!(self))
+            .legacy_contact(o.position, &o.ground);
+        self.orb_fall(i, step, effect);
+    }
+
+    /// The authoritative impact is part of the move, before the captured state's restitution.
+    fn orb_fall(
+        &mut self,
+        i: usize,
+        step: sunrise_client::entities::OrbMove,
+        effect: sunrise_client::motion::BodyContact,
+    ) {
         let o = &self.orbs[i];
         let mut fall = self.vehicle_fall_reset(o.fall_distance, step.from, step.moved);
         if !step.in_water && step.moved.y < 0.0 {
             fall -= f64::from(step.moved.y as f32);
         }
-        if o.on_ground {
+        if o.ground.on_ground {
+            let (id, position, bounds) = (o.id, o.position, o.bounds());
+            self.orbs[i].fall_distance = 0.0;
             if fall > 0.0 {
-                let (position, bounds) = (o.position, o.bounds());
+                self.nonliving_fall_on(id, position, effect);
                 self.post_landing_event(position, bounds, false);
             }
-            fall = 0.0;
+        } else {
+            self.orbs[i].fall_distance = fall;
         }
-        self.orbs[i].fall_distance = fall;
     }
 }
 

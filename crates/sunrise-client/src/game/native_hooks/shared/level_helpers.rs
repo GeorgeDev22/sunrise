@@ -36,6 +36,7 @@ impl GameLevel<'_> {
                 seed,
                 except: None,
                 entity: None,
+                skip_hooks: false,
             });
         true
     }
@@ -59,7 +60,14 @@ impl GameLevel<'_> {
     ) -> bool {
         let state_ok = |id| self.registry.state(id).is_some();
         if !self.native_authoritative
-            || !mod_particles_ok(options, state, state_ok, at, spread, speed)
+            || !mod_particles_ok(
+                options,
+                state,
+                state_ok,
+                std::slice::from_ref(&at),
+                spread,
+                speed,
+            )
         {
             return false;
         }
@@ -137,6 +145,17 @@ impl GameLevel<'_> {
         let previous = self.world.block(pos[0], pos[1], pos[2]);
         let b = self.behaviours;
         let changed = b.set_block(self, ticks, at, state, flags);
+        self.finish_native_block(pos, previous, state, changed);
+        changed
+    }
+
+    pub(in crate::game) fn finish_native_block(
+        &mut self,
+        pos: [i32; 3],
+        previous: BlockStateId,
+        state: BlockStateId,
+        changed: bool,
+    ) {
         let landed = self.world.block(pos[0], pos[1], pos[2]);
         if !self.world.block_entities.stateful_entity(landed.0)
             && block_entity_to_create(self.facts, changed, previous, state, landed).is_some()
@@ -144,7 +163,6 @@ impl GameLevel<'_> {
         {
             put_block_entity(self.world, pos, entity);
         }
-        changed
     }
     /// `Level.removeBlock`: replace a block with its fluid's legacy block.
     pub(in crate::game) fn remove_block_write(
@@ -234,11 +252,14 @@ pub(super) fn block_entity_for_block(
     initial: Compound,
 ) -> Option<BlockEntity> {
     if let Some(kind) = sunrise_client::block_entity_types::type_for(name) {
+        let slots = mod_api::__private::parts_installation::block_container(name)
+            .map_or(0, |container| container.slots);
         return Some(BlockEntity::Mod(Box::new(EngineBlockEntity::new(
             kind.to_owned(),
             ModBlockEntityFields {
                 nbt: initial,
-                ..Default::default()
+                items: vec![None; slots],
+                data: Vec::new(),
             },
         ))));
     }
@@ -283,11 +304,13 @@ fn block_entity_to_create(
 /// Stores a new block entity at `pos`, keeping an existing one of the same kind.
 fn put_block_entity(world: &mut sunrise_client::world::World, pos: [i32; 3], entity: BlockEntity) {
     let key = (pos[0], pos[1], pos[2]);
-    if world
-        .block_entities
-        .get(&key)
-        .is_none_or(|existing| std::mem::discriminant(existing) != std::mem::discriminant(&entity))
-    {
-        world.block_entities.insert(key, entity);
+    if let Some(existing) = world.block_entities.get(&key) {
+        if std::mem::discriminant(existing) == std::mem::discriminant(&entity) {
+            return;
+        }
+        // During a spill join the old row can still be in place. Retire its saved tag
+        // before installing the replacement; the outer removal skips the new generation.
+        world.forget_block_entity_source(key);
     }
+    world.block_entities.insert(key, entity);
 }

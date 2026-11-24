@@ -86,32 +86,25 @@ impl Game<'_> {
         if transferred.is_none() && uuid.is_some_and(|u| self.restored_vehicle(u).is_some()) {
             return;
         }
-        if (matches!(
+        if matches!(
             kind.as_str(),
             "minecraft:experience_orb"
                 | "minecraft:arrow"
                 | "minecraft:spectral_arrow"
                 | "minecraft:llama_spit"
                 | "minecraft:shulker_bullet"
-                | "minecraft:experience_bottle"
                 | "minecraft:fireball"
                 | "minecraft:small_fireball"
                 | "minecraft:dragon_fireball"
                 | "minecraft:wind_charge"
                 | "minecraft:breeze_wind_charge"
                 | "minecraft:wither_skull"
-                | "minecraft:snowball"
-                | "minecraft:egg"
-                | "minecraft:ender_pearl"
-                | "minecraft:splash_potion"
-                | "minecraft:lingering_potion"
                 | "minecraft:falling_block"
                 | "minecraft:firework_rocket"
                 | "minecraft:trident"
                 | "minecraft:end_crystal"
                 | "minecraft:ender_dragon"
-        ) || sunrise_client::projectiles::thrown_type(&kind).is_some())
-            && let Some(at) = entity_nbt::position(&tag)
+        ) && let Some(at) = entity_nbt::position(&tag)
         {
             let key = anon_key(&kind, at);
             let was = self.persist.anon.insert(key.clone(), (at, tag.clone()));
@@ -120,7 +113,10 @@ impl Game<'_> {
         // Kinds outside `entity_lists!` first, then the listed kinds
         // (`Entity::load_nbt`), then whatever else is a compound.
         let transferring = transferred.is_some();
-        let unloaded = if kind == "minecraft:tnt"
+        let unloaded = if kind == "minecraft:lightning_bolt" && !is_mob && !transferring {
+            let _ = self.load_bolt(tag, None, !from_disk);
+            Ok(())
+        } else if kind == "minecraft:tnt"
             && !is_mob
             && reason == sunrise_client::world::EntityLoadReason::TeleportedTnt
         {

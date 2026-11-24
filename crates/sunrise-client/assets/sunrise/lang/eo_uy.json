@@ -388,8 +388,6 @@
   "sunrise.extras.chat_animation.tooltip": "Nova babillinio glitas enen de maldekstre dum ĝi fadas, anstataŭ aperi tute.",
   "sunrise.extras.chat_indicator": "Mesaĝa indikilo",
   "sunrise.extras.chat_indicator.tooltip": "La kolora stango maldekstre de babillinio.",
-  "sunrise.extras.discord_presence": "Discord Riĉa Ĉeesto",
-  "sunrise.extras.discord_presence.tooltip": "Montras Ludante Sunrise sur via Discord profilo dum Discord funkcias: menuoj, unuludanto aŭ plurludanto, la dimensio kaj la tempo ludata. Neniam mondnomo aŭ adreso de servilo.",
   "sunrise.extras.dynamic_lights": "Dinamikaj lumoj",
   "sunrise.extras.dynamic_lights.tooltip": "Torĉoj kaj aliaj lumfontoj tenis, faligis aŭ sur fajro lumigas la blokojn ĉirkaŭ ili.",
   "sunrise.extras.fullbright": "Plenluma",
