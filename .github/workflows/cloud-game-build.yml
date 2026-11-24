@@ -1,0 +1,148 @@
+name: cloud game build
+# Builds, for Linux x86_64 on Ubicloud runners, what a laptop needs to build and play native mods
+# against this commit without compiling the game itself: the game and its companion programs, and on request
+# the mod SDK of the same commit ("[sdk]" in the pushed commit's message, or "sdk" ticked when started by
+# hand). Build only: no Mojang files, no secrets. Each job stops at 90 minutes (the Ubicloud spending cutoff assumes it). Runs on pushes
+# to cloud-build branches of a fork, or by hand.
+on:
+  push:
+    branches: ['cloud-build', 'cloud-build/**']
+  workflow_dispatch:
+    inputs:
+      sdk:
+        description: Also build the mod SDK (compiles the game a second time)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: cloud-game-build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  game:
+    runs-on: ubicloud-standard-8
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: The pinned Rust (tools/ci/rust-version)
+        id: rust
+        run: echo "version=$(cat tools/ci/rust-version)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+          targets: wasm32-unknown-unknown
+          components: rust-src
+      - name: Room for target/ (the hosted image ships tools this build never uses)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - name: ALSA and udev headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cloud-game-build
+          # A failed run still leaves its compiled crates for the next one.
+          cache-on-failure: true
+      - name: Build the game and its companion programs
+        run: |
+          cargo build --locked --profile fast -p sunrise-game -p sunrise-client-lib --bin sunrise-client --bin sunrise-ctl
+          cargo build --locked --profile fast -p sunrise-prepare -p sunrise-server
+      - name: Pack the programs
+        run: |
+          tar -C target/fast -czf sunrise-linux-x86_64-fast.tar.gz \
+            sunrise-client sunrise-ctl sunrise-prepare sunrise-server
+          ls -la sunrise-linux-x86_64-fast.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sunrise-linux-x86_64-fast
+          path: sunrise-linux-x86_64-fast.tar.gz
+          retention-days: 7
+
+  sdk:
+    # Opt-in: it compiles the game again, about a third of a run's minutes.
+    if: (github.event_name == 'workflow_dispatch' && inputs.sdk) || contains(github.event.head_commit.message, '[sdk]')
+    # The Linux leg of prebuilt-game-build.yml: the mod SDK of this exact commit, which native mods
+    # compile against. Its archives are what the launcher reads from HORIZON_LAUNCHER_DEVELOPER_SDK.
+    runs-on: ubicloud-standard-8-ubuntu-2204
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: The launcher's pinned Rust
+        id: rust
+        run: echo "version=$(cat tools/ci/rust-version)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}-x86_64-unknown-linux-gnu
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Room for the build (the hosted image ships tools this build never uses)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cloud-sdk-linux
+          # A failed run still leaves its compiled crates for the next one.
+          cache-on-failure: true
+      - name: ALSA and udev headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      - name: Build and collect
+        run: python tools/prebuilt_game.py build prebuilt
+      - name: Pack the SDK's assets
+        run: python tools/prebuilt_game.py pack prebuilt dist && (cd dist && du -h *)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sunrise-sdk-linux
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  tests:
+    # The fix check another session added (2026-11-18): rustfmt, the lib test binaries and clippy.
+    # Line tables only: backtraces keep file and line (the crash tests read them), linking stays fast.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    runs-on: ubicloud-standard-8
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: The pinned Rust (tools/ci/rust-version)
+        id: rust
+        run: echo "version=$(cat tools/ci/rust-version)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+          components: clippy, rustfmt
+      - name: Room for target/ (the hosted image ships tools this build never uses)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - name: ALSA and udev headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cloud-game-tests
+          # A failed run still leaves its compiled crates for the next one.
+          cache-on-failure: true
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: The lib test binaries
+        run: |
+          cargo test --locked -p sunrise-client --lib --no-run --message-format=json > tests.json
+          mkdir -p testbin
+          python3 -c "import json,shutil;[shutil.copy(m['executable'],'testbin/'+m['target']['name']+'-'+m['target']['kind'][0]) for m in map(json.loads,open('tests.json')) if m.get('reason')=='compiler-artifact' and m.get('profile',{}).get('test') and m.get('executable')]"
+          ls -la testbin
+          tar -czf sunrise-after-tests.tar.gz testbin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sunrise-after-tests
+          path: sunrise-after-tests.tar.gz
+          retention-days: 3
+      - name: Clippy
+        run: cargo clippy --locked -p sunrise-client -p sunrise-client-lib -p sunrise-client-render --lib --tests --bins -- -D warnings
+      # The unit tests of the change being checked: PR #4167's mount packets (seats, carts, boats, effects)
+      - name: The change's unit tests
+        run: |
+          cargo test --locked -p sunrise-client --lib -- boarding:: boat_passengers minecart passengers seats:: mounts:: ambient hidden_effect send_effect active_effects weaker_longer_effect an_effect_added_again a_mobs_effect_keeps hidden_only_updates
