@@ -1,8 +1,8 @@
 name: cloud game build
-# Builds, for Linux x86_64 on Ubicloud runners, what a laptop needs to build and play native mods
+# Builds, for Linux x86_64 on GitHub's hosted runners (free on this public fork), what a laptop needs to build and play native mods
 # against this commit without compiling the game itself: the game and its companion programs, and on request
 # the mod SDK of the same commit ("[sdk]" in the pushed commit's message, or "sdk" ticked when started by
-# hand). Build only: no Mojang files, no secrets. Each job stops at 90 minutes (the Ubicloud spending cutoff assumes it). Runs on pushes
+# hand). Build only: no Mojang files, no secrets. Hosted runners have 4 cores, so the jobs get longer time limits. Runs on pushes
 # to cloud-build branches of a fork, or by hand.
 on:
   push:
@@ -20,8 +20,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   game:
-    runs-on: ubicloud-standard-8
-    timeout-minutes: 90
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
         with:
@@ -63,8 +63,8 @@ jobs:
     if: (github.event_name == 'workflow_dispatch' && inputs.sdk) || contains(github.event.head_commit.message, '[sdk]')
     # The Linux leg of prebuilt-game-build.yml: the mod SDK of this exact commit, which native mods
     # compile against. Its archives are what the launcher reads from HORIZON_LAUNCHER_DEVELOPER_SDK.
-    runs-on: ubicloud-standard-8-ubuntu-2204
-    timeout-minutes: 90
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
         with:
@@ -104,8 +104,8 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
-    runs-on: ubicloud-standard-8
-    timeout-minutes: 90
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v7
         with:
