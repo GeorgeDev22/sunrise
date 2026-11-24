@@ -53,9 +53,9 @@ SCRIPT = [
     ]),
     ('boat', [
         build('ride @s mount @e[type=minecraft:oak_boat,limit=1]'),
-        build('data get entity @s Rotation'),
     ]),
     ('seated', [
+        build('data get entity @s Rotation'),
         build('rotate @s 0 0'),
         build('effect give @s minecraft:instant_health 1 9 true'),
     ]),
