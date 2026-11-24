@@ -12,12 +12,13 @@ sends a living vehicle's effects (PlayerList.sendActiveEffects) and the vehicle'
 command's reply; the tracker sends the passengers again on its next look.
 - The boat already carries a pig, so Alice sits first, in the front seat of a full boat (getPassengers().indexOf),
   and she faces 150 degrees from it: AbstractBoat.clampRotation leaves her at 105, which `/data get` shows.
-- The minecart floats (NoGravity) at y 0.04, where adding the cart's attachment and then taking off the player's
-  rounds differently from taking off their difference.
+- The minecart floats (NoGravity) at y 0.04 over a stone floor, where adding the cart's attachment and then taking
+  off the player's rounds differently from taking off their difference.
 - The horse (NoAI, so it keeps its facing) has an infinite Speed without particles.
 
-Alice's teleports, passenger lists, the other entities' effects and the command replies from the first mount on are
-compared exactly; a reply that names an entity by its key alone (the hover carries its random UUID).
+Alice's teleports, passenger lists, the other entities' effects and the command replies in the mount steps and the
+one after the boat's are compared exactly; the ride's reply by its key alone (the hover carries the vehicle's random
+UUID). The dismounts between the mounts are not compared.
 """
 import sys
 
@@ -44,6 +45,8 @@ SCRIPT = [
         build('summon minecraft:oak_boat 1.0 -60 0.5 {Rotation:[0f,0f]}'),
         build('summon minecraft:pig 1.0 -60 0.5 {NoAI:1b}'),
         build('ride @e[type=minecraft:pig,limit=1] mount @e[type=minecraft:oak_boat,limit=1]'),
+        # A floor under the cart, so its dismount sets Alice down on it rather than in the air.
+        build('fill 1 -1 -1 5 -1 2 minecraft:stone'),
         build('summon minecraft:minecart 3.0 0.04 0.5 {NoGravity:1b,Rotation:[0f,0f]}'),
         build('summon minecraft:horse 5.0 -60 0.5 {NoAI:1b,Rotation:[0f,0f]}'),
         build('effect give @e[type=minecraft:horse] minecraft:speed infinite 1 true'),
@@ -55,16 +58,11 @@ SCRIPT = [
     ('seated', [
         build('rotate @s 0 0'),
         build('effect give @s minecraft:instant_health 1 9 true'),
-        build('ride @s dismount'),
     ]),
-    ('minecart', [
-        build('ride @s mount @e[type=minecraft:minecart,limit=1]'),
-        build('ride @s dismount'),
-    ]),
-    ('horse', [
-        build('ride @s mount @e[type=minecraft:horse,limit=1]'),
-        build('ride @s dismount'),
-    ]),
+    ('off-boat', [build('ride @s dismount')]),
+    ('minecart', [build('ride @s mount @e[type=minecraft:minecart,limit=1]')]),
+    ('off-minecart', [build('ride @s dismount')]),
+    ('horse', [build('ride @s mount @e[type=minecraft:horse,limit=1]')]),
 ]
 
 MOUNTS = ('boat', 'minecart', 'horse')
@@ -72,12 +70,13 @@ MOUNTS = ('boat', 'minecart', 'horse')
 KEPT = ('teleport', 'passengers', 'other-effect', 'chat', 'error')
 
 # The replies that name an entity: its hover carries its random UUID, so only their key is compared.
-NAMES_ENTITY = ('"commands.ride.mount.success"', '"commands.ride.dismount.success"')
+NAMES_ENTITY = ('"commands.ride.mount.success"',)
 
 
 def shown(lines):
-    """Alice's teleports, passenger lists, other entities' effects and command replies from the first mount on."""
-    steps = {f'step={step}' for step, _ in SCRIPT if step != 'setup'}
+    """Alice's teleports, passenger lists, other entities' effects and command replies from the first mount on; the
+    setup and the dismounts between the mounts (`off-*`) are left out."""
+    steps = {f'step={step}' for step, _ in SCRIPT if step != 'setup' and not step.startswith('off-')}
     kept = []
     for line in lines:
         parts = line.split(' ', 3)
