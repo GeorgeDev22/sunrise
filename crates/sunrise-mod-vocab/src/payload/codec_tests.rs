@@ -228,8 +228,6 @@ fn arc_counts_are_charged_even_for_zero_width_values() {
 
 #[test]
 fn typed_forms_with_unmetered_conversions_are_refused() {
-    use crate::{MeshDefinition, ModelPart, PartPose};
-
     fn ordinary_only<T: Wire>(value: &T) {
         let mut writer = Writer::new();
         writer.put(value);
@@ -243,8 +241,6 @@ fn typed_forms_with_unmetered_conversions_are_refused() {
         assert_eq!(input.rest(), writer.bytes());
     }
 
-    ordinary_only(&MeshDefinition::new());
-    ordinary_only(&ModelPart::new(Vec::new(), Vec::new(), PartPose::ZERO));
     ordinary_only(&serde_json::json!({"field": []}));
     ordinary_only(&serde_json::Map::<String, serde_json::Value>::new());
     ordinary_only(&crate::LegacyRandomSource::new(42)); // a #[wire(via = ...)] conversion
@@ -419,10 +415,6 @@ fn checked_decoders_do_not_share_the_raw_representations_fingerprint() {
     assert_ne!(
         payload_schema::<serde_json::Map<String, serde_json::Value>>(),
         payload_schema::<serde_json::Value>()
-    );
-    assert_ne!(
-        payload_schema::<crate::ModelPart>(),
-        payload_schema::<String>()
     );
 }
 

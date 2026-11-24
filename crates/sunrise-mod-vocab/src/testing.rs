@@ -26,6 +26,22 @@
 //! let into = host.level.block_entity_at([1, 64, 0]).unwrap().items.as_ref().unwrap();
 //! assert_eq!(into.count("minecraft:stone"), 3);
 //! ```
+/// Build the command for one exact ignored test in a fresh copy of this test binary.
+/// The caller supplies scratch resources and verifies the fixture's completion.
+pub fn fresh_case_command(name: &str, flag: &str, case: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--ignored",
+            "--exact",
+            name,
+            "--nocapture",
+            "--test-threads=4",
+        ])
+        .env(flag, case);
+    command
+}
+
 #[path = "testing/journal.rs"]
 mod journal;
 #[path = "testing/level.rs"]
@@ -1409,6 +1425,40 @@ impl crate::__private::WorldgenReader for TestReader {
     fn setting(&self, _: &str, _: &str) -> Option<&str> {
         None
     }
+}
+
+/// Build a `(RegisteredAttachment, AttachmentKey<T>)` pair for tests without running full
+/// mod registration.
+// hidden: API-owned test setup uses this vocabulary fixture, not mod authoring code.
+#[doc(hidden)]
+pub fn registered_attachment_fixture<T: Send + Sync + 'static>(
+    owner: &'static str,
+    descriptor: crate::AttachmentDescriptor<T>,
+) -> (crate::RegisteredAttachment, crate::AttachmentKey<T>) {
+    crate::parts::registered_attachment_fixture(owner, descriptor)
+}
+
+/// Install a single attachment descriptor in the test thread's Parts table and return its live
+/// [`AttachmentKey<T>`](crate::AttachmentKey).
+// hidden: API-owned test setup uses this vocabulary fixture, not mod authoring code.
+#[doc(hidden)]
+pub fn install_attachment_fixture<T: Send + Sync + 'static>(
+    owner: &'static str,
+    descriptor: crate::AttachmentDescriptor<T>,
+) -> crate::AttachmentKey<T> {
+    crate::parts::install_attachment_fixture(owner, descriptor)
+}
+
+/// Retrieve the key issued by this test thread's registration fixture.
+// hidden: API-owned test setup uses this vocabulary fixture, not mod authoring code.
+#[doc(hidden)]
+pub fn attachment_key<T: Send + Sync + 'static>(
+    namespace: &str,
+    name: &str,
+) -> crate::AttachmentKey<T> {
+    crate::parts::installed().unwrap().attachment_types[namespace][name]
+        .downcast_key()
+        .unwrap()
 }
 
 #[cfg(test)]

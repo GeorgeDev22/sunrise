@@ -312,6 +312,8 @@ impl Fixture {
             size,
             &[],
             terrain,
+            Default::default(),
+            |_, _| false,
             &std::sync::atomic::AtomicBool::new(false),
             super::super::in_flight::poll_live,
         )
@@ -465,6 +467,7 @@ fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
         underwater: false,
         cave_culling: false,
         title: true,
+        sky_pass: false,
         sky_blocked: false,
         skybox: false,
         end_sky: false,

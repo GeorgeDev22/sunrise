@@ -97,6 +97,23 @@ impl Game<'_> {
         };
         Some(vehicle.is_some())
     }
+    /// Whether the HUD draws this entity's hearts while the local player rides it
+    /// (`Entity.showVehicleHealth`, which is `instanceof LivingEntity`): on a client, the
+    /// local player is one and a tracked entity answers from its type's row.
+    pub(super) fn entity_shows_vehicle_health(&self, entity: EntityRef) -> Option<bool> {
+        if self.is_logical_server() {
+            return Some(self.native_entity_target(entity)?.is_living());
+        }
+        match self.native_client_entity_target(entity) {
+            Some(Target::Player) => Some(true),
+            Some(Target::DragonPart(_)) => Some(false),
+            _ => {
+                let (kind, _) = self.native_client_tracked(entity)?;
+                let rows = super::entity_type_rows::entity_type_rows(&self.options.resources);
+                Some(rows.is_living(kind))
+            }
+        }
+    }
     /// The lowest vehicle under the entity (`Entity.getRootVehicle`): the
     /// entity itself when it rides nothing. Off-level intermediaries are traversed;
     /// an off-level root or a cycle returns no handle, never a descendant substitute.
@@ -541,7 +558,6 @@ impl Game<'_> {
                 self.riding = Some(vehicle_id);
                 self.seat_player(vehicle_id);
                 self.trigger_player("minecraft:started_riding");
-                self.mounted_player(vehicle_id);
             }
             Target::Mob(id) => {
                 sunrise_client::mobs::riders::link(&mut self.mobs, id, vehicle_id);
@@ -1221,6 +1237,24 @@ mod tests {
                 location: [0.0; 3]
             })));
             assert_eq!(game.riding, Some(61));
+        });
+    }
+
+    /// `Entity.showVehicleHealth` is `instanceof LivingEntity`: a horse shows its hearts, a
+    /// boat does not.
+    #[test]
+    #[ignore = "daily"]
+    fn a_living_vehicle_shows_its_health_and_a_boat_does_not() {
+        use super::super::boats::Boat;
+        super::super::native_entity_refs::tests::with_game(|game| {
+            let kind = game.res.mob_types().get("minecraft:horse").unwrap().clone();
+            game.mobs.push(Mob::new(70, kind, Vec3::ZERO, 0.0));
+            game.boats
+                .push(Boat::new(71, "oak".into(), Vec3::ZERO, 0.0));
+            let host = &*game as &dyn ServerHost;
+            let shows = |id| game.entity(id).unwrap().shows_vehicle_health(host);
+            assert_eq!(shows(70), Some(true));
+            assert_eq!(shows(71), Some(false));
         });
     }
 

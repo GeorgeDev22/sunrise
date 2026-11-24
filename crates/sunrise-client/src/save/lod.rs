@@ -439,7 +439,11 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
         self.save
             .tables
             .get_or_init(|| Arc::new(SaveTables::new(&self.registry)));
-        let mut chunk = self.save.load(x, z, self.registry.registry, &self.biomes)?;
+        let mut chunk = self
+            .save
+            .try_load(x, z, self.registry.registry, &self.biomes)
+            .ok()
+            .flatten()?;
         for s in &mut chunk.sections {
             Arc::make_mut(s).compact();
         }
@@ -447,6 +451,10 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
             chunk.entities.extend(entities);
         }
         Some(chunk)
+    }
+    fn accept_loaded_chunk(&self, chunk: &mut Chunk) {
+        self.save
+            .load_disk_attachments(chunk, mod_api::ChunkDiskKind::Full);
     }
     fn lod_surface(
         &self,
@@ -467,14 +475,41 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
         self.inner.idle(worker);
     }
     fn proto(&self, worker: &mut G::Worker, x: i32, z: i32) -> crate::streaming::Proto {
-        let mut proto = self.inner.proto(worker, x, z);
-        if let Some(saved) = self
-            .save
-            .load_proto(x, z, self.registry.registry, &self.biomes)
-        {
-            self.inner.restore_proto(&mut proto, saved);
+        let (mut proto, saved) = self.worker_proto(worker, x, z);
+        if let Some(saved) = saved {
+            self.accept_loaded_proto(&mut proto, *saved);
         }
         proto
+    }
+    fn worker_proto(
+        &self,
+        worker: &mut G::Worker,
+        x: i32,
+        z: i32,
+    ) -> (crate::streaming::Proto, Option<Box<SavedProto>>) {
+        let mut proto = self.inner.proto(worker, x, z);
+        let Some(saved) = self
+            .save
+            .decode_saved_proto(x, z, self.registry.registry, &self.biomes)
+        else {
+            return (proto, None);
+        };
+        if self.save.has_chunk_disk_hook(mod_api::ChunkDiskPhase::Load) {
+            (proto, Some(Box::new(saved)))
+        } else {
+            self.inner.restore_proto(&mut proto, saved);
+            (proto, None)
+        }
+    }
+    fn accept_loaded_proto(
+        &self,
+        proto: &mut crate::streaming::Proto,
+        mut saved: SavedProto,
+    ) -> bool {
+        self.save
+            .load_disk_attachments(&mut saved.column, mod_api::ChunkDiskKind::Proto);
+        self.inner.restore_proto(proto, saved);
+        self.inner.is_decorated(proto)
     }
     fn is_decorated(&self, proto: &crate::streaming::Proto) -> bool {
         self.inner.is_decorated(proto)
@@ -502,6 +537,9 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
     }
     fn proto_heap_bytes(&self, proto: &crate::streaming::Proto) -> ([usize; 6], [usize; 16]) {
         self.inner.proto_heap_bytes(proto)
+    }
+    fn save_protos_on_owner(&self) -> bool {
+        self.save.has_chunk_disk_hook(mod_api::ChunkDiskPhase::Save)
     }
     fn save_protos(&self, protos: &[&crate::streaming::Proto]) {
         self.save

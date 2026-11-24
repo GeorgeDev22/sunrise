@@ -1062,7 +1062,8 @@ impl Game<'_> {
 
 /// Hits one mob's tick deals another, handled after the mob loop.
 impl Game<'_> {
-    /// A melee hit on another mob, then `postAttack`; whether it landed.
+    /// A melee hit on another mob, then `postAttack`: the victim's
+    /// equipment, then the attacker's weapon; whether it landed.
     pub(super) fn mob_attacks_mob(
         &mut self,
         target: u32,
@@ -1071,12 +1072,14 @@ impl Game<'_> {
     ) -> bool {
         let hurt = self.mob_hits_mob(target, amount, source);
         if hurt {
-            self.mob_post_attack(
-                target,
-                source.attacker,
-                None,
-                Some(super::creatures::damage_type(source.kind, false)),
-            );
+            let damage_type = super::creatures::damage_type(source.kind, false);
+            self.mob_post_attack(target, source.attacker, None, Some(damage_type));
+            if let Some(Who::Mob(attacker)) = source.attacker
+                && let Some(victim) = self.mob_index.find(&self.mobs, target)
+            {
+                let victim_kind = self.mobs[victim].kind.clone();
+                self.mob_weapon_post_attack(attacker, (target, &victim_kind.id), damage_type);
+            }
         }
         hurt
     }

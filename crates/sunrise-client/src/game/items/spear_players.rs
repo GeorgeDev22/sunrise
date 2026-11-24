@@ -39,6 +39,9 @@ pub(super) struct PlayerStab {
     knockback: (f32, f64, f64),
     disable_blocking: f32,
     item: Option<Text>,
+    /// The spear at this contact, for mods' own `post_attack` kinds (a later
+    /// contact may break it before the stab lands).
+    weapon: Option<sunrise_client::items::ItemStack>,
     ignite: f32,
 }
 
@@ -69,6 +72,8 @@ struct Landed {
     feet: [f64; 3],
     width: f64,
     height: f64,
+    /// The stab's [`PlayerStab::weapon`].
+    weapon: Option<sunrise_client::items::ItemStack>,
 }
 
 /// A spear's push on a player as the native hooks name it.
@@ -187,6 +192,7 @@ impl Game<'_> {
             disable_blocking,
             item: self.main_hand_custom_name(),
             ignite: self.weapon_ignite_seconds(),
+            weapon: self.native_post_attack_weapon(self.held()),
         })
     }
 
@@ -299,6 +305,7 @@ impl Game<'_> {
                     feet,
                     width,
                     height,
+                    weapon: s.weapon.clone(),
                 };
                 (landed, thorns)
             })
@@ -327,6 +334,17 @@ impl Game<'_> {
             }
             // itemAttackInteraction: hurtEnemy (statistic, wear), and the
             // post-attack enchantments when the target was hurt.
+            if l.hurt
+                && let Some(weapon) = &l.weapon
+            {
+                let attacker = self.consuming_player_entity().id();
+                self.native_weapon_post_attack(
+                    weapon,
+                    (attacker, "minecraft:player"),
+                    (l.id as u32, "minecraft:player"),
+                    "minecraft:spear",
+                );
+            }
             if let Some(stack) = self.held().cloned() {
                 self.award_stat("used", &stack.item, 1);
                 if l.hurt {

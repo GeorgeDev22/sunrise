@@ -113,7 +113,7 @@ numeric widths and typed-array identity and can refuse values it cannot represen
 | `Suggestion` | A completion and its byte range in the input. |
 | `Block`, `Item` | Registration declarations; `None` in a component patch removes that component. |
 | `BlockEntityTypeDecl` | A block entity type declaration, not a resident entity. |
-| `GuiDraw` | A command buffer; an invalid operation refuses the buffer rather than drawing it in part. |
+| `GuiBlitRegion`, `GuiSpriteRegion` | In-process source regions for [canvas blits](../how-to/client/gui-paint.md#blits), not serialized draw commands. A refused call leaves earlier draws intact; return its `GuiDrawError` from the drawing callback to discard the group. |
 
 ## Fluids and effects
 

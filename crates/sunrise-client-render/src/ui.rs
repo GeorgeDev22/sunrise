@@ -2418,36 +2418,29 @@ mod tests {
         );
         // Twelve missing glyphs advance 72 px. At time zero the 58 px overrun is fully
         // scrolled, so glyph 10 starts at x = 10 - 58 + 5 + 9*6 = 11, y = (20 + 40 - 9) / 2 + 1 + 10 = 36.
-        // Its 5×8 SpecialGlyphs.MISSING quad extends to y = 44, so the unshifted clip
-        // [10, 20, 24, 40] cuts its bottom to y = 40 (4/8 of its height visible) and its
-        // shadow at (12, 37) to [12, 37, 17, 40].
+        // Its 5×8 SpecialGlyphs.MISSING quad keeps its whole box and UVs to y = 44, and the
+        // unshifted clip [10, 20, 24, 40] is its scissor, as `GuiRenderer.executeDraw` leaves
+        // geometry whole and gates the fragments. Its shadow at (12, 37) takes the same scissor.
         let missing = atlas.font.missing_rect().expect("missing glyph sprite");
-        let drawn = quads(&batch);
+        let whole = [missing.u0, missing.v0, missing.u1, missing.v1];
+        let clip = Some([10.0, 20.0, 24.0, 40.0]);
+        let drawn: Vec<_> = batch.quad_scissors().zip(quads(&batch)).collect();
         let glyph10 = drawn
             .iter()
-            .find(|(rect, _)| *rect == [11.0, 36.0, 16.0, 40.0])
-            .expect("offset glyph 10 clipped at unshifted bottom y=40");
-        assert_quad(
-            *glyph10,
-            (
-                [11.0, 36.0, 16.0, 40.0],
-                [
-                    missing.u0,
-                    missing.v0,
-                    missing.u1,
-                    missing.v0 + (missing.v1 - missing.v0) * 4.0 / 8.0,
-                ],
-            ),
-        );
+            .find(|((bounds, _), _)| *bounds == [11.0, 36.0, 16.0, 44.0])
+            .expect("offset glyph 10 whole below the unshifted clip");
+        assert_eq!(glyph10.0.1, clip);
+        assert_quad(glyph10.1, ([11.0, 36.0, 16.0, 44.0], whole));
+        let shadow = drawn
+            .iter()
+            .find(|((bounds, _), _)| *bounds == [12.0, 37.0, 17.0, 45.0])
+            .expect("glyph 10's shadow");
+        assert_eq!(shadow.0.1, clip);
         assert!(
-            drawn
-                .iter()
-                .any(|(rect, _)| *rect == [12.0, 37.0, 17.0, 40.0])
-        );
-        assert!(
-            batch.vertices.iter().all(|v| {
-                (10.0..=24.0).contains(&v.pos[0]) && (20.0..=40.0).contains(&v.pos[1])
-            })
+            batch
+                .visible_quads()
+                .flatten()
+                .all(|[x0, y0, x1, y1]| { 10.0 <= x0 && x1 <= 24.0 && 20.0 <= y0 && y1 <= 40.0 })
         );
     }
 
@@ -2598,7 +2591,11 @@ mod tests {
             );
             let mut want = HudBatch::scratch([640, 480]);
             want.text_styled(&atlas, &label.resolved(), -18.0, top, u32::MAX, true);
-            want.clip_since(0, 12.0, y, 48.0, y + h);
+            let end = want.vertices.len() as u32;
+            assert_eq!(
+                batch.scissors_in(0..end).collect::<Vec<_>>(),
+                [(0..end, Some([12.0, y, 48.0, y + h]))]
+            );
             assert_eq!(
                 bytemuck::cast_slice::<_, u8>(&batch.vertices),
                 bytemuck::cast_slice::<_, u8>(&want.vertices),
@@ -2687,11 +2684,11 @@ mod tests {
             u32::MAX,
         );
         assert!(!batch.vertices.is_empty());
-        for v in &batch.vertices {
+        for [x0, y0, x1, y1] in batch.visible_quads().flatten() {
             assert!(
-                (10.0..=106.0).contains(&v.pos[0]) && (20.0..=40.0).contains(&v.pos[1]),
+                10.0 <= x0 && x1 <= 106.0 && 20.0 <= y0 && y1 <= 40.0,
                 "{:?} outside the widget",
-                v.pos
+                [x0, y0, x1, y1]
             );
         }
         // A label that fits is centred and not cut: every glyph is drawn.

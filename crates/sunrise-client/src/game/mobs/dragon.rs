@@ -18,7 +18,7 @@ use super::api_values::TryIntoApi;
 use super::commands::Target;
 use super::{
     Game,
-    creatures::{Finalized, SpawnSite},
+    creatures::SpawnSite,
     potions::{Victim, mob_can_be_affected},
 };
 use mod_api::DragonPhase;
@@ -4917,18 +4917,16 @@ impl Game<'_> {
                 self.finalize_spawn_at("minecraft:ender_dragon", at, reason, None)
                     .0
             }
-            SpawnSite::Plain | SpawnSite::Raw => Finalized::Done,
+            SpawnSite::Plain | SpawnSite::Raw => Default::default(),
         };
-        match finalized {
-            Finalized::Cancelled => return None,
-            Finalized::Skipped => {}
-            Finalized::Done => {
-                // Mob.finalizeSpawn (EnderDragon keeps it): the follow range's
-                // `random.triangle(0, 0.11485)`, then `setLeftHanded(nextFloat() < 0.05)`, from the
-                // level's random. Neither changes how the dragon flies.
-                let _ = self.world.random.triangle(0.0, 0.114_850_000_000_000_01);
-                let _ = self.world.random.next_float();
-            }
+        if !finalized.skip_initialization {
+            // Mob.finalizeSpawn (EnderDragon keeps it): the follow range's
+            // triangle and left-handed roll, neither of which changes how the dragon flies.
+            let _ = self.world.random.triangle(0.0, 0.114_850_000_000_000_01);
+            let _ = self.world.random.next_float();
+        }
+        if finalized.veto_admission {
+            return None;
         }
         // The dragon's own random (`Entity.random`), not the level's.
         let seed = random_source::unique_seed();

@@ -10,6 +10,12 @@ pub trait LevelRulesBackend {
     /// The difficulty (`Level.getDifficulty`): `peaceful`, `easy`, `normal`
     /// or `hard`, as `/difficulty` names it.
     fn level_difficulty(&self, level: LevelRef) -> Option<&'static str>;
+    /// Side: both.
+    /// Whether the world is hardcore (`LevelData.isHardcore`): set when the world is created and
+    /// the same in every dimension. A client reads what the server's login packet said, as
+    /// vanilla's HUD does for its hardcore hearts. None for a stale handle, a level the server
+    /// has not opened, or on a client a level it is not in.
+    fn level_is_hardcore(&self, level: LevelRef) -> Option<bool>;
     /// Side: server.
     /// The local difficulty at `pos` (`ServerLevel.getCurrentDifficultyAt`), as mobs spawned
     /// there are finalized with: the world difficulty scaled by the level's age, the chunk's

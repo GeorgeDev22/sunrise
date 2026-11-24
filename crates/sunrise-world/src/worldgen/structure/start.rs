@@ -62,11 +62,6 @@ pub struct JigsawDef {
     aliases: Vec<PoolAliasBinding>,
     padding: [i32; 2],
     waterlogging: bool,
-    /// A carried mod's start rules (`"sunrise:start_checks"`).
-    checks: super::start_checks::StartChecks,
-    /// Laid out by Repurposed Structures' and Moog's piece-limited
-    /// assembler (`"sunrise:piece_limited"`).
-    piece_limited: Option<super::piece_limited::Config>,
 }
 #[derive(Debug)]
 pub enum StructureKind {
@@ -97,8 +92,6 @@ pub enum StructureKind {
     Fortress,
     NetherFossil(HeightProvider),
     EndCity,
-    /// `sunrise:formations`: Formations' SimpleStructure.
-    Formations(super::formations::Def),
     /// A structure type a mod registered (`"type": "modid:tower"`): vanilla's
     /// `StructureType` as code, with the structure's own JSON config.
     Mod(ModType),
@@ -403,12 +396,6 @@ impl StructureRegistry {
                             .collect(),
                         padding: pair(v.get("dimension_padding"), "bottom", "top", 0, 0),
                         waterlogging: v["liquid_settings"].as_str() != Some("ignore_waterlogging"),
-                        checks: super::start_checks::StartChecks::decode(
-                            v.get("sunrise:start_checks"),
-                        ),
-                        piece_limited: v
-                            .get("sunrise:piece_limited")
-                            .map(super::piece_limited::Config::decode),
                     };
                     // JigsawStructure's codec requires and bounds `size` and
                     // bounds `max_distance_from_center`, and verifyRange
@@ -459,10 +446,6 @@ impl StructureRegistry {
                 "minecraft:nether_fossil" => StructureKind::NetherFossil(
                     HeightProvider::from_json(&v["height"].to_string())?,
                 ),
-                "sunrise:formations" => match super::formations::Def::decode(&v) {
-                    Ok(def) => StructureKind::Formations(def),
-                    Err(_) => StructureKind::Unsupported("sunrise:formations".into()),
-                },
                 other => match mod_types.get(other) {
                     Some(ty) => StructureKind::Mod(ModType {
                         ty: ty.clone(),
@@ -1003,7 +986,7 @@ pub trait StartContext: JigsawContext {
         kind: &dyn Fn(usize) -> HeightmapType,
     ) -> Vec<Vec<bool>>;
     /// ChunkGenerator.getBaseColumn's blocks: the noise column's states, as
-    /// mods' placements test them (Formations').
+    /// mods' placements test them.
     fn noise_column(&mut self, x: i32, z: i32) -> NoiseColumn {
         let mut column = NoiseColumn::default();
         self.noise_column_into(x, z, &mut column);
@@ -1187,9 +1170,7 @@ fn generate(
     stub_only: bool,
 ) -> Option<Generated> {
     let def = &registry.structures[structure];
-    let vanilla_jigsaw =
-        matches!(&def.kind, StructureKind::Jigsaw(jigsaw) if jigsaw.piece_limited.is_none());
-    if stub_only && !vanilla_jigsaw {
+    if stub_only && !matches!(def.kind, StructureKind::Jigsaw(_)) {
         return Some(Generated::Stub);
     }
     context.set_valid_biomes((!any_biome).then_some(&def.biomes));
@@ -1202,14 +1183,6 @@ fn generate(
                 .start_height
                 .sample(&mut random, context.generation())
                 .ok()?;
-            // A carried mod's own start rules keep the structure's biome set:
-            // they read it directly, not through the context's predicate.
-            if !jigsaw
-                .checks
-                .pass(context, &def.biomes, chunk, height, jigsaw.project_to)
-            {
-                return None;
-            }
             let start = [chunk.x * 16, height, chunk.z * 16];
             let aliases = resolve_aliases(&jigsaw.aliases, start, seed);
             let config = JigsawConfig {
@@ -1223,48 +1196,34 @@ fn generate(
                 padding: jigsaw.padding,
                 waterlogging: jigsaw.waterlogging,
             };
-            let (position, pieces) = match &jigsaw.piece_limited {
-                Some(limits) => super::piece_limited::assemble(
-                    &config,
-                    limits,
-                    context,
-                    &registry.pools,
-                    resources,
-                    bindings,
-                    chunk,
-                    start,
-                )?,
-                None => {
-                    let placed = place_start(
-                        &config,
-                        context,
-                        &registry.pools,
-                        resources,
-                        bindings,
-                        &mut random,
-                        start,
-                    )?;
-                    // Structure.findValidGenerationPoint checks the stub's biome before its
-                    // GenerationStub lays the pieces out: a start in another biome costs its
-                    // start piece, not its whole layout (an ancient city's, a camp's).
-                    let quart = placed.position.map(|v| v >> 2);
-                    if !any_biome && !def.biomes.contains(&context.noise_biome(quart)) {
-                        return None;
-                    }
-                    if stub_only {
-                        return Some(Generated::Stub);
-                    }
-                    lay_out_children(
-                        placed,
-                        &config,
-                        context,
-                        &registry.pools,
-                        resources,
-                        bindings,
-                        &mut random,
-                    )
-                }
-            };
+            let placed = place_start(
+                &config,
+                context,
+                &registry.pools,
+                resources,
+                bindings,
+                &mut random,
+                start,
+            )?;
+            // Structure.findValidGenerationPoint checks the stub's biome before its
+            // GenerationStub lays the pieces out: a start in another biome costs its
+            // start piece, not its whole layout (an ancient city's, a camp's).
+            let quart = placed.position.map(|v| v >> 2);
+            if !any_biome && !def.biomes.contains(&context.noise_biome(quart)) {
+                return None;
+            }
+            if stub_only {
+                return Some(Generated::Stub);
+            }
+            let (position, pieces) = lay_out_children(
+                placed,
+                &config,
+                context,
+                &registry.pools,
+                resources,
+                bindings,
+                &mut random,
+            );
             (
                 position,
                 pieces.into_iter().map(Piece::Pool).collect::<Vec<_>>(),
@@ -1500,18 +1459,6 @@ fn generate(
             }
             let piece = super::nether_fossil::piece(resources, &mut random, position)?;
             (position, legacy(vec![piece]))
-        }
-        StructureKind::Formations(formations) => {
-            let (position, pieces) = super::formations::generate(
-                formations,
-                context,
-                &registry.pools,
-                resources,
-                bindings,
-                &mut random,
-                chunk,
-            )?;
-            (position, pieces.into_iter().map(Piece::Pool).collect())
         }
         StructureKind::Mod(mod_type) => {
             // The type's own start and pieces; the biome check below and the

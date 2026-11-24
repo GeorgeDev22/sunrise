@@ -408,13 +408,30 @@ impl Game<'_> {
             let _ = w.player.set_sleeping(sleeping);
             w.player.freeze_immune = freeze_immune;
             let mut contact = None;
-            loop {
+            let inside_effects = loop {
                 let progress = w.server_block_damage_until_hit(start, &mut contact);
                 settle_guest_hit!(game, side, w, id);
-                if !matches!(progress, Ok(false)) {
-                    break;
+                match progress {
+                    Ok(Some(effects)) => break effects,
+                    Ok(None) => continue,
+                    Err(_) => break mod_api::InsideEffects::default(),
                 }
+            };
+            if !inside_effects.is_empty() {
+                let mut collected = std::mem::take(&mut w.player.events);
+                let _ = w;
+                let _ = side;
+                game.flush_player_inside(inside_effects);
+                let Some(player) = game.player.as_mut() else {
+                    return (collected, None, ServerTravel::Continue);
+                };
+                collected.append(&mut player.events);
+                player.events = collected;
+                side = game_side!(game);
+                w = motion_world!(game, side, player);
             }
+            let _ = w.finish_server_block_damage_freezing();
+            settle_guest_hit!(game, side, w, id);
             let _ = w.update_soul_speed_block();
             // LivingEntity.baseTick's air supply: decided here, then `living_breathe` is
             // asked with the game itself, which `w` borrows, and its answer applied.
@@ -441,8 +458,7 @@ impl Game<'_> {
                 let _ = w.tick_lava_contact();
                 settle_guest_hit!(game, side, w, id);
             }
-            let _ = w.apply_fire_contact();
-            settle_guest_hit!(game, side, w, id);
+            w.reset_unlit_fire();
             if w.check_below_world().is_ok() {
                 settle_guest_hit!(game, side, w, id);
                 if in_wall {
@@ -455,21 +471,8 @@ impl Game<'_> {
             game.block_extinguish_player(&events);
             // Entity.baseTick: rain puts out a burning player.
             game.rain_extinguish_player();
-            // WitherRoseBlock.entityInside along those moves, and an
-            // `entity_inside` part's typed effect writes.
-            for event in &events {
-                match event {
-                    MotionEvent::InsideWitherRose => game.wither_rose_contact(),
-                    MotionEvent::InsideEffect {
-                        id,
-                        duration,
-                        amplifier,
-                    } if game.remote.is_none() && game.ui.difficulty != 0 => {
-                        game.give_player_effect(id, *duration, i32::from(*amplifier));
-                    }
-                    _ => {}
-                }
-            }
+            // WitherRoseBlock.entityInside along those moves.
+            game.apply_player_inside_events(&events);
             // LivingEntity.baseTick: a new block position runs the worn
             // enchantments' location_changed effects (frost walker).
             game.location_changed_effects([start.x, start.y, start.z], from_ground);
@@ -772,6 +775,301 @@ impl Game<'_> {
                             host.hub.entity_event(id, 53);
                         }
                     }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Live server backing for [`mod_api::InsideEntityView`] while flushing a server
+/// player's `InsideEffects` collector directly against `Game`.
+struct GamePlayerInsideAccess<'a, 'g> {
+    game: &'a mut Game<'g>,
+}
+
+impl mod_api::InsideEntityAccess for GamePlayerInsideAccess<'_, '_> {
+    fn id(&self) -> u32 {
+        self.game.player.as_ref().map_or(0, |p| p.entity_id as u32)
+    }
+
+    fn kind(&self) -> &str {
+        "minecraft:player"
+    }
+
+    fn is_alive(&self) -> bool {
+        self.game
+            .player
+            .as_ref()
+            .is_some_and(|p| !p.health.dead_or_dying())
+    }
+
+    fn position(&self) -> [f64; 3] {
+        self.game
+            .player
+            .as_ref()
+            .map_or([0.0; 3], |p| [p.position.x, p.position.y, p.position.z])
+    }
+
+    fn velocity(&self) -> [f64; 3] {
+        self.game
+            .player
+            .as_ref()
+            .map_or([0.0; 3], |p| [p.velocity.x, p.velocity.y, p.velocity.z])
+    }
+
+    fn fire_ticks(&self) -> i32 {
+        self.game.player.as_ref().map_or(0, |p| p.fire_ticks)
+    }
+
+    fn is_on_fire(&self) -> bool {
+        self.game.player.as_ref().is_some_and(|p| p.is_on_fire())
+    }
+
+    fn fall_distance(&self) -> f64 {
+        self.game.player.as_ref().map_or(0.0, |p| p.fall_distance)
+    }
+
+    fn block_state(&self, pos: [i32; 3]) -> Option<mod_api::BlockState> {
+        use crate::game::api_values::TryIntoApi as _;
+        let level = self.game.level(self.game.dim.id())?;
+        self.game
+            .level_block_state(level, pos)
+            .and_then(|id| id.try_into_api().ok())
+    }
+
+    fn push(&mut self, delta: [f64; 3]) -> bool {
+        if !delta.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let Some(p) = self.game.player.as_mut() else {
+            return false;
+        };
+        p.velocity = p
+            .velocity
+            .add_vector(Vec3::new(delta[0], delta[1], delta[2]));
+        true
+    }
+
+    fn set_velocity(&mut self, velocity: [f64; 3]) -> bool {
+        if !velocity.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let Some(p) = self.game.player.as_mut() else {
+            return false;
+        };
+        p.velocity = Vec3::new(velocity[0], velocity[1], velocity[2]);
+        true
+    }
+
+    fn make_stuck_in_block(&mut self, speed_multiplier: [f64; 3]) -> bool {
+        if !speed_multiplier.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let Some(p) = self.game.player.as_mut() else {
+            return false;
+        };
+        p.apply_stuck_in_block(Vec3::new(
+            speed_multiplier[0],
+            speed_multiplier[1],
+            speed_multiplier[2],
+        ));
+        true
+    }
+
+    fn reset_fall_distance(&mut self) {
+        if let Some(p) = self.game.player.as_mut() {
+            p.fall_distance = 0.0;
+        }
+    }
+
+    fn set_remaining_fire_ticks(&mut self, ticks: i32) {
+        if let Some(p) = self.game.player.as_mut() {
+            p.set_remaining_fire_ticks(ticks);
+        }
+    }
+
+    fn add_effect(&mut self, effect: mod_api::EffectKey, duration: i32, amplifier: u8) -> bool {
+        let Some(def) = mod_api::__private::effect_index(effect)
+            .and_then(sunrise_client_core::potions::effect_by_index)
+        else {
+            return false;
+        };
+        if self.game.player.is_none() {
+            return false;
+        }
+        let instance =
+            sunrise_client::effects::EffectInstance::from_def(def, duration, i32::from(amplifier));
+        self.game.add_player_effect(instance)
+    }
+
+    fn hurt_with_source(
+        &mut self,
+        damage_type: &str,
+        amount: f32,
+        direct: Option<mod_api::EntityRef>,
+        causing: Option<mod_api::EntityRef>,
+    ) -> bool {
+        let Some(p) = self.game.player.as_ref() else {
+            return false;
+        };
+        let subject_id = p.entity_id as u32;
+        let subject_pos = [p.position.x, p.position.y, p.position.z];
+        let Some((direct, causing, from)) = self.game.resolve_inside_damage_sources(
+            subject_id,
+            crate::game::commands::Target::Player,
+            subject_pos,
+            direct,
+            causing,
+            None,
+        ) else {
+            return false;
+        };
+        self.game.hurt_target(
+            crate::game::commands::Target::Player,
+            amount,
+            damage_type,
+            direct,
+            causing,
+            from,
+        )
+    }
+
+    fn set_block(&mut self, pos: [i32; 3], state: mod_api::BlockState) -> bool {
+        use crate::game::api_values::TryIntoEngine as _;
+        let Some(level) = self.game.level(self.game.dim.id()) else {
+            return false;
+        };
+        let Ok(id) = state.try_into_engine(&*self.game) else {
+            return false;
+        };
+        let flags = mod_api::BlockUpdateFlags::NEIGHBORS | mod_api::BlockUpdateFlags::CLIENTS;
+        self.game
+            .level_set_block(level, pos, id, flags)
+            .unwrap_or(false)
+    }
+
+    fn destroy_block(&mut self, pos: [i32; 3], drop: bool) -> bool {
+        let Some(level) = self.game.level(self.game.dim.id()) else {
+            return false;
+        };
+        self.game
+            .level_destroy_block(level, pos, drop, None, false)
+            .is_some()
+    }
+
+    fn apply_effect(&mut self, effect: mod_api::InsideEffect) {
+        match effect {
+            mod_api::InsideEffect::Freeze => {
+                if let Some(p) = self.game.player.as_mut() {
+                    p.in_powder_snow = true;
+                    if p.can_freeze() {
+                        p.ticks_frozen =
+                            (p.ticks_frozen + 1).min(PlayerMotion::TICKS_REQUIRED_TO_FREEZE);
+                    }
+                }
+            }
+            mod_api::InsideEffect::ClearFreeze => {
+                if let Some(p) = self.game.player.as_mut() {
+                    p.ticks_frozen = 0;
+                }
+            }
+            mod_api::InsideEffect::FireIgnite => {
+                let Some(p) = self.game.player.as_mut() else {
+                    return;
+                };
+                p.fire_ignite_contact(&mut self.game.world.random);
+            }
+            mod_api::InsideEffect::LavaIgnite => {
+                if let Some(p) = self.game.player.as_mut()
+                    && !p.mod_fire_immune
+                {
+                    let _ = p.ignite_for_ticks(300);
+                }
+            }
+            mod_api::InsideEffect::Extinguish => {
+                if let Some(p) = self.game.player.as_mut() {
+                    p.fire_ticks = p.fire_ticks.min(0);
+                }
+            }
+        }
+    }
+
+    fn apply_builtin(&mut self, action: mod_api::__private::BuiltinInsideAction) {
+        match action {
+            mod_api::__private::BuiltinInsideAction::PowderSnowMelt(pos) => {
+                if self
+                    .game
+                    .player
+                    .as_ref()
+                    .is_some_and(|p| p.is_on_fire() && !p.spectator)
+                {
+                    self.game
+                        .powder_snow_melt(sunrise_core::position::BlockPos::new(
+                            pos[0], pos[1], pos[2],
+                        ));
+                }
+            }
+            mod_api::__private::BuiltinInsideAction::LayeredCauldronExtinguish { pos, state } => {
+                let [x, y, z] = pos;
+                let pos = sunrise_core::position::BlockPos::new(x, y, z);
+                if self.game.player.as_ref().is_some_and(|p| p.is_on_fire())
+                    && self.game.may_interact_at(pos)
+                {
+                    self.game
+                        .cauldron_extinguish_at(pos, sunrise_world::registry::BlockStateId(state));
+                }
+            }
+            mod_api::__private::BuiltinInsideAction::FireHurt(damage) => {
+                self.hurt_with_source("minecraft:in_fire", damage, None, None);
+            }
+            mod_api::__private::BuiltinInsideAction::LavaHurt => {
+                if self
+                    .game
+                    .player
+                    .as_ref()
+                    .is_some_and(|p| !p.mod_fire_immune)
+                {
+                    self.hurt_with_source("minecraft:lava", 4.0, None, None);
+                }
+            }
+        }
+    }
+}
+
+impl Game<'_> {
+    /// Flush a server player's collected `InsideEffects` with a live `&mut Game`
+    /// loan (`InsideBlockEffectApplier.StepBasedCollector.applyAndClear`), then
+    /// play the extinguish hiss once if the sweep put a burning player out.
+    pub(in crate::game) fn flush_player_inside(&mut self, mut effects: mod_api::InsideEffects) {
+        if effects.is_empty() {
+            return;
+        }
+        let was_on_fire = self.player.as_ref().is_some_and(|p| p.is_on_fire());
+        let mut access = GamePlayerInsideAccess { game: self };
+        effects.apply_and_clear(&mut access);
+        if was_on_fire
+            && let Some(p) = self.player.as_ref()
+            && !p.is_on_fire()
+        {
+            let at = [p.position.x, p.position.y, p.position.z];
+            self.extinguish_sound(at);
+        }
+    }
+
+    /// `WitherRoseBlock.entityInside` and `step_on`'s `EntityWrite::AddEffect`
+    /// queued along a server player's moves: vanilla's Peaceful check applies
+    /// only to the wither rose, not to general `LivingEntity.addEffect`.
+    pub(in crate::game) fn apply_player_inside_events(&mut self, events: &[MotionEvent]) {
+        for event in events {
+            match event {
+                MotionEvent::InsideWitherRose => self.wither_rose_contact(),
+                MotionEvent::InsideEffect {
+                    id,
+                    duration,
+                    amplifier,
+                } if self.remote.is_none() => {
+                    self.give_player_effect(id, *duration, i32::from(*amplifier));
                 }
                 _ => {}
             }

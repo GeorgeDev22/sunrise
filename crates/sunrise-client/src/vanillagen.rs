@@ -32,6 +32,7 @@ use {
 mod lod;
 mod structure_mobs;
 use lod::VanillaLodSampler;
+pub use structure_mobs::GeneratedMob;
 use structure_mobs::StructureMobFinalizer;
 
 /// The references a saved chunk keeps for its structure start: `(structure, chunk x, chunk z)`.
@@ -285,15 +286,38 @@ impl VanillaTerrain {
         flat: &sunrise_world::worldgen::generator::FlatSettings,
         structures: bool,
     ) -> crate::Result<Self> {
-        let data: Arc<GeneratorData> = shared_resource_data(resources, overrides)?;
-        let generator = OverworldGenerator::flat(data, seed, flat, structures)?;
-        let mut terrain = Self::assemble(
+        Self::for_flat_level(
             resources,
-            generator,
+            overrides,
             seed,
-            "minecraft:normal",
+            flat,
+            structures,
             "minecraft:overworld",
+            None,
+        )
+    }
+
+    /// `FlatLevelSource` for a resolved level stem: the layers start at this
+    /// dimension's build minimum, and its structure references belong to it.
+    pub fn for_flat_level(
+        resources: TerrainResources<'_>,
+        overrides: &WorldgenOverrides,
+        seed: i64,
+        flat: &sunrise_world::worldgen::generator::FlatSettings,
+        structures: bool,
+        dimension: &str,
+        shape: Option<crate::chunk::LevelShape>,
+    ) -> crate::Result<Self> {
+        let data: Arc<GeneratorData> = shared_resource_data(resources, overrides)?;
+        let generator = OverworldGenerator::flat(
+            data,
+            seed,
+            flat,
+            structures,
+            shape.map(|s| (s.min_y, s.height)),
         )?;
+        let mut terrain =
+            Self::assemble(resources, generator, seed, "minecraft:normal", dimension)?;
         terrain.flat = true;
         Ok(terrain)
     }
@@ -460,19 +484,26 @@ impl VanillaTerrain {
     pub fn region_random(&self, cx: i32, cz: i32) -> Box<dyn PieceRandom> {
         self.generator.region_random(ChunkPos::new(cx, cz))
     }
-    /// A mob chunk generation spawns, as the chunk saves it
-    /// (`StructureMobFinalizer::spawn_generated`).
+    /// Finalize a chunk-generation candidate for admission.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_generated(
         &self,
-        kind: &str,
-        position: sunrise_core::geometry::Vec3,
-        yaw: f32,
+        mob: crate::mobs::Mob,
+        uuid: [i32; 4],
         biome: &str,
         random: &mut dyn PieceRandom,
         group: &mut Option<crate::mobs::finalize::Group>,
-    ) -> Option<sunrise_core::nbt::Compound> {
+        prepare: impl FnOnce(
+            &mut crate::mobs::Mob,
+            crate::mobs::spawning::LocalDifficulty,
+            &mut Option<crate::mobs::finalize::Group>,
+        ) -> (
+            crate::mobs::finalize::SpawnEvent,
+            crate::mobs::spawning::LocalDifficulty,
+        ),
+    ) -> Option<Vec<GeneratedMob>> {
         self.structure_mobs
-            .spawn_generated(kind, position, yaw, biome, random, group)
+            .spawn_generated(mob, uuid, biome, random, group, prepare)
     }
     /// Only the generated range of a proto chunk (the Nether is 0..256)
     /// is copied into a column.

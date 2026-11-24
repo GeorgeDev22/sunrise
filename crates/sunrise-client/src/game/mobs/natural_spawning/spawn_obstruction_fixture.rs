@@ -4,7 +4,7 @@ use sunrise_client::mobs::{
     finalize::FinalizeLevel as _,
     spawner::{Spawner, SpawnerEvent, SpawnerExt, SpawnerLevel, SpawnerSpawn},
 };
-use sunrise_core::nbt::parse_snbt;
+use sunrise_core::nbt::{Tag, parse_snbt};
 use sunrise_core::random::{InvalidBound, PositionalRandom};
 
 /// Two attempts at y=64 with a common z and a specified x displacement.

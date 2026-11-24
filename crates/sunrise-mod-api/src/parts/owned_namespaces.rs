@@ -54,30 +54,30 @@ mod tests {
     }
 
     /// A Press whose state has no codec: kept for the session by a native mod.
-    struct Session;
+    struct Session(AttachmentKey<u32>);
     #[mod_api::sunrise_part]
     impl BlockPart for Session {}
     #[mod_api::sunrise_part]
     impl BlockEntityPart for Session {}
-    static SESSION: AttachmentType<u32> = AttachmentType {
-        namespace: "porter",
-        name: "session",
-        default: || 0,
-        codec: None,
-        copy_on_death: false,
-        sync: false,
-    };
     impl BlockEntityPartState for Session {
         type Data = u32;
-        const DATA: &'static AttachmentType<u32> = &SESSION;
+        fn state_key(&self) -> &AttachmentKey<u32> {
+            &self.0
+        }
     }
     struct DeclaresSession;
     #[mod_api::__subscriptions]
     impl Hooks for DeclaresSession {
         fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
-            r.register_attachment_type("porter:session", false).unwrap();
+            let session = r
+                .register_attachment_type(crate::AttachmentDescriptor::new(
+                    "porter:session",
+                    || 0_u32,
+                ))
+                .unwrap();
             let kind = r.block_entity_type("press").blocks(&[]).build();
-            let _ = r.block_entity_part_with_state(&kind, Session);
+            r.block_entity_part_with_state(&kind, Session(session))
+                .unwrap();
         }
     }
 
@@ -95,48 +95,59 @@ mod tests {
     }
 
     #[test]
-    fn part_state_keys_allow_foreign_uses_with_one_type_each() {
-        const fn key<T>(namespace: &'static str, default: fn() -> T) -> AttachmentType<T> {
-            AttachmentType {
-                namespace,
-                name: "progress",
-                default,
-                codec: None,
-                copy_on_death: false,
-                sync: false,
+    fn part_state_keys_use_owned_namespaces_and_refuse_stale_keys() {
+        struct Checks(AttachmentKey<i64>);
+        #[mod_api::__subscriptions]
+        impl Hooks for Checks {
+            fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+                let legacy_key = r
+                    .register_attachment_type(AttachmentDescriptor::new("legacy:progress", || {
+                        0_u32
+                    }))
+                    .unwrap();
+                let primary_key = r
+                    .register_attachment_type(AttachmentDescriptor::new("porter:progress", || {
+                        0_u32
+                    }))
+                    .unwrap();
+                let progress = PartStateDeclaration::of(&legacy_key);
+                assert_eq!(
+                    r.declare_block_entity_part_state("porter::Press", progress.clone()),
+                    Ok(())
+                );
+                assert_eq!(
+                    r.declare_block_entity_part_state("porter::Press", progress),
+                    Ok(()),
+                    "one key, one type, two parts"
+                );
+                let stale = PartStateDeclaration::of(&self.0);
+                assert_eq!(
+                    r.declare_block_entity_part_state("porter::Press", stale.clone()),
+                    Err(stale.refused("porter::Press", PartStateRefusal::StaleKey))
+                );
+                assert_eq!(
+                    r.declare_block_entity_part_state(
+                        "porter::Press",
+                        PartStateDeclaration::of(&primary_key),
+                    ),
+                    Ok(())
+                );
             }
         }
         with_porter(|| {
-            let mut r = PartRegistrar::new("porter");
-            let declare = |r: &mut PartRegistrar, declaration| {
-                r.declare_block_entity_part_state("porter::Press", declaration)
-            };
-            let progress = PartStateDeclaration::of(&key("legacy", || 0_u32));
-            assert_eq!(declare(&mut r, progress), Ok(()));
-            assert_eq!(
-                declare(&mut r, progress),
-                Ok(()),
-                "one key, one type, two parts"
-            );
-            let wider = PartStateDeclaration::of(&key("legacy", || 0_i64));
-            assert_eq!(
-                declare(&mut r, wider),
-                Err(wider.refused(
-                    "porter::Press",
-                    PartStateRefusal::Incompatible { declared: "u32" }
-                ))
-            );
-            assert_eq!(
-                declare(
-                    &mut r,
-                    PartStateDeclaration::of(&key("minecraft", || 0_u32))
-                ),
-                Ok(())
+            let stale_key = crate::testing::registered_attachment_fixture(
+                "porter",
+                AttachmentDescriptor::new("legacy:progress", || 0_i64),
+            )
+            .1;
+            let r = super::super::register_all(
+                &[ModEntry::new("porter", Box::new(Checks(stale_key)))],
+                |_| false,
             );
             assert_eq!(
                 r.refused.len(),
                 1,
-                "the incompatible layout is the registration refusal"
+                "the stale key is the registration refusal"
             );
             assert!(r.refused[0].contains("legacy:progress"));
         });

@@ -13,10 +13,11 @@ impl Game<'_> {
 
 impl Game<'_> {
     /// Chunk `chunk` of `dimension` left the world (NeoForge's
-    /// `ChunkEvent.Unload`), with a level that closes for being empty too. Don't
-    /// read its blocks. Its block entities are still there, but changes made in
+    /// `ChunkEvent.Unload`), including eviction of idle columns while the level
+    /// remains open. Don't read its blocks. Its block entities are still there, but changes made in
     /// this hook aren't saved: as in vanilla, the chunk is saved before it unloads.
-    /// Not told when the world closes, which `native_world_lifecycle` tells.
+    /// Not told when the world closes, which `level_unload` and server shutdown
+    /// (`server_stopping` / `server_stopped`) tell.
     /// Server-side.
     pub(in crate::game) fn native_chunk_unload(&mut self, dimension: &str, chunk: [i32; 2]) {
         self.fire_chunk_unload(dimension, chunk);

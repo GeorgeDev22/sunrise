@@ -185,8 +185,8 @@ pub struct Renderer {
     pub(crate) lightning_pipeline: wgpu::RenderPipeline,
     pub(crate) lightning: lightning::Renderer,
     pub(crate) see_through_pipeline: wgpu::RenderPipeline,
-    /// Native mods' world primitives (`Frame::world_primitives`).
-    pub(crate) world_primitives: world_primitives::WorldPrimitives,
+    /// Native mods' world primitives (`Frame::world_primitives`), taken briefly during OIT pass.
+    pub(crate) world_primitives: Option<world_primitives::WorldPrimitives>,
     pub(crate) text_polygon_offset_pipeline: wgpu::RenderPipeline,
     pub(crate) world_text_pipeline: wgpu::RenderPipeline,
     pub(crate) text_mark_pipelines: [wgpu::RenderPipeline; 2],
@@ -350,6 +350,13 @@ pub struct Renderer {
     /// Per-frame scratch, kept to avoid allocating every frame.
     pub(crate) visible: Vec<resident::Visible>,
     pub(crate) visible_lods: Vec<lod::Visible>,
+    /// Canonical primary-camera visible sections exposed to `FrameHooks` (reused across frames).
+    pub(crate) visible_renderable_sections: Vec<mod_api::RenderableSection>,
+    pub(crate) visible_renderable_scratch: Vec<(u64, SectionKey, Option<u32>)>,
+    /// Reusable submission and merge buffers for `FrameHooks`' CPU models and name tags.
+    pub(crate) hook_geometry: world_primitives::PreparedHookGeometry,
+    pub(crate) hook_entities_scratch: Vec<Vertex>,
+    pub(crate) hook_see_through_scratch: Vec<Vertex>,
     /// Every far tile in view, whether the GPU's solid draws own it or not: the water's
     /// re-sort walks it (`draw_frame`), so its budget and rotation do not follow which
     /// solid draws the sourced-geometry pass took over.

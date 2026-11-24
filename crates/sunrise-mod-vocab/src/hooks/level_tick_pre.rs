@@ -3,6 +3,7 @@
 
 pub trait Hooks {
     /// Before a level's tick pass on either logical side. `level` identifies the level.
+    /// The server ticks eligible levels in its loaded creation order.
     /// `host.server_has_time()` says whether optional work still fits in the tick
     /// (`LevelTickEvent.hasTime`); always true on a client.
     #[hook(
@@ -10,7 +11,8 @@ pub trait Hooks {
         dispatch = "flat",
         side = "both",
         contract = "listen",
-        neoforge = "LevelTickEvent.Pre"
+        neoforge = "LevelTickEvent.Pre",
+        version = 2
     )]
     fn level_tick_pre(level: LevelRef);
 }

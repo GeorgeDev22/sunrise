@@ -8,8 +8,8 @@
 use super::native_entity_refs::tests::{bind_local_player, run_fresh_cases, with_game};
 use super::native_living_refs::tests::summon_mob;
 use mod_api::{
-    AttachmentType, Flow, HitHost, Holder, Hooks, LivingDamagePostEvent, LivingIncomingDamageEvent,
-    LivingView,
+    AttachmentDescriptor, AttachmentKey, Flow, HitHost, Holder, Hooks, LivingDamagePostEvent,
+    LivingIncomingDamageEvent, LivingView,
 };
 use std::sync::{Arc, Mutex};
 use sunrise_client::command::args::GameMode;
@@ -19,14 +19,7 @@ use sunrise_client::projectiles::{Hit, Projectile, ProjectileKind};
 use sunrise_core::geometry::Vec3;
 
 /// The probe's attachment, set to different values on the players.
-static MARK: AttachmentType<i32> = AttachmentType {
-    namespace: "probe",
-    name: "mark",
-    default: || -1,
-    codec: None,
-    copy_on_death: false,
-    sync: false,
-};
+const MARK: AttachmentDescriptor<i32> = AttachmentDescriptor::new("probe:mark", || -1);
 
 /// What a listener read of a hit's causing entity: its id, health and the probe's attachment on
 /// its holder.
@@ -48,10 +41,19 @@ struct Seen {
     victim: Option<u32>,
 }
 
-struct Probe(Arc<Mutex<Vec<Seen>>>);
+struct Probe {
+    seen: Arc<Mutex<Vec<Seen>>>,
+    mark: Arc<Mutex<Option<AttachmentKey<i32>>>>,
+}
 
 impl Probe {
     fn seen(&self, hook: &'static str, entity: i32, source_causing: i32, level: &mut dyn HitHost) {
+        let mark = self
+            .mark
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("probe:mark registered");
         let read = |view: LivingView<'_>| (view.id(), view.health(), view.holder());
         let causing = level.causing().map(read);
         let victim = level.victim().map(|view| view.id());
@@ -59,10 +61,13 @@ impl Probe {
             id,
             health,
             mark: holder
-                .and_then(|holder| MARK.get_existing(level.attachments(), holder).ok())
+                .and_then(|holder| {
+                    mark.get_existing_in(level, holder, |value| value.copied())
+                        .ok()
+                })
                 .flatten(),
         });
-        self.0.lock().unwrap().push(Seen {
+        self.seen.lock().unwrap().push(Seen {
             hook,
             entity,
             source_causing,
@@ -75,7 +80,7 @@ impl Probe {
 #[mod_api::__subscriptions]
 impl Hooks for Probe {
     fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
-        r.register_attachment_type("probe:mark", false).unwrap();
+        *self.mark.lock().unwrap() = Some(r.register_attachment_type(MARK).unwrap());
     }
     fn living_incoming_damage(
         &self,
@@ -120,33 +125,45 @@ fn assert_caused(
     }
 }
 
-fn with_probe(test: impl FnOnce(&mut super::Game<'_>, &Mutex<Vec<Seen>>)) {
+fn with_probe(test: impl FnOnce(&mut super::Game<'_>, &Mutex<Vec<Seen>>, &AttachmentKey<i32>)) {
     let seen = Arc::new(Mutex::new(Vec::new()));
+    let mark = Arc::new(Mutex::new(None));
     let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
         "probe",
-        Box::new(Probe(seen.clone())),
+        Box::new(Probe {
+            seen: seen.clone(),
+            mark: mark.clone(),
+        }),
     )]
     .into();
     mod_platform::testing::with_mods(mods, || {
         with_game(|game| {
+            let mark = mark.lock().unwrap().clone().expect("probe:mark registered");
             game.player =
                 Some(PlayerMotion::new(game.motion, Vec3::new(40.0, 70.0, 40.0)).unwrap());
             bind_local_player(game, 7, 7);
             game.set_game_mode(GameMode::Survival);
-            test(game, &seen);
+            test(game, &seen, &mark);
         })
     });
 }
 
-fn with_guest_probe(test: impl FnOnce(&mut super::Game<'_>, &Mutex<Vec<Seen>>)) {
+fn with_guest_probe(
+    test: impl FnOnce(&mut super::Game<'_>, &Mutex<Vec<Seen>>, &AttachmentKey<i32>),
+) {
     let seen = Arc::new(Mutex::new(Vec::new()));
+    let mark = Arc::new(Mutex::new(None));
     let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
         "probe",
-        Box::new(Probe(seen.clone())),
+        Box::new(Probe {
+            seen: seen.clone(),
+            mark: mark.clone(),
+        }),
     )]
     .into();
     mod_platform::testing::with_mods(mods, || {
         super::native_guest_turn_tests::with_guests(|game| {
+            let mark = mark.lock().unwrap().clone().expect("probe:mark registered");
             game.lan
                 .as_mut()
                 .unwrap()
@@ -156,7 +173,7 @@ fn with_guest_probe(test: impl FnOnce(&mut super::Game<'_>, &Mutex<Vec<Seen>>)) 
                     guest.load_timeout = 0;
                 })
                 .unwrap();
-            test(game, &seen)
+            test(game, &seen, &mark)
         })
     });
 }
@@ -215,12 +232,12 @@ fn explosion(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>) {
     assert_caused(seen, pig, creeper, 20.0, None);
 }
 
-fn thorns(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>) {
+fn thorns(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>, mark: &AttachmentKey<i32>) {
     let zombie = summon_mob(game, "minecraft:zombie", "{NoAI:1b}");
     let mut chest = sunrise_client::items::ItemStack::new("minecraft:diamond_chestplate", 1);
     chest.data_mut().enchantments = vec![("minecraft:thorns".into(), 255)];
     game.armor[1] = Some(chest);
-    MARK.set(game, Holder::Player(7), 9).unwrap();
+    mark.set(game, Holder::Player(7), 9).unwrap();
     game.thorns(zombie);
     assert_caused(seen, zombie, 7, 20.0, Some(9));
 }
@@ -308,7 +325,7 @@ fn wind(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>) {
     assert_caused(seen, pig, owner, 20.0, None);
 }
 
-fn trident(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>) {
+fn trident(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>, mark: &AttachmentKey<i32>) {
     use sunrise_client::chunk::Chunk;
     game.options.dedicated = Some(Vec::new());
     game.world
@@ -335,17 +352,17 @@ fn trident(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>) {
     t.owner_uuid = Some(sunrise_client::lan::playerdata::uuid_ints(7));
     t.left_owner = true;
     game.tridents.push(t);
-    MARK.set(game, Holder::Player(7), 9).unwrap();
+    mark.set(game, Holder::Player(7), 9).unwrap();
     game.tick_tridents();
     assert_caused(seen, 72, 7, 20.0, Some(9));
 }
 
 /// A guest's blast going off while the guest is parked: its record is the causer, as the
 /// `LivingRef` reads answer for it then, with its own attachment map.
-fn guest(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>) {
+fn guest(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>, mark: &AttachmentKey<i32>) {
     let pig = summon_mob(game, "minecraft:pig", "{NoAI:1b}");
     assert!(game.lan_acting != Some(12));
-    MARK.set(game, Holder::Player(12), 5).unwrap();
+    mark.set(game, Holder::Player(12), 5).unwrap();
     let living = game.living(game.entity(12).unwrap()).unwrap();
     assert_eq!(living.health(game), Some(20.0));
     blast(game, [1.5, 70.0, 0.5], 12, true, Some(12));
@@ -354,12 +371,12 @@ fn guest(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>) {
 
 /// A parked guest's blast hurting the player in place (another guest, in its turn): the causer
 /// is the parked guest's record, read with its own map, not the player in place's.
-fn guest_player(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>) {
-    MARK.set(game, Holder::Player(12), 5).unwrap();
+fn guest_player(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>, mark: &AttachmentKey<i32>) {
+    mark.set(game, Holder::Player(12), 5).unwrap();
     game.as_guest(13, |g| {
         g.set_game_mode(GameMode::Creative);
         g.set_game_mode(GameMode::Survival);
-        MARK.set(g, Holder::Player(13), 9).unwrap();
+        mark.set(g, Holder::Player(13), 9).unwrap();
         let at = g.player.as_ref().unwrap().position;
         blast(g, [at.x, at.y, at.z], 12, true, Some(12));
     })
@@ -369,10 +386,10 @@ fn guest_player(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>) {
 
 /// A parked guest's blast killing a pig: the Post waits for the death, and lends the guest
 /// again from its record.
-fn guest_post(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>) {
+fn guest_post(game: &mut super::Game<'_>, seen: &Mutex<Vec<Seen>>, mark: &AttachmentKey<i32>) {
     let pig = summon_mob(game, "minecraft:pig", "{NoAI:1b}");
     game.mobs.iter_mut().find(|m| m.id == pig).unwrap().health = 0.5;
-    MARK.set(game, Holder::Player(12), 5).unwrap();
+    mark.set(game, Holder::Player(12), 5).unwrap();
     blast(game, [1.5, 70.0, 0.5], 12, true, Some(12));
     let posts = calls(seen, "post", pig);
     assert_eq!(posts.len(), 1, "{posts:?}");
@@ -427,15 +444,15 @@ fn a_hit_listener_reads_the_causer_at_each_damage_site() {
         "guest" => with_guest_probe(guest),
         "guest_player" => with_guest_probe(guest_player),
         "guest_post" => with_guest_probe(guest_post),
-        _ => with_probe(|game, seen| match case.as_str() {
+        _ => with_probe(|game, seen, mark| match case.as_str() {
             "projectile" => projectile(game, seen),
             "explosion" => explosion(game, seen),
-            "thorns" => thorns(game, seen),
+            "thorns" => thorns(game, seen, mark),
             "sting" => sting(game, seen),
             "firework" => firework(game, seen),
             "fangs" => fangs(game, seen),
             "skull" => skull(game, seen),
-            "trident" => trident(game, seen),
+            "trident" => trident(game, seen, mark),
             "wind" => wind(game, seen),
             "self" => self_caused(game, seen),
             other => panic!("unknown case {other}"),

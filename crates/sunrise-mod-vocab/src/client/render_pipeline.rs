@@ -7,11 +7,10 @@ use crate::{Identifier, WorldDepth};
 /// primitive type; this API fixes both. The engine builds every GPU object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: local client render-pipeline registration descriptor.
 pub struct RenderPipeline {
     owner: String,
-    /// The pipeline's own name (`mymod:glow`). Unique among all mod pipelines,
-    /// regardless of whether they are required or optional.
+    /// The pipeline's own name (`mymod:glow`), unique among mod pipelines.
     pub id: Identifier,
     /// The fragment shader (`mymod:glow` is `assets/mymod/shaders/pipeline/glow.wgsl`), as the
     /// mod's assets or a resource pack supply it.
@@ -82,21 +81,19 @@ impl RenderPipeline {
 /// that it repeats. It returns linear light (the mod render colour rule) with the texel's alpha.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: local client render-pipeline texture binding.
 pub enum PipelineTexture {
     /// A sprite of the game's block or item atlas, by its texture id: `powah:block/energy_charge`
     /// is `assets/powah/textures/block/energy_charge.png` as the `minecraft:blocks` atlas holds
     /// it, `minecraft:item/diamond` an item sprite. An animated sprite animates. A sprite in
-    /// neither atlas refuses the pipeline ([`PipelineTextureError::NoSuchSprite`]). A texture
-    /// file of the mod's own, packed into the runtime atlas's slot pool (#4438) and drawn the
-    /// same way, follows once that pool exists.
+    /// neither atlas refuses the pipeline ([`PipelineTextureError::NoSuchSprite`]).
     Sprite(Identifier),
 }
 
 /// Why a pipeline's texture was refused: the named cause its refusal is logged with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: refusal of a local client render-pipeline texture load.
 pub enum PipelineTextureError {
     /// No sprite of that id in the block or item atlas.
     NoSuchSprite,
@@ -104,12 +101,8 @@ pub enum PipelineTextureError {
     NoSuchTextureFile,
     /// The id names a file (a `textures/` path or a `.png` name), not a sprite key.
     NotASpriteKey,
-    /// A texture file over the pool's cap of 1024 x 1024 pixels.
-    OverCap,
     /// A texture file that isn't an image the game can decode.
     Undecodable,
-    /// No free atlas slot, or over the mod's image budget.
-    NoSlot,
 }
 
 impl std::fmt::Display for PipelineTextureError {
@@ -118,9 +111,7 @@ impl std::fmt::Display for PipelineTextureError {
             Self::NoSuchSprite => "no such sprite in the block or item atlas",
             Self::NoSuchTextureFile => "no such texture file",
             Self::NotASpriteKey => "the id names a file, not a sprite key",
-            Self::OverCap => "the texture file is over 1024 x 1024 pixels",
             Self::Undecodable => "the texture file cannot be decoded",
-            Self::NoSlot => "no free atlas slot, or over the mod's image budget",
         })
     }
 }
@@ -130,7 +121,7 @@ impl std::error::Error for PipelineTextureError {}
 /// The vertex data a pipeline's draws carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: local client render-pipeline vertex format.
 pub enum PipelineVertexFormat {
     /// A position, a texture coordinate and a colour: what [`PipelineQuad`] gives.
     PositionTexColor,
@@ -139,7 +130,7 @@ pub enum PipelineVertexFormat {
 /// How a pipeline's fragments join the frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: local client render-pipeline blend mode.
 pub enum PipelineBlend {
     /// Laid over the frame by the fragment's alpha, as [`crate::WorldQuad`] is.
     Translucent,
@@ -150,7 +141,7 @@ pub enum PipelineBlend {
 /// A registered pipeline as the current resources built it, resolved through
 /// [`crate::RenderAssets::render_pipeline`]. Retain it between frames; resolve it again after a
 /// successful resource reload.
-// no wire: decoding from_parts rejects generation zero (an unpublished pipeline handle).
+// no wire: process-local handle to a client render pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: private fields; only the engine resolves pipeline handles
 pub struct RenderPipelineRef(pub(crate) u64, pub(crate) u32);
@@ -167,7 +158,7 @@ impl RenderPipelineRef {
 /// Why a pipeline could not be resolved or drawn with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: refusal of a local client render-pipeline lookup or draw.
 pub enum RenderPipelineError {
     /// No mod registered a pipeline of this id.
     Unknown,
@@ -182,7 +173,7 @@ pub enum RenderPipelineError {
 /// top right as seen from the front.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: local client render-pipeline quad primitive.
 pub struct PipelineQuad {
     /// Four world-space corners in blocks, before camera subtraction.
     pub corners: [[f64; 3]; 4],
@@ -207,22 +198,21 @@ impl PipelineQuad {
     }
 }
 
-/// Why a whole pipeline batch was refused; nothing from that batch was appended.
+/// Why a pipeline draw call was refused; nothing from that call was appended.
+///
+/// Individual quads with non-finite coordinates or UVs are skipped without refusing valid quads
+/// in the same slice, and quad storage grows dynamically into the GPU buffers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: refusal of a local client render-pipeline draw submission.
 pub enum PipelineDrawError {
     /// The handle is stale, or names no usable pipeline.
     Pipeline(RenderPipelineError),
-    /// A coordinate is not finite, or a camera-relative coordinate overflows f32.
-    NonFinite,
-    /// The batch would exceed this view's quad capacity, which pipeline quads share with
-    /// [`crate::WorldDrawContext::quads`].
-    CapacityExceeded,
 }
 
-/// Stamp the owning mod onto every pipeline `owner` added in `register_render_pipelines`.
-/// Duplicate IDs are rejected when the engine freezes the collected registrations at startup.
+/// Attribute every pipeline `owner` added in `register_render_pipelines` to `owner`.
+/// Duplicate mod IDs and collisions with the matching vanilla table are rejected
+/// with a startup error when the collected registrations are frozen.
 pub(crate) fn validate_render_pipelines(
     owner: &str,
     previous: &[RenderPipeline],
@@ -252,43 +242,65 @@ mod tests {
     }
 
     #[test]
-    fn stamps_owner_on_new_pipelines_across_namespaces_and_preserves_duplicates_for_freeze() {
-        let mut previous = vec![pipeline("other:glow")];
-        validate_render_pipelines("first_mod", &[], &mut previous);
+    fn a_mod_can_register_pipelines_in_any_valid_namespace() {
+        let previous = vec![pipeline("other:glow")];
         let mut pipelines = previous.clone();
         pipelines.extend([
             pipeline("minecraft:glow"),
             pipeline("other:beam"),
-            pipeline("other:glow"),
-            pipeline("mine:beam"),
+            pipeline("minecraft:custom_beam"),
         ]);
         validate_render_pipelines("owning_mod", &previous, &mut pipelines);
         assert_eq!(
             ids(&pipelines),
             [
-                "other:glow",
-                "minecraft:glow",
-                "other:beam",
-                "other:glow",
-                "mine:beam",
+                "other:glow".to_owned(),
+                "minecraft:glow".to_owned(),
+                "other:beam".to_owned(),
+                "minecraft:custom_beam".to_owned(),
             ]
         );
-        assert_eq!(pipelines[0].owner(), "first_mod");
-        for added in &pipelines[1..] {
-            assert_eq!(added.owner(), "owning_mod");
-        }
+        assert_eq!(pipelines[1].owner(), "owning_mod");
+        assert_eq!(pipelines[2].owner(), "owning_mod");
+        assert_eq!(pipelines[3].owner(), "owning_mod");
+    }
+
+    #[test]
+    fn validator_attributes_owners_and_preserves_entries_for_startup_collision_checks() {
+        let mut pipelines = vec![
+            pipeline("shared:glow"),
+            pipeline("shared:glow"),
+            pipeline("shared:glow").optional(),
+        ];
+        validate_render_pipelines("first", &[], &mut pipelines);
+        assert_eq!(
+            ids(&pipelines),
+            [
+                "shared:glow".to_owned(),
+                "shared:glow".to_owned(),
+                "shared:glow".to_owned(),
+            ]
+        );
+        assert!(pipelines.iter().all(|p| p.owner() == "first"));
+
+        let previous = pipelines.clone();
+        pipelines.push(pipeline("shared:glow").optional());
+        validate_render_pipelines("second", &previous, &mut pipelines);
+        assert_eq!(pipelines.len(), 4);
+        assert_eq!(pipelines[3].owner(), "second");
+        assert!(pipelines[3].optional);
     }
 
     #[test]
     fn a_mod_can_register_more_than_vanillas_pipeline_count() {
-        let mut pipelines: Vec<_> = (0..131).map(|i| pipeline(&format!("mine:p{i}"))).collect();
+        let mut pipelines: Vec<_> = (0..195).map(|i| pipeline(&format!("mine:p{i}"))).collect();
         validate_render_pipelines("mine", &[], &mut pipelines);
-        assert_eq!(pipelines.len(), 131);
-        assert_eq!(pipelines.last().unwrap().id.to_string(), "mine:p130");
+        assert_eq!(pipelines.len(), 195);
+        assert_eq!(pipelines.last().unwrap().id.to_string(), "mine:p194");
 
         let previous = pipelines.clone();
         pipelines.push(pipeline("next:glow"));
         validate_render_pipelines("next", &previous, &mut pipelines);
-        assert_eq!(pipelines.len(), 132);
+        assert_eq!(pipelines.len(), 196);
     }
 }

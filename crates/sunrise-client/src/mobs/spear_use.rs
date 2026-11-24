@@ -279,6 +279,7 @@ fn stab_attack(
                 amount: damage,
                 from,
                 kind: "minecraft:spear",
+                wielder: Some(m.id),
             })),
             Who::Mob(id) => events.push(MobEvent::AttackMob {
                 target: id,

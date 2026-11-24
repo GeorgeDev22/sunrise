@@ -117,8 +117,9 @@ pub mod living_scenes {
 }
 
 pub mod screens {
-    use mod_api::client::hud_layout::{GuiDraw, PoseOp};
-    use mod_api::{ClientHost, DrawContext, Text, TextAlign};
+    use mod_api::{
+        ClientHost, DrawContext, GuiDrawError, Text, TextAlign, TextLayoutSize, TextLayoutSpec,
+    };
 
     pub fn screen_controls(host: &mut dyn ClientHost) {
         // ANCHOR: screen_controls
@@ -141,29 +142,25 @@ pub mod screens {
 
     pub fn draw_scaled_label(
         draw: &mut dyn DrawContext,
-        label: Text,
+        label: &Text,
         x: f32,
         y: f32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<TextLayoutSize, GuiDrawError> {
         // ANCHOR: scaled_text_lines
         // From a menu screen draw callback, gui_render_post or another drawing hook.
         let scale = 2.0;
-        let lines = draw.text_lines(&label, 120.0, TextAlign::Centre, scale)?;
-        let mut draws = Vec::with_capacity(lines.lines.len() + 2);
-        draws.push(GuiDraw::Push(vec![PoseOp::Scale(scale, scale)]));
-        for line in &lines.lines {
-            draws.push(GuiDraw::Text {
-                text: line.text.clone(),
-                x: (x + line.at[0] / scale) as i32,
-                y: (y + line.at[1] / scale) as i32,
-                color: 0xFFFF_FFFF,
-                shadow: false,
-            });
-        }
-        draws.push(GuiDraw::Pop);
-        draw.gui_paint(&draws)?;
-        // lines.width and lines.height size the box you reserved for it.
+        let spec = TextLayoutSpec {
+            max_width: 120.0,
+            align: TextAlign::Centre,
+            scale,
+        };
+        // size.width and size.height are in scaled GUI pixels, before the enclosing pose.
+        let mut size = TextLayoutSize::default();
+        draw.draw_gui(&mut |canvas| {
+            size = canvas.text_with_word_wrap(label, [x, y], spec, 0xFFFF_FFFF, false)?;
+            Ok(())
+        })?;
         // ANCHOR_END: scaled_text_lines
-        Ok(())
+        Ok(size)
     }
 }

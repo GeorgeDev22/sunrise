@@ -359,15 +359,8 @@ impl HudAtlas {
                 images.push((format!("sunrise/jei/{name}"), width, height, rgba));
             }
             Self::slots(&mut images, crate::trims::slot_size(root), pool);
-            // MissingTextureAtlasSprite.generateMissingImage: 16x16, magenta
-            // and black quarters.
-            let missing = (0..256)
-                .flat_map(|i| match (i / 16 < 8) ^ (i % 16 < 8) {
-                    true => [248, 0, 248, 255],
-                    false => [0, 0, 0, 255],
-                })
-                .collect();
-            images.push((MISSING_SPRITE.into(), 16, 16, missing));
+            let (width, height, missing) = missing_image();
+            images.push((MISSING_SPRITE.into(), width, height, missing));
             let (width, height, rgba) =
                 decode_bytes(include_bytes!("../jei_recipes/config_button.png"))?;
             images.push(("sunrise/recipes/settings".to_owned(), width, height, rgba));

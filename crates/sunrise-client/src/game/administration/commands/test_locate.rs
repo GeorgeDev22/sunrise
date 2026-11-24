@@ -79,7 +79,7 @@ impl Game<'_> {
         // blocks within 250 blocks whose test was selected.
         let mut found: Vec<(Pos, String, Rotation)> = Vec::new();
         if !selected.is_empty() {
-            for dim in self.loaded_dims() {
+            for dim in self.loaded_level_order() {
                 let back = self.enter_command_level(dim);
                 for pos in self.find_test_instance_blocks(center, 250) {
                     let key = self.test_instance_at(pos).and_then(|b| b.data.test.clone());

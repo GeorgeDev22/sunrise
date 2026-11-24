@@ -1392,6 +1392,7 @@ fn player_push(m: &mut Mob, p: &super::PlayerView, w: &MobWorld, events: &mut Ve
             amount,
             from: [m.position.x, m.position.y, m.position.z],
             kind: "minecraft:sulfur_cube_hot",
+            wielder: None,
         }));
     }
 }

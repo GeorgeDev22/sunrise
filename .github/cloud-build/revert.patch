@@ -1,0 +1,55 @@
+diff --git a/crates/sunrise-client/src/game/network/lan_actions/turns.rs b/crates/sunrise-client/src/game/network/lan_actions/turns.rs
+index 5e1fc4cc1a46..1f6dade4f21b 100644
+--- a/crates/sunrise-client/src/game/network/lan_actions/turns.rs
++++ b/crates/sunrise-client/src/game/network/lan_actions/turns.rs
+@@ -342,9 +342,7 @@ impl Game<'_> {
+         );
+         let mut play = host.play.remove(&conn).unwrap_or_default();
+         play.hook.begin_loan();
+-        if let Some(cooldown) = loaded_cooldown {
+-            play.portal.cooldown = cooldown;
+-        }
++        let _ = loaded_cooldown;
+         if fresh {
+             // A new body (joined, respawned, changed level): nothing on it yet,
+             // its effects' modifiers and armor protection included.
+diff --git a/crates/sunrise-client/src/game/world/server_travel.rs b/crates/sunrise-client/src/game/world/server_travel.rs
+index 0c129bf742f3..4386982ee898 100644
+--- a/crates/sunrise-client/src/game/world/server_travel.rs
++++ b/crates/sunrise-client/src/game/world/server_travel.rs
+@@ -430,7 +430,16 @@ impl Game<'_> {
+             if self.has_pending_travel(conn) {
+                 continue;
+             }
++            let Some(host) = self.lan.as_mut() else {
++                return;
++            };
++            let mut portal = host.play.entry(conn).or_default().portal;
++            std::mem::swap(&mut self.portals.player, &mut portal);
+             self.handle_server_portal(conn);
++            std::mem::swap(&mut self.portals.player, &mut portal);
++            if let Some(host) = self.lan.as_mut() {
++                host.play.entry(conn).or_default().portal = portal;
++            }
+         }
+     }
+ 
+@@ -440,7 +449,8 @@ impl Game<'_> {
+         &mut self,
+         conn: u32,
+     ) -> Option<&mut sunrise_client::nether_portal::PortalState> {
+-        Some(&mut self.lan.as_mut()?.play.entry(conn).or_default().portal)
++        let _ = conn;
++        Some(&mut self.portals.player)
+     }
+ 
+     /// The player's `portalCooldown`, 0 for one without a record.
+@@ -767,7 +777,7 @@ impl Game<'_> {
+         let transition = self.ui.rules.int_at(rule).max(0);
+         let Some(entry) = self
+             .guest_portal(conn)
+-            .and_then(|portal| portal.tick_inside(inside, usable, transition, PLAYER_DELAY))
++            .and_then(|portal| portal.tick_inside(inside, !sleeping, transition, PLAYER_DELAY))
+         else {
+             return;
+         };

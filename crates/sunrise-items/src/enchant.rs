@@ -1062,6 +1062,12 @@ impl Enchantments {
     pub fn has_custom_damage_effects(&self) -> bool {
         !self.custom_damage.is_empty()
     }
+    /// Whether any loaded enchantment has a `minecraft:post_attack` entry of a
+    /// mod's own kind: one check of each definition's cached payloads, so a
+    /// hit can skip the weapon when no mod adds one.
+    pub fn has_native_post_attack(&self) -> bool {
+        self.list.iter().any(|e| !e.native_post_attack.is_empty())
+    }
     /// `EnchantmentHelper.has`: whether `stack` has any enchantment providing
     /// `component`. It reads the stack's own component.
     pub fn has_component(&self, stack: &ItemStack, component: &str) -> bool {

@@ -7,7 +7,11 @@
 //! The prepared bundles are the built-in pack, so the packs above it are
 //! entries that replace or join a bundle's (`GeneratorData::load_with`).
 use serde_json::Value;
-use std::{collections::BTreeMap, sync::OnceLock};
+use std::{
+    collections::{BTreeMap, HashMap},
+    hash::{Hash, Hasher},
+    sync::OnceLock,
+};
 
 /// The bundle of `dimension/<id>.json` level stems. Nothing prepared has
 /// it: a pack's level stem stands in for the world preset's.
@@ -208,13 +212,28 @@ impl LevelHeight {
 }
 
 /// Replacement and added bundle entries, and tag files, from data packs.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorldgenOverrides {
     templates: BTreeMap<String, sunrise_assets::resource_source::Resource>,
-    /// Bundle name → id → the highest pack's JSON text for it.
+    /// Bundle name → id → the highest pack's JSON text for it (except `DIMENSIONS`).
     entries: BTreeMap<String, BTreeMap<String, String>>,
+    /// Winning stems, with `None` for an implicit built-in. `MappedRegistry.entrySet`
+    /// traverses hash buckets, not registration or filename order.
+    level_stems: HashMap<String, Option<String>>,
     /// Tag bundle name → (tag id, pack id, tag file text), lowest pack first.
     tags: BTreeMap<String, Vec<(String, String, String)>>,
+}
+impl Hash for WorldgenOverrides {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.templates.hash(state);
+        self.entries.hash(state);
+        self.tags.hash(state);
+        // Equal overrides hash alike regardless of the registry's traversal.
+        self.level_stems
+            .iter()
+            .collect::<BTreeMap<_, _>>()
+            .hash(state);
+    }
 }
 impl WorldgenOverrides {
     /// Lazy gzip NBT entries, retaining their source generation for cache identity.
@@ -230,15 +249,22 @@ impl WorldgenOverrides {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.tags.is_empty() && self.templates.is_empty()
+        self.entries.is_empty()
+            && self.level_stems.is_empty()
+            && self.tags.is_empty()
+            && self.templates.is_empty()
     }
     /// A pack's file for `id` in `bundle`: called for packs from the lowest
     /// to the highest, so the last call for an id wins.
     pub fn set(&mut self, bundle: &str, id: &str, json: String) {
-        self.entries
-            .entry(bundle.to_owned())
-            .or_default()
-            .insert(id.to_owned(), json);
+        if bundle == DIMENSIONS {
+            self.level_stems.insert(id.to_owned(), Some(json));
+        } else {
+            self.entries
+                .entry(bundle.to_owned())
+                .or_default()
+                .insert(id.to_owned(), json);
+        }
     }
     /// A mod's level: called before any pack's file, so a pack's replaces it.
     pub fn add_mod_dimension(&mut self, dimension: &ModDimension) {
@@ -331,7 +357,10 @@ impl WorldgenOverrides {
                 }
             }
         }
-        for (id, json) in self.entries.get_mut(DIMENSIONS).into_iter().flatten() {
+        for (id, stem) in &mut self.level_stems {
+            let Some(json) = stem else {
+                continue;
+            };
             let Ok(mut v) = serde_json::from_str::<Value>(json) else {
                 continue;
             };
@@ -360,7 +389,7 @@ impl WorldgenOverrides {
     pub fn level_height(&self, level: &str) -> Option<LevelHeight> {
         let none = BTreeMap::new();
         let types = self.entries.get(DIMENSION_TYPES).unwrap_or(&none);
-        let ty = match self.entries.get(DIMENSIONS).and_then(|d| d.get(level)) {
+        let ty = match self.level_stem(level) {
             Some(stem) => serde_json::from_str::<Value>(stem).ok()?["type"].clone(),
             None => Value::String(level.to_owned()),
         };
@@ -371,7 +400,7 @@ impl WorldgenOverrides {
     pub fn level_type_json(&self, level: &str) -> Option<(String, Value)> {
         let none = BTreeMap::new();
         let types = self.entries.get(DIMENSION_TYPES).unwrap_or(&none);
-        let ty = match self.entries.get(DIMENSIONS).and_then(|d| d.get(level)) {
+        let ty = match self.level_stem(level) {
             Some(stem) => serde_json::from_str::<Value>(stem).ok()?["type"].clone(),
             None => Value::String(level.to_owned()),
         };
@@ -394,8 +423,7 @@ impl WorldgenOverrides {
     ) -> Option<Result<crate::dimension_type::DimensionFacts, String>> {
         use crate::dimension_type::DimensionFacts;
         let Some((id, json)) = self.level_type_json(level) else {
-            let stem = self.entries.get(DIMENSIONS)?.get(level)?;
-            let stem: Value = serde_json::from_str(stem).ok()?;
+            let stem: Value = serde_json::from_str(self.level_stem(level)?).ok()?;
             return Some(Ok(DimensionFacts::vanilla(stem["type"].as_str()?)?.clone()));
         };
         // A pack's type for a vanilla id changes that type; any other starts from the Overworld's.
@@ -407,8 +435,7 @@ impl WorldgenOverrides {
     /// `nether`, `end`) when a pack replaces them. `None` when nothing the packs give changes it,
     /// for a generator that is not the noise one, and for settings the packs do not carry.
     pub fn level_sea_level(&self, level: &str) -> Option<i32> {
-        let stem = self.entries.get(DIMENSIONS).and_then(|d| d.get(level));
-        let settings = match stem {
+        let settings = match self.level_stem(level) {
             Some(stem) => {
                 let generator = &serde_json::from_str::<Value>(stem).ok()?["generator"];
                 if generator["type"].as_str() != Some("minecraft:noise") {
@@ -434,13 +461,43 @@ impl WorldgenOverrides {
         };
         i32::try_from(settings["sea_level"].as_i64()?).ok()
     }
-    /// The entries packs give `bundle`.
+    /// `WorldDimensions.bake` with the default preset. Add built-ins which have no explicit
+    /// stem before publishing levels, without overriding pack definitions.
+    pub fn include_implicit_level_stems(&mut self) {
+        for id in [
+            "minecraft:overworld",
+            "minecraft:the_nether",
+            "minecraft:the_end",
+        ] {
+            self.level_stems.entry(id.to_owned()).or_insert(None);
+        }
+    }
+
+    /// Traverse the effective `LEVEL_STEM` registry, including any implicit built-ins.
+    pub fn level_stems(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.level_stems
+            .iter()
+            .map(|(id, json)| (id.as_str(), json.as_deref()))
+    }
+
+    fn level_stem(&self, level: &str) -> Option<&str> {
+        self.level_stems.get(level)?.as_deref()
+    }
+
+    /// The explicit entries packs give `bundle`.
     pub fn entries(&self, bundle: &str) -> impl Iterator<Item = (&str, &str)> {
-        self.entries
-            .get(bundle)
+        (bundle == DIMENSIONS)
+            .then_some(self.level_stems())
             .into_iter()
             .flatten()
-            .map(|(id, json)| (id.as_str(), json.as_str()))
+            .filter_map(|(id, stem)| stem.map(|json| (id, json)))
+            .chain(
+                self.entries
+                    .get(bundle)
+                    .into_iter()
+                    .flatten()
+                    .map(|(id, json)| (id.as_str(), json.as_str())),
+            )
     }
     /// Partial startup validation of winning fill-layer leaves through their existing codec.
     /// Other feature types keep their existing lazy path; this never expands feature holders.
@@ -486,6 +543,18 @@ impl WorldgenOverrides {
     }
     /// Removes the entries of `bundle` that `keep` refuses, returning their ids.
     pub fn retain(&mut self, bundle: &str, mut keep: impl FnMut(&str) -> bool) -> Vec<String> {
+        if bundle == DIMENSIONS {
+            let mut dropped = Vec::new();
+            self.level_stems.retain(|id, stem| {
+                if stem.is_none() || keep(id) {
+                    true
+                } else {
+                    dropped.push(id.clone());
+                    false
+                }
+            });
+            return dropped;
+        }
         let Some(entries) = self.entries.get_mut(bundle) else {
             return Vec::new();
         };

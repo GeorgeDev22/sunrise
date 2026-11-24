@@ -2326,7 +2326,7 @@ impl Game<'_> {
                 }
                 Call::Item { call, stack, x, y } => match call {
                     ItemCall::Item | ItemCall::Fake => {
-                        self.draw_item_model(batch, stack, *x as f32, *y as f32)
+                        self.draw_item_model(batch, stack, *x as f32, *y as f32, 0)
                     }
                     ItemCall::Decorations => {
                         self.draw_item_decorations(batch, stack, *x as f32, *y as f32, None)

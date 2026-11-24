@@ -616,27 +616,21 @@ Two cases the oracle fills in:
   - **Block states.** 1.21.1 writes a block or fluid state as `{"Name", "Properties"}`, 26.3
     as `{"id", "properties"}` and refuses the old shape, which failed the whole processor
     list, feature or pool. Carry rewrites them (#816; 1,005 files in 17 of ATM10's mods).
-  - **Start and placement rules** (#820 in the game, #821 in carry). Repurposed Structures'
-    and Moog's jigsaws refuse to start in liquid and check biomes and terrain height in a
-    radius; their spreads keep a minimum distance from the world origin and away from other
-    sets (named by a structure set tag). Carry writes these under `sunrise:start_checks`,
-    `sunrise:min_distance_from_world_origin` and `sunrise:exclusion_zone`; the game runs them
-    (`sunrise-world`'s `structure/start_checks.rs`). Vanilla data has none of the keys. Moog's
-    also spreads its structures 1.65 times as far apart as its files say, which carry now
-    applies. MVS went from 829 starts to 90 in a 128×128-chunk square (seed 1234): 294 from the
-    spacing, the rest from the start checks.
+  - **Placement rules** (#821 in carry). Repurposed Structures' and Moog's spreads keep a
+    minimum distance from the world origin and away from other sets (named by a structure set
+    tag). Carry writes these under `sunrise:min_distance_from_world_origin` and
+    `sunrise:exclusion_zone`, and the game reads them. Vanilla data has none of the keys. Moog's
+    also spreads its structures 1.65 times as far apart as its files say, which carry applies.
   - **Mo' Structures** (LGPL-3.0; 38 files). Its `mostructures:generic` is vanilla's jigsaw
     that starts only where the terrain under the 5×5 chunks around it varies by no more than
-    its `heightRange`: carry writes `minecraft:jigsaw` with `sunrise:start_checks`
-    (`terrain_radius` 2, `terrain_range`). Its placement `mostructures:type` takes spacing and
+    its `heightRange`, a start rule of its own: carry writes the ones with no range (-1) as
+    `minecraft:jigsaw` and lists the rest as unsupported. Its placement `mostructures:type` takes spacing and
     separation from the mod's config, not its files; carry writes the config's defaults
     (keyed by `config_key`) and the sets it avoids within 3 chunks as `sunrise:exclusion_zone`
     with `"their_zones": false`: like the mod, the game tests those sets by their spread and
     frequency alone, not by their own exclusion zones. Its two block-ageing processors
     (`jungle_rot_processor`, `simple_cobblestone`, 3 uses) are still dropped, as is its
-    mixin that keeps lakes out of its structures. Over chunks -64..63 that adds 13 starts at
-    seed 1234 (pirate ships, churches, a tavern, the castle in the sky...) and 16 at seed 2,
-    and every other start stays as it was.
+    mixin that keeps lakes out of its structures.
   - **Processors written in Java** are taken out of their lists (#822) unless they have a
     vanilla data-pack equivalent (such as `repurposed_structures:structure_void_processor`,
     which becomes `minecraft:block_ignore` on `minecraft:structure_void`, or a disabled
@@ -695,21 +689,17 @@ Two cases the oracle fills in:
     `sunrise:` keys on a random spread: `sunrise:exclusion_zone` for the enhanced exclusion
     zone, `sunrise:avoid_biomes` for the temples' ocean and river search, `sunrise:ring_sections`
     for Better Strongholds' rings.
-  - **Repurposed Structures' and Moog's own assembler** (#850 in the game, #851 in carry). Both
-    lay out their jigsaws with `PieceLimitedJigsawManager`, not vanilla's. Their structures, the
-    Nether variants too, get `sunrise:piece_limited`: `y_allowance`, burying, the pools whose
-    fallbacks ignore the bounds, liquid, the Nether land search and ledge, and each
-    structure's piece caps and required pieces from the mod's `*_pieces_spawn_counts` files.
-    The game assembles them the mods' way and runs their post-layout steps (centring,
-    burying, the Nether land search).
+  - **Repurposed Structures' and Moog's jigsaw structures.** Both lay their jigsaws out with
+    their own assembler (`PieceLimitedJigsawManager`: piece caps, required pieces, burying, the
+    Nether land search) and start them with checks of their own (no liquid, biomes and terrain
+    height in a radius). Those are their mods' structure types, so carry lists them as
+    unsupported: they need their mod, which registers its type and builds it on the engine's
+    jigsaw pieces (`attach_jigsaw` in docs/modding/src/how-to/world/structure-types.md).
   - **Enhanced terrain adaptation.** YUNG's API and MoogsStructureLib add a kernel of their
     own to the Beardifier: its own size and falloff, carving or burying above and below each
-    piece's floor. Carry writes it as `sunrise:enhanced_terrain_adaptation` on the structure
-    and on pool elements with their own (docs/modding/src/how-to/content-mods.md), and the game sums it after vanilla's
-    terrain density. In seed 1234's terrain before structures are placed, Better Fortresses'
-    pieces held 39 to 41 % netherrack and now 3 to 7 %, the mod's open bridges; Moog's mega
-    fortress band 45 % and now 30 %; Better Strongholds' pieces, buried, go from 92 to 97 %
-    solid to 99 %, closing the caves that cut through them.
+    piece's floor. Carry writes a pool element's own as `sunrise:enhanced_terrain_adaptation`
+    (docs/modding/src/how-to/content-mods.md), and the game sums it after vanilla's terrain
+    density.
 
 
   Each mod's `carry-report.json` lists what was mapped, the rules and processors lost by name,
@@ -731,42 +721,12 @@ Two cases the oracle fills in:
     - the block processors written in Java
       (YUNG's banners and decorations, Better Strongholds' legs, Lithostitched's block swaps);
   - **Formations** (Overworld and Nether: 50 structures, 128 pool elements) places one
-    template per start at a height found in the noise columns under its corners and centre: on
-    the surface, on water or lava, or in a cave (on its floor, under its ceiling, buried in
-    stone, on a lava lake). Carry writes its `formations:simple` as the game's
-    `sunrise:formations` (`sunrise-world`'s `structure/formations.rs`, which reads the blocks
-    of ChunkGenerator.getBaseColumn through the structure context) and its pool element as
-    vanilla's with its `ground_level` under `sunrise:ground_level`. In chunks -64..63 that adds
-    39 Overworld and 672 Nether starts at seed 1234 (51 and 643 at seed 2), and leaves every
-    other start as it was. Its processors (biome replacements, aged blocks, bed colours,
-    plants) are still dropped, so its structures keep their templates' blocks.
-    Its one PiecedStructure, the fountain, starts the same way and then lays out the element's
-    jigsaw children with vanilla's jigsaw: carry writes it as `sunrise:formations` with
-    `sunrise:pieced` (`max_depth`, `max_distance_from_center`), and the game's assembler takes
-    the placed start piece (`jigsaw::add_children`), the children kept within that distance of
-    the start's centre, one block above the height found. It shares Formations' "uncommon"
-    structure set, so where the set now picks it, it takes the place of a statue or a house:
-    1 fountain at seed 1234 and 3 at seed 2 in chunks -64..63, one with a child piece.
+    template per start at a height it finds in the noise columns, and its fountain lays out
+    jigsaw children from there: its own structure types and pool element, listed as
+    unsupported.
 
-  With every structure PR above, the same square (seed 1234, chunks -64..63) holds 362
-  overworld starts with 22,026 pieces. CTOV has 7, Better Dungeons 72 and Better Ocean
-  Monuments 3, and vanilla's monuments are gone as YUNG's mod has them. In the Nether there
-  are 512 starts, up from 322: Moog's Nether Structures 147, Repurposed's Nether structures
-  40, Better Fortresses 7, with no vanilla fortress. Over chunks -256..255: Better Strongholds 10
-  (vanilla 0), Better Jungle Temples 5, Better Witch Huts 11. Vanilla's own worlds are
-  unchanged: the structure-start oracle still matches 35 of 35.
-
-  Repurposed's Nether city, Nether shipwrecks and End stronghold are its generic jigsaw with
-  one more start check each, carried as `minecraft:jigsaw` with the check named in
-  `sunrise:start_checks.repurposed`: open air from sea level + 20 to + 45 around the city's
-  chunk, no solid block in a 33×30×33 grid over a shipwreck, and land 45 blocks up at nine
-  points 35 and 70 blocks apart for the stronghold. Over chunks -320..319 in the Nether there
-  are 2 cities and 45 shipwrecks (30 and 865 without the checks); the End stronghold keeps
-  8,000 blocks from the centre, and chunks 500..1139 × -320..319 hold 2 (43 without).
-
-  In a world with the 40 mods, seed 1234, `/locate structure mvs:azelea_house` finds one 27
-  blocks from spawn and it stands there as the template builds it; When Dungeons Arise's
-  bandit towers and Structory's chapel locate too.
+  In a world with the 40 mods, seed 1234, When Dungeons Arise's bandit towers and Structory's
+  chapel locate and stand as their templates build them.
 
 ### 5. Code: one agent per mod
 

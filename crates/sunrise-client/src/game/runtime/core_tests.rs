@@ -1188,32 +1188,32 @@ fn quit_shortcut_blocks_window_close_when_option_disabled() {
 
 #[test]
 fn integrated_server_save_persists_owner_player_data() {
+    use sunrise_client::lan::playerdata;
+
     let dir = std::env::temp_dir().join(format!(
         "sunrise-integrated-player-save-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
 
-    // Initial world creation writes `level.dat` before the player spawns.
+    // Initial world creation writes the profile reference before the player spawns.
+    let owner = 12;
     let mut level = Level {
         name: "Creative".into(),
         creative: true,
         game_mode: 1,
+        player_uuid: Some(playerdata::uuid_ints(owner)),
         ..Level::default()
     };
-    level.write(&dir, &Default::default()).unwrap();
+    level.write_keeping_player(&dir).unwrap();
 
     // The integrated server stores the owner's state in `level` and saves the world.
     level.position = Some([128.5, 72.0, -64.25]);
     level.inventory = vec![(0, "minecraft:diamond_pickaxe".into(), 1, 0)];
-    write_level_for_role(
-        &mut level,
-        &dir,
-        execution_role::ExecutionRole::IntegratedServer,
-        &Default::default(),
-        false,
-    )
-    .unwrap();
+    level.write_player(&dir, &Default::default()).unwrap();
+    level.write_without_player(&dir).unwrap();
+    let player_file = playerdata::path(&dir, owner);
+    let player_bytes = std::fs::read(&player_file).unwrap();
 
     let reopened = Level::read(&dir).unwrap();
     assert_eq!(reopened.position, Some([128.5, 72.0, -64.25]));
@@ -1228,14 +1228,8 @@ fn integrated_server_save_persists_owner_player_data() {
         day_time: 6000,
         ..Level::default()
     };
-    write_level_for_role(
-        &mut dedicated,
-        &dir,
-        execution_role::ExecutionRole::DedicatedServer,
-        &Default::default(),
-        false,
-    )
-    .unwrap();
+    dedicated.write_without_player(&dir).unwrap();
+    assert_eq!(std::fs::read(&player_file).unwrap(), player_bytes);
 
     let reopened = Level::read(&dir).unwrap();
     assert_eq!(reopened.day_time, 6000);

@@ -205,7 +205,7 @@ impl Game<'_> {
         self.native_configs_load(kinds, Some(world));
     }
 
-    /// The server stops: its `Server` configs unload.
+    /// `ServerLifecycleHooks.handleServerStopped`: unload Server configs after Stopped.
     pub(super) fn native_configs_server_stop(&mut self) {
         for file in self.native_configs.drop_server() {
             self.native_config_unloading(&file);

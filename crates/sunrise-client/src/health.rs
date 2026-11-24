@@ -978,8 +978,20 @@ impl<'a> DamageLevel<'a> {
     pub fn registry(&self) -> &'a sunrise_world::registry::BlockRegistry {
         self.registry
     }
-    /// The level's own attachments (`Holder::Level`), marked for the next sync. A chunk,
-    /// block entity or entity's are not reachable from a hit: `MissingHolder`.
+    /// The level's own attachments (`Holder::Level`); other holders are not lent to a hit.
+    pub fn attachments_read(
+        &self,
+        holder: sunrise_mod_runtime::attachments::Holder,
+    ) -> std::result::Result<
+        &sunrise_mod_runtime::attachments::Attachments,
+        sunrise_mod_runtime::attachments::AttachmentError,
+    > {
+        if holder != sunrise_mod_runtime::attachments::Holder::Level {
+            return Err(sunrise_mod_runtime::attachments::AttachmentError::MissingHolder);
+        }
+        Ok(self.attachments)
+    }
+    /// Mutable attachment storage for an accepted hit edit.
     pub fn attachments(
         &mut self,
         holder: sunrise_mod_runtime::attachments::Holder,
@@ -987,11 +999,12 @@ impl<'a> DamageLevel<'a> {
         &mut sunrise_mod_runtime::attachments::Attachments,
         sunrise_mod_runtime::attachments::AttachmentError,
     > {
-        if holder != sunrise_mod_runtime::attachments::Holder::Level {
-            return Err(sunrise_mod_runtime::attachments::AttachmentError::MissingHolder);
-        }
-        self.attachment_syncs.insert(holder);
+        self.attachments_read(holder)?;
         Ok(self.attachments)
+    }
+    /// Schedule a hit edit or explicit sync for the next send pass.
+    pub fn attachment_sync_queued(&mut self, holder: sunrise_mod_runtime::attachments::Holder) {
+        self.attachment_syncs.insert(holder);
     }
     /// Return the hook's immunity decision, or vanilla's without a listener.
     pub fn invulnerability_check(&mut self, hurting: Hurting<'_>, vanilla: bool) -> bool {
@@ -1422,6 +1435,62 @@ impl DamageLevel<'_> {
         canceled
     }
 }
+/// Map an explicit damage type id to an engine [`crate::mobs::DamageKind`] only when
+/// the kind always resolves back to that id. In particular, the engine's explosion
+/// factory chooses the type based on the attacker; an explicit registry type must not.
+/// Other registered types in `catalog` keep their id and tags as
+/// [`crate::mobs::DamageKind::Named`]; unknown or unregistered types return `None`.
+pub fn resolve_damage_kind(catalog: Option<&Catalog>, ty: &str) -> Option<crate::mobs::DamageKind> {
+    use crate::mobs::{DamageKind, NamedDamage};
+    Some(match ty.strip_prefix("minecraft:").unwrap_or(ty) {
+        "player_attack" => DamageKind::PlayerAttack,
+        "mace_smash" => DamageKind::MaceSmash,
+        "spear" => DamageKind::Spear,
+        "mob_attack" => DamageKind::MobAttack,
+        "mob_attack_no_aggro" => DamageKind::MobAttackNoAggro,
+        "arrow" => DamageKind::Arrow,
+        "thrown" => DamageKind::Thrown,
+        "fireball" => DamageKind::Fireball,
+        "wither_skull" => DamageKind::WitherSkull,
+        "fall" => DamageKind::Fall,
+        "on_fire" => DamageKind::OnFire,
+        "in_fire" => DamageKind::InFire,
+        "hot_floor" => DamageKind::HotFloor,
+        "campfire" => DamageKind::Campfire,
+        "lava" => DamageKind::Lava,
+        "drown" => DamageKind::Drown,
+        "dry_out" => DamageKind::DryOut,
+        "magic" => DamageKind::Magic,
+        "sting" => DamageKind::Sting,
+        "cactus" => DamageKind::Cactus,
+        "sweet_berry_bush" => DamageKind::SweetBerryBush,
+        "freeze" => DamageKind::Freeze,
+        "in_wall" => DamageKind::InWall,
+        "thorns" => DamageKind::Thorns,
+        "cramming" => DamageKind::Cramming,
+        "falling_anvil" => DamageKind::FallingAnvil,
+        "falling_block" => DamageKind::FallingBlock,
+        "fireworks" => DamageKind::Fireworks,
+        "generic_kill" => DamageKind::GenericKill,
+        "lightning_bolt" => DamageKind::LightningBolt,
+        "out_of_world" => DamageKind::OutOfWorld,
+        "outside_border" => DamageKind::OutsideBorder,
+        "sonic_boom" => DamageKind::SonicBoom,
+        "spit" => DamageKind::Spit,
+        "stalagmite" => DamageKind::Stalagmite,
+        "starve" => DamageKind::Starve,
+        "sulfur_cube_hot" => DamageKind::SulfurCubeHot,
+        "wind_charge" => DamageKind::WindCharge,
+        "wither" => DamageKind::Wither,
+        "generic" => DamageKind::Generic,
+        _ => {
+            return catalog
+                .and_then(|c| NamedDamage::registered(c, ty))
+                .map(DamageKind::Named);
+        }
+    })
+}
+
 #[derive(Clone)]
 pub struct HealthResources {
     pub damage: Catalog,
@@ -3683,5 +3752,19 @@ mod tests {
         );
         let record = meeting.hurt_log.last().unwrap();
         assert_eq!((record.armor, record.toughness), (7.0, 7.0));
+    }
+
+    #[test]
+    fn resolve_damage_kind_maps_builtins_and_rejects_unknown_without_catalog() {
+        use crate::mobs::DamageKind;
+        assert_eq!(
+            resolve_damage_kind(None, "minecraft:in_fire"),
+            Some(DamageKind::InFire)
+        );
+        assert_eq!(
+            resolve_damage_kind(None, "generic"),
+            Some(DamageKind::Generic)
+        );
+        assert_eq!(resolve_damage_kind(None, "mod:unknown"), None);
     }
 }

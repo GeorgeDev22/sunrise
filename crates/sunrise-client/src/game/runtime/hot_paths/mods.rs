@@ -4,14 +4,15 @@ use super::{super::Game, Recorder};
 use sunrise_client::Result;
 
 /// The attachment the attachment workloads read and write: plain data, not saved or synced.
-static COUNTER: mod_api::AttachmentType<u32> = mod_api::AttachmentType {
-    namespace: "hot_paths",
-    name: "counter",
-    default: || 0,
-    codec: None,
-    copy_on_death: false,
-    sync: false,
-};
+static COUNTER: sunrise_mod_runtime::attachments::AttachmentType<u32> =
+    sunrise_mod_runtime::attachments::AttachmentType {
+        namespace: "hot_paths",
+        name: "counter",
+        default: || 0,
+        codec: None,
+        copy_on_death: false,
+        sync_codec: None,
+    };
 
 const CALLS: u64 = 100_000;
 

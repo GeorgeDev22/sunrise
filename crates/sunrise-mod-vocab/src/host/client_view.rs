@@ -16,6 +16,15 @@ pub trait ClientViewClientHost {
     /// including on the title screen, independently of server tick freeze. Wraps as a Java int.
     fn gui_ticks(&self) -> i32;
     /// Side: client.
+    /// How far above the bottom edge the HUD's status rows reach, left and right in GUI pixels
+    /// (NeoForge's `Hud.leftHeight` and `rightHeight`), as they stand when the current HUD layer
+    /// starts: both are 39 (the hotbar and experience bar) before `minecraft:player_health`,
+    /// and each vanilla row adds its height as it draws (health and armour on the left, food,
+    /// a vehicle's hearts and air on the right). A layer placed `Below` a vanilla row sees the
+    /// height that row draws at, and one placed `Above` it the height after it. A vanilla row
+    /// that is hidden, canceled or replaced adds nothing. None outside the HUD layer pass.
+    fn gui_status_heights(&self) -> Option<[i32; 2]>;
+    /// Side: client.
     /// Read effective HUD visibility independently of first-person hands.
     fn hud_mode(&self) -> HudMode;
     /// Side: client.

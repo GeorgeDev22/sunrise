@@ -107,7 +107,7 @@ pub struct World {
     pub attachments: sunrise_mod_runtime::attachments::Attachments,
     /// Mod-owned watered areas; never serialized with the world.
     pub water_tickets: sunrise_mod_runtime::water_tickets::WaterTickets,
-    /// The holders lent to mods since the last flush, whose synced changes
+    /// The holders with accepted sync updates since the last flush, whose changes
     /// `flush_attachment_sync` sends.
     pub attachment_syncs: FxHashSet<sunrise_mod_runtime::attachments::Holder>,
     /// Block entities a moving piston landed since the last flush, whose

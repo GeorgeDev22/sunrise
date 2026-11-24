@@ -161,13 +161,13 @@ impl Hooks for OwnedText {
 }
 
 #[test]
-fn checked_model_json_cannot_negotiate_as_owned_text() {
+fn checked_json_cannot_negotiate_as_owned_text() {
     mod_platform::testing::with_mods(
         vec![ModEntry::new("typed_schema", Box::new(OwnedText))].into(),
         || {
             mod_platform::__private::part_tests::install_parts_fixture(mod_api::__private::mods())
                 .unwrap();
-            let model = mod_api::payload_schema::<mod_api::ModelPart>();
+            let json = mod_api::payload_schema::<serde_json::Value>();
             for side in [Side::Client, Side::Server] {
                 let local = Local::capture(side).unwrap();
                 let mut peer = Manifest::builder();
@@ -175,7 +175,7 @@ fn checked_model_json_cannot_negotiate_as_owned_text() {
                     RegistrationPhase::Play,
                     "typed_schema:owned",
                     Flow::Bidirectional,
-                    &mod_api::typed_payload_version("1", model),
+                    &mod_api::typed_payload_version("1", json),
                     false,
                 )
                 .unwrap();

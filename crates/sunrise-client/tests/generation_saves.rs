@@ -450,7 +450,14 @@ fn saved_proto_chunks_restore_exactly() {
         Some(&sunrise_core::nbt::Tag::Int(42))
     );
     assert_eq!(
-        proto.column.saved.as_ref().unwrap().attachments.to_nbt(),
+        proto
+            .column
+            .saved
+            .as_ref()
+            .unwrap()
+            .attachments
+            .try_to_nbt()
+            .unwrap(),
         attachment
     );
     for (i, (original, restored)) in region.into_iter().zip(restored).enumerate() {
@@ -466,7 +473,7 @@ fn saved_proto_chunks_restore_exactly() {
                 extras.root.get(&"example:unknown".into()),
                 Some(&sunrise_core::nbt::Tag::Int(42))
             );
-            assert_eq!(extras.attachments.to_nbt(), attachment);
+            assert_eq!(extras.attachments.try_to_nbt().unwrap(), attachment);
         }
         for y in sunrise_client::chunk::MIN_Y..sunrise_client::chunk::MIN_Y + 384 {
             for lz in 0..16 {

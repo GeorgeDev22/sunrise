@@ -99,7 +99,7 @@ fn drawn_pixel(game: &mut super::Game<'_>) -> [u8; 4] {
         scaled: false,
         background: false,
     });
-    game.render_with(|renderer, frame| renderer.render(frame))
+    game.render_with(|renderer, frame| renderer.render(frame, None))
         .unwrap();
     let result = game.renderer.as_mut().unwrap().screenshot_result.take();
     let mut pending = result.unwrap().unwrap();

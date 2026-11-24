@@ -48,44 +48,55 @@ impl Game<'_> {
     }
 
     pub(super) fn save_game_metadata(&mut self) -> Result<()> {
-        self.save_maps();
-        self.save_random_sequences();
-        self.save_fight();
-        self.save_wandering_trader();
-        self.save_portal_arrivals();
-        self.save_stats();
-        self.save_advancements();
-        self.save_scoreboard();
-        self.save_bossbars();
-        self.save_schedule();
-        self.save_warden_tracker();
-        self.sync_level();
-        // Level::write can synchronously replace the integrated owner file.
-        let _ = self.finish_player_autosaves(true);
-        let stored_owner = self.store_owner();
-        write_level_for_role(
-            &mut self.level,
-            &self.world_root,
-            self.options.execution_role,
-            self.res.items(),
-            self.crash_save.keep_owner_file,
-        )?;
-        // PlayerEvent.SaveToFile for the owner, once level.dat is written.
-        if let Some((uuid, name)) = stored_owner {
-            let directory = sunrise_client::lan::playerdata::directory(&self.world_root);
-            self.native_player_save_to_file(uuid, &name, &directory);
+        let owner_saved = self.save_placed_players();
+        self.save_world_metadata(owner_saved)
+    }
+
+    /// `PlayerList.saveAll`, without removing players or their vehicles. Finish the
+    /// player writes and their file events before `ServerLevel.save` can notify mods.
+    fn save_placed_players(&mut self) -> bool {
+        let mut owner_saved = false;
+        if self.options.execution_role.writes_singleplayer_player()
+            && !self.crash_save.keep_owner_file
+        {
+            let stored_owner = self.store_owner();
+            // A local player can be present in an offline game without a network player list.
+            if stored_owner.is_some() || (self.lan.is_none() && self.player.is_some()) {
+                if stored_owner.is_none() {
+                    self.sync_level();
+                }
+                // A synchronous owner write must not overtake an older player snapshot.
+                let _ = self.finish_player_autosaves(true);
+                match self.level.write_player(&self.world_root, self.res.items()) {
+                    Ok(()) => {
+                        owner_saved = true;
+                        self.save_stats();
+                        self.save_advancements();
+                        if let Some((uuid, name)) = stored_owner {
+                            let directory =
+                                sunrise_client::lan::playerdata::directory(&self.world_root);
+                            self.native_player_save_to_file(uuid, &name, &directory);
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("Sunrise: the owner's playerdata is not saved: {error}")
+                    }
+                }
+            }
         }
-        // PlayerList.saveAll: every placed player saves with the server, to
-        // their own file (`PlayerDataStorage.save`); the owner is also in the
-        // file level.dat names, which is the one it loads from
-        // (`playerdata::load_owner`).
-        if self.options.execution_role == execution_role::ExecutionRole::DedicatedServer
+        if self.options.execution_role.is_logical_server()
             && let Some(host) = self.lan.as_mut()
         {
+            let owner = host.owner.as_ref().map(|owner| owner.uuid);
             // The vehicle tree goes into a player's file when they leave
             // (`take_parent_vehicle`); here it stays in the chunk saves.
             host.hub.guests.update_all(|g| {
-                if g.placed && !self.crash_save.excludes(g.conn) {
+                if g.placed
+                    && g.participates_in_player_simulation()
+                    && !g.released
+                    && Some(g.uuid) != owner
+                    && !self.crash_save.excludes(g.conn)
+                {
                     // Read-only fixture input, correlated with the real save receipt.
                     // Keep this identical on the untouched/fixed selector builds.
                     if std::env::var_os("SUNRISE_DEV_ADVANCEMENT_SELECTOR_AUDIT").is_some() {
@@ -100,22 +111,39 @@ impl Game<'_> {
                     self.player_autosaves.enqueue(g, &self.world_root, self.res.items());
                 }
             });
-        }
-        if self.options.execution_role == execution_role::ExecutionRole::DedicatedServer
-            && let Some(host) = self.lan.as_ref()
-        {
+            let host = self
+                .lan
+                .as_ref()
+                .expect("the player list is still installed");
             self.save_connected_guest_statistics(host);
             for guest in host.hub.guests.iter() {
-                if host
-                    .owner
-                    .as_ref()
-                    .is_some_and(|owner| owner.uuid == guest.uuid)
-                    || !host.play.contains_key(&guest.conn)
-                {
-                    continue;
+                if Some(guest.uuid) != owner && host.play.contains_key(&guest.conn) {
+                    self.save_guest_advancements(host, guest);
                 }
-                self.save_guest_advancements(host, guest);
             }
+        }
+        // PlayerDataStorage logs a failed player write and still saves the levels.
+        let _ = self.finish_player_autosaves(true);
+        owner_saved
+    }
+
+    fn save_world_metadata(&mut self, owner_saved: bool) -> Result<()> {
+        self.save_maps();
+        self.save_random_sequences();
+        self.save_fight();
+        self.save_wandering_trader();
+        self.save_portal_arrivals();
+        self.save_scoreboard();
+        self.save_bossbars();
+        self.save_schedule();
+        self.save_warden_tracker();
+        self.sync_world_level_data();
+        if self.options.execution_role.writes_singleplayer_player() && !owner_saved {
+            // No placed owner (including IntegratedServer.initServer), or the stop path
+            // already saved them. Name a known profile on creation without writing its file.
+            self.level.write_keeping_player(&self.world_root)?;
+        } else {
+            self.level.write_without_player(&self.world_root)?;
         }
         self.save_world_state();
         Ok(())
@@ -129,16 +157,26 @@ impl Game<'_> {
             return Ok(());
         }
         self.admit_level_save()?;
+        let owner_saved = self.save_placed_players();
+        self.write_world(wait, owner_saved)
+    }
+
+    /// Startup has no placed players; at shutdown PlayerList has already
+    /// finished its writes. Do not serialize the integrated server's shell.
+    pub(super) fn save_world_after_players(&mut self, owner_saved: bool) -> Result<()> {
+        self.admit_level_save()?;
+        self.write_world(true, owner_saved)
+    }
+
+    fn write_world(&mut self, wait: bool, owner_saved: bool) -> Result<()> {
         // `DedicatedServer.saveAllChunks` tells the management protocol's clients when a save starts and when
         // it ends without failing, for every save: the command, the autosave, the pause.
         let dedicated = self.is_dedicated_server();
         if dedicated {
             dedicated::events::record_server("saving", serde_json::json!({}));
         }
-        self.save_level(wait)?;
-        self.save_parked_levels(wait)?;
-        self.save_game_metadata()?;
-        let _ = self.finish_player_autosaves(wait);
+        self.save_all_levels(wait)?;
+        self.save_world_metadata(owner_saved)?;
         if wait {
             self.message = Some((
                 sunrise_client::lang::get("commands.save.success"),

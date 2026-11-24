@@ -254,9 +254,11 @@ impl dyn Registrar + '_ {
     /// The Part is skipped only when the type's namespace is the id of an absent package
     /// with a surviving, applicable optional dependency row. An absent package's other
     /// namespaces are unknown; a present package must declare the type.
-    /// The Part's saved state is the key it declares (see [`Self::block_entity_part_with_state`]),
-    /// which a package declares only in its own namespace, so it is saved under this package's id; it
-    /// reaches the owner's state only through the owner's declared attachments. Declaring the type, its
+    /// The Part's saved state is the issued [`AttachmentKey`](crate::AttachmentKey) it declares
+    /// (see [`Self::block_entity_part_with_state`]), registered during startup with
+    /// [`Self::register_attachment_type`] (or looked up from another package via
+    /// [`Self::attachment_key`]). It reaches the owner's state through the owner's declared
+    /// attachments. Declaring the type, its
     /// transform and its initial data stay with the owner. If this package is later removed, the
     /// block entities keep what it saved, unread, and a package that returns reads it again.
     pub fn block_entity_part<P: BlockEntityPart>(
@@ -267,11 +269,9 @@ impl dyn Registrar + '_ {
         self.attach_block_entity_part(kind, type_name::<P>(), Arc::new(part))
     }
     /// [`Self::block_entity_part`] for a Part with typed state (`BlockEntityPartState`):
-    /// each block entity of type `kind` keeps one `P::Data`, under `P::DATA`. Refused, and
-    /// reported as the mod's registration refusal, when `P::DATA` syncs, copies on death,
-    /// is outside the mod's namespaces (a Part on another
-    /// package's type declares its state key as its own package does), or names a key
-    /// this mod already declared with another type.
+    /// each block entity of type `kind` keeps one `P::Data`, under `part.state_key()`.
+    /// Refused, and reported as the mod's registration refusal, when the key syncs, copies on
+    /// death, or was not issued in this registration pass.
     pub fn block_entity_part_with_state<P: crate::BlockEntityPartState>(
         &mut self,
         kind: &crate::BlockEntityTypeKey,
@@ -279,7 +279,7 @@ impl dyn Registrar + '_ {
     ) -> Result<(), crate::BlockEntityStateError> {
         self.declare_block_entity_part_state(
             type_name::<P>(),
-            crate::PartStateDeclaration::of(P::DATA),
+            crate::PartStateDeclaration::of(part.state_key()),
         )?;
         self.block_entity_part(kind, part)
             .map_err(crate::BlockEntityStateError::Part)
@@ -372,9 +372,8 @@ pub trait BlockEntitiesRegistrar {
     ) -> Result<(), crate::BlockEntityPartError>;
 
     /// Record the state declaration of Part `part`, or refuse it (as the mod's registration
-    /// refusal too): see `PartStateDeclaration::check`, and a key outside this mod's
-    /// namespaces or one it declared with another type. Mods reach it through
-    /// `block_entity_part_with_state`.
+    /// refusal too): see `PartStateDeclaration::check` and `PartStateRefusal::StaleKey`. Mods
+    /// reach it through `block_entity_part_with_state`.
     fn declare_block_entity_part_state(
         &mut self,
         part: &'static str,

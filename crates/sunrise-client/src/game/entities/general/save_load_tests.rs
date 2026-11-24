@@ -160,7 +160,9 @@ fn saved_chunk(game: &mut Game<'_>, key: ChunkKey) -> Vec<Tag> {
         HashMap::new();
     let mut keys = HashSet::new();
     keys.insert(key);
-    game.save_every_entity(&keys, &mut out, false);
+    let mut failed = HashMap::new();
+    game.save_every_entity(&keys, &mut out, &mut failed, false);
+    assert!(failed.is_empty());
     out.remove(&key)
         .unwrap_or_default()
         .into_iter()

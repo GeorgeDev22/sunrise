@@ -2,11 +2,7 @@
 //! `clientTick` for every spawner (`mobs::spawner`), the mobs they add, a
 //! spawn egg used on one (`SpawnEggItem.useOn`), their events and the mob
 //! spinning inside (`SpawnerRenderer`).
-use super::{
-    Game,
-    creatures::{Finalized, SpawnReason},
-    persist::SpawnTree,
-};
+use super::{Game, creatures::SpawnReason, persist::SpawnTree};
 use std::collections::HashMap;
 use sunrise_client::{
     Result,
@@ -219,38 +215,38 @@ impl Game<'_> {
         let kind = self.res.mob_types().get(r.id)?.clone();
         let [x, y, z] = r.position;
         let at = Vec3::new(x, y, z);
+        let reason = if r.trial {
+            SpawnReason::TrialSpawner
+        } else {
+            SpawnReason::Spawner
+        };
         let key = if r.finalize {
             // The mob a listened position check created, else a new one.
             let mut mob = l
                 .take_checked(r.id, r.position, r.yaw)
                 .unwrap_or_else(|| Mob::new(l.provisional_id(), kind, at, r.yaw));
-            let reason = if r.trial {
-                SpawnReason::TrialSpawner
-            } else {
-                SpawnReason::Spawner
-            };
-            // TrialSpawner.spawnMob: setPersistenceRequired.
-            mob.persistent = r.trial;
             let mut group = None;
-            match self.finalize_spawn_event(&mut mob, reason, source, &mut group) {
-                (Finalized::Cancelled, _) => return None,
-                (outcome, difficulty) => {
-                    if outcome == Finalized::Done {
-                        let mut level = super::natural_spawning::PassLevel::new(l);
-                        let mut cx = sunrise_client::mobs::finalize::Ctx {
-                            level: &mut level,
-                            random,
-                            difficulty,
-                            created: Vec::new(),
-                            jockey_rider: None,
-                        };
-                        sunrise_client::mobs::finalize::finalize(&mut cx, &mut mob, reason, group);
-                        for m in cx.created {
-                            l.record_pending(&m);
-                            l.spawned.borrow_mut().push(m);
-                        }
-                    }
+            let (event, difficulty) =
+                self.finalize_spawn_event(&mut mob, reason, source, &mut group);
+            if !event.skip_initialization {
+                let mut level = super::natural_spawning::PassLevel::new(l);
+                let mut cx = sunrise_client::mobs::finalize::Ctx {
+                    level: &mut level,
+                    random,
+                    difficulty,
+                    created: Vec::new(),
+                    jockey_rider: None,
+                };
+                sunrise_client::mobs::finalize::finalize(&mut cx, &mut mob, reason, group);
+                for m in cx.created {
+                    l.record_pending(&m);
+                    l.spawned.borrow_mut().push(m);
                 }
+            }
+            // TrialSpawner.spawnMob sets persistence after finalization.
+            mob.persistent |= r.trial;
+            if event.veto_admission {
+                return None;
             }
             // Shulker.finalizeSpawn faces it south.
             if mob.species() == sunrise_client::mobs::Species::Shulker {
@@ -266,27 +262,16 @@ impl Game<'_> {
             planned.push(Planned::Finalized(mob, r.equipment.cloned()));
             key
         } else {
-            let mut tag = r.entity.clone();
-            let double = |v: f64| Tag::Double(v.to_bits());
-            tag.insert(
-                "Pos".into(),
-                Tag::List(vec![double(x), double(y), double(z)]),
-            );
-            tag.insert(
-                "Rotation".into(),
-                Tag::List(vec![
-                    Tag::Float(r.yaw.to_bits()),
-                    Tag::Float(0f32.to_bits()),
-                ]),
-            );
-            if r.trial {
-                tag.insert("PersistenceRequired".into(), Tag::Byte(1));
+            let mut tree = l
+                .take_checked_tree()
+                .or_else(|| self.decode_spawner_tree(r.entity, r.position, r.yaw))?;
+            let mob = tree.root_mob()?;
+            // NeoForge posts FinalizeSpawnEvent even when configuration skips Mob.finalizeSpawn.
+            let (event, _) = self.finalize_spawn_event(mob, reason, source, &mut None);
+            mob.persistent |= r.trial;
+            if event.veto_admission {
+                return None;
             }
-            let mut tag = Tag::Compound(tag);
-            // EntityType.loadEntityRecursive applies the spawner's placement
-            // callback to every passenger as well as the root.
-            super::commands::place_summoned(&mut tag, r.position);
-            let mut tree = SpawnTree::decode(self, tag)?;
             if !l.admit_pending_tree(&mut tree) {
                 return None;
             }
@@ -295,6 +280,22 @@ impl Game<'_> {
             key
         };
         Some(SpawnerAdded { id: key, mob: true })
+    }
+    pub(super) fn decode_spawner_tree(
+        &self,
+        entity: &sunrise_core::nbt::Compound,
+        position: [f64; 3],
+        yaw: f32,
+    ) -> Option<SpawnTree> {
+        let mut tag = entity.clone();
+        tag.insert(
+            "Rotation".into(),
+            Tag::List(vec![Tag::Float(yaw.to_bits()), Tag::Float(0f32.to_bits())]),
+        );
+        let mut tag = Tag::Compound(tag);
+        // EntityType.loadEntityRecursive runs the placement callback for every member.
+        super::commands::place_summoned(&mut tag, position);
+        SpawnTree::decode(self, tag)
     }
     /// What a spawner's tick or a spawn egg did, shown and sent.
     fn apply_spawner_events(

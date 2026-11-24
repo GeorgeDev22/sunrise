@@ -1537,7 +1537,7 @@ fn assign_local_styles(root: &Text) -> (HashMap<usize, usize>, Vec<StyleEntry<'_
     (ids, styles)
 }
 /// In-process engine text paired with its inherited API styles so layout and
-/// visual-order reads (`text_split`, `text_visual_order`, `text_lines`)
+/// formatted reads (`text_split`, `visit_text_visual_order`, `visit_text_lines`)
 /// preserve opaque click/hover/metadata payloads without JSON serialization.
 pub struct LocalText<'a> {
     engine: engine::Text,

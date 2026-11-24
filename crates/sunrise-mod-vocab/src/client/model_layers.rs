@@ -21,7 +21,7 @@ use sunrise_core::geometry::Direction;
 /// texels, with its texture unchanged: a hat or an armour layer over a head.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: local client model box deformation, baked in-process.
 pub struct CubeDeformation {
     /// Growth on the x axis, in texels.
     pub grow_x: f32,
@@ -65,7 +65,7 @@ impl CubeDeformation {
 /// then y, then x, as `ModelPart.translateAndRotate` turns it) and its scale.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: local client model part pose, used in-process.
 pub struct PartPose {
     /// Position on the x axis, in texels.
     pub x: f32,
@@ -153,7 +153,7 @@ impl PartPose {
 /// One box of a part (`CubeDefinition`), as a [`CubeListBuilder`] adds it.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: local client model cube definition, baked in-process.
 pub struct CubeDefinition {
     /// Its corner at the least x, y and z, in texels from the part's pivot.
     pub origin: [f32; 3],
@@ -372,6 +372,7 @@ struct PartNode {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[serde(try_from = "MeshDefinitionData")]
 // exhaustive: private fields; use the builder to create the tree
+// no wire: local client model mesh definition, serialized via JSON when needed.
 pub struct MeshDefinition {
     parts: Vec<PartNode>,
 }
@@ -477,7 +478,7 @@ impl MeshDefinition {
 /// `LayerDefinition`: a mesh and the size of the texture its boxes are on.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: local client model layer definition, baked at startup.
 pub struct LayerDefinition {
     /// The model mesh to bake.
     pub mesh: MeshDefinition,
@@ -506,16 +507,14 @@ impl LayerDefinition {
 
 impl RegisterLayerDefinitionsEvent<'_> {
     /// Register a supplier for a model layer ID such as `mymod:golem#main`.
-    /// Use `<namespace>:<path>#<layer>` with both delimiters. The namespace and path follow
-    /// vanilla `Identifier` rules (including empty components), and the layer can be any string,
-    /// including empty. When multiple registrations share an ID, the last supplier wins
-    /// and overwritten suppliers never run (matching NeoForge's
-    /// `ClientHooks.registerLayerDefinition`). Exact collisions with vanilla layer keys in
-    /// `entity-models.json` fail client startup (matching vanilla's
-    /// `LayerDefinitions.createRoots`). Malformed IDs and registrations from a phase-refused
-    /// listener never call their supplier. An accepted supplier runs once at client startup to
-    /// build the frozen definition, not when the layer is baked or resources are reloaded.
-    /// Capture owned data in the supplier.
+    /// Write the model `Identifier` before the first `#` in its full `namespace:path` form,
+    /// as in `ModelLayerLocation`. Either half may be empty. The suffix after `#` is unrestricted.
+    /// Duplicate mod registrations for an ID overwrite earlier suppliers (last-writer-wins)
+    /// before freeze. Malformed IDs, collisions with existing vanilla layer definitions, or an
+    /// unavailable vanilla layer table fail startup freeze before any supplier runs or the table
+    /// publishes. Each winning supplier runs once at client startup, not on bake or reload.
+    /// A panicking supplier leaves no definition and its mod is named in the error log and toast;
+    /// it does not prevent other suppliers from running. Capture owned data in the supplier.
     pub fn register(
         &mut self,
         id: impl Into<String>,
@@ -534,15 +533,32 @@ impl RegisterLayerDefinitionsEvent<'_> {
 pub struct LayerDefinitionRegistration {
     /// The model layer ID, validated when the layer table is frozen.
     pub id: String,
-    /// The supplier called when assembling the frozen table.
-    pub supplier: Box<dyn Fn() -> LayerDefinition + Send + Sync>,
+    supplier: Box<dyn Fn() -> LayerDefinition + Send + Sync>,
+}
+
+impl LayerDefinitionRegistration {
+    /// Realize a winning supplier once at freeze, under its registering mod's identity.
+    pub fn build(&self, mod_id: &'static str) -> Option<LayerDefinition> {
+        let id = &self.id;
+        let Some(index) = crate::__private::mod_index(mod_id) else {
+            log::warn!("Model layer {id} has no installed owner {mod_id}");
+            return None;
+        };
+        if !crate::__private::mod_index_on(index) {
+            log::warn!("Model layer {id}: mod {mod_id} is disabled");
+            return None;
+        }
+        let operation = "build_layer_definition";
+        let _owner = crate::runtime::mark_mod(mod_id, operation);
+        crate::runtime::invoke_once(operation, mod_id, &self.supplier)
+    }
 }
 
 /// A corner of a baked face (`ModelPart.Vertex`): in texels in its part's
 /// frame, and where it falls on the texture, 0 to 1 across it.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: local client baked model vertex.
 pub struct ModelVertex {
     /// The vertex position, in texels.
     pub pos: [f32; 3],
@@ -563,7 +579,7 @@ impl ModelVertex {
 /// part's frame.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: local client baked model polygon.
 pub struct ModelPolygon {
     /// The four corners in winding order.
     pub vertices: [ModelVertex; 4],
@@ -581,12 +597,9 @@ impl ModelPolygon {
 /// `ModelPart`: a baked part, its children by name, and the pose a mod sets
 /// each frame before drawing it (`setupAnim`), from the pose it was baked
 /// with (`reset_pose`).
-///
-/// Wire uses JSON with at most 32 nested containers; named children consume
-/// object, list and tuple levels. Encoding preflights children before serialization.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[non_exhaustive]
-// no wire: handwritten JSON-backed Wire preflights recursive children before serde.
+// no wire: local client model tree, baked and posed in-process rather than sent as a binary wire payload.
 pub struct ModelPart {
     /// Where it sits in its parent, in texels.
     pub x: f32,

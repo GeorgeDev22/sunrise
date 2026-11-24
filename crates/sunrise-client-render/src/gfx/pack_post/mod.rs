@@ -46,7 +46,9 @@ pub trait PackPostExt: Sized {
         motion: (&[(u32, u64)], &[u32]),
     );
     /// Runs the pack over the world drawn into `world` (colour) and `world_depth`, then draws
-    /// the result onto `screen`. Fails once the device is lost (`lost`).
+    /// the result onto `screen`. Notifies after the sky if the frame assigned the stage to this
+    /// pack, and after the last pack world pass, before composition. Fails once the device is lost (`lost`).
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &mut self,
         device: &wgpu::Device,
@@ -61,6 +63,8 @@ pub trait PackPostExt: Sized {
         window: [u32; 2],
         pages: &[TerrainPage],
         terrain: &mut TerrainDraw<'_>,
+        boundaries: WorldBoundaries,
+        boundary: impl FnMut(&mut wgpu::CommandEncoder, WorldBoundary<'_>) -> bool,
         lost: &std::sync::atomic::AtomicBool,
         poll: sunrise_render_shaderpack::PollLive,
     ) -> Result<(), String>;
@@ -172,6 +176,7 @@ impl PackPostExt for PackPost {
 
     /// Runs the pack over the world drawn into `world` (colour) and `world_depth`, then draws
     /// the result onto `screen`.
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &mut self,
         device: &wgpu::Device,
@@ -186,6 +191,8 @@ impl PackPostExt for PackPost {
         window: [u32; 2],
         pages: &[TerrainPage],
         terrain: &mut TerrainDraw<'_>,
+        boundaries: WorldBoundaries,
+        boundary: impl FnMut(&mut wgpu::CommandEncoder, WorldBoundary<'_>) -> bool,
         lost: &std::sync::atomic::AtomicBool,
         poll: sunrise_render_shaderpack::PollLive,
     ) -> Result<(), String> {
@@ -236,6 +243,8 @@ impl PackPostExt for PackPost {
             frame.shadow_scene_revision,
             frame.ticks,
             frame.pack.day_time,
+            boundaries,
+            boundary,
             lost,
             poll,
         )

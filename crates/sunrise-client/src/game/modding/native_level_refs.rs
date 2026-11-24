@@ -270,6 +270,11 @@ impl Game<'_> {
     pub(super) fn level_logical_height(&self, level: LevelRef) -> Option<i32> {
         Some(self.native_level_read_world(level)?.shape.logical_height)
     }
+    /// `LevelData.isHardcore`: the world's flag on a server, the login packet's on a client.
+    pub(super) fn level_is_hardcore(&self, level: LevelRef) -> Option<bool> {
+        self.native_level_read_world(level)?;
+        Some(self.level.hardcore)
+    }
 
     /// `BlockGetter.getBlockFloorHeight` with an empty collision context.
     /// Uses the normal dynamic shapes, querying below only when this shape is empty.
@@ -325,10 +330,12 @@ impl Game<'_> {
         if self.is_logical_server() {
             return self.native_level_world(level);
         }
-        (self.remote.as_ref().is_some_and(|r| r.logged_in)
-            && self.level_handle_current(level)
-            && level.dimension() == self.native_level_key())
-        .then_some(&self.world)
+        let remote = self.remote.as_ref().filter(|r| r.logged_in)?;
+        if let Some(constructing) = remote.constructing(level) {
+            return Some(&constructing.world);
+        }
+        (self.level_handle_current(level) && level.dimension() == remote.level_key)
+            .then_some(&self.world)
     }
     /// Find a loaded chunk in an open server level: `ServerChunkCache.getChunkNow`, which also
     /// makes a FULL column one of the level's recent FULL lookups (`Streaming::note_full_read`).
@@ -2488,7 +2495,7 @@ mod tests {
             let fresh = overworld
                 .add_water_ticket(game, [0, 64, 0], [5, 65, 5])
                 .unwrap();
-            game.native_levels_closing();
+            game.close_loaded_levels_for_stop();
             assert!(!overworld.has_water_ticket(game, [0, 64, 0]));
             assert!(!nether.has_water_ticket(game, [3, 64, 3]));
             assert!(!fresh.remove(game));
@@ -2547,12 +2554,13 @@ mod tests {
                 .unwrap();
             let root = game.save.root.clone();
             let shape = game.world.shape;
-            game.native_levels_closing();
+            game.close_loaded_levels_for_stop();
             let save = SaveDir::new(root, shape, Some(Default::default()));
             let chunk = save.load(0, 0, registry, game.res.biomes()).unwrap();
             game.world = World::new(registry.default_state("minecraft:air").unwrap(), 0);
             game.world.chunks.insert((0, 0), Arc::new(chunk));
             game.save = Arc::new(save);
+            game.levels.active_closed = false;
             game.native_lifecycle
                 .begin_open(mod_api::Authority::IntegratedServer);
             let reopened = game.level(game.dim.id()).unwrap();

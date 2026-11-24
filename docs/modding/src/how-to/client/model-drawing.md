@@ -1,10 +1,11 @@
 # Drawing resolved models
 
 Register standalone models during `standalone_models`, then resolve their `ModelRef`
-through `RenderAssets::model` after resources are published. World render hooks receive
-`WorldDrawContext`: submit transient copies with `draw_model_instances`, or retain
-copies in a group. GUI scenes, mobs and kept/spinning renderers use their
-CPU routes; groups are a world-drawing facility, not another renderer.
+through `RenderAssets::model` after resources are published. `submit_custom_geometry`
+(and registered debug renderers) receive `WorldDrawContext`: submit transient copies
+with `draw_model_instances`, or retain copies in a group. Update retained groups before
+render passes execute in `prepare_render_buffers`. GUI scenes, mobs and kept/spinning
+renderers use their CPU routes; groups are a world-drawing facility, not another renderer.
 
 ## Local player skins
 
@@ -92,22 +93,25 @@ stack submitted during a frame. Rendering is not a source of combat state; see
 
 ## Entity model layers
 
-At client startup, implement `Hooks::register_layer_definitions` and call
+At client startup, implement `Hooks::register_layer_definitions` (hook version 5) and call
 `event.register("mymod:golem#main", create_golem_layer)`, where `create_golem_layer`
 returns a `LayerDefinition` built from a `MeshDefinition` and the texture size.
 The supplier is `Fn() -> LayerDefinition + Send + Sync + 'static`: capture owned
-inputs, not the event or its registration context. Use a `<namespace>:<path>#<layer>`
-ID matching vanilla's `ModelLayerLocation`. Include both separators even when a
-component is empty. Namespace and path follow vanilla's `Identifier` rules, and the
-layer can be any string. An exact collision with a vanilla layer key in
-`entity-models.json` fails client startup.
+inputs, not the event or its registration context. Write the model `Identifier` as
+`namespace:path` (with `:` even if a half is empty), followed by `#` and the layer name.
+The suffix after the first `#` is preserved verbatim.
 
-When multiple registrations share an ID, the last registration wins and overwritten
-suppliers never run. The game calls each winning supplier once when it freezes the
-layer table, in registration order. The frozen table retains the definitions, not the
-suppliers. Call `ClientHost::bake_layer("mymod:golem#main")` during renderer setup,
-then keep the resulting `ModelPart` tree for posing and drawing. Baking again and
-reloading resources reuse the definition.
+Duplicate mod registrations for the same ID overwrite earlier suppliers (last-writer-wins)
+before freeze, so overwritten suppliers never run. Malformed IDs, collisions with existing
+vanilla layer definitions, or an unavailable/invalid vanilla `entity-models.json` fail
+startup freeze cleanly before invoking any supplier or publishing. The game calls each
+winning supplier once when it freezes the layer table. A panicking supplier leaves no
+layer and is reported in the error log and client error toast under its mod's name.
+Other suppliers, including that mod's other suppliers, still run. The frozen table
+retains the definitions, not the suppliers. Call
+`ClientHost::bake_layer("mymod:golem#main")` during renderer setup, then keep the
+resulting `ModelPart` tree for posing and drawing. Baking again and reloading
+resources reuse the definition.
 
 ## Worn humanoid equipment
 
@@ -243,7 +247,7 @@ after it applies. Successful reloads invalidate old handles, while refused prepa
 A copy whose colour alpha is below `0xFF` draws every quad in the translucent material described below.
 A model with translucent faces otherwise keeps its per-quad routing: only those faces take the translucent
 material. Copies with a colour other than white, hidden faces, a model with translucent faces or a block state model are baked on the CPU
-instead of drawn as GPU instances; the 16,384-copy budget bounds that cost.
+instead of drawn as GPU instances; GPU-routed copies past GPU buffer room also fall back to CPU baking.
 `overlay` (the hurt tint) has no effect on a copy on the translucent or block state model route, including any
 opaque faces it holds. `color` (the whole baked block model, multiplied at draw time) and `hidden_faces` (a
 cull mask the caller supplies) are Sunrise's options for mod copies.
@@ -350,7 +354,7 @@ fn client_tick_pre(&self, host: &mut dyn ClientHost, _: &mut ClientTickPreEvent)
 
 ## Persistent groups
 
-- `host.create_group(model, capacity)` reserves up to 16,384 copies of a model.
+- `host.create_group(model, capacity)` reserves storage for `capacity` copies of a model.
   Initial drawn length is zero.
 - `group.write(host, first, copies)` atomically overwrites a range and extends drawn
   length if needed. Unwritten slots start as white, full-bright identity copies at
@@ -366,12 +370,30 @@ fn client_tick_pre(&self, host: &mut dyn ClientHost, _: &mut ClientTickPreEvent)
   submissions in that view are ignored. Culling uses the composed pose.
 - `group.destroy(host)` retires the handle and releases capacity and CPU caches.
   Copies already accepted for a view remain drawn; subsequent calls return `Stale`.
+- `Hooks::prepare_render_buffers` runs once per world view before any pass-bearing render stage.
+  If a classic pack owns the sky disc or celestial work, `RenderLevelStage::AfterSky` fires once
+  after that work, following the pack's world import. Preparation
+  lends `&WorldRenderView<'_>` (camera, world partial tick, game time, improved-transparency state,
+  and visible `RenderableSection`s) and `&dyn ClientHost` so mods can update retained
+  `InstanceGroups` before the render passes execute.
+  To draw at a specific stage, prepare engine lines or quads with `event.context.lines(stage, &lines)`
+  or `.quads(stage, &quads)`. Keep the returned `PreparedWorldDraw` for this view. At the matching
+  `render_level_stage` callback, call `draw(batch)` on `event.context.world_pass()` or
+  `event.context.oit_pass()` as appropriate. Draws run in call order, without uploading from the
+  pass; handles cannot be used in a different view or stage. With a classic pack that owns feature
+  drawing, the two feature stages follow the pack's own opaque and translucent groups. They run
+  only if the pack's world color buffer can blend engine geometry. `AfterSky` and `AfterLevel` lend no
+  pass, and stages skipped by the renderer are not replayed later.
+  Drawing values (`WorldLine`, `WorldQuad`, `WorldDepth`, `NameTagOptions`, and `DrawError`)
+  and stage selectors (`RenderLevelStage` and `OitStage`) are client-local. To synchronize a
+  draw effect, send only its data in your own typed payload and choose the stage on the client.
 
-Each mod may reserve 65,536 copies across all its groups; a zero-capacity group
-reserves one slot. Destroying a group releases that reservation immediately. A view
-accepts 16,384 visible copies shared across transient batches, groups and listeners,
-and at most 16,384 group submissions. Culled copies do not consume the visible-copy
-budget. Refusal is atomic: no prefix of a refused submission draws.
+Per-view draw storage grows dynamically without fixed per-view or per-mod copy caps,
+and copies past GPU instance buffer room fall back to CPU baking. Culled copies are
+omitted before staging. For transient `draw_model_instances` calls, copies are culled
+against the frustum first and any individual visible copy with non-finite coordinates
+or transforms, or light channels outside `0..=15`, is skipped without rolling back
+valid copies in the same slice.
 
 Groups cache converted records on the CPU. Unchanged groups avoid pose, normal and
 tint conversion, but cull and stage visible copies each frame. Every visible

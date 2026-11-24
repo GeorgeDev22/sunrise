@@ -444,7 +444,10 @@ fn generic_client_entries_use_only_builtin_synced_and_negotiated_tables() {
                 else {
                     panic!("expected negotiated snapshot");
                 };
-                sunrise_client::datapack_net::accept(&bytes).unwrap();
+                let receiver = &mut game.remote.as_mut().unwrap().datapacks;
+                for chunk in sunrise_client::datapack_net::chunks(&bytes).unwrap() {
+                    receiver.accept_chunk(&chunk).unwrap();
+                }
                 let remote = host(game)
                     .registry_entry("registry_entry_test:spell", "addon:remote")
                     .unwrap();
@@ -477,7 +480,7 @@ fn generic_client_entries_use_only_builtin_synced_and_negotiated_tables() {
                     host(game).registry_entry_in_tag(&step, "minecraft:vibrations"),
                     Some(false)
                 );
-                sunrise_client::datapack_net::clear_received();
+                game.remote.as_mut().unwrap().datapacks = Default::default();
                 assert_eq!(host(game).registry_entry_in_tag(&remote, "addon:hot"), None);
             });
         },

@@ -623,7 +623,7 @@ impl Game<'_> {
                 let sent = self
                     .as_guest_at(gi, conn, |g| {
                         g.remember_player_target(Some(id as u32));
-                        g.pvp_hit_after(on_ground, stops_sprint)
+                        g.pvp_hit_after(id as u32, on_ground, stops_sprint, strike.weapon.as_ref())
                     })
                     .ok()
                     .flatten();

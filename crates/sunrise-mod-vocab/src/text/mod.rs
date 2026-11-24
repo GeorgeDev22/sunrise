@@ -542,9 +542,30 @@ fn discard_nested_tag(tag: &mut Tag) {
     }
 }
 
+/// Drain the opaque tags before a style is freed. Nested hover text has its own iterative drop.
+pub(crate) fn discard_style_tags(style: &mut TextStyle) {
+    discard_nested_tag(&mut style.metadata);
+    if let Some(
+        TextClick::ShowDialog(tag)
+        | TextClick::Custom {
+            payload: Some(tag), ..
+        },
+    ) = &mut style.click
+    {
+        discard_nested_tag(tag);
+    }
+    if let Some(TextHover::Item {
+        components: Some(tag),
+        ..
+    }) = &mut style.hover
+    {
+        discard_nested_tag(tag);
+    }
+}
+
 fn drain_text_node(node: &mut Text, stack: &mut Vec<Text>) {
     discard_nested_tag(&mut node.metadata);
-    discard_nested_tag(&mut node.style.metadata);
+    discard_style_tags(&mut node.style);
     stack.append(&mut node.children);
     match &mut node.content {
         TextContent::Translatable { arguments, .. } => stack.append(arguments),
@@ -571,34 +592,18 @@ fn drain_text_node(node: &mut Text, stack: &mut Vec<Text>) {
         }
         TextContent::Literal(_) | TextContent::Keybind(_) | TextContent::Score { .. } => {}
     }
-    if let Some(
-        TextClick::ShowDialog(tag)
-        | TextClick::Custom {
-            payload: Some(tag), ..
-        },
-    ) = &mut node.style.click
-    {
-        discard_nested_tag(tag);
-    }
     match &mut node.style.hover {
         Some(TextHover::Text(_)) => {
             if let Some(TextHover::Text(child)) = node.style.hover.take() {
                 stack.push(*child);
             }
         }
-        Some(TextHover::Item {
-            components: Some(tag),
-            ..
-        }) => discard_nested_tag(tag),
         Some(TextHover::Entity { name, .. }) => {
             if let Some(child) = name.take() {
                 stack.push(*child);
             }
         }
-        Some(TextHover::Item {
-            components: None, ..
-        })
-        | None => {}
+        Some(TextHover::Item { .. }) | None => {}
     }
 }
 

@@ -118,6 +118,7 @@ pub enum Event {
     /// Configuration finished: the play state begins with these registries.
     Joined {
         registries: Arc<Dynamic>,
+        datapacks: crate::datapack_net::Receiver,
         uuid: u128,
         name: String,
     },
@@ -142,7 +143,10 @@ pub enum Event {
     /// Configuration finish commits the ACK and Play phase on main.
     FinishConfiguration(Box<configuration::FinishConfiguration>),
     /// The server sent us back to configuration and finished it again.
-    Reconfigured(Arc<Dynamic>),
+    Reconfigured {
+        registries: Arc<Dynamic>,
+        datapacks: crate::datapack_net::Receiver,
+    },
     /// ClientboundResourcePackPushPacket, in configuration or in play.
     PackPush(cfg::ResourcePackPush),
     /// ClientboundResourcePackPopPacket: one pack, or every pack.
@@ -204,7 +208,7 @@ impl Event {
             | Self::Transfer(_)
             | Self::Status(_)
             | Self::Joined { .. }
-            | Self::Reconfigured(_)
+            | Self::Reconfigured { .. }
             | Self::Features(_)
             | Self::FarTerrain(_)
             | Self::CustomBooks
@@ -251,10 +255,16 @@ impl Event {
             // configure only inserts/replaces before freezing these snapshots.
             Self::Joined {
                 registries,
-                uuid: _,
+                datapacks,
                 name,
-            } => dynamic(registries).saturating_add(name.capacity()),
-            Self::Reconfigured(registries) => dynamic(registries),
+                ..
+            } => dynamic(registries)
+                .saturating_add(datapacks.owned_heap_bytes())
+                .saturating_add(name.capacity()),
+            Self::Reconfigured {
+                registries,
+                datapacks,
+            } => dynamic(registries).saturating_add(datapacks.owned_heap_bytes()),
             Self::Packet(packet) | Self::ObservePacket(packet) => {
                 size_of::<play::Clientbound>() + packet.owned_heap_bytes()
             }
@@ -1465,7 +1475,7 @@ fn run(
         writer.attach_droppable(queue.clone());
     }
     *shared_writer.lock().unwrap() = Some(writer);
-    let registries = configure(
+    let (registries, datapacks) = configure(
         &mut reader,
         shared_writer,
         configuring,
@@ -1476,11 +1486,13 @@ fn run(
         payloads,
     )?;
     let registries = Arc::new(registries);
-    let _ = send.send_wait(Event::Joined {
+    send.send_wait(Event::Joined {
         registries: registries.clone(),
+        datapacks,
         uuid: profile.uuid,
         name: profile.name,
-    });
+    })
+    .map_err(|error| Reason::plain(error.to_string()))?;
     receive_play(
         &mut reader,
         registries,
@@ -1555,6 +1567,17 @@ impl PhaseChange {
             &play::Serverbound::ConfigurationAcknowledged(Empty).encode(),
         );
         let _ = self.resume.send(result);
+    }
+
+    #[cfg(feature = "test-payload-probe")]
+    pub fn dummy_for_test() -> Self {
+        let (resume, _rx) = std::sync::mpsc::channel();
+        Self {
+            writer: Arc::new(Mutex::new(None)),
+            configuring: Arc::new(AtomicBool::new(false)),
+            payloads: crate::raw_payloads::Transport::empty(),
+            resume,
+        }
     }
 }
 
@@ -1946,7 +1969,7 @@ fn receive_play(
                     .recv()
                     .map_err(|_| Reason::plain("Disconnected"))?
                     .map_err(|error| connection_lost(error, lang))?;
-                let snapshot = configure(
+                let (snapshot, datapacks) = configure(
                     reader,
                     shared_writer,
                     configuring,
@@ -1958,7 +1981,11 @@ fn receive_play(
                 )?;
                 registries = Arc::new(snapshot);
                 io = new_listener();
-                let _ = send.send_wait(Event::Reconfigured(registries.clone()));
+                send.send_wait(Event::Reconfigured {
+                    registries: registries.clone(),
+                    datapacks,
+                })
+                .map_err(|error| Reason::plain(error.to_string()))?;
             }
             play::Clientbound::CookieRequest(q) => {
                 io.common.queue_cookie(send, Cookie::Request(q))?;
@@ -2044,7 +2071,7 @@ fn configure(
     cookies: &Cookies,
     resources: &ItemData,
     payloads: &Arc<crate::raw_payloads::Transport>,
-) -> Result<Dynamic, Reason> {
+) -> Result<(Dynamic, crate::datapack_net::Receiver), Reason> {
     use sunrise_protocol::payload_negotiation::Phase;
     let io = CommonIo::new(writer, cookies, Phase::Configuration);
     let config = Arc::new(Configuration::default());
@@ -2053,7 +2080,7 @@ fn configure(
     let mut features = None;
     let mut negotiation =
         sunrise_protocol::payload_negotiation::Negotiation::new(payloads.local.manifest.clone());
-    crate::datapack_net::clear_received();
+    let mut datapacks = crate::datapack_net::Receiver::default();
     let reply = |p: cfg::Serverbound| -> Result<(), Reason> {
         match writer.lock().unwrap().as_mut() {
             Some(w) => p
@@ -2143,7 +2170,7 @@ fn configure(
                 menu_extra_revision = revision;
             }
             cfg::Clientbound::CustomPayload(p) if p.channel == crate::datapack_net::CHANNEL => {
-                crate::datapack_net::accept_chunk(&p.data).map_err(Reason::plain)?;
+                datapacks.accept_chunk(&p.data).map_err(Reason::plain)?;
             }
             cfg::Clientbound::CustomPayload(p) => {
                 let endpoint = crate::raw_payloads::Endpoint::client(
@@ -2278,12 +2305,13 @@ fn configure(
                     writer: writer.clone(),
                     configuring: configuring.clone(),
                     play,
+                    datapacks,
                     content_verified,
                     menu_extra_revision,
                     resume,
                 })))
                 .map_err(|error| Reason::plain(error.to_string()))?;
-                let registries = match ready.recv() {
+                let (registries, datapacks) = match ready.recv() {
                     Ok(result) => result?,
                     Err(_) => {
                         if let Some(reason) = config.take_packet_error() {
@@ -2295,7 +2323,7 @@ fn configure(
                 if let Some(features) = features {
                     let _ = send.send_wait(Event::Features(features));
                 }
-                return Ok(registries);
+                return Ok((registries, datapacks));
             }
             _ => {}
         }
@@ -3939,7 +3967,7 @@ mod tests {
                     panic!("expected the configuration finish task");
                 };
                 change.acknowledge();
-                let registries = worker.join().unwrap().unwrap();
+                let (registries, _) = worker.join().unwrap().unwrap();
                 assert_eq!(registries.consume_effect_id("effect_test:charge"), Some(0));
                 assert_eq!(
                     registries.consume_effect_id("minecraft:apply_effects"),
@@ -4160,7 +4188,7 @@ mod tests {
         let revision = thread
             .join()
             .unwrap()
-            .map(|registries| registries.menu_extra_revision)
+            .map(|(registries, _)| registries.menu_extra_revision)
             .unwrap_or(0);
         drop(writer);
         std::fs::remove_dir_all(root).unwrap();
@@ -4834,7 +4862,7 @@ mod tests {
             assert_eq!(cfg::Serverbound::decode(id, &body).unwrap(), expected);
         }
         let (event, _) = events.recv_timeout_owned(timeout).unwrap().into_parts();
-        assert!(matches!(event, Event::Reconfigured(_)));
+        assert!(matches!(event, Event::Reconfigured { .. }));
         server.writer.shutdown();
         thread.join().unwrap();
         std::fs::remove_dir_all(root).unwrap();

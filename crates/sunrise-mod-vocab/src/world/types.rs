@@ -1301,22 +1301,6 @@ impl TickId {
     }
 }
 
-/// The world phases (`world_lifecycle`'s `phase`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// The phase names are the hook log's stable vocabulary (the Debug text
-/// the mixins write); keep them despite the shared prefix.
-#[allow(clippy::enum_variant_names)]
-#[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
-pub enum WorldPhase {
-    /// The open failed; `error_text` is the engine's own error text.
-    WorldOpenFailed,
-    /// World close final.
-    WorldCloseFinal,
-    /// The server loop or final save failed; `error_text` carries the error.
-    WorldCloseFailed,
-}
-
 /// The tick phases carry whether the world runs, including frozen steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1334,18 +1318,17 @@ pub enum ServerTickPhase {
     },
 }
 
-/// Context for every world lifecycle phase.
-/// `authority` is the server role. LocalAuthoritative and RemoteClient never
-/// fire. `epoch` identifies the open attempt, including failed opens;
-/// the same epoch identifies its ready, final-close, or failed-close event.
-/// `tick` counts non-paused server ticks since the world opened.
+/// Context carried by server tick notifications (`server_tick`) and world-read queries.
+/// `authority` is the server role. `LocalAuthoritative` and `RemoteClient` never
+/// fire. `epoch` identifies the world open attempt, and `tick` counts non-paused
+/// server ticks since the world opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
 pub struct LifecycleContext {
-    /// The server role that fired the phase.
+    /// The server role that owns the world.
     pub authority: Authority,
-    /// Identifies the open attempt this phase belongs to.
+    /// Identifies the world open attempt.
     pub epoch: WorldEpoch,
     /// Non-paused server ticks since the world opened.
     pub tick: TickId,
@@ -1782,7 +1765,7 @@ pub trait LevelRandomHost: LevelHost {
     fn container_signal(&mut self, _pos: [i32; 3]) -> Option<i32> {
         None
     }
-    /// The holders' server-owned attachments; `TYPE.get(host, holder)` reads one through it.
+    /// The holders' server-owned attachments; `key.get_in(level, holder, read)` reads one through it.
     fn attachments(&mut self) -> &mut dyn AttachmentStore {
         unimplemented!("LevelRandomHost::attachments")
     }

@@ -147,8 +147,6 @@ pub(in crate::game) fn listen_snapshot(tick: &TickThread) -> Option<ListenSnapsh
         index.blocks(),
     ))
 }
-#[path = "api_values/inside_write.rs"]
-mod inside_write;
 #[path = "api_values/landing_write.rs"]
 mod landing_write;
 #[path = "api_values/recipe_inputs.rs"]
@@ -2546,107 +2544,11 @@ mod declaration_snapshot_tests {
     }
 }
 
-#[path = "api_values/gui_draw.rs"]
-mod gui_draw;
 #[path = "api_values/text_boundary.rs"]
 mod text_boundary;
 #[cfg(test)]
-mod gui_draw_boundary_tests {
+mod text_boundary_tests {
     use super::{TryIntoApi, TryIntoEngine};
-    use serde_json::json;
-    use sunrise_client::{
-        hud_layout::{Blend, GuiDraw as D, PoseOp},
-        text::Text,
-    };
-
-    #[test]
-    fn gui_commands_keep_every_variant_field_order_and_text_source() {
-        let text = Text::from(
-            json!({"translate":"test.hud", "fallback":"%s", "with":[{"text":"name"}], "bold":false, "test:meta":{"n":1}}),
-        );
-        let commands = vec![
-            D::Sprite {
-                sprite: String::from("test:sprite").into(),
-                x: -1,
-                y: 2,
-                w: 3,
-                h: 4,
-                region: Some([5, 6, 7, 8]),
-                color: 0x12345678,
-                blend: Blend::Crosshair,
-            },
-            D::AtlasSprite {
-                sprite: "test:atlas".into(),
-                x: 11,
-                y: 12,
-                w: 13,
-                h: 14,
-                color: 15,
-            },
-            D::Blit {
-                texture: "test:texture".into(),
-                blend: Blend::Nausea,
-                x: 21,
-                y: 22,
-                w: 23,
-                h: 24,
-                uv: [0.25, 0.5],
-                src: [26, 27],
-                tex: [28, 29],
-                color: 30,
-            },
-            D::Fill {
-                x0: -31,
-                y0: 32,
-                x1: 33,
-                y1: 34,
-                color: 35,
-            },
-            D::FillGradient {
-                x0: 36,
-                y0: -37,
-                x1: 38,
-                y1: 39,
-                top: 0x8000_0040,
-                bottom: 0xFF00_0041,
-            },
-            D::Text {
-                text: text.clone(),
-                x: 41,
-                y: 42,
-                color: 43,
-                shadow: false,
-            },
-            D::Item {
-                slot: 40,
-                x: 51,
-                y: 52,
-                seed: -53,
-                scale: [0.5, 1.5],
-                pivot: [55., 56.],
-            },
-            D::PlayerFace {
-                uuid: 0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10,
-                x: -57,
-                y: 58,
-                size: 59,
-                hat: false,
-                flip: true,
-                color: 0x8000_0060,
-            },
-            D::Push(vec![PoseOp::Translate(61., 62.), PoseOp::Scale(0.5, 1.5)]),
-            D::Pop,
-        ];
-        let api = commands.try_into_api().unwrap();
-        let actual: Result<Vec<D>, mod_api::text::TextFormError> = api.try_into_engine(&());
-        let actual = actual.unwrap();
-        assert_eq!(actual, commands);
-        let D::Text { text: actual, .. } = &actual[5] else {
-            panic!("text command")
-        };
-        assert_eq!(actual.component(), text.component());
-    }
-
     #[test]
     fn tooltip_pairs_round_trip_without_an_item_registry() {
         let lines = vec![(sunrise_client::text::Text::literal("tip"), 0xff00ff00)];

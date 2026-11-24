@@ -271,6 +271,16 @@ pub(super) fn walk(source: &ResourceSource, directory: &str, out: &mut Vec<Strin
             .filter(|name| name.ends_with(".png")),
     );
 }
+/// `MissingTextureAtlasSprite.generateMissingImage`: 16x16, magenta and black quarters.
+pub(super) fn missing_image() -> (u32, u32, Vec<u8>) {
+    let pixels = (0..256)
+        .flat_map(|i| match (i / 16 < 8) ^ (i % 16 < 8) {
+            true => [248, 0, 248, 255],
+            false => [0, 0, 0, 255],
+        })
+        .collect();
+    (16, 16, pixels)
+}
 pub(crate) fn decode_resource(source: &ResourceSource, name: &str) -> Result<(u32, u32, Vec<u8>)> {
     decode_bytes(&source.read(name)?)
 }

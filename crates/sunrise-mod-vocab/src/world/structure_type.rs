@@ -14,7 +14,8 @@
 //! `terrain_adaptation`, and the pieces ride the one piece mechanism the game
 //! has, next to a fortress piece's.
 use super::pool_element::{
-    ElementContext, ElementPlacement, PoolElementRef, PoolPiece, TemplatePool,
+    ElementContext, ElementPlacement, JigsawBlock, JigsawSpace, PoolElementRef, PoolPiece,
+    TemplatePool,
 };
 use crate::{BlockKey, BlockMetadata, BlockState, RandomSource};
 use std::sync::Arc;
@@ -427,9 +428,47 @@ pub trait GenerationContext {
     /// left out because an element failed to decode. Aliases are not applied:
     /// a type that uses `pool_aliases` looks the aliased name up itself.
     fn template_pool(&mut self, name: &crate::Identifier) -> Option<TemplatePool>;
-    /// Element reads for laying pieces out by hand: any element's jigsaws and
-    /// box.
-    fn elements(&self) -> &dyn ElementContext;
+    /// Element reads for laying pieces out by hand, any element's jigsaws and
+    /// box, beside [`random`](Self::random) to draw the jigsaws from, as
+    /// `JigsawPlacement.Placer` shuffles a piece's jigsaws with the random its
+    /// pools and placements draw from.
+    fn elements(&mut self) -> (&dyn ElementContext, &mut dyn RandomSource);
+    /// One candidate tried on one jigsaw of a piece already laid out: the
+    /// inner loops of `JigsawPlacement.Placer.tryPlacingChildren` for one
+    /// target element, drawing from [`random`](Self::random) as vanilla does.
+    ///
+    /// The candidate's rotations are tried in `Rotation.getShuffled` order,
+    /// and in each its jigsaws in shuffled order, against `jigsaw`, a jigsaw of
+    /// `source` ([`JigsawBlock::can_attach`]). A rigid child of a rigid source
+    /// takes its height from the jigsaws; any other child's comes from the
+    /// `WORLD_SURFACE_WG` height under `jigsaw`. With `use_expansion_hack`, a
+    /// box at most 16 high grows by the largest `max_size` of the pools (and
+    /// their fallbacks) its inward-facing jigsaws name, looked up by those
+    /// names without aliases, as [`template_pool`](Self::template_pool) does.
+    /// The first placement whose box [fits](JigsawSpace::fits) `space` wins:
+    /// its box leaves `space`, `source` gets the junction toward it, and the
+    /// child comes back with the junction toward `source` and `source`'s
+    /// liquid settings.
+    ///
+    /// `None`, with no draws, for the empty element, where vanilla's candidate
+    /// loop stops; `None`, after the draws, when no placement fits.
+    ///
+    /// Which candidates a jigsaw tries, in which space, and how deep the
+    /// layout goes are the caller's, as in `tryPlacingChildren`: the pool's
+    /// [`shuffled_templates`](TemplatePool::shuffled_templates) (none at the
+    /// last depth), then its fallback's, up to the first empty element; in a
+    /// new [`JigsawSpace`] over `source`'s box when the attached piece would
+    /// start inside it, otherwise in the space `source` was placed in. A type
+    /// with its own rules, such as a cap on how often a piece appears, skips
+    /// the candidates they refuse.
+    fn attach_jigsaw(
+        &mut self,
+        source: &mut PoolPiece,
+        jigsaw: &JigsawBlock,
+        candidate: &PoolElementRef,
+        space: &mut JigsawSpace,
+        use_expansion_hack: bool,
+    ) -> Option<PoolPiece>;
 }
 
 /// The placement context a piece's

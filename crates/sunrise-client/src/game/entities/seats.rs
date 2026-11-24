@@ -151,14 +151,15 @@ impl Game<'_> {
         Some(Seat::general(row.type_slot, row.position, row.rotation[0]))
     }
 
-    /// Seats the player in place on such a vehicle; `start_riding` tells its client
-    /// (`ServerPlayer.startRiding`: at once, as a teleport).
+    /// Seats the player in place on such a vehicle (`ServerPlayer.startRiding`: at once, as a teleport).
     pub(super) fn board_seat(&mut self, id: u32, seat: Seat) {
         let at = seat.player_seat();
         if let Some(player) = self.player.as_mut() {
             player.position = at;
             player.velocity = Vec3::ZERO;
             player.fall_distance = 0.0;
+            player.teleported = true;
+            player.teleported_delta = [true; 3];
         }
         self.previous_position = at;
         self.start_riding(id);

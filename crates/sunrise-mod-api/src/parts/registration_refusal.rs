@@ -14,9 +14,7 @@ impl DiagnosticsRegistrar for PartRegistrar {
 impl PartRegistrar {
     pub(crate) fn registration_checkpoint(&self) -> impl FnOnce(&mut Self) + use<> {
         let parts = self.parts.clone();
-        let part_states = self.part_states.clone();
         let attachment_types = self.attachment_types.clone();
-        let attachment_owners = self.attachment_owners.clone();
         let tags = self.tags.clone();
         let keys = self.registry_keys.borrow().clone();
         let menu_screen_factories = self.menu_screen_factories.clone();
@@ -45,9 +43,7 @@ impl PartRegistrar {
                         &mut registrar.menu_screen_factories,
                         menu_screen_factories,
                     );
-                    registrar.part_states = part_states;
                     registrar.attachment_types = attachment_types;
-                    registrar.attachment_owners = attachment_owners;
                     *registrar.registry_keys.borrow_mut() = keys;
                     registrar.menu_recipe_books = menu_recipe_books;
                     registrar.recipe_book_types = recipe_book_types;
@@ -76,7 +72,6 @@ impl PartRegistrar {
             custom_stats,
             custom_stat_owners,
             entity_tick_each,
-            attachment_uses,
             block_entity_types,
             entity_attributes,
             general_entity_types,
@@ -86,7 +81,6 @@ impl PartRegistrar {
             attributes,
             attribute_widenings,
             spawn_placements,
-            entity_part_states,
             biome_regions,
             biome_modifiers,
             datapack_registries,

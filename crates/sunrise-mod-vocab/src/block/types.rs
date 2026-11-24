@@ -411,19 +411,24 @@ impl EntityInsideEvent<'_> {
     pub fn apply(&mut self, effect: InsideEffect) {
         self.effects.apply(effect);
     }
-    /// Queue a typed write to the swept entity that applies just before `effect` in the
-    /// flush order (`InsideBlockEffectApplier.runBefore`).
-    pub fn run_before(&mut self, effect: InsideEffect, write: EntityWrite) {
-        self.effects.run_before(effect, write);
+    /// Queue a callback that runs just before `effect` in the flush order
+    /// (`InsideBlockEffectApplier.runBefore`), lent an [`InsideEntityView`] over the
+    /// swept entity and its live level.
+    pub fn run_before(
+        &mut self,
+        effect: InsideEffect,
+        callback: impl FnMut(&mut InsideEntityView<'_>) + 'static,
+    ) {
+        self.effects.run_before(effect, callback);
     }
-    /// Queue a typed write to the swept entity that applies just after `effect` in the
-    /// flush order (`InsideBlockEffectApplier.runAfter`).
-    pub fn run_after(&mut self, effect: InsideEffect, write: EntityWrite) {
-        self.effects.run_after(effect, write);
-    }
-    /// Ask for a write at the touched block. It is applied once the entity's batch has
-    /// ticked, in the order asked, if the block is still the state the entity touched.
-    pub fn request(&mut self, write: InsideWrite) {
-        self.writes.push(write);
+    /// Queue a callback that runs just after `effect` in the flush order
+    /// (`InsideBlockEffectApplier.runAfter`), lent an [`InsideEntityView`] over the
+    /// swept entity and its live level.
+    pub fn run_after(
+        &mut self,
+        effect: InsideEffect,
+        callback: impl FnMut(&mut InsideEntityView<'_>) + 'static,
+    ) {
+        self.effects.run_after(effect, callback);
     }
 }

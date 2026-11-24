@@ -34,6 +34,7 @@ same pieces, even when workers generate neighbouring chunks concurrently.
 | `config` | The structure JSON converted to a shared `Arc<Tag>` |
 | `assemble_jigsaw` | Lay out pieces from the data pack's template pools (below) |
 | `template_pool`, `elements` | Read a template pool, and its elements' jigsaws and boxes, to lay pieces out yourself (below) |
+| `attach_jigsaw` | Place one candidate element on one jigsaw of a laid-out piece, with vanilla's checks (below) |
 
 Config conversion runs when definitions load or reload, not per start. Nested JSON nulls are
 refused at load. The engine handles structure-set spacing, `biomes` and `terrain_adaptation`.
@@ -75,8 +76,9 @@ A type with its own layout rules reads the pools itself. `context.template_pool(
 the data pack's `TemplatePool`, or `None` when the data pack has none by that name; aliases are
 not applied. It offers vanilla's `StructureTemplatePool` reads: `templates`,
 `shuffled_templates`, `random_template`, `fallback`, `size` and `max_size`. Each element is a
-`PoolElementRef`, whatever its type. `context.elements()` gives any element's jigsaws
-(`getShuffledJigsawBlocks`) and box. `JigsawBlock::can_attach` is vanilla's
+`PoolElementRef`, whatever its type; `template_location` names a single element's template
+(`getTemplateLocation`). `context.elements()` gives any element's jigsaws
+(`getShuffledJigsawBlocks`) and box, beside the context's random to shuffle the jigsaws with. `JigsawBlock::can_attach` is vanilla's
 `JigsawBlock.canAttach`. Draw from `context.random()` in vanilla's order when you mean to match
 it.
 
@@ -84,6 +86,46 @@ Hand the pieces back as `FoundStructure::pool_pieces`, each a `PoolPiece::new(el
 ground_level_delta, rotation, bounding_box, liquid)`, with `junctions` set when terrain should
 blend towards them. The game keeps them as it keeps `assemble_jigsaw`'s pieces: after those and
 before your own `pieces`, saved, loaded and placed as `minecraft:jigsaw` pieces are.
+
+### Attaching children with vanilla's checks
+
+`context.attach_jigsaw(&mut source, &jigsaw, &candidate, &mut space, use_expansion_hack)` is
+the inner loop of vanilla's `JigsawPlacement.Placer.tryPlacingChildren` for one candidate: its
+rotations in shuffled order, its jigsaws that `can_attach` to `jigsaw`, the child's height
+(from the jigsaws when both pieces are rigid, from the surface otherwise), the expansion hack,
+and the check that the child's box fits the free space. On the first placement that fits, the
+box leaves `space`, `source` gets the junction toward the child, and the child comes back as a
+`PoolPiece` with the junction toward `source` and `source`'s liquid settings. It returns `None`
+when nothing fits, and `None` without drawing for the empty element.
+
+A `JigsawSpace` is vanilla's free-space shape: `JigsawSpace::new(container)` is the whole box,
+`remove` takes a placed box out and `fits` tests one. Everything around the call is your type's,
+as it is `tryPlacingChildren`'s: which pieces to visit and in which order, which candidates to
+try (the pool's `shuffled_templates`, none at the last depth, then its fallback's, up to the
+first empty element) and which space each child goes in (a new space over `source`'s box when
+the attached piece would start inside it, otherwise the space `source` was placed in). A rule
+of your own, such as a cap on how often a piece appears, skips the candidates it refuses:
+
+```rust,ignore
+let (elements, random) = context.elements();
+let jigsaws = elements.jigsaws(&piece.element, piece.position, piece.rotation, random);
+'jigsaws: for jigsaw in jigsaws {
+    let Some(pool) = context.template_pool(&jigsaw.pool) else { continue };
+    for candidate in pool.shuffled_templates(context.random()) {
+        if candidate.is_empty() {
+            break;
+        }
+        if candidate.template_location() == Some(&capped) && placed >= cap {
+            continue;
+        }
+        if let Some(child) = context.attach_jigsaw(&mut piece, &jigsaw, candidate, &mut space, false) {
+            placed += 1;
+            children.push(child);
+            continue 'jigsaws;
+        }
+    }
+}
+```
 
 ## Pool element types
 

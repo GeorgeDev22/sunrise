@@ -840,21 +840,24 @@ def smoke(out: Path) -> None:
     # `smoke_user` calls `smoke` through its library, as a mod calls a declared dependency: rustc links it against
     # `smoke`'s library (on windows-gnu through its import library) and the loader resolves the call at start.
     mods = {
-        "smoke": (SMOKE_LIBRARY_ITEM, [], ""),
-        "smoke_user": (SMOKE_USER_ITEM, ["--extern", f"smoke={smoke_library}"], '\n[dependencies]\nsmoke = "^0.1"\n'),
+        "smoke": (SMOKE_LIBRARY_ITEM, [], "", []),
+        "smoke_user": (SMOKE_USER_ITEM, ["--extern", f"smoke={smoke_library}"], '\n[dependencies]\nsmoke = "^0.1"\n', ["smoke"]),
     }
     records = []
     with tempfile.TemporaryDirectory(dir=out.parent) as scratch:
         scratch = Path(scratch)
-        for mod, (item, externs, dependencies) in mods.items():
-            build = f"{identity['commit']} {mod} 0.1.0 {release}"
+        for mod, (item, externs, dependencies, links) in mods.items():
+            source = starter.replace("{id}", mod) + item
+            # The identity names each linked mod's recorded identity (`library_identity` in sunrise-mod-package).
+            recorded = {r["mod"]: r["identity"] for r in records}
+            linked = ",".join(f"{m}={hashlib.sha256(recorded[m].encode()).hexdigest()}" for m in links) or "none"
+            build = f"{identity['commit']} {mod} 0.1.0 {release} {hashlib.sha256(source.encode()).hexdigest()} {linked}"
             rows = {"NATIVE_BUILD": build, "MOD_ENTRIES": f'"{mod}" => crate::hooks,',
                     "BUILT_MODS": f'mod_api::__private::native::BuiltMod {{ id: "{mod}", version: "0.1.0", side: mod_api::Side::Both }},',
                     "MOD_REDIRECTS": ""}
             entry = template
             for marker, value in rows.items():
                 entry = entry.replace(f"/* {marker} */", value)
-            source = starter.replace("{id}", mod) + item
             (scratch / f"{mod}_entry.rs").write_text(entry)
             (scratch / f"{mod}.rs").write_text(source + f'\n#[path = "{mod}_entry.rs"] mod entry;\n')
             library = installed / f"{dylib_prefix()}{mod}{dylib_suffix()}"

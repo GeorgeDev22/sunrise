@@ -9,7 +9,7 @@ use mod_api::{
     ClientHost, Flow, GuiLayerPlacement, GuiLayerPostEvent, GuiLayerPreEvent, Hooks, ModEntry,
     PlayerHeartTypeEvent, RegisterGuiLayersEvent, RegistrationContext, RenderGuiPostEvent,
     RenderGuiPreEvent, ScreenRenderBackgroundEvent, ScreenRenderPostEvent, ScreenRenderPreEvent,
-    client::hud_layout::GuiDraw, content::crash::current_native_mod,
+    content::crash::current_native_mod,
 };
 use std::sync::{Arc, Mutex};
 use sunrise_client::{
@@ -22,6 +22,8 @@ use sunrise_core::geometry::Vec3;
 
 #[path = "gui_layer_tests/hidden_panic.rs"]
 mod hidden_panic;
+#[path = "gui_layer_tests/status_heights.rs"]
+mod status_heights;
 
 static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -193,13 +195,9 @@ impl Hooks for HealthLayer {
                 PLAYER_HEALTH,
                 Box::new(move |_, draw| {
                     trace.lock().unwrap().calls.push("replacement");
-                    draw.gui_paint(&[GuiDraw::Fill {
-                        x0: 80,
-                        y0: 100,
-                        x1: 150,
-                        y1: 104,
-                        color: HEALTH_MARKER,
-                    }])
+                    draw.draw_gui(&mut |canvas| {
+                        canvas.fill([80.0, 100.0, 70.0, 4.0], HEALTH_MARKER)
+                    })
                     .unwrap();
                 }),
             ));

@@ -76,7 +76,16 @@ impl SaveDir {
         attachments: &sunrise_mod_runtime::attachments::Attachments,
     ) -> Result<()> {
         let path = self.attachments_path();
-        let data = attachments.to_nbt();
+        let data = match attachments.try_to_nbt() {
+            Ok(data) => data,
+            Err(error) => {
+                log::error!(
+                    "Sunrise: refusing level attachments save at {}: {error}",
+                    path.display()
+                );
+                return Err(error.into());
+            }
+        };
         // Emptied after a Horizon file was read: an empty file under Sunrise's name keeps it unread.
         if data.is_empty()
             && !path.exists()
@@ -476,7 +485,9 @@ impl SaveDir {
     /// `ChunkMap.handleChunkLoadFailure`: once this chunk's read failure has been reported,
     /// let generation replace it, as `ChunkMap.createEmptyChunk` does.
     pub fn load(&self, x: i32, z: i32, registry: &BlockRegistry, biomes: &Biomes) -> Option<Chunk> {
-        self.try_load(x, z, registry, biomes).ok().flatten()
+        let mut chunk = self.try_load(x, z, registry, biomes).ok().flatten()?;
+        self.load_disk_attachments(&mut chunk, mod_api::ChunkDiskKind::Full);
+        Some(chunk)
     }
     /// `load`, telling a chunk that isn't saved as a full chunk (`Ok(None)`) from a read that
     /// failed (`Err`): a later read may succeed.
@@ -503,9 +514,6 @@ impl SaveDir {
         };
         load_light(&root.tag, &mut chunk, self.shape.sky_light);
         chunk.entities = sunrise_world::chunk::legacy_entities(&root.tag);
-        // A failing load listener does not fail the load: the chunk keeps its stored attachments.
-        self.load_disk_attachments(&mut chunk, mod_api::ChunkDiskKind::Full)
-            .map_err(|_| ())?;
         Ok(Some(chunk))
     }
     /// A proto chunk saved before it became final (`decode_proto`).
@@ -516,12 +524,21 @@ impl SaveDir {
         registry: &BlockRegistry,
         biomes: &Biomes,
     ) -> Option<SavedProto> {
+        let mut proto = self.decode_saved_proto(x, z, registry, biomes)?;
+        self.load_disk_attachments(&mut proto.column, mod_api::ChunkDiskKind::Proto);
+        Some(proto)
+    }
+
+    pub(super) fn decode_saved_proto(
+        &self,
+        x: i32,
+        z: i32,
+        registry: &BlockRegistry,
+        biomes: &Biomes,
+    ) -> Option<SavedProto> {
         let root = self.read_record("region", x, z)?;
         let tables = self.tables.get().map(|t| &**t);
-        let mut proto = decode_proto(&root, registry, biomes, tables, self.shape.column())?;
-        self.load_disk_attachments(&mut proto.column, mod_api::ChunkDiskKind::Proto)
-            .ok()?;
-        Some(proto)
+        decode_proto(&root, registry, biomes, tables, self.shape.column())
     }
     /// Queue proto chunks for the writer thread; loads see them meanwhile.
     pub fn save_protos(
@@ -590,7 +607,7 @@ impl SaveDir {
                 let key = (c.x, c.z);
                 match compression_pool::catch_encoding_panic(|| {
                     let blending = self.calculated_blending(c.x, c.z);
-                    Ok(encode_saved(
+                    encode_saved(
                         c,
                         registry,
                         biomes,
@@ -598,7 +615,8 @@ impl SaveDir {
                         self.shape,
                         blending.as_deref(),
                         items,
-                    ))
+                    )
+                    .map_err(std::io::Error::other)
                 }) {
                     Ok(tag) => Some((key, Some(tag))),
                     Err(error) => {
@@ -613,15 +631,22 @@ impl SaveDir {
         Ok(chunks.len())
     }
     pub(super) fn save_poi(&self, chunks: &[Arc<Chunk>], wait: bool) -> Result<()> {
-        let Some(tables) = self.tables.get() else {
+        if self.tables.get().is_none() {
             return Ok(());
+        }
+        self.queue(Folder::Poi, self.poi_records(chunks), wait)
+    }
+
+    fn poi_records(&self, chunks: &[Arc<Chunk>]) -> Vec<((i32, i32), Record)> {
+        let Some(tables) = self.tables.get() else {
+            return Vec::new();
         };
         let professions = self
             .professions
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let records = chunks
+        chunks
             .iter()
             .map(|c| {
                 (
@@ -629,9 +654,9 @@ impl SaveDir {
                     Record::Poi(c.clone(), tables.clone(), professions.clone()),
                 )
             })
-            .collect();
-        self.queue(Folder::Poi, records, wait)
+            .collect()
     }
+
     /// `save` on the writer thread: returns before the files are written;
     /// loads see the chunks meanwhile.
     pub fn save_later(
@@ -640,6 +665,17 @@ impl SaveDir {
         registry: &'static BlockRegistry,
         biomes: &Arc<Biomes>,
     ) -> Result<usize> {
+        self.enqueue_chunk_saves(chunks, registry, biomes, None)?;
+        Ok(chunks.len())
+    }
+
+    fn enqueue_chunk_saves(
+        &self,
+        chunks: &[Arc<Chunk>],
+        registry: &'static BlockRegistry,
+        biomes: &Arc<Biomes>,
+        eviction: Option<&EvictionWrites>,
+    ) -> Result<()> {
         let encoding = self.encoding_for_save_later(chunks, registry, biomes)?;
         let records = chunks
             .iter()
@@ -651,41 +687,78 @@ impl SaveDir {
                 )
             })
             .collect();
-        self.queue(Folder::Region, records, false)?;
-        self.save_poi(chunks, false)?;
-        Ok(chunks.len())
+        self.enqueue_records(Folder::Region, records, eviction)?;
+        self.enqueue_records(Folder::Poi, self.poi_records(chunks), eviction)
     }
+
+    /// Save the records required by an idle column eviction and wait for queued
+    /// writes to finish without forcing every cached region (`sync_all`).
+    /// Returns the columns whose own records were refused or skipped; if the
+    /// writer failed, eviction cannot assume any column was written.
+    pub fn save_eviction(
+        &self,
+        chunks: &[Arc<Chunk>],
+        registry: &'static BlockRegistry,
+        biomes: &Arc<Biomes>,
+        entities: Vec<((i32, i32), Vec<Tag>)>,
+    ) -> Result<HashSet<(i32, i32)>> {
+        let eviction = EvictionWrites::default();
+        if !chunks.is_empty() {
+            self.enqueue_chunk_saves(chunks, registry, biomes, Some(&eviction))?;
+        }
+        let records = self.entity_records(entities, Some(&eviction));
+        self.enqueue_records(Folder::Entities, records, Some(&eviction))?;
+        self.wait_for_writes()?;
+        Ok(eviction.refused())
+    }
+
     /// Write the entity chunks (`EntityStorage`): an empty list deletes it.
     pub fn save_entities(&self, chunks: Vec<((i32, i32), Vec<Tag>)>) -> Result<()> {
-        self.write_entities(chunks, true)
+        self.queue(Folder::Entities, self.entity_records(chunks, None), true)
     }
     /// `save_entities` on the writer thread.
     pub fn save_entities_later(&self, chunks: Vec<((i32, i32), Vec<Tag>)>) -> Result<()> {
-        self.write_entities(chunks, false)
+        self.queue(Folder::Entities, self.entity_records(chunks, None), false)
     }
     /// `PersistentEntitySectionManager.storeChunkSections`: never store a pending entity chunk.
-    fn write_entities(&self, mut chunks: Vec<((i32, i32), Vec<Tag>)>, wait: bool) -> Result<()> {
+    fn entity_records(
+        &self,
+        mut chunks: Vec<((i32, i32), Vec<Tag>)>,
+        eviction: Option<&EvictionWrites>,
+    ) -> Vec<((i32, i32), Record)> {
         {
             let failed = self.failed_entity_reads.lock().unwrap();
             if !failed.is_empty() {
-                chunks.retain(|(key, _)| !failed.contains(key));
+                chunks.retain(|(key, _)| {
+                    if failed.contains(key) {
+                        if let Some(eviction) = eviction {
+                            eviction.refuse(*key);
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
             }
         }
-        let records = chunks
+        chunks
             .into_iter()
             .map(|((x, z), entities)| {
-                let tag = (!entities.is_empty()).then(|| NamedTag {
-                    name: "".into(),
-                    tag: Tag::compound([
-                        ("DataVersion", Tag::Int(DATA_VERSION)),
-                        ("Position", Tag::IntArray(vec![x, z])),
-                        ("Entities", Tag::List(entities)),
-                    ]),
-                });
-                ((x, z), tag)
+                let record = if entities.is_empty() {
+                    Record::Delete
+                } else {
+                    Record::Tag(Arc::new(NamedTag {
+                        name: "".into(),
+                        tag: Tag::compound([
+                            ("DataVersion", Tag::Int(DATA_VERSION)),
+                            ("Position", Tag::IntArray(vec![x, z])),
+                            ("Entities", Tag::List(entities)),
+                        ]),
+                    }))
+                };
+                ((x, z), record)
             })
-            .collect();
-        self.write_records("entities", records, wait)
+            .collect()
     }
 }
 

@@ -55,9 +55,8 @@ pub struct PartRegistrar {
     pub(crate) recipe_book_filters: HashMap<String, crate::RecipeBookFilterLook>,
     pub(crate) game_rule_categories: Vec<String>,
     pub(crate) game_rules: Vec<crate::GameRuleDecl>,
-    pub(crate) attachment_uses: Vec<(String, String, String)>,
-    pub(crate) attachment_types: HashMap<String, HashMap<String, bool>>,
-    pub(crate) attachment_owners: HashMap<String, HashMap<String, &'static str>>,
+    pub(crate) attachment_types:
+        HashMap<&'static str, HashMap<&'static str, crate::RegisteredAttachment>>,
     pub(crate) custom_stats: Vec<String>,
     pub(crate) custom_stat_owners: Vec<&'static str>,
     /// The entity types each named to `entity_tick_each`, in order: `None` for every type.
@@ -100,8 +99,6 @@ pub struct PartRegistrar {
     pub(crate) chunk_generators: Vec<ChunkGeneratorInfo>,
     pub(crate) biome_sources: Vec<BiomeSourceInfo>,
     pub(crate) refused: Vec<String>,
-    /// The Part state keys this mod declared, with their type names.
-    pub(crate) part_states: HashMap<(&'static str, &'static str), &'static str>,
 }
 
 impl PartRegistrar {
@@ -122,9 +119,7 @@ impl PartRegistrar {
             recipe_book_filters: HashMap::new(),
             game_rule_categories: Vec::new(),
             game_rules: Vec::new(),
-            attachment_uses: Vec::new(),
             attachment_types: HashMap::new(),
-            attachment_owners: HashMap::new(),
             custom_stats: Vec::new(),
             custom_stat_owners: Vec::new(),
             entity_tick_each: Vec::new(),
@@ -163,7 +158,6 @@ impl PartRegistrar {
             chunk_generators: Vec::new(),
             biome_sources: Vec::new(),
             refused: Vec::new(),
-            part_states: HashMap::new(),
         }
     }
     /// `part`, of kind `kind`, for tag `tag`; none if it is refused.
@@ -353,7 +347,6 @@ pub(crate) fn install_registrar(
         game_rules: registrar.game_rules,
         game_rule_categories: registrar.game_rule_categories,
         attachment_types: registrar.attachment_types,
-        attachment_owners: registrar.attachment_owners,
         custom_stats: registrar.custom_stats,
         custom_stat_owners: registrar.custom_stat_owners,
         entity_tick_each: mod_vocab::__private::EntityTickEach::of(&registrar.entity_tick_each),

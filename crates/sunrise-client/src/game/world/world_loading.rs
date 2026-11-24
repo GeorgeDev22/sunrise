@@ -15,12 +15,17 @@ pub(super) struct WorldRequest {
     /// The account the world opens under, for an integrated server
     /// (`IntegratedServer.getSingleplayerProfile`): its name and UUID.
     owner: Option<(String, u128)>,
+    /// A fixture's effective registry traversal, before shape projection.
+    #[cfg(test)]
+    pub(super) stem_order: Option<&'static [&'static str]>,
 }
 
 pub(super) struct PreparedWorld {
     pub save_root: PathBuf,
     /// The levels' shapes, from the world's dimension types.
     pub shapes: sunrise_client::chunk::LevelShapes,
+    /// Traversal of the resolved LEVEL_STEM registry, before Overworld is promoted.
+    pub configured_levels: Vec<Dim>,
     pub level: Level,
     pub world: World,
     pub biomes: Arc<Biomes>,
@@ -124,6 +129,8 @@ impl WorldRequest {
             rule_registry,
             chunk_reports: sunrise_client::chunk_io::PROCESS_REPORTS.clone(),
             owner: None,
+            #[cfg(test)]
+            stem_order: None,
         })
     }
 
@@ -154,6 +161,8 @@ impl WorldRequest {
             rule_registry,
             chunk_reports,
             owner,
+            #[cfg(test)]
+            stem_order,
         } = self;
         let name = name.as_deref();
         sunrise_client::biome::Biomes::forget_missing_warnings();
@@ -201,19 +210,21 @@ impl WorldRequest {
         // file, its `UUID` and level.dat's `singleplayer_uuid`. Its entities follow as
         // their chunks load (`owner_migration`, `entity_nbt::migrate_player_uuid`).
         let owner_migration = owner.and_then(|(player, account)| {
+            if created {
+                // The profile exists before `IntegratedServer.initServer` saves; the player does not.
+                level.player_uuid = Some(sunrise_client::lan::playerdata::uuid_ints(account));
+            }
             let old = sunrise_protocol::crypto::offline_uuid(&player);
             (old != account).then(|| {
-                if created {
-                    // `IntegratedServer.initServer` saves with the profile before the first
-                    // tick: a world made under the account names it from its first level.dat.
-                    level.player_uuid = Some(sunrise_client::lan::playerdata::uuid_ints(account));
-                } else if sunrise_client::lan::playerdata::migrate_owner(
-                    &save_root,
-                    &mut level,
-                    old,
-                    account,
-                    res.items(),
-                ) {
+                if !created
+                    && sunrise_client::lan::playerdata::migrate_owner(
+                        &save_root,
+                        &mut level,
+                        old,
+                        account,
+                        res.items(),
+                    )
+                {
                     log::info!(
                         "Sunrise: \"{folder}\" was made under the offline profile; \
                          its owner moved to the account's UUID"
@@ -306,12 +317,28 @@ impl WorldRequest {
             &level.enabled_features,
             &pack.additional_data,
         );
-        let shapes = level_shapes(&mut overrides, &options.resources, &level);
-        Dim::set_extra(shapes.extra.iter().map(|level| level.id));
+        let (shapes, configured_levels) = level_shapes(
+            &mut overrides,
+            &options.resources,
+            &level,
+            #[cfg(test)]
+            stem_order,
+        );
         // The bounded registry-loader leaf slice: fail world preparation before streaming,
         // rather than letting the flat-generator fallback swallow a selected pack's codec error.
         overrides.validate_fill_layers(pack.assets.registry)?;
-        let dim = Dim::from_id(&level.dimension);
+        // PrepareSpawnTask: resolve the player's dimension against this world's stems,
+        // without changing the saved position or adding a stem for the player.
+        let dim = configured_levels
+            .iter()
+            .find(|dim| dim.id() == level.dimension)
+            .or_else(|| {
+                let spawn = level.world_spawn_dimension.as_deref()?;
+                configured_levels.iter().find(|dim| dim.id() == spawn)
+            })
+            .copied()
+            .unwrap_or(Dim::Overworld);
+        level.dimension = dim.id().to_owned();
         let shape = shapes.get(dim.id());
         let streaming_step = startup::step("world.make_streaming");
         let loot = sunrise_client::structure_blocks::LootSnapshot::default();
@@ -384,13 +411,17 @@ impl WorldRequest {
             };
         }
 
-        // Persist new metadata on the worker too, before publishing the world.
-        if !save_root.join("level.dat").exists() {
+        // IntegratedServer.initServer writes the first level.dat after preparing the levels.
+        // The worker must not write an initialized world or the unplaced owner's player file.
+        if options.execution_role != execution_role::ExecutionRole::IntegratedServer
+            && !save_root.join("level.dat").exists()
+        {
             level.write(&save_root, res.items())?;
         }
         Ok(PreparedWorld {
             save_root,
             shapes,
+            configured_levels,
             level,
             world,
             biomes,
@@ -703,17 +734,36 @@ fn level_shapes(
     overrides: &mut sunrise_world::worldgen::overrides::WorldgenOverrides,
     resources: &std::path::Path,
     level: &Level,
-) -> sunrise_client::chunk::LevelShapes {
+    #[cfg(test)] stem_order: Option<&[&str]>,
+) -> (sunrise_client::chunk::LevelShapes, Vec<Dim>) {
     if let Some(generator) = &level.generator {
         generator.merge_dimensions(overrides);
+    } else {
+        overrides.include_implicit_level_stems();
     }
-    let shapes = shapes_of(overrides);
+    let stems = overrides.level_stems();
+    #[cfg(test)]
+    let (shapes, stems) = match stem_order {
+        Some(order) => {
+            assert_eq!(order.len(), overrides.level_stems().count());
+            shapes_of(
+                overrides,
+                order
+                    .iter()
+                    .map(|id| overrides.level_stems().find(|(key, _)| key == id).unwrap()),
+            )
+        }
+        None => shapes_of(overrides, stems),
+    };
+    #[cfg(not(test))]
+    let (shapes, stems) = shapes_of(overrides, stems);
+    Dim::set_extra(shapes.extra.iter().map(|level| level.id));
     set_level_sea_levels(
         overrides,
         sunrise_world::worldgen::overrides::mod_dimensions(),
         resources,
     );
-    shapes
+    (shapes, stems.into_iter().map(Dim::from_id).collect())
 }
 
 /// The sea levels of the levels whose stem the mods or the data packs give: a mod's own
@@ -785,17 +835,17 @@ fn set_level_sea_levels(
     sunrise_world::level::set_sea_levels(levels);
 }
 
-/// The levels' shapes the mods' and packs' worldgen entries give.
-fn shapes_of(
+/// Resolve shapes in the effective registry's traversal, retaining it for level creation.
+fn shapes_of<'a>(
     overrides: &sunrise_world::worldgen::overrides::WorldgenOverrides,
-) -> sunrise_client::chunk::LevelShapes {
+    stems: impl Iterator<Item = (&'a str, Option<&'a str>)>,
+) -> (sunrise_client::chunk::LevelShapes, Vec<&'static str>) {
     use sunrise_client::chunk::{ExtraLevel, LevelShape, LevelShapes};
+    let builtins = [Dim::Overworld.id(), Dim::Nether.id(), Dim::End.id()];
     let mut shapes = LevelShapes::VANILLA;
-    for level in [
-        "minecraft:overworld",
-        "minecraft:the_nether",
-        "minecraft:the_end",
-    ] {
+    let mut extra = Vec::new();
+    let mut configured = Vec::new();
+    for (level, stem) in stems {
         let shape = overrides.level_height(level).and_then(|h| {
             LevelShape::new(
                 h.min_y,
@@ -806,47 +856,40 @@ fn shapes_of(
             )
             .ok()
         });
-        match shape {
-            Some(shape) => *shapes.get_mut(level) = shape,
-            None => log::warn!(
-                "Sunrise: data pack worldgen: the dimension type of {level} is not one the \
-                 game accepts; the level keeps the vanilla build height"
-            ),
-        }
-    }
-    let extra: Vec<_> = overrides
-        .entries(sunrise_world::worldgen::overrides::DIMENSIONS)
-        .filter(|(level, _)| !Dim::is_vanilla(level))
-        .filter_map(|(level, stem)| {
-            let shape = overrides.level_height(level).and_then(|h| {
-                LevelShape::new(
-                    h.min_y,
-                    h.height,
-                    h.logical_height,
-                    h.has_skylight,
-                    h.has_ceiling,
-                )
-                .ok()
-            });
-            if shape.is_none() {
+        if let Some(id) = builtins.into_iter().find(|id| *id == level) {
+            configured.push(id);
+            if let Some(shape) = shape {
+                *shapes.get_mut(id) = shape;
+            } else {
                 log::warn!(
-                    "Sunrise: data pack worldgen: the dimension type of {level} is not one the \
-                     game accepts; the level is left out"
+                    "Sunrise: data pack worldgen: the dimension type of {id} is not one the \
+                     game accepts; the level keeps the vanilla build height"
                 );
             }
+        } else if let Some(shape) = shape {
             // A stem's `type` is a dimension type's id, or the type itself.
-            let stem = serde_json::from_str::<serde_json::Value>(stem).ok()?;
-            let dimension_type = stem["type"].as_str().unwrap_or(level);
-            Some(ExtraLevel {
-                id: level.to_owned().leak(),
-                dimension_type: dimension_type.to_owned().leak(),
-                shape: shape?,
-            })
-        })
-        .collect();
+            let Some(stem) = stem.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            else {
+                continue;
+            };
+            let id: &'static str = level.to_owned().leak();
+            let dimension_type = stem["type"].as_str().unwrap_or(level).to_owned().leak();
+            extra.push(ExtraLevel {
+                id,
+                dimension_type,
+                shape,
+            });
+            configured.push(id);
+        } else {
+            log::warn!(
+                "Sunrise: data pack worldgen: the dimension type of {level} is not one the \
+                 game accepts; the level is left out"
+            );
+        }
+    }
     shapes.extra = extra.leak();
     set_level_types(overrides, &shapes);
-    shapes
+    (shapes, configured)
 }
 
 /// The dimension types the mods and packs changed or added, for the levels `shapes` holds: what
@@ -1043,14 +1086,40 @@ pub(super) fn make_streaming(
     };
     let mut locator = None;
     let overworld_settings = generator.filter(|_| dim == Dim::Overworld);
-    let flat = overworld_settings.and_then(|s| {
-        sunrise_client::flatgen::FlatTerrain::from_settings(
-            s,
-            pack.assets.registry,
-            res.biomes(),
-            shape,
-        )
-    });
+    use sunrise_client::flatgen::FlatTerrain;
+    let overrides = std::cell::OnceCell::new();
+    let overrides = || {
+        overrides.get_or_init(|| {
+            world_worldgen_overrides(
+                world_root,
+                &options.resources,
+                &biomes,
+                enabled_features,
+                &pack.additional_data,
+            )
+        })
+    };
+    let flat = if runtime.is_none() {
+        // Enabled packs own the resolved stem; saved presets fill in levels they don't define.
+        let packed_stem = overrides()
+            .entries(sunrise_world::worldgen::overrides::DIMENSIONS)
+            .find(|(id, _)| *id == dim.id())
+            .map(|(_, json)| serde_json::from_str::<serde_json::Value>(json))
+            .transpose()
+            .map_err(|e| format!("{}: cannot decode dimension stem: {e}", dim.id()))?
+            .as_ref()
+            .map(sunrise_client::scoreboard::json_to_tag);
+        packed_stem
+            .as_ref()
+            .or(saved_stem)
+            .and_then(|stem| stem.get("generator"))
+            .map(FlatTerrain::decode_generator)
+            .transpose()
+            .map_err(|e| format!("{}: cannot decode flat dimension: {e}", dim.id()))?
+            .flatten()
+    } else {
+        None
+    };
     // `DebugLevelSource`: the overworld of the Debug preset.
     let debug = overworld_settings.and_then(|s| {
         sunrise_client::debugworld::DebugTerrain::from_settings(
@@ -1064,40 +1133,6 @@ pub(super) fn make_streaming(
     // of WorldOptions.generateStructures. Keep their flat locator available
     // even when automatic structure starts are disabled.
     let automatic_structures = generator.is_none_or(|s| WorldGen::from_settings(s).structures);
-    let flat_settings =
-        overworld_settings.and_then(sunrise_client::flatgen::FlatTerrain::pipeline_settings);
-    // `adjustGenerationSettings`: a superflat world with features or lakes is decorated
-    // whether or not its structures generate.
-    let flat_decorates = flat_settings
-        .as_ref()
-        .is_some_and(|s| s.features || s.lakes);
-    // A generator that cannot be built (a layer block the registry lacks, a level shorter
-    // than the noise) leaves the world on its flat ground, as it was before.
-    let flat_vanilla = flat_settings.and_then(|settings| {
-        let overrides = world_worldgen_overrides(
-            world_root,
-            &options.resources,
-            &biomes,
-            enabled_features,
-            &pack.additional_data,
-        );
-        match VanillaTerrain::for_flat(
-            terrain_resources,
-            &overrides,
-            seed,
-            &settings,
-            automatic_structures,
-        ) {
-            Ok(mut terrain) => {
-                terrain.add_mod_signs(res.facts());
-                Some(Arc::new(terrain))
-            }
-            Err(e) => {
-                log::warn!("Sunrise: the superflat structures and features are unavailable: {e}");
-                None
-            }
-        }
-    });
     // The sea level the level's rules and the mods read is the one its generator builds with
     // (`ChunkGenerator.getSeaLevel`), so a pack's noise settings or a superflat world are seen:
     // the superflat generators' is -63 (`FlatLevelSource.getSeaLevel`).
@@ -1106,9 +1141,6 @@ pub(super) fn make_streaming(
             sunrise_world::level::register_sea_level(key, sea_level);
         }
     };
-    if flat.is_some() || flat_vanilla.is_some() {
-        register_sea_level(-63);
-    }
     let mut streaming = if let Some(generate) =
         runtime.filter(|generate| !matches!(generate, super::runtime_levels::Generate::Stem(_)))
     {
@@ -1132,41 +1164,59 @@ pub(super) fn make_streaming(
             pack.context_with(biomes.clone()),
             res.threads(),
         )
-    } else if let Some(inner) = debug {
-        Streaming::new(
-            Arc::new(Persistent {
-                inner: Arc::new(inner),
-                save: save.clone(),
-                registry: pack.assets.clone(),
-                biomes: biomes.clone(),
-            }),
-            pack.context_with(biomes.clone()),
-            res.threads(),
-        )
-    } else if let Some(inner) = flat_vanilla
-        .as_ref()
-        .filter(|_| automatic_structures || flat_decorates)
-        .cloned()
-    {
-        if automatic_structures {
-            inner.search_rings_behind();
+    } else if let Some(flat) = flat {
+        // `adjustGenerationSettings` decorates independently of generateStructures.
+        let staged = FlatTerrain::uses_pipeline(&flat)
+            .then(|| {
+                VanillaTerrain::for_flat_level(
+                    terrain_resources,
+                    overrides(),
+                    seed,
+                    &flat,
+                    automatic_structures,
+                    dim.id(),
+                    Some(shape),
+                )
+                .map(|mut terrain| {
+                    terrain.add_mod_signs(res.facts());
+                    Arc::new(terrain)
+                })
+            })
+            .transpose()
+            .map_err(|e| format!("{}: cannot build flat dimension: {e}", dim.id()))?;
+        register_sea_level(-63);
+        locator = staged.clone();
+        if let Some(inner) = staged.filter(|_| automatic_structures || flat.features || flat.lakes)
+        {
+            if automatic_structures {
+                inner.search_rings_behind();
+            }
+            keep_structure_references(&inner, world_root, dim, &save);
+            Streaming::new(
+                Arc::new(Persistent {
+                    inner,
+                    save: save.clone(),
+                    registry: pack.assets.clone(),
+                    biomes: biomes.clone(),
+                }),
+                pack.context_with(biomes.clone()),
+                res.threads(),
+            )
+        } else {
+            let inner = FlatTerrain::from_decoded(&flat, pack.assets.registry, &biomes, shape)
+                .ok_or_else(|| format!("{}: flat layers use an unregistered block", dim.id()))?;
+            Streaming::new(
+                Arc::new(Persistent {
+                    inner: Arc::new(inner),
+                    save: save.clone(),
+                    registry: pack.assets.clone(),
+                    biomes: biomes.clone(),
+                }),
+                pack.context_with(biomes.clone()),
+                res.threads(),
+            )
         }
-        keep_structure_references(&inner, world_root, dim, &save);
-        locator = Some(inner.clone());
-        Streaming::new(
-            Arc::new(Persistent {
-                inner,
-                save: save.clone(),
-                registry: pack.assets.clone(),
-                biomes: biomes.clone(),
-            }),
-            pack.context_with(biomes.clone()),
-            res.threads(),
-        )
-    } else if let Some(inner) = flat {
-        // A superflat world that neither decorates nor generates structures: its
-        // layers alone. Only manual commands use the locator.
-        locator = flat_vanilla;
+    } else if let Some(inner) = debug {
         Streaming::new(
             Arc::new(Persistent {
                 inner: Arc::new(inner),
@@ -1245,23 +1295,17 @@ pub(super) fn make_streaming(
         // WorldOptions.generateStructures, from the world's settings.
         let structures = automatic_structures;
         let preset = WorldGen::noise_preset(generator);
-        let overrides = world_worldgen_overrides(
-            world_root,
-            &options.resources,
-            &biomes,
-            enabled_features,
-            &pack.additional_data,
-        );
+        let overrides = overrides();
         let saved_stem = saved_stem.map(sunrise_client::scoreboard::tag_to_json);
         let regions = sunrise_client::save::biome_regions::layout(world_root, dim.id())
             .map_err(|e| format!("Failed to read the world's biome regions: {e}"))?;
-        let mut inner = VanillaTerrain::for_world_with_settings(terrain_resources, &overrides, seed, preset, dim.id(), structures, saved_stem.as_ref(), regions).map_err(|e| {
-                if overrides.is_empty() {
-                    format!("{e}\nPrepare the worldgen bundle with the launcher, or: sunrise-prepare --prepare")
-                } else {
-                    format!("{e}\nThe world's data packs change its world generation: one of them may not be made for this version")
-                }
-            })?;
+        let mut inner = VanillaTerrain::for_world_with_settings(terrain_resources, overrides, seed, preset, dim.id(), structures, saved_stem.as_ref(), regions).map_err(|e| {
+                    if overrides.is_empty() {
+                        format!("{e}\nPrepare the worldgen bundle with the launcher, or: sunrise-prepare --prepare")
+                    } else {
+                        format!("{e}\nThe world's data packs change its world generation: one of them may not be made for this version")
+                    }
+                })?;
         inner.add_mod_signs(res.facts());
         register_sea_level(inner.sea_level());
         let inner = Arc::new(inner);
@@ -1494,6 +1538,124 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "daily"]
+    fn custom_flat_stems_validate_and_generate_pack_decoration() {
+        use crate::game::native_entity_refs::tests::{run_fresh_cases, with_game};
+        use std::fs;
+        use sunrise_client::chunk::LevelShape;
+
+        const CASE: &str = "SUNRISE_CUSTOM_FLAT_STEM_CASE";
+        if run_fresh_cases(
+            "game::world_loading::tests::custom_flat_stems_validate_and_generate_pack_decoration",
+            CASE,
+            &["invalid", "decorated"],
+        ) {
+            return;
+        }
+        let invalid = std::env::var(CASE).unwrap() == "invalid";
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pack = root.join("datapacks/flat");
+        let write = |path: &str, text: &str| {
+            let path = pack.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "pack.mcmeta",
+            r#"{"pack":{"description":"Flat stem fixture","min_format":[121,0],"max_format":[121,0]}}"#,
+        );
+        fs::write(
+            root.join("datapacks.json"),
+            r#"{"enabled":["vanilla","file/flat"],"disabled":[]}"#,
+        )
+        .unwrap();
+        // FlatLevelGeneratorSettings.validateHeight rejects one above the limit.
+        let height = if invalid { 4065 } else { 1 };
+        write(
+            "data/test/dimension/flat.json",
+            &format!(
+                r#"{{"type":"minecraft:the_nether","generator":{{"type":"minecraft:flat","settings":{{
+            "biome":"test:glade","features":true,"lakes":false,"structure_overrides":[],
+            "layers":[{{"height":{height},"block":"minecraft:bedrock"}}]}}}}}}"#
+            ),
+        );
+        write(
+            "data/test/worldgen/biome/glade.json",
+            r#"{"temperature":0.8,"downfall":0.4,"has_precipitation":true,"effects":{},"carvers":[],"features":[["test:decoration"]]}"#,
+        );
+        write(
+            "data/test/worldgen/feature/decoration.json",
+            r#"{"type":"minecraft:fill_layer","height":4,"state":{"id":"minecraft:gold_block"}}"#,
+        );
+        write(
+            "data/test/worldgen/placed_feature/decoration.json",
+            r#"{"feature":"test:decoration","placement":[]}"#,
+        );
+
+        with_game(|game| {
+            let shape = LevelShape::NETHER;
+            let biomes = packed_biomes(
+                root,
+                &game.options.resources,
+                game.res.biomes(),
+                &game.level.enabled_features,
+                &game.pack.additional_data,
+            );
+            let built = make_streaming(
+                &game.res,
+                &game.pack,
+                &game.options,
+                &game.settings,
+                root,
+                Dim::Extra(mod_api::__private::dimension_key("test:flat")),
+                shape,
+                29,
+                &game.level,
+                biomes.clone(),
+                None,
+                game.save.chunk_reports().clone(),
+                game.save.save_failure_reporter().clone(),
+            );
+            if invalid {
+                let Err(error) = built else {
+                    panic!("a height outside the flat codec must reject this stem");
+                };
+                assert!(
+                    error
+                        .to_string()
+                        .starts_with("test:flat: cannot decode flat dimension:")
+                );
+                return;
+            }
+            let (mut streaming, _, locator) = built.unwrap();
+            assert_eq!(
+                locator.unwrap().noise_biomes(&[[0, 0, 0]]),
+                [Some("test:glade".into())]
+            );
+            let mut world = World::new(game.res.facts().air, 29);
+            world.shape = shape;
+            assert!(streaming.set_forced_loaded(&mut world, 0, 0, true));
+            let chunk = &world.chunks[&(0, 0)];
+            let gold = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:gold_block")
+                .unwrap();
+            let bedrock = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:bedrock")
+                .unwrap();
+            assert_eq!(chunk.get(0, 0, 0), bedrock.0);
+            assert_eq!(chunk.get(0, 4, 0), gold.0);
+            assert_eq!(biomes.saved_name(chunk.biome(0, 4, 0)), "test:glade");
+        });
+    }
+
     /// A world whose level.dat does not read but whose level.dat_old does: only the
     /// dedicated server restores it unasked. Every role here carries the launch configuration
     /// (`options.dedicated`) a dedicated server and the integrated server thread both have, so
@@ -1601,6 +1763,7 @@ mod tests {
             let request = WorldRequest {
                 owner: None,
                 chunk_reports: sunrise_client::chunk_io::PROCESS_REPORTS.clone(),
+                stem_order: None,
                 save_root: dir.clone(),
                 folder: "test".into(),
                 name: Some("test".into()),
@@ -1886,8 +2049,9 @@ mod tests {
     fn a_mods_level_opens_with_no_data_packs() {
         use sunrise_client::chunk::{LevelShape, LevelShapes};
         use sunrise_client::datapack::worldgen_overrides_over;
-        let (none, _) = worldgen_overrides_over(&[], &[], |_| true);
-        assert_eq!(shapes_of(&none), LevelShapes::VANILLA);
+        let (mut none, _) = worldgen_overrides_over(&[], &[], |_| true);
+        none.include_implicit_level_stems();
+        assert_eq!(shapes_of(&none, none.level_stems()).0, LevelShapes::VANILLA);
 
         let pocket = sunrise_world::worldgen::overrides::ModDimension {
             id: "test:pocket".into(),
@@ -1897,8 +2061,21 @@ mod tests {
                     .into(),
             sea_level: None,
         };
-        let (overrides, _) = worldgen_overrides_over(&[pocket], &[], |_| true);
-        let shapes = shapes_of(&overrides);
+        let (mut overrides, _) = worldgen_overrides_over(&[pocket], &[], |_| true);
+        overrides.include_implicit_level_stems();
+        let registry: std::collections::HashMap<_, _> = overrides.level_stems().collect();
+        let traversal = [
+            "minecraft:the_nether",
+            "test:pocket",
+            "minecraft:overworld",
+            "minecraft:the_end",
+        ];
+        assert_eq!(registry.len(), traversal.len());
+        let (shapes, configured) = shapes_of(
+            &overrides,
+            traversal.into_iter().map(|id| (id, registry[id])),
+        );
+        assert_eq!(configured, traversal);
         assert!(shapes.has("test:pocket"));
         assert_eq!(
             shapes.get("test:pocket"),
@@ -1951,8 +2128,9 @@ mod tests {
         let world =
             std::env::temp_dir().join(format!("sunrise-mod-terrain-{}", std::process::id()));
         std::fs::create_dir_all(&world).unwrap();
-        let (overrides, _) = worldgen_overrides_of(&world, &root, &biomes, &[], &[]);
-        let shapes = shapes_of(&overrides);
+        let (mut overrides, _) = worldgen_overrides_of(&world, &root, &biomes, &[], &[]);
+        overrides.include_implicit_level_stems();
+        let (shapes, _) = shapes_of(&overrides, overrides.level_stems());
         use sunrise_world::native_load_context::{DataLoadOrigin, LoadContext, LoadInputs};
         let inputs = LoadInputs::new(Default::default(), root.join("settings"));
         let item_data = Arc::new(
@@ -2046,6 +2224,7 @@ mod tests {
                         let request = WorldRequest {
                             owner: None,
                             chunk_reports: sunrise_client::chunk_io::PROCESS_REPORTS.clone(),
+                            stem_order: None,
                             save_root: world.clone(),
                             folder: "world".into(),
                             name: Some("Region fixture".into()),
@@ -2172,6 +2351,7 @@ mod unused_feature_startup_tests {
                 create: None,
                 owner: None,
                 chunk_reports: sunrise_client::chunk_io::PROCESS_REPORTS.clone(),
+                stem_order: None,
                 rule_registry: Level::default().rule_registry,
             };
             let result = request.prepare(
@@ -2288,6 +2468,7 @@ mod unused_feature_preservation_tests {
             create: None,
             owner: None,
             chunk_reports: sunrise_client::chunk_io::PROCESS_REPORTS.clone(),
+            stem_order: None,
             rule_registry: Level::default().rule_registry,
         };
         assert!(

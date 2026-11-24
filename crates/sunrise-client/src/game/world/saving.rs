@@ -280,7 +280,12 @@ impl Game<'_> {
                     if keys.is_empty() {
                         self.prune_entity_memory();
                         self.save_raids();
-                        self.save.save_attachments(&self.world.attachments)?;
+                        if let Err(error) = self.save.save_attachments(&self.world.attachments)
+                            && !error
+                                .is::<sunrise_mod_runtime::attachments::AttachmentEncodeError>()
+                        {
+                            return Err(error);
+                        }
                         self.save_chunk_tickets()?;
                         self.save_game_metadata()?;
                         save.stage = Stage::Writes(Some(self.save.flush_later()?));
@@ -407,7 +412,7 @@ impl Game<'_> {
             "Saving world...",
             progress,
         );
-        renderer.render(&loading_frame(&hud))?;
+        renderer.render(&loading_frame(&hud), None)?;
         Ok(())
     }
 
@@ -492,7 +497,11 @@ impl Game<'_> {
             }
         }
         let keys: Vec<_> = self.world.modified.iter().copied().collect();
-        self.save.save_attachments(&self.world.attachments)?;
+        if let Err(error) = self.save.save_attachments(&self.world.attachments)
+            && !error.is::<sunrise_mod_runtime::attachments::AttachmentEncodeError>()
+        {
+            return Err(error);
+        }
         // ChunkMap.save calls tryMarkSaved before creating the snapshot. A record failure
         // finishes this attempt and does not put the mark back.
         for key in &keys {

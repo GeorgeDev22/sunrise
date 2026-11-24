@@ -6,7 +6,7 @@
 //! never while quads are being submitted, so a required pipeline the GPU refuses fails that
 //! load's renderer and the reload with it.
 
-use super::world_primitives::Upload;
+use super::world_primitives::{Upload, VertexPages};
 use crate::mod_pipelines::{Built, BuiltTexture, Pipelines};
 use glam::Mat4;
 use mod_api::{PipelineBlend, WorldDepth};
@@ -27,7 +27,7 @@ pub struct PipelineVertex {
 pub struct PipelineRun {
     /// The pipeline's slot in the frame's [`Pipelines`].
     pub slot: u32,
-    /// The stage it draws at (`RenderLevelStage::ALL`'s index).
+    /// The stage it draws at (`STAGE_AFTER_OPAQUE_BLOCKS..=STAGE_CUSTOM_GEOMETRY`).
     pub stage: u32,
     pub quads: u32,
 }
@@ -83,7 +83,7 @@ pub struct ModPipelines {
     group: wgpu::BindGroup,
     view: wgpu::Buffer,
     frame: wgpu::Buffer,
-    vertices: wgpu::Buffer,
+    vertices: VertexPages,
     /// The load `pipelines` was built from; 0 before any.
     generation: u64,
     /// By slot; `None` for a pipeline the load refused.
@@ -184,7 +184,7 @@ impl ModPipelines {
             group,
             view,
             frame,
-            vertices: buffer("Mod pipeline quads", 0, wgpu::BufferUsages::VERTEX),
+            vertices: VertexPages::default(),
             generation: 0,
             pipelines: Vec::new(),
             runs: Vec::new(),
@@ -392,9 +392,7 @@ impl ModPipelines {
         Ok(())
     }
 
-    /// Uploads the frame's quads, drawn with `view_proj` into a frame `viewport` pixels big. The
-    /// number of quads to draw: the caller's quad indices must reach that far. A set this
-    /// renderer was not built with draws nothing.
+    /// Upload the frame's quads and return the number of indices needed for its largest page.
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -431,16 +429,14 @@ impl ModPipelines {
             return 0;
         };
         let quads = last.quads.end;
-        let bytes: &[u8] = bytemuck::cast_slice(&batch.vertices[..quads as usize * 4]);
-        if self.vertices.size() < bytes.len() as u64 {
-            self.vertices = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Mod pipeline quads"),
-                size: (bytes.len() as u64).next_power_of_two(),
-                usage: self.vertices.usage(),
-                mapped_at_creation: false,
-            });
-        }
-        upload(&self.vertices, bytes);
+        self.vertices.upload(
+            device,
+            upload,
+            "Mod pipeline quads",
+            bytemuck::cast_slice(&batch.vertices[..quads as usize * 4]),
+            4 * std::mem::size_of::<PipelineVertex>() as u64,
+            0,
+        );
         upload(&self.view, bytemuck::cast_slice(&view_proj.to_cols_array()));
         upload(
             &self.frame,
@@ -450,7 +446,7 @@ impl ModPipelines {
                 _pad: 0.0,
             }),
         );
-        quads
+        self.vertices.index_quads(quads)
     }
 
     /// Draws the prepared runs of stages `first..=last` in the order queued, with `indices`
@@ -463,18 +459,30 @@ impl ModPipelines {
         first: usize,
         last: usize,
     ) {
+        self.draw_runs(
+            pass,
+            indices,
+            self.runs
+                .iter()
+                .filter(|run| first <= run.stage && run.stage <= last)
+                .map(|run| (run, run.quads.clone())),
+        );
+    }
+
+    fn draw_runs<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'_>,
+        indices: &wgpu::Buffer,
+        runs: impl Iterator<Item = (&'a Run, std::ops::Range<u32>)>,
+    ) {
         let mut bound = false;
-        for run in &self.runs {
-            if run.stage < first || run.stage > last {
-                continue;
-            }
+        for (run, range) in runs {
             let Some(Some((pipeline, texture))) = self.pipelines.get(run.slot) else {
                 continue;
             };
             if !bound {
                 bound = true;
                 pass.set_bind_group(0, &self.group, &[]);
-                pass.set_vertex_buffer(0, self.vertices.slice(..));
                 pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
             }
             pass.set_pipeline(pipeline);
@@ -482,7 +490,10 @@ impl ModPipelines {
             if let Some(texture) = texture {
                 pass.set_bind_group(1, texture, &[]);
             }
-            pass.draw_indexed(run.quads.start * 6..run.quads.end * 6, 0, 0..1);
+            for (buffer, range) in self.vertices.ranges(0, range) {
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw_indexed(range.start * 6..range.end * 6, 0, 0..1);
+            }
         }
     }
 }
@@ -509,6 +520,8 @@ impl super::Renderer {
             sprite,
         };
         self.world_primitives
+            .as_mut()
+            .expect("world primitives")
             .pipelines
             .build(&self.device, set, Some(textures))
     }
@@ -838,7 +851,10 @@ mod tests {
         assert_eq!(renderer.generation, 41);
         assert_eq!(renderer.pipelines.len(), 1);
         assert_eq!(next.slot(handle), Ok(0));
-        assert!(next.resolve(&Identifier::parse("test:p1").unwrap()).is_ok());
+        assert!(
+            next.resolve(&Identifier::parse("test:p1").unwrap(),)
+                .is_ok()
+        );
         renderer.build(&device, &next, None).unwrap();
         assert_eq!(renderer.generation, 42);
         assert_eq!(renderer.pipelines.len(), 2);
@@ -1119,5 +1135,81 @@ mod tests {
         assert_near(pixel(8, 24), green, 1.0, "the sprite, not the atlas's red");
         assert_near(pixel(40, 24), green, 1.0, "the sprite repeated");
         assert_near(pixel(8, 40), [255.0; 4], 1.0, "the untextured pipeline");
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn pipeline_quads_chunk_across_small_max_buffer_size_and_preserve_order() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some(adapter) = crate::gfx::test_gpu::adapter() else {
+            return;
+        };
+        // A non-power-of-two limit that still fits the 64 × 64 RGBA readback.
+        let limit = 20 * 1024;
+        let gpu = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: wgpu::Limits {
+                max_buffer_size: limit,
+                max_uniform_buffer_binding_size: limit,
+                max_storage_buffer_binding_size: limit,
+                ..wgpu::Limits::default()
+            },
+            ..Default::default()
+        }))
+        .expect("GPU device with small max_buffer_size");
+        let set = load(
+            77,
+            &[(PASS, PipelineBlend::Translucent, WorldDepth::Tested)],
+        );
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut primitives = WorldPrimitives::new(&gpu.0, (format, false));
+        let quad_bytes = 4 * std::mem::size_of::<PipelineVertex>() as u64;
+        let max_quads = world_primitives::VertexPages::limit(limit, quad_bytes);
+        assert!(max_quads > 0);
+        // More than one full page in a single run, followed by a second run at a later stage.
+        let first_count = max_quads + 20;
+        let mut vertices = Vec::with_capacity((first_count as usize + 1) * 4);
+        for _ in 0..first_count {
+            vertices.extend_from_slice(&quad([0.0, 0.0, 64.0, 64.0], 2.0, [255, 0, 0, 255]));
+        }
+        vertices.extend_from_slice(&quad([32.0, 0.0, 64.0, 64.0], 2.0, [0, 255, 0, 255]));
+        let runs = [
+            PipelineRun {
+                slot: 0,
+                stage: 0,
+                quads: first_count,
+            },
+            PipelineRun {
+                slot: 0,
+                stage: (STAGES - 1) as u32,
+                quads: 1,
+            },
+        ];
+        let at = render(
+            &gpu,
+            &mut primitives,
+            format,
+            Batch {
+                set: Some(&set),
+                vertices: &vertices,
+                runs: &runs,
+                time: 0.0,
+            },
+            STAGES - 1,
+        );
+        assert!(primitives.pipelines.vertices.buffers.len() >= 2);
+        assert!(
+            primitives
+                .pipelines
+                .vertices
+                .buffers
+                .iter()
+                .all(|buffer| buffer.size() <= limit)
+        );
+        assert_eq!(at(16, 32), [255.0, 0.0, 0.0, 255.0], "earlier stage");
+        assert_eq!(
+            at(48, 32),
+            [0.0, 255.0, 0.0, 255.0],
+            "later stage over earlier stage"
+        );
     }
 }

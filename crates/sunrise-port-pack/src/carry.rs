@@ -1033,7 +1033,6 @@ pub fn carry(
     let mut block_loot = BTreeSet::new();
     let mut biome_conventions = BTreeSet::new();
     let set_tags = crate::worldgen::structure_set_tags(&mut zip);
-    let piece_counts = crate::worldgen::piece_counts(&mut zip);
     let processor_data = crate::processors::ProcessorData::read(&mut zip);
     report.namespaces = extra_namespaces(&mut zip, id, pack.mods);
     let owned: Vec<&str> = std::iter::once(id.as_str())
@@ -1156,14 +1155,8 @@ pub fn carry(
                         &mut v,
                         &mut types.rule_tests_carried,
                     );
-                    let mut changed =
+                    let changed =
                         crate::worldgen::upgrade(kind, &mut v, types, &set_tags) || carried;
-                    if kind == "structure" {
-                        let path = rel.trim_start_matches("worldgen/structure/");
-                        let structure = format!("{ns}:{}", path.trim_end_matches(".json"));
-                        changed |=
-                            crate::worldgen::add_piece_counts(&structure, &mut v, &piece_counts);
-                    }
                     if changed {
                         bytes = serde_json::to_vec_pretty(&v).unwrap_or(bytes);
                     }

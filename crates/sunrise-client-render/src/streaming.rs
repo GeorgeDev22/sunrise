@@ -98,6 +98,8 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// What a loaded chunk needs from the generator before the game uses it,
     /// on the worker that loaded it.
     fn prepare_loaded(&self, _worker: &mut Self::Worker, _chunk: &Chunk) {}
+    /// Finish a decoded full record on the owner before it enters the world.
+    fn accept_loaded_chunk(&self, _chunk: &mut Chunk) {}
     /// The worker has had nothing to do for [`IDLE_RELEASE`]: give back what
     /// it keeps between jobs only to go faster.
     fn idle(&self, _worker: &mut Self::Worker) {}
@@ -106,6 +108,19 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// next to each other in a run. Results do not change.
     fn all_idle(&self) {}
     fn proto(&self, worker: &mut Self::Worker, x: i32, z: i32) -> Proto;
+    /// Build the proto and, when needed, return its decoded disk record to the owner.
+    fn worker_proto(
+        &self,
+        worker: &mut Self::Worker,
+        x: i32,
+        z: i32,
+    ) -> (Proto, Option<Box<crate::chunk::SavedProto>>) {
+        (self.proto(worker, x, z), None)
+    }
+    fn accept_loaded_proto(&self, proto: &mut Proto, saved: crate::chunk::SavedProto) -> bool {
+        self.restore_proto(proto, saved);
+        self.is_decorated(proto)
+    }
     fn decorates(&self) -> bool {
         false
     }
@@ -180,6 +195,10 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// Save proto chunks decoration wrote to, so that they come back as they
     /// were: generating them again would lose those writes.
     fn save_protos(&self, _protos: &[&Proto]) {}
+    /// Whether proto snapshots must go through the owner before background encoding.
+    fn save_protos_on_owner(&self) -> bool {
+        false
+    }
     /// Save a column that finished after the player moved away: its
     /// neighbours' decoration is done, so it can't be generated again.
     fn save_finished(&self, _chunk: Chunk) {}
@@ -268,10 +287,22 @@ impl<G: ChunkGenerator> ProtoAccess for G {
     }
 }
 trait Saves: LodSource + ProtoAccess {
+    fn accept_loaded_chunk(&self, chunk: &mut Chunk);
+    fn accept_loaded_proto(&self, proto: &mut Proto, saved: crate::chunk::SavedProto) -> bool;
+    fn save_protos_on_owner(&self) -> bool;
     fn save_protos(&self, protos: &[&Proto]);
     fn save_finished(&self, chunk: Chunk);
 }
 impl<G: ChunkGenerator> Saves for G {
+    fn accept_loaded_chunk(&self, chunk: &mut Chunk) {
+        ChunkGenerator::accept_loaded_chunk(self, chunk);
+    }
+    fn accept_loaded_proto(&self, proto: &mut Proto, saved: crate::chunk::SavedProto) -> bool {
+        ChunkGenerator::accept_loaded_proto(self, proto, saved)
+    }
+    fn save_protos_on_owner(&self) -> bool {
+        ChunkGenerator::save_protos_on_owner(self)
+    }
     fn save_protos(&self, protos: &[&Proto]) {
         ChunkGenerator::save_protos(self, protos);
     }
@@ -325,8 +356,8 @@ pub struct FinalWrites {
 }
 pub enum Done {
     Generated(Chunk),
-    /// A proto chunk, and whether it was decorated (loaded so from the save).
-    Proto(i32, i32, Proto, bool),
+    /// A proto chunk, its decoration flag, and any record deferred to the owner.
+    Proto(i32, i32, Proto, bool, Option<Box<crate::chunk::SavedProto>>),
     /// A decorated region, the region indices of its final chunks and what
     /// decoration wrote into them.
     Decorated(i32, i32, Box<[Proto; 9]>, Vec<usize>, FinalWrites),
@@ -497,7 +528,7 @@ pub struct ProtoCensus {
     /// `ChunkGenerator::cache_census`.
     pub caches: Vec<(&'static str, usize, Option<usize>)>,
 }
-fn plan_unloads(world: &World, unload: impl Fn(i32, i32) -> bool) -> Vec<(i32, i32)> {
+fn plan_unloads(world: &World, unload: impl Fn(i32, i32) -> bool) -> HashSet<(i32, i32)> {
     world
         .chunks
         .keys()
@@ -506,10 +537,16 @@ fn plan_unloads(world: &World, unload: impl Fn(i32, i32) -> bool) -> Vec<(i32, i
         .collect()
 }
 
-fn commit_unloads(world: &mut World, keys: &[(i32, i32)]) -> Vec<Arc<Chunk>> {
-    keys.iter()
-        .filter_map(|&key| world.unload_chunk(key))
-        .collect()
+fn commit_unloads(world: &mut World, keys: &mut HashSet<(i32, i32)>) -> Vec<Arc<Chunk>> {
+    let mut removed = Vec::with_capacity(keys.len());
+    keys.retain(|&key| {
+        let Some(chunk) = world.unload_chunk(key) else {
+            return false;
+        };
+        removed.push(chunk);
+        true
+    });
+    removed
 }
 
 /// A completed mesh and the compile sequence that produced it, kept through GPU publication.
@@ -524,8 +561,25 @@ pub struct MeshUpload {
 pub struct StreamingUpdate {
     uploads: Vec<MeshUpload>,
     sweep: bool,
-    far: Vec<(i32, i32)>,
+    far: HashSet<(i32, i32)>,
     paused: bool,
+}
+
+impl StreamingUpdate {
+    /// Columns selected for removal. After `prepare_commit`, only the columns actually removed.
+    pub fn unloading_columns(&self) -> &HashSet<(i32, i32)> {
+        &self.far
+    }
+
+    /// Leave the live columns alone when their save could not be submitted.
+    pub fn keep_columns(&mut self) {
+        self.far.clear();
+    }
+
+    /// Keep only columns that may be committed by this sweep.
+    pub fn retain_unloading_columns(&mut self, can_unload: impl FnMut(&(i32, i32)) -> bool) {
+        self.far.retain(can_unload);
+    }
 }
 
 /// Result of processing generation results, pausing before a late full save.
@@ -1124,12 +1178,12 @@ impl<G: ChunkGenerator> Jobs<G> {
                     // generating forever. This covers every generator, the vanilla one included,
                     // not only a mod's `build_terrain`.
                     let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        generator.proto(&mut *worker, x, z)
+                        generator.worker_proto(&mut *worker, x, z)
                     }));
                     match made {
-                        Ok(proto) => {
-                            let decorated = generator.is_decorated(&proto);
-                            Done::Proto(x, z, proto, decorated)
+                        Ok((proto, saved)) => {
+                            let decorated = saved.is_none() && generator.is_decorated(&proto);
+                            Done::Proto(x, z, proto, decorated, saved)
                         }
                         Err(_) => Done::Failed(x, z),
                     }
@@ -1665,8 +1719,13 @@ impl Streaming {
     /// Queue checked-out protos ahead of other generation work.
     pub fn submit_protos(&mut self, protos: Vec<ProtoSave>) -> bool {
         if !protos.is_empty() {
-            self.saving += 1;
-            self.submit(None, 0, Job::Save(protos));
+            if self.saves.save_protos_on_owner() {
+                // This only captures and queues the region records; encoding stays on workers.
+                self.finish_save(protos, true);
+            } else {
+                self.saving += 1;
+                self.submit(None, 0, Job::Save(protos));
+            }
         }
         self.saving == 0
     }
@@ -1693,6 +1752,9 @@ impl Streaming {
                 return Some(chunk);
             }
             return None;
+        }
+        if !chunk.generated {
+            self.saves.accept_loaded_chunk(&mut chunk);
         }
         // Generated columns are saved like edited ones, as vanilla saves
         // every chunk it generates.
@@ -2011,6 +2073,11 @@ impl Streaming {
             ("meshing", self.meshing.len()),
         ]
     }
+    /// Request an unload sweep on the next `begin_plan_update`, even if the
+    /// view center and radius did not change and fewer than 8 ticks elapsed.
+    pub fn force_unload_sweep(&mut self) {
+        self.scan_age = 8;
+    }
     /// Advance streaming: collect finished work, then schedule more.
     /// Returns meshes ready for upload and columns that were unloaded.
     pub fn update(&mut self, world: &mut World) -> (Vec<MeshUpload>, Vec<Arc<Chunk>>) {
@@ -2039,7 +2106,7 @@ impl Streaming {
             return PlanStep::Ready(StreamingUpdate {
                 uploads: Vec::new(),
                 sweep: false,
-                far: Vec::new(),
+                far: HashSet::new(),
                 paused: true,
             });
         }
@@ -2100,10 +2167,13 @@ impl Streaming {
                 self.decoration_changed = true;
             }
             match done {
-                Done::Proto(x, z, proto, decorated) => {
+                Done::Proto(x, z, mut proto, decorated, saved) => {
                     self.generation_scan.exhausted = false;
                     self.generating.remove(&(x, z));
                     if self.in_range(x, z, 4) || self.near_finished(x, z, 2) {
+                        let decorated = saved.map_or(decorated, |saved| {
+                            self.saves.accept_loaded_proto(&mut proto, *saved)
+                        });
                         self.light_views.remove(&(x, z));
                         self.protos.insert((x, z), Some(proto));
                         if decorated || !self.decorates {
@@ -2162,7 +2232,7 @@ impl Streaming {
                 !self.remote && self.ranges().unloaded(x, z, self.decorates)
             })
         } else {
-            Vec::new()
+            HashSet::new()
         };
         PlanStep::Ready(StreamingUpdate {
             uploads: resume.uploads,
@@ -2176,9 +2246,9 @@ impl Streaming {
     pub fn finish_update(
         &mut self,
         world: &mut World,
-        plan: StreamingUpdate,
+        mut plan: StreamingUpdate,
     ) -> (Vec<MeshUpload>, Vec<Arc<Chunk>>) {
-        let (commit, protos) = self.prepare_commit(world, plan);
+        let (commit, protos) = self.prepare_commit(world, &mut plan);
         self.submit_protos(protos);
         self.complete_commit(world, commit)
     }
@@ -2187,15 +2257,10 @@ impl Streaming {
     pub fn prepare_commit(
         &mut self,
         world: &mut World,
-        plan: StreamingUpdate,
+        plan: &mut StreamingUpdate,
     ) -> (StreamingCommit, Vec<ProtoSave>) {
-        let StreamingUpdate {
-            uploads,
-            sweep,
-            far,
-            paused,
-        } = plan;
-        if paused {
+        let uploads = std::mem::take(&mut plan.uploads);
+        if plan.paused {
             return (
                 StreamingCommit {
                     uploads,
@@ -2208,14 +2273,13 @@ impl Streaming {
         let mut hz_laps = crate::spans::laps();
         let mut removed = Vec::new();
         let mut proto_saves = Vec::new();
-        if sweep {
+        if plan.sweep {
             self.decoration_changed = true;
-            for key in &far {
-                self.decorated.remove(key);
-            }
-            removed = commit_unloads(world, &far);
+            let far = &mut plan.far;
+            removed = commit_unloads(world, far);
             self.forget_visibility(world, far.iter().copied());
-            for key in &far {
+            for key in far.iter() {
+                self.decorated.remove(key);
                 world.entities_pending.remove(key);
                 self.lit.remove(key);
                 self.meshed.remove(key);
@@ -2223,7 +2287,6 @@ impl Streaming {
                 self.light_snapshots.remove(key);
             }
             if !far.is_empty() {
-                let far: HashSet<(i32, i32)> = far.iter().copied().collect();
                 self.meshing.retain(|k, _| !far.contains(&(k.0, k.2)));
                 self.compile_started
                     .retain(|k, _| !far.contains(&(k.0, k.2)));
@@ -4226,6 +4289,7 @@ mod tests {
             neighbour.1,
             Box::new(SectionMask::single(6)),
             true,
+            None,
         ));
         streaming.plan_update(&mut world);
 
@@ -4745,10 +4809,10 @@ mod tests {
         world.chunks.insert((11, 0), Arc::new(Chunk::empty(11, 0)));
         world.chunks.insert((0, 0), Arc::new(Chunk::empty(0, 0)));
         world.modified.insert((10, 0));
-        let plan = plan_unloads(&world, |x, _| x > 5);
+        let mut plan = plan_unloads(&world, |x, _| x > 5);
         assert!(world.chunks.contains_key(&(10, 0)));
         let saved = world.chunks.get(&(10, 0)).unwrap().clone();
-        let unloaded = commit_unloads(&mut world, &plan);
+        let unloaded = commit_unloads(&mut world, &mut plan);
         assert_eq!((saved.x, saved.z), (10, 0));
         assert_eq!(unloaded.len(), 2);
         assert!(!world.chunks.contains_key(&(10, 0)));
@@ -5726,9 +5790,9 @@ mod tests {
             forced_cover: None,
             band: None,
         };
-        let planned = plan_unloads(&world, |x, z| idle.unloaded(x, z, true));
+        let mut planned = plan_unloads(&world, |x, z| idle.unloaded(x, z, true));
         assert_eq!(planned.len(), 3);
-        let unloaded = commit_unloads(&mut world, &planned);
+        let unloaded = commit_unloads(&mut world, &mut planned);
         assert_eq!(unloaded.len(), 3);
         assert!(world.chunks.is_empty());
     }

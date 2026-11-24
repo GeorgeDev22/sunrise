@@ -417,7 +417,7 @@ impl From<ChannelRef> for super::ChannelRef {
     }
 }
 // exhaustive: the game builds it with a literal; mods read it and edit its fields
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: native game-to-hook staging record for local SoundPlay.
 pub struct SoundPlay {
     pub identifier: String,
     pub source: super::SoundSource,

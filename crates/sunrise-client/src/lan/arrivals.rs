@@ -463,7 +463,8 @@ pub fn export_record(
     }
     let id = freeze.then(new_handover_id).transpose()?;
     let g = &hub.guests[i];
-    let tag = super::playerdata::player_tag(g, &hub.encoder.items);
+    let tag = super::playerdata::try_player_tag(g, &hub.encoder.items)
+        .map_err(|error| error.to_string())?;
     let bytes = write_named(
         &NamedTag {
             name: "".into(),

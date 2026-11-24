@@ -21,7 +21,7 @@ fn pick_up(host: &mut dyn ServerHost, mob: EntityRef, player: EntityRef) {
 `ride_player` is the only way onto a player. `EntityRef::start_riding(host, player, force)` keeps refusing a player
 vehicle, forced or not, as vanilla's `startRiding` callers and `/ride` do.
 
-## What the game does
+### What the game does
 
 - **The seat.** Each tick the mob sits on top of the player's box for its current pose (`Player`'s default passenger
   attachment), less the mob's own vehicle attachment (`Entity.positionRider`). It follows the player as the player
@@ -42,7 +42,7 @@ vehicle, forced or not, as vanilla's `startRiding` callers and `/ride` do.
   vehicle, on the server and on a client after it applies a passenger list for the vehicle,
   including the player's own client when it receives that list.
 
-## Refusals
+### Refusals
 
 | `RidePlayerRefusal` | When |
 |---|---|
@@ -57,7 +57,7 @@ vehicle, forced or not, as vanilla's `startRiding` callers and `/ride` do.
 | `CannotRide` | Unforced, and the mob's boarding cooldown is running, or it is a warden or a wither. |
 | `Canceled` | A mod's `entity_mount` canceled the mount or the dismount before it. |
 
-## Limits
+### Limits
 
 - Only a mob can ride a player. A player can't ride a player, and items, boats and other entities can't ride one
   either.

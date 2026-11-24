@@ -9,6 +9,8 @@ pub(in crate::gfx) struct PostPassArgs<'a> {
     pub(in crate::gfx) fg_frames: Option<&'a (wgpu::Texture, wgpu::Texture)>,
     pub(in crate::gfx) pack_post: bool,
     pub(in crate::gfx) native_post: bool,
+    pub(in crate::gfx) after_pack_sky: bool,
+    pub(in crate::gfx) after_pack_features: bool,
     pub(in crate::gfx) pack_draws_weather: bool,
     pub(in crate::gfx) pack_draws_terrain: bool,
     pub(in crate::gfx) pack_draws_shadow: bool,
@@ -57,6 +59,7 @@ impl Renderer {
         &mut self,
         mut encoder: wgpu::CommandEncoder,
         args: PostPassArgs<'_>,
+        mut hooks: Option<&mut dyn world_primitives::FrameHooks>,
     ) -> std::result::Result<(wgpu::CommandEncoder, PostPassResult), String> {
         let PostPassArgs {
             frame,
@@ -67,6 +70,8 @@ impl Renderer {
             fg_frames,
             pack_post,
             native_post,
+            after_pack_sky,
+            after_pack_features,
             pack_draws_weather,
             pack_draws_terrain,
             pack_draws_shadow,
@@ -110,6 +115,27 @@ impl Renderer {
             && pack_post
             && let Some((dimension, Some(mut post))) = self.pack_post.take()
         {
+            let format = post.formats[0];
+            // The standard primitive blend cannot target an integer or unblendable colortex0.
+            // On that route the feature stages have no compatible pass, rather than firing early.
+            let pack_features = after_pack_features
+                && pack_post::holds_floats(format)
+                && format
+                    .guaranteed_format_features(self.device.features())
+                    .flags
+                    .contains(wgpu::TextureFormatFeatureFlags::BLENDABLE);
+            if pack_features {
+                self.world_primitives
+                    .as_mut()
+                    .expect("world primitives")
+                    .prepare_pack_pass(
+                        &self.device,
+                        format,
+                        post.rgb & 1 != 0,
+                        self.output.frame.linear_light,
+                    );
+            }
+
             let size = self.world_post.size().unwrap_or([1, 1]);
             let weather = match &self.hud.atlas_texture {
                 Some(atlas) if pack_draws_weather => self
@@ -231,6 +257,38 @@ impl Renderer {
                 [self.config.width, self.config.height],
                 pages,
                 &mut terrain,
+                pack_post::WorldBoundaries {
+                    sky: after_pack_sky,
+                    features: pack_features,
+                },
+                |encoder, boundary| {
+                    use pack_post::WorldBoundary;
+                    if let Some(hooks) = hooks.as_deref_mut() {
+                        let sections = &self.visible_renderable_sections;
+                        match boundary {
+                            WorldBoundary::AfterSky => hooks.on_after_sky(sections, false),
+                            WorldBoundary::AfterLevel => hooks.on_after_level(sections, false),
+                            WorldBoundary::Features {
+                                translucent,
+                                color,
+                                depth,
+                            } => {
+                                let stage = if translucent {
+                                    mod_api::RenderLevelStage::AfterTranslucentFeatures
+                                } else {
+                                    mod_api::RenderLevelStage::AfterOpaqueFeatures
+                                };
+                                let draws = hooks.on_render_stage(stage, sections, false);
+                                return self
+                                    .world_primitives
+                                    .as_ref()
+                                    .expect("world primitives")
+                                    .draw_pack_prepared(encoder, color, depth, draws);
+                            }
+                        }
+                    }
+                    false
+                },
                 &self.device_lost,
                 super::super::in_flight::poll_live,
             );

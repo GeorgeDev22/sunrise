@@ -1,4 +1,5 @@
-//! Item-owned client behaviour for worn equipment and tooltip fonts. Registered anew at resource load.
+//! Item-owned client behaviour for worn equipment, tooltip fonts and dropped stacks. Registered anew
+//! at resource load.
 use crate::{ClientHost, Identifier, ItemKey, ItemStack, ModelPart};
 use std::sync::Arc;
 
@@ -181,6 +182,28 @@ pub trait ClientItemExtensions: Send + Sync + 'static {
     fn tooltip_font(&self, host: &dyn ClientHost, stack: &ItemStack) -> Option<Identifier> {
         let _ = (host, stack);
         None
+    }
+    /// Whether this dropped stack bobs up and down as it spins
+    /// (`IClientItemExtensions.shouldBobAsEntity`).
+    ///
+    /// Asked with the dropped stack each time it is drawn on the client, picked-up stacks flying
+    /// to their collector included. `false` removes only the up-and-down offset: the spin, the
+    /// height above the ground and the number of copies drawn stay as they are. If the callback
+    /// panics, the stack bobs as vanilla's does.
+    fn should_bob_as_entity(&self, host: &dyn ClientHost, stack: &ItemStack) -> bool {
+        let _ = (host, stack);
+        true
+    }
+    /// Whether a dropped stack of several copies draws them spread apart
+    /// (`IClientItemExtensions.shouldSpreadAsEntity`).
+    ///
+    /// Asked with the dropped stack each time it is drawn on the client, picked-up stacks flying
+    /// to their collector included. `false` draws every copy
+    /// at the same place and in the same pose, so the stack looks like one item. If the callback
+    /// panics, the copies spread as vanilla's do.
+    fn should_spread_as_entity(&self, host: &dyn ClientHost, stack: &ItemStack) -> bool {
+        let _ = (host, stack);
+        true
     }
 }
 

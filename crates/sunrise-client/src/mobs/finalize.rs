@@ -30,15 +30,11 @@ use serde_json::Value;
 use std::{borrow::Cow, fs, path::Path, sync::Arc};
 use sunrise_core::{equipment_slot::EquipmentSlot, geometry::Aabb, random::RandomSource};
 
-/// What a level's finalizeSpawn event decided for a mob another mob's
-/// finalizeSpawn created: the rider is dropped, added without its own rolls,
-/// or finalized. Vanilla fires the event for every `finalizeSpawn` call,
-/// riders included.
-#[derive(Debug, PartialEq)]
-pub enum SpawnEvent {
-    Cancelled,
-    Skip,
-    Finalize,
+/// The two independent decisions of NeoForge's `FinalizeSpawnEvent`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SpawnEvent {
+    pub skip_initialization: bool,
+    pub veto_admission: bool,
 }
 
 /// The level as finalizeSpawn reads it.
@@ -77,7 +73,7 @@ pub trait FinalizeLevel {
     /// finalizeSpawn creates (`ZombieHorse`'s zombie, a chicken jockey).
     /// The default finalizes: a level without the event keeps vanilla's flow.
     fn spawn_event(&mut self, _: &mut Mob, _: Reason) -> SpawnEvent {
-        SpawnEvent::Finalize
+        SpawnEvent::default()
     }
     /// What finalizeSpawn needs besides the level: the variant registries,
     /// enchantments and items the level owns.
@@ -1763,14 +1759,11 @@ impl<L: FinalizeLevel + ?Sized, R: RandomSource> Ctx<'_, L, R> {
     /// `false` drops it, otherwise it is finalized unless the level said the
     /// listener already did (`Mob.finalizeSpawn` fires for riders too).
     fn rider_kept(&mut self, j: &mut Mob, reason: Reason, group: Option<Group>) -> bool {
-        match self.level.spawn_event(j, reason) {
-            SpawnEvent::Cancelled => false,
-            SpawnEvent::Skip => true,
-            SpawnEvent::Finalize => {
-                self.finalize(j, reason, group);
-                true
-            }
+        let event = self.level.spawn_event(j, reason);
+        if !event.skip_initialization {
+            self.finalize(j, reason, group);
         }
+        !event.veto_admission
     }
     /// `startRiding`: the rider leaves the vehicle it was on.
     fn ride(&mut self, rider: &mut Mob, vehicle: &mut Mob) {

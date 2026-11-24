@@ -4,7 +4,6 @@ use super::*;
 const MAGIC: &[u8; 4] = b"DRS1";
 const HEADER: usize = 12;
 pub const CHUNK_DATA: usize = 512 << 10;
-static ASSEMBLY: Mutex<Assembly> = Mutex::new(Assembly { pending: None });
 
 pub fn chunks(bytes: &[u8]) -> Result<impl Iterator<Item = Vec<u8>> + '_, String> {
     if bytes.is_empty() || bytes.len() > mod_api::MAX_SNAPSHOT_BYTES {
@@ -21,7 +20,7 @@ pub fn chunks(bytes: &[u8]) -> Result<impl Iterator<Item = Vec<u8>> + '_, String
     }))
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Assembly {
     pending: Option<(usize, Vec<u8>)>,
 }
@@ -62,30 +61,43 @@ impl Assembly {
     }
 }
 
-pub fn clear_transfer() {
-    ASSEMBLY.lock().unwrap_or_else(|e| e.into_inner()).pending = None;
+/// A single client configuration's synchronized registries and in-flight snapshot.
+#[derive(Debug, Default)]
+pub struct Receiver {
+    assembly: Assembly,
+    received: Option<Arc<mod_api::DatapackRegistrySet>>,
 }
-pub fn finish_transfer() -> Result<(), String> {
-    if ASSEMBLY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .pending
-        .is_some()
-    {
-        Err("Incomplete datapack registry snapshot at the end of configuration.".into())
-    } else {
+
+impl Receiver {
+    pub fn received(&self) -> Option<&Arc<mod_api::DatapackRegistrySet>> {
+        self.received.as_ref()
+    }
+
+    pub(crate) fn owned_heap_bytes(&self) -> usize {
+        use sunrise_protocol::retained::OwnedHeap;
+        self.assembly.pending.owned_heap_bytes().saturating_add(
+            self.received
+                .as_deref()
+                .map_or(0, mod_api::__private::queued_datapack_set_bytes),
+        )
+    }
+
+    pub(crate) fn finish_transfer(&self) -> Result<(), String> {
+        if self.assembly.pending.is_some() {
+            Err("Incomplete datapack registry snapshot at the end of configuration.".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn accept_chunk(&mut self, packet: &[u8]) -> Result<(), String> {
+        if let Some(bytes) = self.assembly.push(packet)? {
+            let declarations = mod_api::__private::datapack_registry_declarations();
+            let received = receive(declarations, &bytes)?;
+            self.received = Some(Arc::new(received));
+        }
         Ok(())
     }
-}
-pub fn accept_chunk(packet: &[u8]) -> Result<(), String> {
-    let complete = ASSEMBLY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(packet)?;
-    if let Some(bytes) = complete {
-        accept(&bytes)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

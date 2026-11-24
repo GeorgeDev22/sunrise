@@ -11,9 +11,7 @@ use super::{
 };
 use mod_api::{ScheduleError, TaskId};
 // Their old home, for mixin code that names them here.
-pub(super) use mod_api::{
-    Authority, LifecycleContext, ServerTickPhase, TickId, WorldEpoch, WorldPhase,
-};
+pub(super) use mod_api::{Authority, LifecycleContext, ServerTickPhase, TickId, WorldEpoch};
 
 /// Epoch allocation spans server and client `Game` instances and client level
 /// replacements, so the counter is process-wide.
@@ -97,11 +95,23 @@ impl NativeLifecycle {
         self.attempt.map(|a| WorldEpoch::new(a.epoch))
     }
 
+    /// Whether a world open is still in progress (before `world_open_ready`).
+    #[cfg(test)]
+    pub(super) fn is_opening(&self) -> bool {
+        self.attempt
+            .as_ref()
+            .is_some_and(|a| a.session == OpenState::Opening)
+    }
+
     /// The open starts: a fresh process-wide epoch, never reused.
     pub(super) fn begin_open(&mut self, authority: Authority) {
+        self.begin_open_at(authority, fresh_epoch());
+    }
+
+    fn begin_open_at(&mut self, authority: Authority, epoch: WorldEpoch) {
         self.attempt = Some(OpenAttempt {
             authority,
-            epoch: fresh_epoch().get(),
+            epoch: epoch.get(),
             session: OpenState::Opening,
             ticks: 0,
             tick_open: false,
@@ -119,52 +129,18 @@ impl NativeLifecycle {
         attempt.server_context()
     }
 
-    pub(super) fn is_opening(&self) -> bool {
-        self.attempt
-            .as_ref()
-            .is_some_and(|attempt| attempt.session == OpenState::Opening)
-    }
-
-    /// `WorldOpenFailed`: only while opening; the attempt is invalidated.
-    pub(super) fn world_open_failed(&mut self) -> Option<LifecycleContext> {
-        let attempt = self.attempt.as_mut()?;
-        if attempt.session != OpenState::Opening {
-            return None;
-        }
-        let context = attempt.server_context();
-        self.attempt = None;
-        self.tasks.clear();
-        context
-    }
-
     pub(super) fn begin_close(&mut self) {
         if let Some(attempt) = self.attempt.as_mut() {
             attempt.session = OpenState::Closing;
         }
     }
 
-    /// A failure after readiness retires the epoch, including during shutdown.
-    pub(super) fn world_close_failed(&mut self) -> Option<LifecycleContext> {
-        let attempt = self.attempt.as_ref()?;
-        if attempt.session == OpenState::Opening {
-            return None;
-        }
-        let context = attempt.server_context();
-        self.attempt = None;
+    /// Retire the active epoch (if any) and drop pending scheduled tasks.
+    /// Idempotent: returns `true` when an epoch was retired.
+    pub(super) fn retire(&mut self) -> bool {
+        let had = self.attempt.take().is_some();
         self.tasks.clear();
-        context
-    }
-
-    /// `WorldCloseFinal`: at most once per epoch; the epoch retires.
-    pub(super) fn world_close_final(&mut self) -> Option<LifecycleContext> {
-        let attempt = self.attempt.as_mut()?;
-        if attempt.session != OpenState::Closing {
-            return None;
-        }
-        let context = attempt.server_context();
-        self.attempt = None;
-        self.tasks.clear();
-        context
+        had
     }
 
     /// Non-paused ready ticks only; a paused pass observes nothing, does not count.
@@ -227,6 +203,11 @@ impl Game<'_> {
     }
 
     pub(super) fn native_lifecycle_open_started(&mut self) {
+        self.native_lifecycle_open_at(fresh_epoch());
+    }
+
+    pub(super) fn native_lifecycle_open_at(&mut self, epoch: WorldEpoch) {
+        self.levels.active_closed = false;
         self.clear_composter_randoms();
         self.reset_entity_residency();
         self.entity_initialization = Default::default();
@@ -236,7 +217,7 @@ impl Game<'_> {
         self.attachment_indexes.clear();
         self.passages.retire_world();
         self.native_lifecycle
-            .begin_open(self.native_lifecycle_authority());
+            .begin_open_at(self.native_lifecycle_authority(), epoch);
     }
 
     pub(super) fn native_lifecycle_world_ready(&mut self) {
@@ -249,44 +230,16 @@ impl Game<'_> {
         }
     }
 
-    /// `error_text` is the engine's own error text, unchanged.
-    pub(super) fn native_lifecycle_world_failed(&mut self, error_text: &str) {
-        // The server levels that opened before the failure close first.
-        if self.remote.is_none() {
-            self.native_levels_closing();
-        }
-        if let Some(context) = self.native_lifecycle.world_open_failed() {
-            self.native_world_lifecycle(&context, WorldPhase::WorldOpenFailed, error_text);
-        }
-        self.attachment_indexes.clear();
-        self.passages.retire_world();
-        self.resident_entities.table.get_mut().reset();
-    }
-
-    /// Report a server-loop or shutdown failure once and retire its epoch.
-    pub(super) fn native_lifecycle_close_failed(&mut self, error_text: &str) {
-        if self.remote.is_none() {
-            self.native_levels_closing();
-        }
-        if let Some(context) = self.native_lifecycle.world_close_failed() {
-            self.native_world_lifecycle(&context, WorldPhase::WorldCloseFailed, error_text);
-        }
-        self.attachment_indexes.clear();
-        self.passages.retire_world();
-        self.resident_entities.table.get_mut().reset();
-    }
-
-    /// After the final save, before the lock release. Client epochs retire
-    /// without dispatching server lifecycle hooks.
+    /// Retire the current world epoch and clear per-world mod state without
+    /// synthesizing `LevelEvent.Unload` events (which only fire when
+    /// `close_loaded_levels_for_stop` closes each loaded level).
+    /// Idempotent and safe on every exit path (orderly close, failed open,
+    /// tick failure or panic, save failure, and client disconnect).
     pub(super) fn native_lifecycle_world_closed(&mut self) {
         self.instance_groups.borrow_mut().clear();
-        // Each server level closes after the final save (`LevelEvent.Unload`).
-        if self.remote.is_none() {
-            self.native_levels_closing();
-        }
-        if let Some(context) = self.native_lifecycle.world_close_final() {
-            self.native_world_lifecycle(&context, WorldPhase::WorldCloseFinal, "");
-        }
+        self.levels.clear();
+        self.world.water_tickets.clear();
+        self.native_lifecycle.retire();
         self.attachment_indexes.clear();
         self.passages.retire_world();
         self.resident_entities.table.get_mut().reset();
@@ -396,23 +349,20 @@ mod tests {
         let mut lifecycle = NativeLifecycle::default();
         lifecycle.begin_open(Authority::RemoteClient);
         let epoch = lifecycle.epoch().unwrap();
+        assert!(lifecycle.is_opening());
         assert!(lifecycle.world_open_ready().is_none());
+        assert!(!lifecycle.is_opening());
         assert_eq!(lifecycle.epoch(), Some(epoch));
         assert!(lifecycle.server_tick_start(true).is_none());
         assert!(lifecycle.server_tick_end(false).is_none());
         assert!(!lifecycle.permits_read(&lifecycle.attempt.unwrap().context()));
         lifecycle.begin_close();
-        assert!(lifecycle.world_close_final().is_none());
+        assert!(lifecycle.retire());
         assert!(lifecycle.epoch().is_none());
 
         lifecycle.begin_open(Authority::RemoteClient);
         assert_ne!(lifecycle.epoch(), Some(epoch));
-        assert!(lifecycle.world_open_failed().is_none());
-        assert!(lifecycle.epoch().is_none());
-
-        lifecycle.begin_open(Authority::RemoteClient);
-        lifecycle.world_open_ready();
-        assert!(lifecycle.world_close_failed().is_none());
+        assert!(lifecycle.retire());
         assert!(lifecycle.epoch().is_none());
     }
 
@@ -479,7 +429,7 @@ mod tests {
         assert!(lifecycle.server_tick_end(true).is_none());
         assert!(lifecycle.tasks.pop_due().is_none());
         lifecycle.begin_close();
-        lifecycle.world_close_final();
+        assert!(lifecycle.retire());
         lifecycle.begin_open(Authority::IntegratedServer);
         lifecycle.world_open_ready();
         lifecycle.server_tick_start(true);
@@ -936,7 +886,7 @@ mod tests {
         assert!(!life.permits_read(&tick));
         life.server_tick_end(false).unwrap();
         life.begin_close();
-        life.world_close_final().unwrap();
+        assert!(life.retire());
         life.begin_open(Authority::IntegratedServer);
         life.world_open_ready().unwrap();
         life.read_scope = true;
@@ -955,8 +905,10 @@ mod tests {
     #[test]
     fn a_failed_open_invalidates_and_a_retry_is_fresh() {
         let mut lifecycle = opening();
-        let context = lifecycle.world_open_failed().expect("the failure fires");
-        let failed_epoch = context.epoch;
+        let failed_epoch = lifecycle.epoch().expect("open allocated an epoch");
+        assert!(lifecycle.is_opening());
+        assert!(lifecycle.retire());
+        assert!(!lifecycle.is_opening());
         assert!(lifecycle.world_open_ready().is_none(), "the epoch is gone");
         assert!(lifecycle.server_tick_start(true).is_none());
         lifecycle.begin_open(Authority::IntegratedServer);
@@ -965,35 +917,31 @@ mod tests {
     }
 
     #[test]
-    fn close_final_fires_once_and_retires_the_epoch() {
+    fn retire_clears_opening_ready_and_closing_and_is_idempotent() {
         let mut lifecycle = opening();
-        lifecycle.world_open_ready();
-        lifecycle.begin_close();
-        let context = lifecycle.world_close_final().expect("the close fires");
-        assert!(context.epoch.get() >= 1);
-        assert!(
-            lifecycle.world_close_final().is_none(),
-            "a repeated close request is a no-op"
-        );
-        assert!(lifecycle.server_tick_start(true).is_none());
+        assert!(lifecycle.is_opening());
+        assert!(lifecycle.retire());
+        assert!(!lifecycle.retire(), "a second retire is a no-op");
+        assert!(!lifecycle.is_opening());
+        assert!(lifecycle.epoch().is_none());
         assert!(lifecycle.world_open_ready().is_none());
-    }
+        assert!(lifecycle.server_tick_start(true).is_none());
 
-    #[test]
-    fn a_close_during_opening_still_closes_once() {
-        let mut lifecycle = opening();
-        lifecycle.begin_close();
-        assert!(lifecycle.world_close_final().is_some());
-    }
+        lifecycle.begin_open(Authority::IntegratedServer);
+        assert!(lifecycle.is_opening());
+        lifecycle.world_open_ready().unwrap();
+        assert!(!lifecycle.is_opening());
+        assert!(lifecycle.retire());
+        assert!(!lifecycle.retire());
+        assert!(lifecycle.epoch().is_none());
 
-    #[test]
-    fn close_failure_retires_only_ready_epochs() {
-        let mut lifecycle = opening();
-        assert!(lifecycle.world_close_failed().is_none());
-        lifecycle.world_open_ready();
+        lifecycle.begin_open(Authority::IntegratedServer);
+        lifecycle.world_open_ready().unwrap();
         lifecycle.begin_close();
-        assert!(lifecycle.world_close_failed().is_some());
-        assert!(lifecycle.world_close_failed().is_none());
-        assert!(lifecycle.world_close_final().is_none());
+        assert!(!lifecycle.is_opening());
+        assert!(lifecycle.retire());
+        assert!(!lifecycle.retire());
+        assert!(lifecycle.epoch().is_none());
+        assert!(lifecycle.server_tick_start(true).is_none());
     }
 }

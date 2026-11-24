@@ -311,6 +311,14 @@ impl Game<'_> {
             self.lan_building_boxes
                 .for_turn(conn, Some(outer), building_players(host));
         let fresh = host.hub.guests[i].motion.is_none();
+        // Entity.load: the first body after joining counts down the saved `PortalCooldown`.
+        let loaded_cooldown = (fresh && host.hub.guests[i].loaded_body.is_some()).then(|| {
+            host.hub.guests[i]
+                .saved
+                .as_ref()
+                .and_then(|tag| sunrise_client::save::number(tag.get("PortalCooldown")))
+                .unwrap_or(0) as i32
+        });
         if fresh {
             let initialized = host
                 .hub
@@ -334,6 +342,9 @@ impl Game<'_> {
         );
         let mut play = host.play.remove(&conn).unwrap_or_default();
         play.hook.begin_loan();
+        if let Some(cooldown) = loaded_cooldown {
+            play.portal.cooldown = cooldown;
+        }
         if fresh {
             // A new body (joined, respawned, changed level): nothing on it yet,
             // its effects' modifiers and armor protection included.

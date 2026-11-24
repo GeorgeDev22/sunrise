@@ -290,17 +290,6 @@ impl Wire for crate::BakedModelKey {
         Self::from_parts(input.take()?, input.take()?).map_err(WireError::Invalid)
     }
 }
-impl Wire for crate::RenderPipelineRef {
-    layout_fields!("generation" => u64, "slot" => u32);
-    const MIN: usize = 12;
-    fn put(&self, out: &mut Writer) {
-        out.put(&self.0);
-        out.put(&self.1);
-    }
-    fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        Self::from_parts(input.take()?, input.take()?).map_err(WireError::Invalid)
-    }
-}
 impl Wire for crate::InstanceGroupRef {
     layout_fields!("generation" => u64, "slot" => u32);
     const MIN: usize = 12;

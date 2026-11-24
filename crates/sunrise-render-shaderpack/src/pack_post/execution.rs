@@ -14,11 +14,35 @@ use sunrise_shaders::{BUFFERS, Group, SHADOW_COLORS};
 
 use super::construction::*;
 use crate::PollLive;
+use crate::pack_entities::{
+    BEAM, BLOCK, BLOCK_TRANSLUCENT, DESTROY, ENTITY, PARTICLE, PARTICLE_TRANSLUCENT, TRANSLUCENT,
+};
 use crate::pack_hand;
 use crate::pack_images;
 use crate::pack_sky::SkyFrame;
 use crate::pack_textures;
 use crate::pack_uniforms::{self, PackInputs};
+
+/// Which engine render boundaries this frame's classic pack owns.
+#[derive(Clone, Copy, Default)]
+pub struct WorldBoundaries {
+    pub sky: bool,
+    pub features: bool,
+}
+
+/// Render boundaries reached within the classic pack's world pass.
+pub enum WorldBoundary<'a> {
+    AfterSky,
+    Features {
+        translucent: bool,
+        color: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+    },
+    AfterLevel,
+}
+
+const OPAQUE_FEATURES: [usize; 3] = [ENTITY, BLOCK, PARTICLE];
+const TRANSLUCENT_FEATURES: [usize; 4] = [TRANSLUCENT, DESTROY, BEAM, BLOCK_TRANSLUCENT];
 
 /// The frame's sky inputs, decoupled from the client's `Frame`: what `draw_sky` needs to build a
 /// `SkyFrame` (`view` gives the sun, colours and fog).
@@ -158,6 +182,46 @@ impl PackPost {
         self.entities.is_some()
     }
 
+    /// Whether the pack takes over either feature boundary, excluding shadow-only programs.
+    pub fn owns_feature_stages(&self) -> bool {
+        self.entities.as_ref().is_some_and(|entities| {
+            OPAQUE_FEATURES
+                .iter()
+                .any(|&i| entities.passes[i].is_some() && !entities.late[i])
+                || TRANSLUCENT_FEATURES
+                    .iter()
+                    .any(|&i| entities.passes[i].is_some())
+        })
+    }
+
+    fn has_late_features(&self) -> bool {
+        self.entities.as_ref().is_some_and(|entities| {
+            TRANSLUCENT_FEATURES
+                .iter()
+                .any(|&i| entities.passes[i].is_some() && entities.late[i])
+        })
+    }
+
+    fn feature_boundary(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        translucent: bool,
+        boundary: &mut impl FnMut(&mut wgpu::CommandEncoder, WorldBoundary<'_>) -> bool,
+    ) {
+        let targets = self.targets.as_ref().expect("resized");
+        let color = &targets.color[0].as_ref().expect("colortex0")[usize::from(self.main & 1 != 0)];
+        if boundary(
+            encoder,
+            WorldBoundary::Features {
+                translucent,
+                color,
+                depth: &targets.depth,
+            },
+        ) {
+            self.mips_valid &= !1;
+        }
+    }
+
     /// Whether the pack draws the block outline itself.
     pub fn has_lines(&self) -> bool {
         self.lines.is_some()
@@ -237,7 +301,10 @@ impl PackPost {
     }
 
     /// Runs the pack over the world drawn into `world` (colour) and `world_depth`, then draws
-    /// the result onto `screen`.
+    /// the result onto `screen`. Notifies after the sky if the frame assigned the stage to this
+    /// pack, and after the last pack world pass, before composition. A pack's hand is still part
+    /// of its world passes for the depth snapshots.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_frame(
         &mut self,
         device: &wgpu::Device,
@@ -258,6 +325,8 @@ impl PackPost {
         shadow_scene_revision: (u64, u64),
         ticks: u64,
         day_time: i64,
+        boundaries: WorldBoundaries,
+        mut boundary: impl FnMut(&mut wgpu::CommandEncoder, WorldBoundary<'_>) -> bool,
         lost: &std::sync::atomic::AtomicBool,
         poll: PollLive,
     ) -> Result<(), String> {
@@ -554,8 +623,11 @@ impl PackPost {
         let mut passes = std::mem::take(&mut self.passes);
         let mut seen = (false, false);
         let mut shown = false;
-        // A water-only pack still needs the opaque phase to populate requested snapshots.
-        let mut terrain_drawn = self.terrain.is_none()
+        // The opaque phase owns the sky boundary even without geometry, and a water-only
+        // pack still needs it to populate requested snapshots.
+        let mut terrain_drawn = !boundaries.sky
+            && !boundaries.features
+            && self.terrain.is_none()
             && self.terrain_cutout.is_none()
             && self.sky.is_none()
             && !self.entities.as_ref().is_some_and(Entities::drawn)
@@ -572,6 +644,7 @@ impl PackPost {
         });
         let mut water_drawn = self.water.is_none() && self.weather.is_none() && !late_entities;
         let mut shadow_drawn = false;
+        let mut world_finished = false;
         for pass in &mut passes {
             if pass.group == Group::Setup && !self.setup_pending {
                 continue;
@@ -593,15 +666,38 @@ impl PackPost {
             }
             if !terrain_drawn && !early && pass.group != Group::Prepare {
                 terrain_drawn = true;
-                self.draw_opaque(device, queue, encoder, size, frame_view, sky, hand, terrain);
+                self.draw_opaque(
+                    device,
+                    queue,
+                    encoder,
+                    size,
+                    frame_view,
+                    sky,
+                    hand,
+                    terrain,
+                    boundaries,
+                    &mut boundary,
+                );
             }
             // As if the pack didn't have it: no compute stages, flips or stage changes.
             if self.sizes_differ(pass) {
                 continue;
             }
-            if !water_drawn && matches!(pass.group, Group::Composite | Group::Final) {
-                water_drawn = true;
-                self.draw_translucent(device, queue, encoder, size, terrain);
+            if !world_finished && matches!(pass.group, Group::Composite | Group::Final) {
+                if !water_drawn {
+                    water_drawn = true;
+                    self.draw_translucent(
+                        device,
+                        queue,
+                        encoder,
+                        size,
+                        terrain,
+                        boundaries.features,
+                        &mut boundary,
+                    );
+                }
+                boundary(encoder, WorldBoundary::AfterLevel);
+                world_finished = true;
             }
             if pass.group == Group::Deferred && !seen.0 {
                 seen.0 = true;
@@ -704,10 +800,32 @@ impl PackPost {
             );
         }
         if !terrain_drawn {
-            self.draw_opaque(device, queue, encoder, size, frame_view, sky, hand, terrain);
+            self.draw_opaque(
+                device,
+                queue,
+                encoder,
+                size,
+                frame_view,
+                sky,
+                hand,
+                terrain,
+                boundaries,
+                &mut boundary,
+            );
         }
         if !water_drawn {
-            self.draw_translucent(device, queue, encoder, size, terrain);
+            self.draw_translucent(
+                device,
+                queue,
+                encoder,
+                size,
+                terrain,
+                boundaries.features,
+                &mut boundary,
+            );
+        }
+        if !world_finished {
+            boundary(encoder, WorldBoundary::AfterLevel);
         }
         let targets = self.targets.as_ref().expect("resized");
         // depthtex0 as the frame leaves it, for next frames' `centerDepthSmooth`.
@@ -1334,23 +1452,26 @@ impl PackPost {
         self.sky = Some(sky_parts);
     }
 
-    /// Entities, block entities, translucent entity parts and particles with the pack's
-    /// programs, those drawn before deferred or (`late`) after: each run `prepare_entities` kept
-    /// is one draw with its own `entityId` or `blockEntityId` and `entityColor`.
-    pub fn draw_entities(
+    /// Draw one group of entity programs before deferred or (`late`) afterwards. Each run that
+    /// `prepare_entities` kept has its own `entityId` or `blockEntityId` and `entityColor`.
+    fn draw_entities(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         size: [u32; 2],
         late: bool,
+        programs: &[usize],
     ) {
         let Some(mut entities) = self.entities.take() else {
             return;
         };
         let geometry = &entities.geometry;
-        for (program, pass) in entities.passes.iter_mut().enumerate() {
-            let Some(pass) = pass.as_mut().filter(|_| entities.late[program] == late) else {
+        for &program in programs {
+            let Some(pass) = entities.passes[program]
+                .as_mut()
+                .filter(|_| entities.late[program] == late)
+            else {
                 continue;
             };
             let mut draws = geometry
@@ -1564,6 +1685,7 @@ impl PackPost {
     }
 
     /// The sky, when it shows, then terrain, entities and block entities.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_opaque(
         &mut self,
         device: &wgpu::Device,
@@ -1574,12 +1696,24 @@ impl PackPost {
         sky: &SkyInputs<'_>,
         hand: &HandInputs<'_>,
         terrain: &mut TerrainDraw<'_>,
+        boundaries: WorldBoundaries,
+        boundary: &mut impl FnMut(&mut wgpu::CommandEncoder, WorldBoundary<'_>) -> bool,
     ) {
         if sky.visible || sky.end_fog_sky {
             self.draw_sky(device, queue, encoder, size, view, sky);
         }
+        if boundaries.sky {
+            boundary(encoder, WorldBoundary::AfterSky);
+        }
         self.draw_terrain(device, queue, encoder, size, TerrainList::Solid, terrain);
-        self.draw_entities(device, queue, encoder, size, false);
+        self.draw_entities(device, queue, encoder, size, false, &OPAQUE_FEATURES);
+        if boundaries.features {
+            self.feature_boundary(encoder, false, boundary);
+        }
+        self.draw_entities(device, queue, encoder, size, false, &TRANSLUCENT_FEATURES);
+        if boundaries.features && !self.has_late_features() {
+            self.feature_boundary(encoder, true, boundary);
+        }
         self.draw_lines(device, queue, encoder, size);
         self.draw_clouds(device, queue, encoder, size);
         // Only depth2 excludes the opaque first-person hand.
@@ -1746,13 +1880,16 @@ impl PackPost {
     }
 
     /// Translucent terrain, then the entity parts drawn after deferred.
-    pub fn draw_translucent(
+    #[allow(clippy::too_many_arguments)]
+    fn draw_translucent(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         size: [u32; 2],
         terrain: &mut TerrainDraw<'_>,
+        after_features: bool,
+        boundary: &mut impl FnMut(&mut wgpu::CommandEncoder, WorldBoundary<'_>) -> bool,
     ) {
         self.draw_terrain(
             device,
@@ -1762,7 +1899,18 @@ impl PackPost {
             TerrainList::Translucent,
             terrain,
         );
-        self.draw_entities(device, queue, encoder, size, true);
+        self.draw_entities(device, queue, encoder, size, true, &TRANSLUCENT_FEATURES);
+        if after_features && self.has_late_features() {
+            self.feature_boundary(encoder, true, boundary);
+        }
+        self.draw_entities(
+            device,
+            queue,
+            encoder,
+            size,
+            true,
+            &[PARTICLE, PARTICLE_TRANSLUCENT],
+        );
         self.draw_hand_water(device, queue, encoder, size);
         self.draw_weather(device, queue, encoder, size);
     }

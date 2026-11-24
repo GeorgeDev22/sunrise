@@ -39,7 +39,7 @@
 //! | [`BlockPart`], [`ItemPart`], [`BlockEntityPart`], [`MenuPart`], [`EntityPart`] | Behaviour for the objects a mod attaches a Part to. |
 //! | [`Registrar`] | What a mod declares in [`Hooks::register`]: registry keys, Parts and settings. |
 //! | [`Host`], [`ServerHost`], [`ClientHost`] | The game as a hook sees it, split by side so a call on the wrong side does not compile. |
-//! | [`AttachmentType`] | Data a mod keeps on levels, chunks, entities and other holders. |
+//! | [`AttachmentDescriptor`], [`AttachmentKey`] | Data a mod keeps on levels, chunks, entities and other holders. |
 //! | [`Wire`](derive@Wire) | The derive that encodes typed payloads and other values. |
 //!
 //!

@@ -434,7 +434,7 @@ fn level_attachments_survive_save_and_load() {
             },
         }),
         copy_on_death: false,
-        sync: false,
+        sync_codec: None,
     };
     let mut map = Attachments::default();
     key.set(&mut map, sunrise_mod_runtime::attachments::Holder::Level, 7)
@@ -665,7 +665,7 @@ fn chunk_attachments_survive_save_and_load() {
             },
         }),
         copy_on_death: false,
-        sync: false,
+        sync_codec: None,
     };
     let mut chunk = Chunk::empty(2, 3);
     let mut extras = ChunkExtras::default();
@@ -4420,15 +4420,246 @@ fn mod_attachments_save_in_sunrises_namespace_only_when_some() {
     save.save_attachments(&Attachments::from_nbt(data.clone()))
         .unwrap();
     assert!(file.is_file());
-    assert_eq!(save.load_attachments().to_nbt(), data);
+    assert_eq!(save.load_attachments().try_to_nbt().unwrap(), data);
     fs::write(&file, b"not nbt").unwrap();
-    assert!(save.load_attachments().to_nbt().is_empty());
+    assert!(save.load_attachments().try_to_nbt().unwrap().is_empty());
     assert_eq!(
         fs::read(root.join("data/sunrise/attachments.dat.corrupt")).unwrap(),
         b"not nbt"
     );
     assert!(!file.exists());
     fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn attachment_encode_failure_refuses_record_and_keeps_original_saved_value() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use sunrise_mod_runtime::attachments::{
+        AttachmentCodec, AttachmentEncodeError, AttachmentError, AttachmentType, Attachments,
+        Holder,
+    };
+
+    #[derive(Clone)]
+    struct Fallible {
+        value: i32,
+        fail: Arc<AtomicBool>,
+    }
+    fn encode_fallible(v: &Fallible) -> std::result::Result<Compound, AttachmentError> {
+        if v.fail.load(Ordering::Relaxed) {
+            return Err(AttachmentError::Encode);
+        }
+        Ok([("value".into(), Tag::Int(v.value))].into())
+    }
+    fn decode_fallible(c: &Compound) -> std::result::Result<Fallible, AttachmentError> {
+        match c.get(&"value".into()) {
+            Some(Tag::Int(value)) => Ok(Fallible {
+                value: *value,
+                fail: Arc::new(AtomicBool::new(false)),
+            }),
+            _ => Err(AttachmentError::Decode),
+        }
+    }
+    static FALLIBLE: AttachmentType<Fallible> = AttachmentType {
+        namespace: "example_mod",
+        name: "persisted",
+        default: || Fallible {
+            value: 0,
+            fail: Arc::new(AtomicBool::new(false)),
+        },
+        codec: Some(AttachmentCodec {
+            encode: encode_fallible,
+            decode: decode_fallible,
+        }),
+        copy_on_death: false,
+        sync_codec: None,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let save = SaveDir::new(
+        dir.path().to_path_buf(),
+        LevelShape::OVERWORLD,
+        Some(Default::default()),
+    );
+    let fail = Arc::new(AtomicBool::new(false));
+    let mut attachments = Attachments::default();
+    FALLIBLE
+        .set(
+            &mut attachments,
+            Holder::Level,
+            Fallible {
+                value: 42,
+                fail: fail.clone(),
+            },
+        )
+        .unwrap();
+    // First save accepts and persists 42 on disk.
+    save.save_attachments(&attachments).unwrap();
+
+    // Next encode fails: level save refuses the record and disk keeps 42.
+    fail.store(true, Ordering::Relaxed);
+    let err = save.save_attachments(&attachments).unwrap_err();
+    let encode_err = err.downcast_ref::<AttachmentEncodeError>().unwrap();
+    assert_eq!(encode_err.namespace, "example_mod");
+    assert_eq!(encode_err.name, "persisted");
+    let mut reloaded = save.load_attachments();
+    assert_eq!(
+        FALLIBLE
+            .get_existing(&mut reloaded, Holder::Level)
+            .unwrap()
+            .map(|v| v.value),
+        Some(42)
+    );
+
+    // Same contract for a chunk record: save accepted value, fail next encode, reload keeps 42.
+    let (reg, biomes) = loot_tests::fixture();
+    let reg = &*Box::leak(Box::new(reg));
+    let biomes = Arc::new(biomes);
+    let fail_chunk = Arc::new(AtomicBool::new(false));
+    let mut chunk_attachments = Attachments::default();
+    FALLIBLE
+        .set(
+            &mut chunk_attachments,
+            Holder::Chunk([0, 0]),
+            Fallible {
+                value: 42,
+                fail: fail_chunk.clone(),
+            },
+        )
+        .unwrap();
+    let mut chunk = Chunk::empty(0, 0);
+    chunk.saved = Some(Arc::new(ChunkExtras {
+        attachments: chunk_attachments,
+        ..Default::default()
+    }));
+    let chunk = Arc::new(chunk);
+    save.save_later(std::slice::from_ref(&chunk), reg, &biomes)
+        .unwrap();
+    save.flush().unwrap();
+    assert_eq!(save.record_save_failures(), 0);
+
+    fail_chunk.store(true, Ordering::Relaxed);
+    save.save_later(std::slice::from_ref(&chunk), reg, &biomes)
+        .unwrap();
+    save.flush().unwrap();
+    assert_eq!(save.record_save_failures(), 1);
+
+    let reloaded_chunk = save.load(0, 0, reg, &biomes).unwrap();
+    let mut reloaded_chunk_attachments = reloaded_chunk.saved.as_ref().unwrap().attachments.clone();
+    assert_eq!(
+        FALLIBLE
+            .get_existing(&mut reloaded_chunk_attachments, Holder::Chunk([0, 0]))
+            .unwrap()
+            .map(|v| v.value),
+        Some(42)
+    );
+}
+
+/// A block caught mid-move carries its block entity's attachments with no live block entity
+/// to write them. If they cannot encode, the whole chunk record is refused and the old record
+/// stays, rather than the moving block being saved without them.
+#[test]
+fn a_moving_blocks_attachment_encode_failure_refuses_its_chunk_record() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use sunrise_mod_runtime::attachments::{
+        AttachmentCodec, AttachmentError, AttachmentType, Attachments, Holder,
+    };
+
+    #[derive(Clone)]
+    struct Fallible {
+        value: i32,
+        fail: Arc<AtomicBool>,
+    }
+    static FALLIBLE: AttachmentType<Fallible> = AttachmentType {
+        namespace: "example_mod",
+        name: "carried",
+        default: || Fallible {
+            value: 0,
+            fail: Arc::new(AtomicBool::new(false)),
+        },
+        codec: Some(AttachmentCodec {
+            encode: |v: &Fallible| {
+                if v.fail.load(Ordering::Relaxed) {
+                    return Err(AttachmentError::Encode);
+                }
+                Ok([("value".into(), Tag::Int(v.value))].into())
+            },
+            decode: |c| match c.get(&"value".into()) {
+                Some(Tag::Int(value)) => Ok(Fallible {
+                    value: *value,
+                    fail: Arc::new(AtomicBool::new(false)),
+                }),
+                _ => Err(AttachmentError::Decode),
+            },
+        }),
+        copy_on_death: false,
+        sync_codec: None,
+    };
+    let value = |value: i32, holder: Holder, fail: &Arc<AtomicBool>| {
+        let mut attachments = Attachments::default();
+        FALLIBLE
+            .set(
+                &mut attachments,
+                holder,
+                Fallible {
+                    value,
+                    fail: fail.clone(),
+                },
+            )
+            .unwrap();
+        attachments
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let save = SaveDir::new(
+        dir.path().to_path_buf(),
+        LevelShape::OVERWORLD,
+        Some(Default::default()),
+    );
+    let (reg, biomes) = loot_tests::fixture();
+    let reg = &*Box::leak(Box::new(reg));
+    let biomes = Arc::new(biomes);
+    let never = Arc::new(AtomicBool::new(false));
+    let chunk_value = |chunk: &Chunk| {
+        let mut attachments = chunk.saved.as_ref().unwrap().attachments.clone();
+        FALLIBLE
+            .get_existing(&mut attachments, Holder::Chunk([0, 0]))
+            .unwrap()
+            .map(|v| v.value)
+    };
+    let saved = |chunk_value: i32, carried_fails: &Arc<AtomicBool>| {
+        let mut chunk = Chunk::empty(0, 0);
+        chunk.saved = Some(Arc::new(ChunkExtras {
+            attachments: value(chunk_value, Holder::Chunk([0, 0]), &never),
+            block_entity_attachments: vec![(
+                (1, 64, 1),
+                value(5, Holder::BlockEntity([1, 64, 1]), carried_fails),
+            )],
+            ..Default::default()
+        }));
+        Arc::new(chunk)
+    };
+
+    // Setting a value encodes it once, so the codec starts out working and fails only from
+    // the save that should be refused.
+    let carried_fails = Arc::new(AtomicBool::new(false));
+    save.save_later(&[saved(42, &carried_fails)], reg, &biomes)
+        .unwrap();
+    save.flush().unwrap();
+    assert_eq!(save.record_save_failures(), 0);
+    assert_eq!(
+        chunk_value(&save.load(0, 0, reg, &biomes).unwrap()),
+        Some(42)
+    );
+
+    let refused = saved(9, &carried_fails);
+    carried_fails.store(true, Ordering::Relaxed);
+    save.save_later(&[refused], reg, &biomes).unwrap();
+    save.flush().unwrap();
+    assert_eq!(save.record_save_failures(), 1);
+    assert_eq!(
+        chunk_value(&save.load(0, 0, reg, &biomes).unwrap()),
+        Some(42),
+        "the refused record left the old one on disk"
+    );
 }
 
 /// A level id never names a folder outside the world's `dimensions` folder, and no two ids

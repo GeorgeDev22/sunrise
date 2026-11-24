@@ -747,10 +747,14 @@ impl Game<'_> {
     }
 
     /// Whether `level` names the level now open under its id: the world open it was made in, and
-    /// for a runtime level the open it was given. A handle of an earlier open reads as stale.
+    /// for a runtime level the open it was given. A handle of an earlier open or a level closed by
+    /// server shutdown reads as stale.
     pub(in crate::game) fn level_handle_current(&self, level: LevelRef) -> bool {
         self.native_lifecycle.epoch() == Some(level.epoch())
             && level.generation() == self.levels.runtime.generation_of(level.dimension_id())
+            && !(self.is_logical_server()
+                && self.levels.active_closed
+                && level.dimension() == self.dim.key())
     }
 
     /// A handle to the server level `key`, of the generation it is open with.
@@ -846,7 +850,6 @@ impl Game<'_> {
         if self.dim == dim {
             self.enter_level(Dim::Overworld)?;
         }
-        // A level the idle close already saved and dropped is only forgotten.
         if self.levels.parked.contains_key(&dim)
             && let Err(why) = self.close_parked_level(dim)
         {

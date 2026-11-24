@@ -109,17 +109,6 @@ pub(super) enum SpawnSite {
     Raw,
 }
 
-/// What a spawn site does with a mob after `finalize_spawn` was heard.
-#[derive(Debug, PartialEq)]
-pub(super) enum Finalized {
-    /// Finalized as vanilla does; the site goes on to the class's follow-ups.
-    Done,
-    /// A mod skipped finalization: the mob spawns uninitialised.
-    Skipped,
-    /// A mod stopped the spawn: the mob is not added.
-    Cancelled,
-}
-
 mod death_source;
 mod death_weapon;
 mod destroy_rules;
@@ -264,6 +253,8 @@ pub(super) struct Creatures {
     event_buf: Vec<MobEvent>,
     pickable_projectile_targets: Vec<sunrise_client::projectiles::TargetCandidate>,
     arrow_hit_scratch: sunrise_client::arrows::ArrowHitScratch,
+    /// Reusable visited-cell set for `sweep_item_inside` and `sweep_projectile_inside`.
+    pub(super) inside_visited_scratch: sunrise_client::fast_hash::FxHashSet<i64>,
     /// For each arrow an entity hit in this projectile tick, the projectiles
     /// that ticked after it and stayed, in order: a bounced one goes back
     /// before the first still listed (`finish_arrow_hit`).
@@ -275,6 +266,7 @@ pub(super) struct Creatures {
     /// (pickups, item searches) is for these alone.
     pub ticked: sunrise_client::fast_hash::FxHashSet<u32>,
     pub deferred_hits: bool,
+    pub(super) natural_admission: Option<super::natural_spawning::NaturalAdmission>,
     /// The game time of the spear rows below, and for each attacker the latest contact
     /// whose `setLastHurtMob` was applied then. A player's row is delivered after the
     /// attacker's other rows, so an earlier contact never overwrites a later one.
@@ -746,7 +738,6 @@ impl Game<'_> {
         // Entity.random first supplies the UUID, then LivingEntity's initial
         // yaw; species constructor draws continue from that same stream.
         let (own, uuid) = sunrise_client::mobs::living_random();
-        self.persist.uuids.insert(self.next_entity, uuid);
         let mut mob = Mob::with_random(
             self.next_entity,
             t,
@@ -755,15 +746,16 @@ impl Game<'_> {
             own,
         );
         // `EntityType.create`: the mob is constructed before `finalizeSpawn`.
-        self.initialize_entity(mod_api::Holder::Entity(mob.id), &kind);
+        self.persist.uuids.insert(mob.id, uuid);
+        self.initialize_unpublished_mob(mob.id, &kind);
         mob.persistent = persistent;
         match site {
             SpawnSite::Raw => return Some(mob),
-            SpawnSite::Finalizing(reason) => match self.finalize_with(&mut mob, reason, None) {
-                Finalized::Cancelled => return self.discard_unjoined_mob(mob.id),
-                Finalized::Skipped => return Some(mob),
-                Finalized::Done => {}
-            },
+            SpawnSite::Finalizing(reason) => {
+                if !self.finalize_with(&mut mob, reason, None) {
+                    return self.discard_unjoined_mob(mob.id);
+                }
+            }
             // A plain spawn finalizes as a summoned one (vanilla's /summon
             // and egg path): its few reason-gated arms behave the same.
             SpawnSite::Plain => {
@@ -960,12 +952,6 @@ impl Game<'_> {
             self.lan_entity_event(id as i32, event, at);
         }
     }
-    /// Finalize a converted frog or witch before it joins the level.
-    fn finalize_converted(&mut self, mob: &mut Mob) {
-        // A mod that stops a conversion's finalization leaves the mob as converted.
-        self.finalize_with(mob, SpawnReason::Conversion, None);
-        mob.persistent = true;
-    }
     /// `Mob.convertTo(type, ConversionParams.single(...))`: a new mob of
     /// `kind`, made without spawn finalization unless its conversion asks, takes
     /// its place with what `conversion::single` carries over, and the old
@@ -1037,7 +1023,11 @@ impl Game<'_> {
         }
         match (from.species(), kind) {
             (Species::Tadpole, "minecraft:frog") | (Species::Villager, "minecraft:witch") => {
-                self.finalize_converted(&mut mob);
+                if !self.finalize_with(&mut mob, SpawnReason::Conversion, None) {
+                    self.forget_entity(mob.id);
+                    return None;
+                }
+                mob.persistent = true;
             }
             (Species::Pig, "minecraft:zombified_piglin") => {
                 let old = self.mobs.iter_mut().find(|m| m.id == from.id)?;
@@ -1211,19 +1201,20 @@ impl Game<'_> {
     /// `Mob.finalizeSpawn` behind `FinalizeSpawnEvent`: the one fire point for
     /// the mobs the game spawns where vanilla calls `finalizeSpawn`. The class's
     /// follow-ups (raider flags and the like) are part of `finalizeSpawn`, so a
-    /// site skips them on [`Finalized::Skipped`].
+    /// site skips them when the listener cancels initialization. Returns whether
+    /// the mob may be admitted.
     pub(super) fn finalize_with(
         &mut self,
         mob: &mut Mob,
         reason: SpawnReason,
         spawner: Option<mod_api::SpawnSource>,
-    ) -> Finalized {
+    ) -> bool {
         let mut group = None;
         let (outcome, difficulty) = self.finalize_spawn_event(mob, reason, spawner, &mut group);
-        if outcome == Finalized::Done {
+        if !outcome.skip_initialization {
             self.finalize_grouped(mob, &difficulty, reason, group);
         }
-        outcome
+        !outcome.veto_admission
     }
     /// `Mob.finalizeSpawn`'s event, the half listeners own: they hear the
     /// spawn, cancel it, take it over, set its difficulty, edit the mob
@@ -1236,48 +1227,65 @@ impl Game<'_> {
         reason: SpawnReason,
         spawner: Option<mod_api::SpawnSource>,
         group: &mut Option<Group>,
-    ) -> (Finalized, spawning::LocalDifficulty) {
+    ) -> (
+        sunrise_client::mobs::finalize::SpawnEvent,
+        spawning::LocalDifficulty,
+    ) {
         let at = [mob.position.x, mob.position.y, mob.position.z];
         let difficulty = self.local_difficulty(at);
-        if !mod_api::__private::listened(mod_api::HookId::FinalizeSpawn) {
-            return (Finalized::Done, difficulty);
-        }
-        let kind = mob.kind.id.clone();
-        self.finalize_spawn_lent(&kind, at, reason, spawner, difficulty, Some(mob), group)
+        self.finalize_spawn_with_difficulty(mob, reason, spawner, difficulty, group)
     }
-    /// `Mob.getMaxSpawnClusterSize` as the entity parts of the finalized `mob`'s type answer it
-    /// (`EntityPart::spawn_cluster_size`), asked with `mob` lent as it stands before it joins the
-    /// level: the first part in dispatch order to answer wins, and none answering leaves vanilla's
-    /// `vanilla` to the spawner. A type with no part costs one table lookup. Server-side.
-    pub(super) fn spawn_cluster_size(
+    pub(super) fn finalize_spawn_with_difficulty(
         &self,
         mob: &mut Mob,
         reason: SpawnReason,
         spawner: Option<mod_api::SpawnSource>,
+        difficulty: spawning::LocalDifficulty,
+        group: &mut Option<Group>,
+    ) -> (
+        sunrise_client::mobs::finalize::SpawnEvent,
+        spawning::LocalDifficulty,
+    ) {
+        let at = [mob.position.x, mob.position.y, mob.position.z];
+        if !mod_api::__private::listened(mod_api::HookId::FinalizeSpawn) {
+            return (Default::default(), difficulty);
+        }
+        let kind = mob.kind.id.clone();
+        self.finalize_spawn_lent(&kind, at, reason, spawner, difficulty, Some(mob), group)
+    }
+    /// `Mob.getMaxSpawnClusterSize`, asked after natural-spawn admission and accounting. The
+    /// first part of the candidate's type to answer wins; no answer keeps the vanilla limit.
+    pub(super) fn spawn_cluster_size(
+        &self,
+        mob: &Mob,
+        reason: SpawnReason,
+        spawner: Option<mod_api::SpawnSource>,
         vanilla: u32,
+        tags: Option<mod_api::EntityTags<'_>>,
     ) -> Option<u32> {
         if !mod_api::__private::has_entity_parts() {
             return None;
         }
         let parts = mod_api::__private::entity_parts();
-        let kind = mob.kind.id.clone();
-        let list = parts.entity_parts(&kind);
+        let kind = mob.kind.id.as_str();
+        let list = parts.entity_parts(kind);
         if list.is_empty() {
             return None;
         }
         let at = [mob.position.x, mob.position.y, mob.position.z];
-        self.lend_unspawned(&kind, at, Some(mob), |lent, _| {
-            list.iter().find_map(|attached| {
-                let _guard =
-                    mod_api::content::crash::enter_native_mod(mod_api::content::crash::ModCall {
-                        id: attached.mod_id(),
-                        hook: "spawn_cluster_size",
-                        part: Some(attached.type_name()),
-                    });
-                attached
-                    .part()
-                    .spawn_cluster_size(self, lent, reason, spawner, vanilla)
-            })
+        let mut borrowed = self.borrowed_unspawned_mob(kind, at, Some(mob));
+        borrowed.live_tags = tags;
+        let view = mod_api::UnspawnedMobView::new(&borrowed);
+        list.iter().find_map(|attached| {
+            let _guard =
+                mod_api::content::crash::enter_native_mod(mod_api::content::crash::ModCall {
+                    id: attached.mod_id(),
+                    hook: "spawn_cluster_size",
+                    part: Some(attached.type_name()),
+                });
+            attached
+                .part()
+                .spawn_cluster_size(self, view, reason, spawner, vanilla)
         })
     }
     /// The shared finalization decision for a mob type the game keeps apart
@@ -1289,10 +1297,13 @@ impl Game<'_> {
         at: [f64; 3],
         reason: SpawnReason,
         spawner: Option<mod_api::SpawnSource>,
-    ) -> (Finalized, spawning::LocalDifficulty) {
+    ) -> (
+        sunrise_client::mobs::finalize::SpawnEvent,
+        spawning::LocalDifficulty,
+    ) {
         let difficulty = self.local_difficulty(at);
         if !mod_api::__private::listened(mod_api::HookId::FinalizeSpawn) {
-            return (Finalized::Done, difficulty);
+            return (Default::default(), difficulty);
         }
         self.finalize_spawn_lent(kind, at, reason, spawner, difficulty, None, &mut None)
     }
@@ -1308,40 +1319,41 @@ impl Game<'_> {
         difficulty: spawning::LocalDifficulty,
         mob: Option<&mut Mob>,
         group: &mut Option<Group>,
-    ) -> (Finalized, spawning::LocalDifficulty) {
+    ) -> (
+        sunrise_client::mobs::finalize::SpawnEvent,
+        spawning::LocalDifficulty,
+    ) {
         let mut heard = mod_api::Difficulty::from(difficulty);
         let (mut spawn_cancelled, mut skip) = (false, false);
         let given = group
             .as_ref()
             .and_then(|g| super::native_unspawned_mob::native_spawn_group(g, self.lend_epoch()));
         let mut native_group = given.clone();
-        self.lend_unspawned(kind, at, mob, |mob, edits| {
-            self.native_finalize_spawn(mod_api::__private::FinalizeSpawnCall {
-                dimension: self.dim.id(),
-                kind,
-                reason,
-                pos: at,
-                spawner,
-                difficulty: &mut heard,
-                spawn_cancelled: &mut spawn_cancelled,
-                mob,
-                edits,
-                group: &mut native_group,
-                cancel: &mut skip,
-            });
+        let mut borrowed = self.borrowed_unspawned_mob_mut(kind, at, mob);
+        self.native_finalize_spawn(mod_api::__private::FinalizeSpawnCall {
+            dimension: self.dim.id(),
+            kind,
+            reason,
+            pos: at,
+            spawner,
+            difficulty: &mut heard,
+            spawn_cancelled: &mut spawn_cancelled,
+            mob: mod_api::UnspawnedMobEditor::new(&mut borrowed),
+            group: &mut native_group,
+            cancel: &mut skip,
         });
         if native_group != given {
             *group = native_group
                 .as_ref()
                 .and_then(super::native_unspawned_mob::spawn_group);
         }
-        if spawn_cancelled {
-            return (Finalized::Cancelled, difficulty);
-        }
-        if skip {
-            return (Finalized::Skipped, difficulty);
-        }
-        (Finalized::Done, heard.into())
+        (
+            sunrise_client::mobs::finalize::SpawnEvent {
+                skip_initialization: skip,
+                veto_admission: spawn_cancelled,
+            },
+            heard.into(),
+        )
     }
     /// `ServerLevel.getCurrentDifficultyAt` in the level in place.
     pub(super) fn local_difficulty(&self, at: [f64; 3]) -> spawning::LocalDifficulty {
@@ -1485,7 +1497,6 @@ impl Game<'_> {
         #[cfg(test)]
         super::entity::taken_pass_tests::after_take(self);
         let mut dead = Vec::new();
-        let mut corpses = Vec::new();
         let mut died = std::mem::take(&mut self.died);
         let mut ticked = std::mem::take(&mut self.creatures.ticked);
         ticked.clear();
@@ -1513,10 +1524,7 @@ impl Game<'_> {
         let mut player_credit = std::mem::take(&mut self.last_hurt_by_player);
         // The block writes since the last tick: mobs re-path around them.
         let mut path_writes = std::mem::take(self.world.path_writes.get_or_insert_with(Vec::new));
-        // The mobs whose bodies go this tick: (id, feet, width, height, split).
-        // 🤖 Agent: the last field is the grown slime, magma cube or sulfur
-        // cube the body leaves behind (`AbstractCubeMob.remove`), captured as
-        // the body goes because it has left the list by the time it splits.
+        // The mobs whose bodies go this tick: (id, feet, width, height).
         let mut gone = Vec::new();
         let mut restocks = Vec::new();
         // The level's random and attachments, lent to the mobs (brain behaviours draw from
@@ -1532,7 +1540,6 @@ impl Game<'_> {
             restocks: &mut restocks,
             pushes: &mut pending.pushes,
             dead: &mut dead,
-            corpses: &mut corpses,
             died: &mut died,
             ticked: &mut ticked,
             guests: &mut guests,
@@ -1609,19 +1616,13 @@ impl Game<'_> {
         self.creatures.pending.insert(level_id, pending);
         self.creatures.event_buf = events;
         if let Some(payload) = dispatch_panic {
-            // Restoration may itself panic and replace this payload; a second
-            // destructor panic may abort. panic=abort cannot recover at all.
+            self.emit_death_poofs(gone);
             std::panic::resume_unwind(payload);
         }
         stand_result?;
         self.native_tick_post_batch(round);
         self.tick_armor_stands_before(sunrise_client::join_seq::JoinSeq::MAX)?;
-        // ... and entity event 60 goes out as it is: the poof.
-        // 🤖 Agent: the split follows the poof, as `LivingEntity.tickDeath`
-        // broadcasts event 60 before it calls `remove`.
-        for (id, at, width, height, split) in gone {
-            self.finish_mob_death_animation(id, at, width, height, split);
-        }
+        self.emit_death_poofs(gone);
         laps.lap("creature_retain");
         self.sync_riders();
         self.tick_skeleton_traps();
@@ -1631,16 +1632,6 @@ impl Game<'_> {
         laps.lap("creature_villagers");
         for m in dead {
             self.mob_die(&m);
-        }
-        for mut m in corpses {
-            let names: Vec<&'static str> = m
-                .extra
-                .effects
-                .iter()
-                .map(|e| e.id.trim_start_matches("minecraft:"))
-                .collect();
-            let bounds = m.bounds();
-            self.effects_on_death(&names, bounds, m.silent, Some(m.id), Some(&mut m.random));
         }
         self.deliver_pending_mob_actions(level_id)?;
         self.finish_creature_entities(&mut laps, &primable)
@@ -1728,25 +1719,14 @@ impl Game<'_> {
         self.native_entity_sizes();
         Ok(())
     }
-
-    /// `LivingEntity.tickDeath` broadcasts the poof before `remove`, which
-    /// also splits a large cube before it reaches `Entity.setRemoved`.
-    fn finish_mob_death_animation(
-        &mut self,
-        id: u32,
-        at: Vec3,
-        width: f64,
-        height: f64,
-        split: Option<Mob>,
-    ) {
-        let at = at.components();
-        self.lan_entity_event(id as i32, 60, at);
-        self.death_poof(at, width, height);
-        if let Some(mob) = split {
-            self.split_dead_cube(mob);
+    /// `LivingEntity.tickDeath` tells clients to poof before removing the body.
+    fn emit_death_poofs(&mut self, gone: impl IntoIterator<Item = (u32, Vec3, f64, f64)>) {
+        for (id, at, width, height) in gone {
+            let at = [at.x, at.y, at.z];
+            self.lan_entity_event(id as i32, 60, at);
+            self.death_poof(at, width, height);
         }
     }
-
     /// `LivingEntity.makePoofParticles` (entity event 60) about a mob's box.
     pub(super) fn death_poof(&mut self, at: [f64; 3], width: f64, height: f64) {
         let options = sunrise_client::particles::ParticleOptions::simple(
@@ -1973,7 +1953,51 @@ impl Game<'_> {
         );
         self.finish_mob_death(m, &mut dying, source);
     }
-    /// `AbstractCubeMob.remove`: split only as the dead body is removed.
+    /// `AbstractCubeMob.remove` and `LivingEntity.remove`: split, run removal effects,
+    /// then retire the body. A failed callback cannot queue the removal for another tick.
+    fn complete_mob_removal(&mut self, join: sunrise_client::join_seq::JoinSeq, split: bool) {
+        let Some(index) = self.mobs.locate(join) else {
+            return;
+        };
+        let removal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut random = if split {
+                let mut dying = self.mobs[index].clone();
+                self.split_cube_children(&mut dying);
+                dying.random
+            } else {
+                self.mobs[index].random.clone()
+            };
+            // LivingEntity.remove sees the body's current effects and pose, after the split
+            // and child join listeners have had a chance to edit it. Keep the split's draws.
+            let Some(index) = self.mobs.locate(join) else {
+                return;
+            };
+            let parent = &self.mobs[index];
+            if !parent.extra.effects.is_empty() {
+                let names: Vec<_> = parent
+                    .extra
+                    .effects
+                    .iter()
+                    .map(|e| e.id.trim_start_matches("minecraft:"))
+                    .collect();
+                self.effects_on_death(
+                    &names,
+                    parent.bounds(),
+                    parent.silent,
+                    Some(parent.id),
+                    Some(&mut random),
+                );
+            }
+        }));
+        if let Some(index) = self.mobs.locate(join) {
+            self.mobs.remove(index);
+        }
+        if let Err(payload) = removal {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[cfg(test)]
     fn split_dead_cube(&mut self, mut dying: Mob) {
         if matches!(
             dying.species(),
@@ -2802,6 +2826,12 @@ impl Game<'_> {
                     if self.combat.hit_landed
                         && let Some(attacker) = attacker
                     {
+                        let victim = self.consuming_player_entity().id();
+                        self.mob_weapon_post_attack(
+                            attacker,
+                            (victim, "minecraft:player"),
+                            "minecraft:mob_attack",
+                        );
                         self.remember_mob_target(
                             attacker,
                             self.player.as_ref().map(|p| p.entity_id as u32),
@@ -2828,6 +2858,12 @@ impl Game<'_> {
                     self.combat.hit_landed =
                         self.mob_hits_player(amount, from, "minecraft:mob_attack");
                     if self.combat.hit_landed {
+                        let victim = self.consuming_player_entity().id();
+                        self.mob_weapon_post_attack(
+                            attacker,
+                            (victim, "minecraft:player"),
+                            "minecraft:mob_attack",
+                        );
                         self.remember_mob_target(
                             attacker,
                             self.player.as_ref().map(|p| p.entity_id as u32),
@@ -2835,10 +2871,19 @@ impl Game<'_> {
                         self.give_player_effect(effect, ticks, amplifier);
                     }
                 }
-                MobEvent::DamagePlayer { amount, from, kind } => {
+                MobEvent::DamagePlayer {
+                    amount,
+                    from,
+                    kind,
+                    wielder,
+                } => {
                     let hurt = self.mob_hits_player(amount, from, kind);
                     if kind == "minecraft:spear" {
                         self.combat.hit_landed = hurt;
+                    }
+                    if hurt && let Some(wielder) = wielder {
+                        let victim = self.consuming_player_entity().id();
+                        self.mob_weapon_post_attack(wielder, (victim, "minecraft:player"), kind);
                     }
                 }
                 MobEvent::ElderCurse { at, silent } => self.elder_curse(at, silent),
@@ -3869,24 +3914,7 @@ impl Game<'_> {
                     self.ignite_entity(target, seconds)?
                 }
                 MobEvent::ZombieIgnite(..) => {}
-                MobEvent::Breed {
-                    parent,
-                    partner,
-                    equine,
-                    parent_variant,
-                    wolf_voice,
-                    experience,
-                } => {
-                    let child = self.breed(
-                        parent,
-                        partner,
-                        equine,
-                        parent_variant,
-                        wolf_voice,
-                        experience,
-                    );
-                    self.native_entity_breed(parent, partner, child);
-                }
+                MobEvent::Breed { .. } => self.deliver_breed(e, false),
                 MobEvent::LockGaze { mob, partner } => {
                     if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
                         sunrise_client::mobs::animal_brain::lock_gaze(m, partner);
@@ -4223,19 +4251,20 @@ impl Game<'_> {
         parent_variant: Option<bool>,
         wolf_voice: Option<u8>,
         experience: sunrise_client::mobs::BreedExperience,
+        at_tick_boundary: bool,
     ) -> Option<u32> {
         let p = self.mobs.iter().find(|m| m.id == parent).cloned()?;
         let q = self.mobs.iter().find(|m| m.id == partner).cloned();
         // Sniffer.spawnChildFromBreeding: an egg instead of a baby.
         if p.species() == Species::Sniffer {
-            self.finalize_breeding(&p, partner, None, OrbOrder::BeforeChild);
+            self.finalize_breeding(&p, partner, None, OrbOrder::BeforeChild, false);
             self.lay_sniffer_egg(&p);
             return None;
         }
         // TurtleBreedGoal.breed: the goal gave the mother her egg; only the
         // experience is left, and only with mob loot on.
         if matches!(p.species(), Species::Turtle | Species::Frog) {
-            self.finalize_breeding(&p, partner, None, OrbOrder::BeforeChild);
+            self.finalize_breeding(&p, partner, None, OrbOrder::BeforeChild, false);
             // One `new ExperienceOrb`, not split as `ExperienceOrb.award` does.
             self.award_breeding_experience(parent, [p.position.x, p.position.y, p.position.z]);
             return None;
@@ -4304,74 +4333,133 @@ impl Game<'_> {
             [p.position.x, p.position.y, p.position.z],
             true,
             SpawnSite::Raw,
+            // Animal.spawnChildFromBreeding places the child at yaw zero. Its constructor still
+            // spends LivingEntity's yaw draw on the child's stream, not the level's.
             Some(0.0),
-        )?;
-        'offspring: {
-            let child = &mut child;
-            child.extra.age = -24000;
-            // No Mob.finalizeSpawn either: no follow range bonus, right-handed.
-            spawning::bred_offspring(child);
-            // getBreedOffspring creates the baby without finalizeSpawn: it keeps
-            // the default (`classic`) sound variant.
-            child.extra.sound_variant = None;
-            // Fox.getBreedOffspring runs no finalizeSpawn: nothing in the
-            // baby fox's mouth.
-            if p.species() == Species::Fox {
-                child.extra.set_main_hand(None);
-            }
-            // Fox.FoxBreedGoal.breed: the baby trusts the players who fed its
-            // parents into love.
-            if p.species() == Species::Fox {
-                let parent_cause = self
-                    .love_cause
-                    .get(&parent)
-                    .copied()
-                    .and_then(|conn| self.killer_uuid(conn));
-                let partner_cause = self
-                    .love_cause
-                    .get(&partner)
-                    .copied()
-                    .and_then(|conn| self.killer_uuid(conn));
-                sunrise_client::mobs::fox::trust_breeders(
-                    child,
-                    parent_cause.map(sunrise_client::lan::playerdata::uuid_ints),
-                    partner_cause.map(sunrise_client::lan::playerdata::uuid_ints),
-                );
-            }
-            // Goat.getBreedOffspring: GoatAi.initMemories, then the baby
-            // screams if the parent a coin toss picks does, or on a 2% roll.
-            if p.species() == Species::Goat {
-                child.extra.lost_horns = [false; 2];
-                sunrise_client::mobs::finalize::goat_init_memories(child, &mut self.world.random);
-                let pick_parent = self.world.random.next_boolean();
-                let parent_screams = if pick_parent {
-                    p.extra.screaming
-                } else {
-                    q.as_ref().unwrap_or(&p).extra.screaming
-                };
-                child.extra.screaming = parent_screams || self.world.random.next_double() < 0.02;
-            }
-            // Inheritance was drawn synchronously in the breeding goal,
-            // before the parent's later same-tick aiStep rolls.
-            if let Some(o) = equine {
-                sunrise_client::mobs::equine::apply_offspring(child, &o);
-                break 'offspring;
-            }
-            // Camel.getBreedOffspring creates a camel with default attributes.
-            if sunrise_client::mobs::camel::is_camel(p.species()) {
-                break 'offspring;
-            }
-            if p.species() == Species::Cat {
-                // Cat.getBreedOffspring.
-                let other = q.as_ref().unwrap_or(&p);
-                child.extra.variant = if coin {
-                    p.extra.variant
-                } else {
-                    other.extra.variant
-                };
-                if p.extra.tame {
+        );
+        if let Some(child) = child.as_mut() {
+            'offspring: {
+                // getBreedOffspring supplies inheritance; the accepted child gets baby age
+                // later in Animal.spawnChildFromBreeding or Fox.FoxBreedGoal.breed.
+                // No Mob.finalizeSpawn either: no follow range bonus, right-handed.
+                spawning::bred_offspring(child);
+                // getBreedOffspring creates the baby without finalizeSpawn: it keeps
+                // the default (`classic`) sound variant.
+                child.extra.sound_variant = None;
+                // Fox.getBreedOffspring runs no finalizeSpawn: nothing in the
+                // baby fox's mouth.
+                if p.species() == Species::Fox {
+                    child.extra.set_main_hand(None);
+                }
+                // Goat.getBreedOffspring: GoatAi.initMemories, then the baby
+                // screams if the parent a coin toss picks does, or on a 2% roll.
+                if p.species() == Species::Goat {
+                    child.extra.lost_horns = [false; 2];
+                    sunrise_client::mobs::finalize::goat_init_memories(
+                        child,
+                        &mut self.world.random,
+                    );
+                    let pick_parent = self.world.random.next_boolean();
+                    let parent_screams = if pick_parent {
+                        p.extra.screaming
+                    } else {
+                        q.as_ref().unwrap_or(&p).extra.screaming
+                    };
+                    child.extra.screaming =
+                        parent_screams || self.world.random.next_double() < 0.02;
+                }
+                // Inheritance was drawn synchronously in the breeding goal,
+                // before the parent's later same-tick aiStep rolls.
+                if let Some(o) = equine {
+                    sunrise_client::mobs::equine::apply_offspring(child, &o);
+                    break 'offspring;
+                }
+                // Camel.getBreedOffspring creates a camel with default attributes.
+                if sunrise_client::mobs::camel::is_camel(p.species()) {
+                    break 'offspring;
+                }
+                if p.species() == Species::Cat {
+                    // Cat.getBreedOffspring.
+                    let other = q.as_ref().unwrap_or(&p);
+                    child.extra.variant = if coin {
+                        p.extra.variant
+                    } else {
+                        other.extra.variant
+                    };
+                    if p.extra.tame {
+                        child.extra.tame = true;
+                        child.extra.owner = p.extra.owner;
+                        let mixed = dye_mix(
+                            &self.loop_context,
+                            world_recipes!(self),
+                            &mut self.world.random,
+                            p.extra.color,
+                            other.extra.color,
+                        );
+                        child.extra.color = mixed;
+                    }
+                    break 'offspring;
+                }
+                if p.species() == Species::Wolf {
+                    // Wolf.getBreedOffspring: a parent's variant; tame parents
+                    // give a tame baby with their collar colours mixed.
+                    let other = q.as_ref().unwrap_or(&p);
+                    child.extra.variant = if coin {
+                        p.extra.variant
+                    } else {
+                        other.extra.variant
+                    };
+                    if p.extra.tame {
+                        sunrise_client::mobs::tame::set_tame(child, true);
+                        child.extra.owner = p.extra.owner;
+                        let mixed = dye_mix(
+                            &self.loop_context,
+                            world_recipes!(self),
+                            &mut self.world.random,
+                            p.extra.color,
+                            other.extra.color,
+                        );
+                        child.extra.color = mixed;
+                    }
+                    child.extra.sound_variant = wolf_voice.or_else(|| self.bred_wolf_voice(parent));
+                    break 'offspring;
+                }
+                // Panda.getBreedOffspring: genes from both parents.
+                if p.species() == Species::Panda {
+                    sunrise_client::mobs::panda::inherit(child, &p, q.as_ref().unwrap_or(&p));
+                    break 'offspring;
+                }
+                // Axolotl.getBreedOffspring: the drawn variant, and the baby is persistent.
+                if let Some(variant) = axolotl {
+                    child.extra.variant = variant;
+                    child.persistent = true;
+                    break 'offspring;
+                }
+                // Nautilus.getBreedOffspring: a tame parent's baby is tame too.
+                if p.species() == Species::Nautilus && p.extra.tame {
                     child.extra.tame = true;
                     child.extra.owner = p.extra.owner;
+                    child.persistent = true;
+                }
+                // Offspring inherit a parent's variant (pigs/cows/chickens) or mixed wool.
+                child.extra.variant = p.extra.variant;
+                // Fox, Pig, Cow and Chicken.getBreedOffspring: either parent's variant.
+                if sunrise_client::mobs::draws_parent_variant(p.species())
+                    && p.species() != Species::Cat
+                    && !coin
+                {
+                    child.extra.variant = q.as_ref().map_or(p.extra.variant, |q| q.extra.variant);
+                }
+                // The rabbit's own draw above.
+                if let Some(variant) = rabbit_variant {
+                    child.extra.variant = variant;
+                }
+                if let Some(variant) = mooshroom {
+                    child.extra.variant = variant;
+                }
+                // Sheep.getBreedOffspring: the lamb's wool mixes both parents' dyes.
+                if p.species() == Species::Sheep {
+                    let other = q.as_ref().unwrap_or(&p);
                     let mixed = dye_mix(
                         &self.loop_context,
                         world_recipes!(self),
@@ -4381,140 +4469,129 @@ impl Game<'_> {
                     );
                     child.extra.color = mixed;
                 }
-                break 'offspring;
-            }
-            if p.species() == Species::Wolf {
-                // Wolf.getBreedOffspring: a parent's variant; tame parents
-                // give a tame baby with their collar colours mixed.
-                let other = q.as_ref().unwrap_or(&p);
-                child.extra.variant = if coin {
-                    p.extra.variant
-                } else {
-                    other.extra.variant
-                };
-                if p.extra.tame {
-                    sunrise_client::mobs::tame::set_tame(child, true);
-                    child.extra.owner = p.extra.owner;
-                    let mixed = dye_mix(
-                        &self.loop_context,
-                        world_recipes!(self),
-                        &mut self.world.random,
-                        p.extra.color,
-                        other.extra.color,
-                    );
-                    child.extra.color = mixed;
-                }
-                child.extra.sound_variant = wolf_voice.or_else(|| self.bred_wolf_voice(parent));
-                break 'offspring;
-            }
-            // Panda.getBreedOffspring: genes from both parents.
-            if p.species() == Species::Panda {
-                sunrise_client::mobs::panda::inherit(child, &p, q.as_ref().unwrap_or(&p));
-                break 'offspring;
-            }
-            // Axolotl.getBreedOffspring: the drawn variant, and the baby is persistent.
-            if let Some(variant) = axolotl {
-                child.extra.variant = variant;
-                child.persistent = true;
-                break 'offspring;
-            }
-            // Nautilus.getBreedOffspring: a tame parent's baby is tame too.
-            if p.species() == Species::Nautilus && p.extra.tame {
-                child.extra.tame = true;
-                child.extra.owner = p.extra.owner;
-                child.persistent = true;
-            }
-            // Offspring inherit a parent's variant (pigs/cows/chickens) or mixed wool.
-            child.extra.variant = p.extra.variant;
-            // Fox, Pig, Cow and Chicken.getBreedOffspring: either parent's variant.
-            if sunrise_client::mobs::draws_parent_variant(p.species())
-                && p.species() != Species::Cat
-                && !coin
-            {
-                child.extra.variant = q.as_ref().map_or(p.extra.variant, |q| q.extra.variant);
-            }
-            // The rabbit's own draw above.
-            if let Some(variant) = rabbit_variant {
-                child.extra.variant = variant;
-            }
-            if let Some(variant) = mooshroom {
-                child.extra.variant = variant;
-            }
-            // Sheep.getBreedOffspring: the lamb's wool mixes both parents' dyes.
-            if p.species() == Species::Sheep {
-                let other = q.as_ref().unwrap_or(&p);
-                let mixed = dye_mix(
-                    &self.loop_context,
-                    world_recipes!(self),
-                    &mut self.world.random,
-                    p.extra.color,
-                    other.extra.color,
-                );
-                child.extra.color = mixed;
             }
         }
-        // BabyEntitySpawnEvent: the baby is constructed and has inherited (its draws are
-        // spent); breeding is finalized and the baby inserted after the listeners.
-        if mod_api::__private::listened(mod_api::HookId::BabyEntitySpawn) {
-            let conn = self
-                .love_cause
-                .get(&parent)
-                .or(self.love_cause.get(&partner))
-                .copied();
-            let player = (
-                conn.and_then(|c| self.killer_uuid(c)),
-                conn.and_then(|c| self.player_entity_id_by_connection(c)),
-            );
-            match self.breed_with_listeners(parent, partner, player, child, |game, baby| {
-                game.finish_live_breeding(&p, partner, baby, experience)
-            }) {
-                // The levels' normal join hooks have now run if this was the root commit.
-                Some(joined) => {
-                    return joined.filter(|&id| {
-                        self.resident_target_dimension(super::commands::Target::Mob(id))
-                            == Some(self.dim)
-                    });
-                }
-                None => {
+        // BabyEntitySpawnEvent: posted even if no proposed child was constructed, matching
+        // NeoForge's Animal.spawnChildFromBreeding and Fox.FoxBreedGoal.breed.
+        let listened = mod_api::__private::listened(mod_api::HookId::BabyEntitySpawn);
+        let accepted = if listened {
+            let feeders = [parent, partner].map(|id| self.love_cause.get(&id).copied());
+            let player = feeders
+                .into_iter()
+                .flatten()
+                .find_map(|conn| match conn {
+                    Some(conn) if self.lan_acting != Some(conn) => {
+                        let guest = self.lan.as_ref()?.hub.guest(conn)?;
+                        guest
+                            .placed_in(self.dim.id())
+                            .then_some((guest.uuid, guest.entity_id))
+                    }
+                    conn if conn == self.lan_acting && self.player.is_some() => {
+                        Some((self.native_acting_id(), self.own_entity_id()))
+                    }
+                    _ => None,
+                })
+                .map_or((None, None), |(uuid, id)| (Some(uuid), Some(id)));
+            let constraint = if p.species() == Species::Fox {
+                super::native_pending_children::ChildConstraint::BreedingFox
+            } else {
+                super::native_pending_children::ChildConstraint::BreedingAgeable
+            };
+            match self.breed_with_listeners(parent, partner, player, child, constraint) {
+                super::pending_births::BreedOutcome::Accepted(baby) => baby,
+                super::pending_births::BreedOutcome::Cancelled => {
+                    // NeoForge Animal.spawnChildFromBreeding / Fox.FoxBreedGoal.breed:
+                    // only cancellation resets both parents and skips finalization.
                     breeding_credit(&mut self.love_cause, parent, partner);
-                    if let Some(q) = self.mobs.iter_mut().find(|m| m.id == partner) {
-                        q.extra.age = 6000;
-                        q.extra.in_love = 0;
+                    for id in [parent, partner] {
+                        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                            sunrise_client::mobs::finalize::set_age(m, 6000, None);
+                            m.extra.in_love = 0;
+                        }
                     }
                     return None;
                 }
             }
-        }
-        self.finish_live_breeding(&p, partner, child, experience)
-    }
-
-    fn finish_live_breeding(
-        &mut self,
-        p: &Mob,
-        partner: u32,
-        child: Mob,
-        experience: sunrise_client::mobs::BreedExperience,
-    ) -> Option<u32> {
-        let parent = p.id;
-        let order = if sunrise_client::mobs::orb_after_child(p.species()) {
+        } else {
+            child.map(|child| self.stash_breeding_child(child))
+        };
+        let (mut pending, action) = accepted?;
+        let child = &mut pending.mob;
+        // NeoForge Animal.spawnChildFromBreeding / Fox.FoxBreedGoal.breed:
+        // apply post-event completion to the live initiating parent and selected child.
+        let live_parent = self
+            .mobs
+            .iter()
+            .find(|m| m.id == parent)
+            .cloned()
+            .unwrap_or(p);
+        let fox = live_parent.species() == Species::Fox;
+        let order = if sunrise_client::mobs::orb_after_child(live_parent.species()) {
             OrbOrder::AfterChild
         } else {
             OrbOrder::BeforeChild
         };
-        self.finalize_breeding(p, partner, Some(&child), order);
-        let at = [p.position.x, p.position.y, p.position.z];
-        match order {
-            OrbOrder::AfterChild => {
-                let joined = self.insert_spawned_mob(child);
-                self.mob_event_particles(parent, 18);
-                self.breeding_orb(parent, at, experience);
-                joined
-            }
-            OrbOrder::BeforeChild => {
-                self.breeding_orb(parent, at, experience);
-                self.insert_spawned_mob(child)
-            }
+        // Fox.FoxBreedGoal.breed grants trust, then credits breeding and cools the parents
+        // while the selected fox still has its pre-snap age and position.
+        if fox {
+            let parent_cause = self
+                .love_cause
+                .get(&parent)
+                .copied()
+                .and_then(|conn| self.killer_uuid(conn));
+            let partner_cause = self
+                .love_cause
+                .get(&partner)
+                .copied()
+                .and_then(|conn| self.killer_uuid(conn));
+            sunrise_client::mobs::fox::trust_breeders(
+                child,
+                parent_cause.map(sunrise_client::lan::playerdata::uuid_ints),
+                partner_cause.map(sunrise_client::lan::playerdata::uuid_ints),
+            );
+            self.finalize_breeding(
+                &live_parent,
+                partner,
+                Some(child),
+                order,
+                listened || at_tick_boundary,
+            );
         }
+        sunrise_client::mobs::finalize::set_baby(child, true);
+        sunrise_client::mobs::living::teleports::snap_to(child, live_parent.position);
+        child.yaw = 0.0;
+        child.previous_yaw = 0.0;
+        child.body_yaw = 0.0;
+        child.previous_body_yaw = 0.0;
+        child.head_yaw = 0.0;
+        child.previous_head_yaw = 0.0;
+        child.head_pitch = 0.0;
+        child.previous_head_pitch = 0.0;
+        // Animal.spawnChildFromBreeding credits the child after setting its baby age and pose.
+        if !fox {
+            self.finalize_breeding(
+                &live_parent,
+                partner,
+                Some(child),
+                order,
+                listened || at_tick_boundary,
+            );
+        }
+        let at = [
+            live_parent.position.x,
+            live_parent.position.y,
+            live_parent.position.z,
+        ];
+        if order == OrbOrder::BeforeChild {
+            self.breeding_orb(parent, at, experience);
+        }
+        let child = self.issue_pending_child(pending, action);
+        let joined = self.insert_spawned_mob(child);
+        if order == OrbOrder::AfterChild {
+            self.mob_event_particles(parent, 18);
+            self.breeding_orb(parent, at, experience);
+        }
+        joined
     }
     /// `MobEffectUtil.addEffectToPlayersAround` for an elder guardian:
     /// mining fatigue III for five minutes unless a stronger or longer one
@@ -4970,8 +5047,12 @@ impl Game<'_> {
             return self.tick_projectiles_live(through, ticking, vanish, round);
         }
         let mut projectiles = self.creatures.projectiles.lift();
-        // The tick's own projectiles: what joins during it (a hook's spawn) ticks from the next.
-        let last_ticked_join = projectiles.iter().map(|p| p.join).max();
+        // The projectiles this tick really ticked: what joins during it (a hook's spawn) ticks
+        // from the next, and one a mod canceled, or whose chunk does not tick, stays as it is.
+        // `swept` holds those whose block effects are settled without a sweep: a wind charge
+        // that burst at the world's top instead of its tick.
+        let mut ticked = sunrise_client::fast_hash::FxHashSet::default();
+        let mut swept = sunrise_client::fast_hash::FxHashSet::default();
         let mut hits = Vec::new();
         let mut arrow_events = Vec::new();
         let mut shoot_events = Vec::new();
@@ -5040,6 +5121,7 @@ impl Game<'_> {
             if round.canceled(projectiles[i].id) {
                 continue;
             }
+            ticked.insert(projectiles[i].id);
             let section_from = projectiles[i].position;
             let skip_wind = matches!(
                 projectiles[i].kind,
@@ -5139,6 +5221,7 @@ impl Game<'_> {
                     }
                     water_splashes.append(&mut p.water_splashes);
                     if let Some((hurt_at, is_lava)) = p.take_bullet_hurt() {
+                        swept.insert(p.id);
                         let silent = self.entity_silent(p.id);
                         let ctx = sunrise_client::sculk::Context {
                             owner: p.owner,
@@ -5191,6 +5274,7 @@ impl Game<'_> {
                         && keep
                         && let Some(hit) = self.wind_ceiling_contact(p)
                     {
+                        swept.insert(p.id);
                         hits.push(ProjectileHit {
                             projectile: p.clone(),
                             hit,
@@ -5239,11 +5323,45 @@ impl Game<'_> {
                     section_from,
                     keep_flags[i],
                 );
-            // Its own Post, right after its tick, also when it ended in it. Its block effects and
-            // hits land after the family's ticks, as they do for every projectile.
+            // Its own Post, right after its tick and block effects, also when it ended in it.
             if let Some(back) = hand_back.as_deref_mut()
                 && let Some((id, kind)) = back.told.take()
             {
+                if ticked.contains(&id)
+                    && !swept.contains(&id)
+                    && let Some(pos) = projectiles.iter().position(|p| p.id == id)
+                {
+                    swept.insert(id);
+                    let mut destroyed = false;
+                    let mut swept_row = None;
+                    projectiles.update_with_rest(pos, |shot, before, after| {
+                        let sources = |src_id| {
+                            before
+                                .iter()
+                                .chain(after)
+                                .find(|p| p.id == src_id && crate::game::entity::shot_alive(p))
+                                .map(|p| {
+                                    (
+                                        crate::game::commands::Target::Projectile(src_id),
+                                        p.position.components(),
+                                    )
+                                })
+                        };
+                        self.sweep_projectile_inside(shot, Some(&sources));
+                        destroyed = shot.destroyed;
+                        swept_row = Some(shot.clone());
+                    });
+                    if let Some(row) = swept_row {
+                        for h in &mut hits {
+                            if h.projectile.join == row.join {
+                                h.projectile.clone_from(&row);
+                            }
+                        }
+                    }
+                    if destroyed {
+                        keep_flags[pos] = false;
+                    }
+                }
                 let same;
                 (projectiles, same) = self.projectiles_told(projectiles, |game| {
                     game.native_tick_post_one(&round, id, kind);
@@ -5255,6 +5373,111 @@ impl Game<'_> {
         }
         self.creatures.pickable_projectile_targets = winds;
         self.creatures.arrow_hit_scratch = scratch;
+        // Do not retire an impact owner just because vanilla would consume it. Its live
+        // row is what the event resolves and what transaction commit will remove.
+        for impact in &mut impacts {
+            if let Some(i) = impact.index {
+                impact.keep = keep_flags[i];
+                if !projectiles[i].destroyed {
+                    keep_flags[i] = true;
+                }
+            }
+        }
+        let mut flags = keep_flags.into_iter();
+        projectiles.retain(|_| flags.next().unwrap());
+        // `Projectile.tick` applies `Entity.applyEffectsFromBlocks` before `hitTargetOrDeflectSelf`:
+        // sweep all remaining ticked projectiles and non-arrow hits before dispatching
+        // `projectile_impact` or emitting impact-dependent side effects.
+        for i in 0..projectiles.len() {
+            let id = projectiles[i].id;
+            if !ticked.contains(&id)
+                || swept.contains(&id)
+                || hear && self.projectile_removal_pending(id)
+            {
+                continue;
+            }
+            swept.insert(id);
+            projectiles.update_with_rest(i, |shot, before, after| {
+                let sources = |src_id| {
+                    before
+                        .iter()
+                        .chain(after)
+                        .find(|p| p.id == src_id && crate::game::entity::shot_alive(p))
+                        .map(|p| {
+                            (
+                                crate::game::commands::Target::Projectile(src_id),
+                                p.position.components(),
+                            )
+                        })
+                };
+                self.sweep_projectile_inside(shot, Some(&sources));
+            });
+        }
+        for h in &mut hits {
+            let shot = &mut h.projectile;
+            if hear && self.projectile_removal_pending(shot.id) {
+                continue;
+            }
+            if swept.contains(&shot.id) {
+                if let Some(row) = projectiles.iter().find(|p| p.join == shot.join) {
+                    shot.clone_from(row);
+                }
+                continue;
+            }
+            if shot.arrow.is_some() {
+                continue;
+            }
+            let sources = |src_id| {
+                projectiles
+                    .iter()
+                    .find(|p| p.id == src_id && crate::game::entity::shot_alive(p))
+                    .map(|p| {
+                        (
+                            crate::game::commands::Target::Projectile(src_id),
+                            p.position.components(),
+                        )
+                    })
+            };
+            self.sweep_projectile_inside(shot, Some(&sources));
+        }
+        // A block effect destroyed it (a shulker bullet in lava or fire): settle its
+        // destruction before dispatching `projectile_impact` or impact side effects.
+        let mut destroyed_ids = sunrise_client::fast_hash::FxHashSet::default();
+        for p in projectiles.iter() {
+            if p.destroyed {
+                destroyed_ids.insert(p.id);
+            }
+        }
+        for h in &hits {
+            if h.projectile.destroyed {
+                destroyed_ids.insert(h.projectile.id);
+            }
+        }
+        if !destroyed_ids.is_empty() {
+            let mut hit_remap: Vec<Option<usize>> = Vec::with_capacity(hits.len());
+            let mut next_slot = 0usize;
+            hits.retain(|h| {
+                if h.projectile.destroyed || destroyed_ids.contains(&h.projectile.id) {
+                    hit_remap.push(None);
+                    false
+                } else {
+                    hit_remap.push(Some(next_slot));
+                    next_slot += 1;
+                    true
+                }
+            });
+            impacts.retain_mut(|impact| {
+                if destroyed_ids.contains(&impact.before.id) {
+                    return false;
+                }
+                let Some(slot) = hit_remap.get(impact.hit_slot).copied().flatten() else {
+                    return false;
+                };
+                impact.hit_slot = slot;
+                true
+            });
+            projectiles.retain(|p| !p.destroyed && !destroyed_ids.contains(&p.id));
+        }
         // Track followers so bounced/deflected projectiles reinsert in tick order.
         self.creatures.bounced_followers.clear();
         for ProjectileHit {
@@ -5265,22 +5488,16 @@ impl Game<'_> {
                 && let Some(i) = projectiles.iter().position(|q| q.id == p.id)
             {
                 let followers = (i + 1..projectiles.len())
-                    .filter(|&j| keep_flags[j])
+                    .filter(|&j| {
+                        impacts
+                            .iter()
+                            .all(|imp| imp.before.join != projectiles[j].join || imp.keep)
+                    })
                     .map(|j| projectiles[j].id)
                     .collect();
                 self.creatures.bounced_followers.push((p.id, followers));
             }
         }
-        // Do not retire an impact owner just because vanilla would consume it. Its live
-        // row is what the event resolves and what transaction commit will remove.
-        for impact in &mut impacts {
-            if let Some(i) = impact.index {
-                impact.keep = keep_flags[i];
-                keep_flags[i] = true;
-            }
-        }
-        let mut flags = keep_flags.into_iter();
-        projectiles.retain(|_| flags.next().unwrap());
         let hears_impact = !impacts.is_empty();
         let scope = self.storage_scope_guard(hears_impact);
         let game = &mut *scope.game;
@@ -5296,7 +5513,9 @@ impl Game<'_> {
             FxHashMap::default()
         };
         for (id, block, position, movement) in snow_contacts {
-            if !hears_impact || !game.projectile_removal_pending(id) {
+            if !destroyed_ids.contains(&id)
+                && (!hears_impact || !game.projectile_removal_pending(id))
+            {
                 game.powder_snow_particle(block, position, movement);
             }
         }
@@ -5322,24 +5541,13 @@ impl Game<'_> {
             game.apply_item_splash(splash);
         }
         for (id, at, event) in arrow_events {
-            if !hears_impact
-                || !projectile_impact_event(&event)
-                || !game.projectile_removal_pending(id)
+            if !destroyed_ids.contains(&id)
+                && (!hears_impact
+                    || !projectile_impact_event(&event)
+                    || !game.projectile_removal_pending(id))
             {
                 game.arrow_event(at, event);
             }
-        }
-        // `Entity.applyEffectsFromBlocks` sweeps the original cohort by join identity:
-        // settlement can remove rows or append hook spawns. Contacts need the lent
-        // level here, after the read-only borrow, each still in this batch's tick.
-        for i in 0..projectiles.len() {
-            if last_ticked_join.is_none_or(|last| projectiles[i].join > last)
-                || hears_impact && game.projectile_removal_pending(projectiles[i].id)
-            {
-                continue;
-            }
-            projectiles.update(i, |p| game.sweep_projectile_inside(p));
-            projectiles.update(i, |p| game.lava_mark_hurt(p));
         }
         game.creatures.projectiles.restore(
             projectiles,
@@ -5536,6 +5744,15 @@ impl Game<'_> {
                 self.apply_projectile_hit(&p, ceiling)?;
                 continue;
             }
+            // `Projectile.tick` applies the blocks' effects before its hit; one that
+            // left the tick with no hit had none. An arrow's own are its collector's.
+            if keep || hit != Hit::None && p.arrow.is_none() {
+                self.sweep_projectile_inside(&mut p, None);
+                if p.destroyed {
+                    self.creatures.projectiles.retire_extracted(pid, join);
+                    continue;
+                }
+            }
             if matches!(hit, Hit::Entity { .. }) && (!keep || p.arrow.is_some()) {
                 let followers: Vec<u32> = self
                     .creatures
@@ -5547,8 +5764,6 @@ impl Game<'_> {
                 self.creatures.bounced_followers.push((pid, followers));
             }
             if keep {
-                self.sweep_projectile_inside(&mut p);
-                self.lava_mark_hurt(&mut p);
                 let to = p.position;
                 let place = pos.min(self.creatures.projectiles.len());
                 if hit == Hit::None {
@@ -5636,8 +5851,7 @@ impl Game<'_> {
                         if let Some(ceiling) = self.wind_ceiling_contact(&p) {
                             Some((p, ceiling))
                         } else {
-                            self.sweep_projectile_inside(&mut p);
-                            self.lava_mark_hurt(&mut p);
+                            self.sweep_projectile_inside(&mut p, None);
                             let (pid, to) = (p.id, p.position);
                             self.reinsert_continuing_projectile(p);
                             self.entity_section_step(pid, from.components(), to.components());
@@ -6627,8 +6841,7 @@ impl Game<'_> {
         };
         self.flush_arrow_events(&mut arrow);
         if keep {
-            self.sweep_projectile_inside(&mut arrow);
-            self.lava_mark_hurt(&mut arrow);
+            self.sweep_projectile_inside(&mut arrow, None);
             let (aid, from, to) = (arrow.id, arrow.previous, arrow.position);
             self.reinsert_continuing_projectile(arrow);
             self.entity_section_step(aid, from.components(), to.components());
@@ -6838,8 +7051,7 @@ impl Game<'_> {
             if deflected.arrow.is_some() {
                 self.finish_arrow_hit(deflected, EntityHit::Deflected);
             } else {
-                self.sweep_projectile_inside(&mut deflected);
-                self.lava_mark_hurt(&mut deflected);
+                // Its blocks' effects were applied before the hit, in its tick.
                 let (pid, from, to) = (deflected.id, deflected.previous, deflected.position);
                 self.reinsert_continuing_projectile(deflected);
                 self.entity_section_step(pid, from.components(), to.components());
@@ -9848,6 +10060,9 @@ mod breeding_tests;
 
 #[cfg(test)]
 pub(in crate::game) mod projectile_batch_tests;
+
+#[cfg(test)]
+mod projectile_block_effects_tests;
 
 #[cfg(test)]
 mod breeze_random_tests;

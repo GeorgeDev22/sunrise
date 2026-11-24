@@ -12,6 +12,23 @@ what doesn't fit drops from them.
 
 For a player in another level than the hook's it breaks nothing and returns false: a break lands in the world, and the hook's level is the one in place.
 
+## Asking first
+
+A mod that changes blocks itself, such as a protection-aware builder or a block swapper, can ask
+whether the player's break or placement would be stopped before it makes the change, as NeoForge's
+`CommonHooks.fireBlockBreak` and `EventHooks.onBlockPlace` are asked:
+
+- `PlayerRef::break_canceled(host, pos)` is true when the player's checks refuse the break or a
+  `break_block` listener cancels it, without breaking anything. The listeners hear it as a break.
+  As in vanilla, a held debug stick takes it as a click and selects its next property.
+- `PlayerRef::place_canceled(host, pos, face, state)` is true when an `entity_place` listener
+  cancels this player placing `state` at `pos`, where the block goes, having clicked the `face`
+  of the block `pos` lies against, without placing anything. It is heard as a single placement
+  against the clicked block. The game's own rule is `PlayerRef::may_use_item_at`.
+
+Both are None for a player who isn't here or is in another level than the one in place, and for
+an unloaded block. They share the nesting limit below with `destroy_block`.
+
 ## A vein miner
 
 A vein miner keeps the drops of its own breaks with `block_drops`: it takes the item list and the

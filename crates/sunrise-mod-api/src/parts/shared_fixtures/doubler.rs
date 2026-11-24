@@ -14,9 +14,18 @@ impl Hooks for Doubler {
             .blocks(&["test:press"])
             .build();
         r.block_entity_part(&kind, Press).expect("native type");
+        let hoard_key = r
+            .register_attachment_type(AttachmentDescriptor::new("doubler:hoard", || 0u32))
+            .unwrap();
+        let energy_key = r
+            .register_attachment_type(AttachmentDescriptor::new("doubler:energy", || 0u32))
+            .unwrap();
+        let fluid_key = r
+            .register_attachment_type(AttachmentDescriptor::new("doubler:fluid", || 0u32))
+            .unwrap();
         let hoard = r.block_entity_type("hoard").blocks(&["test:hoard"]).build();
         let granite = r.block_key("minecraft:granite");
-        r.block_entity_part(&hoard, Hoard(granite))
+        r.block_entity_part(&hoard, Hoard(granite, hoard_key))
             .expect("native type");
         // These handlers wrap the test hosts' own slots and tanks, as a mod replacing how a
         // block entity's are reached does: ahead of the game's.
@@ -39,13 +48,16 @@ impl Hooks for Doubler {
         r.entity_capability(
             &ENTITY_ENERGY,
             "minecraft:armor_stand",
-            |_, entity, side| {
-                (side != Some(Direction::Down)).then(|| Box::new(EntityBattery(entity)) as _)
+            move |_, entity, side| {
+                (side != Some(Direction::Down))
+                    .then(|| Box::new(EntityBattery(entity, energy_key.clone())) as _)
             },
         );
-        r.entity_capability(&ENTITY_FLUIDS, "minecraft:armor_stand", |_, entity, _| {
-            Some(Box::new(EntityTank(entity)))
-        });
+        r.entity_capability(
+            &ENTITY_FLUIDS,
+            "minecraft:armor_stand",
+            move |_, entity, _| Some(Box::new(EntityTank(entity, fluid_key.clone()))),
+        );
         r.item_capability_before_game(&ITEM_ITEMS, "test:pouch", |_, place| {
             Some(Box::new(Pouch(place.clone())))
         });

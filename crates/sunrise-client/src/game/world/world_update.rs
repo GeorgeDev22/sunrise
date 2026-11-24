@@ -103,6 +103,13 @@ impl Game<'_> {
         }
     }
     pub(super) fn update_world(&mut self) {
+        if let Err(e) = self.update_world_with_eviction(false) {
+            log::warn!("Sunrise: failed to save unloaded chunks or entities: {e}");
+        }
+    }
+
+    /// A forced idle sweep waits for its writes before removing resident data.
+    pub(super) fn update_world_with_eviction(&mut self, wait: bool) -> Result<()> {
         if let Err(e) = sunrise_client::spans::time("poll_remote", || self.poll_remote()) {
             log::warn!("Sunrise: {e}");
         }
@@ -155,7 +162,11 @@ impl Game<'_> {
             self.streaming.mesh = self.renderer.is_some();
         }
         if self.defer_chunk_disk_save() {
-            return;
+            return if wait {
+                self.admit_level_save()
+            } else {
+                Ok(())
+            };
         }
         let areas = self.streaming.extra.len();
         // The configuration connection is not a guest and owns no player area.
@@ -193,7 +204,7 @@ impl Game<'_> {
         // `Level.getChunk`'s tickets keep their columns until they expire.
         self.streaming.hold_unknown_tickets();
         self.streaming.upload_backlog = self.pending_uploads.len();
-        let plan = sunrise_client::spans::time("streaming_plan", || {
+        let mut plan = sunrise_client::spans::time("streaming_plan", || {
             let mut step = self.streaming.begin_plan_update(&mut self.world);
             loop {
                 match step {
@@ -206,7 +217,57 @@ impl Game<'_> {
                 }
             }
         });
-        let (commit, protos) = self.streaming.prepare_commit(&mut self.world, plan);
+        if wait {
+            // Like PersistentEntitySectionManager.storeChunkSections, a pending load must
+            // complete before its live entities can replace the stored ones.
+            plan.retain_unloading_columns(|key| !self.world.entities_pending.contains(key));
+        }
+        let saved = (|| -> Result<_> {
+            let keys = plan.unloading_columns();
+            if keys.is_empty() {
+                return Ok(Vec::new());
+            }
+            self.admit_level_save()?;
+            let chunks = self.with_entities(
+                keys.iter()
+                    .filter(|key| self.world.modified.contains(key))
+                    .filter_map(|key| self.world.chunks.get(key)),
+            );
+            self.native_full_chunk_snapshots(&chunks);
+            let (entities, refused_entities) = self.unloading_entity_snapshots(keys);
+            let mut counts = Vec::new();
+            if mod_api::__private::listened(mod_api::HookId::EntitiesUnload) {
+                counts.extend(entities.iter().map(|(key, rows)| (*key, rows.len())));
+            }
+            if wait {
+                let refused = self.save.save_eviction(
+                    &chunks,
+                    self.pack.assets.registry,
+                    world_biomes!(self),
+                    entities,
+                )?;
+                plan.retain_unloading_columns(|key| {
+                    !refused.contains(key) && !refused_entities.contains(key)
+                });
+            } else {
+                if !chunks.is_empty() {
+                    self.save.save_later(
+                        &chunks,
+                        self.pack.assets.registry,
+                        world_biomes!(self),
+                    )?;
+                }
+                self.save.save_entities_later(entities)?;
+                plan.retain_unloading_columns(|key| !refused_entities.contains(key));
+            }
+            Ok(counts)
+        })();
+        if saved.is_err() {
+            plan.keep_columns();
+            self.streaming.force_unload_sweep();
+        }
+        let (commit, protos) = self.streaming.prepare_commit(&mut self.world, &mut plan);
+        let unloaded_columns = plan.unloading_columns();
         self.native_proto_snapshots(&protos);
         self.streaming.submit_protos(protos);
         let (mut uploads, unloaded) = sunrise_client::spans::time("streaming", || {
@@ -225,21 +286,6 @@ impl Game<'_> {
                 .viewed
                 .mesh_frame(|| streaming.viewed_mesh_source(), std::time::Instant::now());
         }
-        let dirty: Vec<_> = unloaded
-            .iter()
-            .filter(|c| self.world.modified.remove(&(c.x, c.z)))
-            .cloned()
-            .collect();
-        let modified = sunrise_client::spans::time("with_entities", || self.with_entities(&dirty));
-        self.native_full_chunk_snapshots(&modified);
-        if !modified.is_empty()
-            && let Err(e) = sunrise_client::spans::time("save_chunks", || {
-                self.save
-                    .save_later(&modified, self.pack.assets.registry, world_biomes!(self))
-            })
-        {
-            log::warn!("Sunrise: failed to save unloaded chunks: {e}");
-        }
         sunrise_client::spans::time("spawn_fresh_chunks", || self.spawn_fresh_chunks());
         self.ask_loaded_light_emission();
         // Vanilla saves the chunk before its unload hook and drops its block entities afterwards.
@@ -247,9 +293,6 @@ impl Game<'_> {
             self.native_chunks_loaded();
             self.native_chunks_unloaded(&unloaded);
         });
-        for chunk in &unloaded {
-            self.world.modified.unloaded(&(chunk.x, chunk.z));
-        }
         if let Some(lod) = &mut self.lod {
             self.lod_observe
                 .extend(uploads.iter().map(|upload| (upload.key.0, upload.key.2)));
@@ -273,21 +316,27 @@ impl Game<'_> {
                 }
             });
         }
-        for chunk in &unloaded {
-            self.world.modified.unloaded(&(chunk.x, chunk.z));
+        for key in unloaded_columns {
+            self.world.modified.remove(key);
+            self.world.modified.unloaded(key);
         }
-        sunrise_client::spans::time("unload_entities", || self.unload_entities(&unloaded));
-        if !unloaded.is_empty() {
-            let gone: sunrise_client::fast_hash::FxHashSet<(i32, i32)> =
-                unloaded.iter().map(|c| (c.x, c.z)).collect();
+        if !unloaded_columns.is_empty() {
+            self.remove_unloading_entities(unloaded_columns);
+            if let Ok(counts) = &saved {
+                for &(chunk, count) in counts {
+                    if unloaded_columns.contains(&chunk) {
+                        self.native_entities_unload(self.dim.id(), [chunk.0, chunk.1], count);
+                    }
+                }
+            }
             sunrise_client::spans::time("unload_block_entities", || {
-                for &column in &gone {
+                for &column in unloaded_columns {
                     self.world.block_entities.unload_column(column);
                 }
             });
             self.world
                 .block_names
-                .retain(|p, _| !gone.contains(&(p.0 >> 4, p.2 >> 4)));
+                .retain(|p, _| !unloaded_columns.contains(&(p.0 >> 4, p.2 >> 4)));
         }
         // LevelChunk.registerTickContainerInLevel: a chunk that became
         // resident has its tick containers before a command can schedule into
@@ -468,6 +517,7 @@ impl Game<'_> {
                 });
             }
         }
+        saved.map(|_| ())
     }
 }
 

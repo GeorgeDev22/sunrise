@@ -26,7 +26,7 @@ impl Game<'_> {
     pub(super) fn draw_item(&self, batch: &mut HudBatch, stack: &ItemStack, x: f32, y: f32) {
         // `GuiGraphics.renderItem`: the resolved item model (tints, foil and
         // special renderers included), then the decorations.
-        self.draw_item_model(batch, stack, x, y);
+        self.draw_item_model(batch, stack, x, y, 0);
         self.draw_item_decorations(batch, stack, x, y, None);
     }
     /// `extractSlot` of slot `slot` holding `stack` at (x, y): during a quick
@@ -56,8 +56,13 @@ impl Game<'_> {
             None => (stack.as_ref(), false),
         };
         if let Some(stack) = stack {
-            self.draw_item_model(batch, stack, x, y);
-            let text = capped.then(|| format!("\u{a7}e{}", stack.count));
+            self.draw_item_model(batch, stack, x, y, 0);
+            let mut count = [0; 13];
+            let text = if capped {
+                Some(hud_overlays::item_count_text(stack.count, true, &mut count))
+            } else {
+                None
+            };
             self.draw_item_decorations(batch, stack, x, y, text);
         } else if let Some(icon) =
             container_slot_index(slot).and_then(|slot| self.native_screen_slot_icon(slot))
@@ -124,7 +129,25 @@ impl Game<'_> {
         stack: &ItemStack,
         x: f32,
         y: f32,
-        count_text: Option<String>,
+        count_text: Option<&str>,
+    ) {
+        self.draw_vanilla_item_decorations(batch, stack, x, y, count_text);
+        let hook = mod_api::HookId::ItemDecorations;
+        if mod_api::__private::has_part_hook(hook) || mod_api::__private::listened(hook) {
+            // The ordinary inventory, hotbar and tooltip paths draw in screen GUI units.
+            self.draw_item_decorator(batch, stack, x, y);
+        }
+    }
+
+    /// Emit only the standard bar (including `item_bar`'s choice), cooldown and count.
+    /// A scoped caller poses this suffix before lending its canvas to the decorator.
+    pub(in crate::game) fn draw_vanilla_item_decorations(
+        &self,
+        batch: &mut HudBatch,
+        stack: &ItemStack,
+        x: f32,
+        y: f32,
+        count_text: Option<&str>,
     ) {
         // GuiGraphicsExtractor.itemDecorations, laid out at the origin and
         // moved to (x, y): the damage bar, the cooldown shade and the count.
@@ -153,18 +176,7 @@ impl Game<'_> {
             bar,
             cooldown: self.cooldowns.percent(&cooldown, partial),
         };
-        let mut draws = vec![hud_layout::GuiDraw::Push(vec![
-            hud_layout::PoseOp::Translate(x, y),
-        ])];
-        draws.extend(hud_overlays::item_decorations(
-            0,
-            0,
-            &decorations,
-            &self.gui.atlas.font,
-        ));
-        draws.push(hud_layout::GuiDraw::Pop);
-        hud_layout::paint(batch, &self.gui.atlas, &draws);
-        self.native_item_decorations(stack, x, y, batch);
+        hud_overlays::paint_item_decorations(batch, &self.gui.atlas, [x, y], &decorations);
     }
     /// The open container screen's player-inventory origin (`getXOrigin`/
     /// `getYOrigin`): the build's, or the frame's own arithmetic with no

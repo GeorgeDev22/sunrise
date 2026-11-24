@@ -104,6 +104,7 @@ paths = [
 cargo = [
   { package = "sunrise-client-lib", target = "lib", filter = "mobs::" },
   { package = "sunrise-client", target = "lib", filter = "game::creatures::" },
+  { package = "sunrise-client", target = "lib", filter = "game::natural_spawning::" },
   { package = "sunrise-client", target = "lib", filter = "game::stats::phantom_spawn_tests" },
   { package = "sunrise-client", target = "lib", filter = "game::wither_star_tests" },
 ]

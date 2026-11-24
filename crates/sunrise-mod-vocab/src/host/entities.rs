@@ -33,7 +33,9 @@ pub trait EntitiesHost {
     /// old handle read again. A login, a reconfiguration or a respawn into
     /// another level replaces the client level: the old handle stays stale and
     /// the mod asks `host.level` again. None with no world open, or for a
-    /// dimension the server hasn't loaded. API 373.
+    /// dimension the server hasn't loaded. In `client_level_load`, the new level
+    /// resolves by the event's dimension even before it is installed; in
+    /// `client_level_unload`, the retiring level still resolves. API 373.
     fn level(&self, dimension: &str) -> Option<LevelRef>;
 }
 /// The server host's methods of the `entities` area, implemented by the game and reached through [`ServerHost`].

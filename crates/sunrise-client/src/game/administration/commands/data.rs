@@ -125,6 +125,12 @@ impl Game<'_> {
         if let Some(u) = self.saved_player_uuid() {
             set_key(&mut tag, "UUID", Tag::IntArray(u.to_vec()));
         }
+        // Entity.saveWithoutId: the live `portalCooldown`, the player's own on its turn.
+        set_key(
+            &mut tag,
+            "PortalCooldown",
+            Tag::Int(self.portals.player.cooldown),
+        );
         // NbtPredicate.getEntityTagToCompare: a player's held stack.
         let selected = self.level.selected_slot;
         let held = match tag.get("Inventory") {

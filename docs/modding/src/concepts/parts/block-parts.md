@@ -230,16 +230,29 @@ preserves the requested resource-drop flag.
 
 ## Inside-block effects
 
-`BlockPart::entity_inside` runs on the server as the entity's sweep reaches the block.
-Use `event.run_before` or `event.run_after` to schedule an `EntityWrite` around an
-`InsideEffect`. Both `entity_inside` and `step_on` accept
-`EntityWrite::Hurt { damage_type, amount }`. Request the key once in `register`,
-for example `r.damage_type_key("minecraft:hot_floor")`. The level supplies the
-registered damage type, including data-pack types and tags, without a causing
-or direct entity. If the type is absent in that world, the hurt does not apply.
-Players, mobs and dropped items accept hurt from both callbacks. Experience
-orbs accept hurt from `step_on` only. Neither callback adds a hurt path for
-armor stands, projectiles or vehicles.
+`BlockPart::entity_inside` (version 4) runs on the server as the entity's sweep reaches the block.
+Use `event.run_before` or `event.run_after` to queue an owned closure around an `InsideEffect` slot.
+The closure receives a short-lived `&mut InsideEntityView` when the sweep flushes, even if no
+`event.apply` was requested for that slot. Built-in effects use the same ordered slots, and
+later callbacks stop when the entity dies. A dropped item sweeps once, after `step_on`.
+
+```rust,ignore
+event.run_after(InsideEffect::FireIgnite, |entity| {
+    entity.hurt("minecraft:hot_floor", 1.0);
+});
+```
+
+When migrating a v2 `EntityWrite::Hurt`, use the same registered damage-type ID you used for
+`r.damage_type_key`. `hurt_with_source` can additionally take typed handles for the direct
+entity and the causing entity (for example, a projectile and its shooter). An absent damage
+type or stale source handle makes that hurt return `false`. Players, mobs and dropped items
+use their live hurt path; a projectile's hurt path can mark it hurt for sync and still return
+`false`.
+
+`BlockPart::step_on` still queues `EntityWrite`, not closures. Its `EntityWrite::Hurt` still
+takes a `DamageTypeKey` requested in `register`, and has no direct or causing entity.
+Experience orbs accept hurt from `step_on` only. Neither callback adds a hurt path for armor
+stands or vehicles.
 
 ## Storage changes
 

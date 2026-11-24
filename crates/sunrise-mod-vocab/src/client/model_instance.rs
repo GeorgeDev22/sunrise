@@ -84,7 +84,8 @@ pub struct ModelInstance {
 }
 
 impl ModelInstance {
-    /// One copy. The draw call checks finiteness, light range and the view budget.
+    /// One copy. Group writes validate finiteness and light range atomically;
+    /// `draw_model_instances` culls first and skips any individual invalid visible copy.
     #[inline]
     pub fn new(
         origin: [f64; 3],
@@ -133,7 +134,12 @@ impl ModelInstance {
     }
 }
 
-/// Why a whole instance batch was refused. Nothing from that batch is drawn.
+/// Why a model instance submission or validation was refused.
+///
+/// `WorldDrawContext::draw_model_instances` refuses stale or unknown models with
+/// [`InstanceError::Model`]; after resolving the model, it culls each copy against the
+/// view frustum first and skips individual visible copies that are non-finite or have
+/// light channels outside `0..=15` without rolling back valid copies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
@@ -144,8 +150,6 @@ pub enum InstanceError {
     NonFinite,
     /// A light channel is outside `0..=15`.
     InvalidLight,
-    /// The batch would exceed this view's 16,384 instance budget.
-    CapacityExceeded,
 }
 
 /// Persistent copies of one resolved model, retired on reload, world close, mod disable or destroy.
@@ -222,8 +226,6 @@ pub enum GroupError {
     InvalidLight,
     /// The range exceeds reserved capacity.
     OutOfRange,
-    /// The mod's reserved capacity or the view budget would be exceeded.
-    CapacityExceeded,
 }
 
 impl From<InstanceError> for GroupError {
@@ -232,7 +234,6 @@ impl From<InstanceError> for GroupError {
             InstanceError::Model(error) => Self::Model(error),
             InstanceError::NonFinite => Self::NonFinite,
             InstanceError::InvalidLight => Self::InvalidLight,
-            InstanceError::CapacityExceeded => Self::CapacityExceeded,
         }
     }
 }

@@ -8,12 +8,14 @@ use crate::*;
 pub trait LevelDatapacksBackend {
     /// Side: both.
     /// The owned entry IDs (`addon:fire`) of a datapack registry, sorted by ID, as this world
-    /// last loaded them. On the logical server, both the active dimension and any loaded parked
-    /// server dimension are accepted (matching vanilla `Level.registryAccess()`); stale epochs
-    /// and unloaded dimensions return `None`. On a client these are the entries the server sent
-    /// at join and after each reload; a declared registry omitted from the snapshot is empty.
+    /// session last loaded them. On the logical server, both the active dimension and any loaded
+    /// parked server dimension are accepted (matching vanilla `Level.registryAccess()`); stale
+    /// epochs and unloaded dimensions return `None`. On a client these are the entries the server
+    /// sent at join and after each reload; a declared registry omitted from the snapshot is empty.
     /// An empty list means the registry has no entries. `None` means the level or registry is
-    /// unavailable. Reads nothing from disk.
+    /// unavailable. In `client_level_load` the entering level reads its own configuration;
+    /// in `client_level_unload` the retiring level still reads its old configuration even if the
+    /// next has already arrived. Reads nothing from disk.
     fn level_datapack_entries(&self, level: LevelRef, registry: &str) -> Option<Vec<String>>;
     /// Side: both.
     /// Borrow the published entry `entry` of `registry` (on a client, from the snapshot its
@@ -26,9 +28,12 @@ pub trait LevelDatapacksBackend {
     ///
     /// On the logical server, both the active dimension and any loaded parked server dimension
     /// are accepted, matching vanilla `Level.registryAccess()`; stale epochs and unloaded
-    /// dimensions are refused. An unavailable set, unknown or unavailable registry, or stale or
-    /// unloaded level returns [`DatapackReadError::UnknownRegistry`]; a missing entry in the
-    /// registry returns [`DatapackReadError::MissingEntry`]. A host without a backend returns
+    /// dimensions are refused. On a client, `client_level_load` reads the entering level's
+    /// configuration and `client_level_unload` reads the retiring configuration even if the next
+    /// has already arrived; the retiring client `LevelRef` stops resolving after Unload. An
+    /// unavailable set, unknown or unavailable registry, or stale or unloaded level returns
+    /// [`DatapackReadError::UnknownRegistry`]; a missing entry in the registry returns
+    /// [`DatapackReadError::MissingEntry`]. A host without a backend returns
     /// [`DatapackReadError::Unavailable`]. No error calls `visit`.
     fn level_datapack_read(
         &self,

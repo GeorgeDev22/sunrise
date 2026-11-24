@@ -2143,7 +2143,7 @@ mod tests {
     #[ignore = "daily"]
     fn a_block_entity_part_gives_back_what_it_held_when_removed() {
         use mod_api::Holder;
-        use mod_platform::__private::part_tests::{HOARD, HOARD_ASKED, game_thread};
+        use mod_platform::__private::part_tests::{HOARD_ASKED, game_thread, hoard_key};
         use std::sync::Arc;
         use std::sync::atomic::Ordering;
         use sunrise_client::chunk::Chunk;
@@ -2178,7 +2178,7 @@ mod tests {
                 game.world.block_entities.insert(key, entity);
                 let holder = Holder::BlockEntity([pos.x, pos.y, pos.z]);
                 let host: &mut dyn mod_api::Host = game;
-                HOARD.set(host, holder, hoard).unwrap();
+                hoard_key().set(host, holder, hoard).unwrap();
                 let (spawns, random) = game.with_level(|_, level, _| {
                     let mut scatter = level.world.random.clone();
                     level.remove_entity(pos, stone, side_effects);
@@ -2219,7 +2219,7 @@ mod tests {
     #[ignore = "daily"]
     fn a_block_entity_removing_itself_in_its_tick_runs_resident_removal() {
         use mod_api::Holder;
-        use mod_platform::__private::part_tests::{HOARD, HOARD_ASKED};
+        use mod_platform::__private::part_tests::{HOARD_ASKED, hoard_key};
         use std::sync::Arc;
         use std::sync::atomic::Ordering;
         use sunrise_client::chunk::Chunk;
@@ -2266,7 +2266,7 @@ mod tests {
             );
             let holder = Holder::BlockEntity([pos.x, pos.y, pos.z]);
             let host: &mut dyn mod_api::Host = game;
-            HOARD.set(host, holder, 5).unwrap();
+            hoard_key().set(host, holder, 5).unwrap();
             let asked = HOARD_ASKED.load(Ordering::Relaxed);
             let dropped = game.dropped.len();
             assert!(game.tick_mod_block_entity(key));

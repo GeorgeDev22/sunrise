@@ -18,19 +18,29 @@ use mod_api::{DimensionKey, LevelRef};
 use sunrise_client::world::World;
 
 impl Game<'_> {
-    /// On a client, the key of the level `dimension` names: the one it shows, or one the server
-    /// opened for viewing while that view is open. None before login.
-    pub(super) fn client_level_key(&self, dimension: &str) -> Option<DimensionKey> {
+    /// Resolve the constructor's level by name during Load; otherwise the installed level or
+    /// a view the server opened. The constructor and installed level have distinct epochs.
+    pub(super) fn client_level_by_name(&self, dimension: &str) -> Option<LevelRef> {
         let remote = self.remote.as_ref().filter(|r| r.logged_in)?;
-        if remote.level == dimension {
-            return Some(remote.level_key);
+        if let Some(level) = &remote.constructing_level
+            && level.handle.dimension_id() == dimension
+        {
+            return Some(level.handle);
         }
-        remote.viewed.key_of(dimension)
+        let key: DimensionKey = if remote.level == dimension {
+            remote.level_key
+        } else {
+            remote.viewed.key_of(dimension)?
+        };
+        Some(LevelRef::new(self.native_lifecycle.epoch()?, key))
     }
     /// On a client, the world a handle names now: the player's own, or a viewed level's while
     /// the server keeps it open. None before login, for a stale handle and for any other level.
     pub(super) fn client_view_world(&self, level: LevelRef) -> Option<&World> {
         let remote = self.remote.as_ref().filter(|r| r.logged_in)?;
+        if let Some(constructing) = remote.constructing(level) {
+            return Some(&constructing.world);
+        }
         if self.native_lifecycle.epoch() != Some(level.epoch()) {
             return None;
         }
@@ -42,7 +52,7 @@ impl Game<'_> {
     /// On a client, the handle the player's own level answers to now (its key and the client
     /// level's epoch): what a world view naming a level is compared with, resolved with the
     /// same rules as `client_view_world`. None before login.
-    fn client_own_level(&self) -> Option<LevelRef> {
+    pub(super) fn client_own_level(&self) -> Option<LevelRef> {
         let remote = self.remote.as_ref().filter(|r| r.logged_in)?;
         Some(LevelRef::new(
             self.native_lifecycle.epoch()?,

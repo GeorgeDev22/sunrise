@@ -430,17 +430,28 @@ impl Game<'_> {
             if self.has_pending_travel(conn) {
                 continue;
             }
-            // `Entity.portalProcess` and `portalCooldown` are the player's own.
-            let Some(host) = self.lan.as_mut() else {
-                return;
-            };
-            let mut portal = host.play.entry(conn).or_default().portal;
-            std::mem::swap(&mut self.portals.player, &mut portal);
             self.handle_server_portal(conn);
-            std::mem::swap(&mut self.portals.player, &mut portal);
-            if let Some(host) = self.lan.as_mut() {
-                host.play.entry(conn).or_default().portal = portal;
-            }
+        }
+    }
+
+    /// `Entity.portalProcess` and `portalCooldown` of the player on `conn`: its own, kept in
+    /// its record, where its turns (`as_guest`) and the mods called during its trip read them.
+    fn guest_portal(
+        &mut self,
+        conn: u32,
+    ) -> Option<&mut sunrise_client::nether_portal::PortalState> {
+        Some(&mut self.lan.as_mut()?.play.entry(conn).or_default().portal)
+    }
+
+    /// The player's `portalCooldown`, 0 for one without a record.
+    fn guest_portal_cooldown(&mut self, conn: u32) -> i32 {
+        self.guest_portal(conn).map_or(0, |portal| portal.cooldown)
+    }
+
+    /// `Entity.setPortalCooldown`: `Player.getDimensionChangingDelay`.
+    fn set_guest_portal_cooldown(&mut self, conn: u32) {
+        if let Some(portal) = self.guest_portal(conn) {
+            portal.cooldown = PLAYER_DELAY;
         }
     }
 
@@ -653,7 +664,7 @@ impl Game<'_> {
             .is_some()
     }
 
-    /// `Entity.handlePortal` for one player, whose portal state is in place.
+    /// `Entity.handlePortal` for one player, on its own portal state ([`Self::guest_portal`]).
     pub(super) fn handle_server_portal(&mut self, conn: u32) {
         let Some(host) = self.lan.as_ref() else {
             return;
@@ -668,17 +679,15 @@ impl Game<'_> {
             g.vehicle.is_some(),
             g.seen_credits,
         );
-        // Entity.checkInsideBlocks: the Nether portal blocks the box is in.
-        // `LivingEntity.canUsePortal` (#943): not a passenger — its vehicle
+        // `LivingEntity.canUsePortal` (#943): alive, not a passenger — its vehicle
         // goes through and carries it (`carry_riders_through_portals`) — and
-        // not asleep.
-        if g.motion
+        // not asleep. `handlePortal` and `setAsInsidePortal` both ask it this tick.
+        let usable = g
+            .motion
             .as_deref()
-            .is_some_and(|p| self.can_use_portal_of(p, riding, sleeping))
-            && let Some(pos) = self.nether_portal_inside(at)
-        {
-            self.portals.player.set_inside(pos, PLAYER_DELAY);
-        }
+            .is_some_and(|p| self.can_use_portal_of(p, riding, sleeping));
+        // Entity.checkInsideBlocks: the Nether portal blocks the box is in.
+        let inside = usable.then(|| self.nether_portal_inside(at)).flatten();
         let (end_portal, gateway) = self.inside_end_portals(at, WIDTH, HEIGHT);
         if end_portal && !riding {
             // EndPortalBlock.entityInside: the first exit from the End shows the credits.
@@ -701,20 +710,22 @@ impl Game<'_> {
                 );
                 return;
             }
-            if self.portals.player.cooldown == 0 {
+            if self.guest_portal_cooldown(conn) == 0 {
                 if self.dim == Dim::End {
                     // Entity.handlePortal sets the cooldown before resolving its destination.
-                    self.portals.player.cooldown = PLAYER_DELAY;
+                    self.set_guest_portal_cooldown(conn);
                     self.queue_spawn_trip(conn, SpawnAction::EndExit);
                 } else {
                     if !self.server_player_travel_allowed(conn, Dim::End, TravelCause::EndPortal) {
                         return;
                     }
+                    // Entity.handlePortal: setPortalCooldown before the teleport.
+                    self.set_guest_portal_cooldown(conn);
                     self.start_server_trip(conn, Dim::End, None);
                 }
             }
             // Entity.setAsInsidePortal while cooling down restarts the cooldown.
-            self.portals.player.cooldown = PLAYER_DELAY;
+            self.set_guest_portal_cooldown(conn);
             return;
         }
         // EndGatewayBlock.entityInside: a gateway that is not cooling down
@@ -724,7 +735,8 @@ impl Game<'_> {
             && let Some(g) = gateway
             && self.gateway_available(g)
         {
-            if self.portals.player.cooldown == 0 {
+            let ready = self.guest_portal_cooldown(conn) == 0;
+            if ready {
                 let Some(player) = self.lan.as_ref().and_then(|host| host.hub.guest(conn)) else {
                     return;
                 };
@@ -739,11 +751,11 @@ impl Game<'_> {
                 }
             }
             if self.gateway_enter(g) {
-                if self.portals.player.cooldown == 0 {
+                // setPortalCooldown: before the trip, or again while cooling down.
+                self.set_guest_portal_cooldown(conn);
+                if ready {
                     self.start_gateway_trip(conn, g);
                 }
-                // setPortalCooldown: after the trip, or again while cooling down.
-                self.portals.player.cooldown = 10;
                 return;
             }
         }
@@ -754,9 +766,8 @@ impl Game<'_> {
         };
         let transition = self.ui.rules.int_at(rule).max(0);
         let Some(entry) = self
-            .portals
-            .player
-            .handle(!sleeping, transition, PLAYER_DELAY)
+            .guest_portal(conn)
+            .and_then(|portal| portal.tick_inside(inside, usable, transition, PLAYER_DELAY))
         else {
             return;
         };
@@ -767,7 +778,9 @@ impl Game<'_> {
         if !self.server_player_travel_allowed(conn, plan.dim, TravelCause::NetherPortal) {
             // The processor already reached its threshold. Forget this attempt
             // so a canceled trip must complete a fresh portal wait before retrying.
-            self.portals.player.process = None;
+            if let Some(portal) = self.guest_portal(conn) {
+                portal.process = None;
+            }
             return;
         }
         self.start_server_trip(conn, plan.dim, Some(plan));
@@ -1688,9 +1701,24 @@ mod tests {
     use mod_api::ServerHost;
     use std::sync::Arc;
 
+    /// Whether the portal test `case` runs here: in the test process it reruns `name` alone in a
+    /// fresh child process and answers false. The game fixture installs process-wide tables (the
+    /// worldgen tables, the block palette, the registered keys), which no other test of the
+    /// shared process may see half-built.
+    fn in_own_process(name: &str, case: &str) -> bool {
+        !crate::game::native_entity_refs::tests::run_fresh_cases(
+            &format!("game::server_travel::tests::{name}"),
+            "SUNRISE_TEST_SERVER_PORTAL_CASE",
+            &[case],
+        )
+    }
+
     #[test]
     #[ignore = "daily"]
     fn guest_portal_entry_uses_body_sleep_and_vehicle() {
+        if !in_own_process("guest_portal_entry_uses_body_sleep_and_vehicle", "entry") {
+            return;
+        }
         super::super::native_guest_turn_tests::with_guests(|game| {
             let mut chunk = sunrise_client::chunk::Chunk::empty(0, 0);
             chunk.lit = true;
@@ -1702,12 +1730,14 @@ mod tests {
                 .default_state("minecraft:nether_portal")
                 .unwrap();
             game.world.set(3, 64, 5, portal).unwrap();
+            // handlePortal decays the wait first; only a player that may use
+            // the portal is then marked inside it, for the next tick.
             for (body, dead, sleeping, riding, expected) in [
-                (true, false, false, false, 9),
-                (true, false, true, false, 4),
-                (true, false, false, true, 4),
-                (true, true, false, false, 4),
-                (false, false, false, false, 4),
+                (true, false, false, false, true),
+                (true, false, true, false, false),
+                (true, false, false, true, false),
+                (true, true, false, false, false),
+                (false, false, false, false, false),
             ] {
                 game.lan.as_mut().unwrap().hub.update_guest(12, |g| {
                     g.position = [3.5, 64.0, 5.5];
@@ -1726,18 +1756,149 @@ mod tests {
                         g.motion.as_mut().unwrap().set_health(0.0, false).unwrap();
                     }
                 });
-                game.portals.player.process = Some(sunrise_client::nether_portal::Process {
-                    entry: BlockPos::new(3, 64, 5),
-                    time: 8,
-                    inside: false,
-                });
+                game.guest_portal(12).unwrap().process =
+                    Some(sunrise_client::nether_portal::Process {
+                        entry: BlockPos::new(3, 64, 5),
+                        time: 8,
+                        inside: false,
+                    });
                 game.handle_server_portal(12);
+                let process = game.guest_portal(12).unwrap().process.unwrap();
                 assert_eq!(
-                    game.portals.player.process.unwrap().time,
-                    expected,
+                    (process.time, process.inside),
+                    (4, expected),
                     "body={body} dead={dead} sleeping={sleeping} riding={riding}"
                 );
             }
+            // Marked inside last tick with the wait at its threshold, then mounted: handlePortal
+            // asks canUsePortal again, so the player stays and the wait does not grow.
+            game.lan.as_mut().unwrap().hub.update_guest(12, |g| {
+                g.sleeping = false;
+                g.vehicle = Some(99);
+                g.motion = Some(Box::new(
+                    sunrise_client::motion::PlayerMotion::new(
+                        game.motion,
+                        Vec3::new(3.5, 64.0, 5.5),
+                    )
+                    .unwrap(),
+                ));
+            });
+            let threshold = game
+                .ui
+                .rules
+                .int_at(sunrise_client::gamerules::vanilla::PLAYERS_NETHER_PORTAL_DEFAULT_DELAY);
+            game.guest_portal(12).unwrap().process = Some(sunrise_client::nether_portal::Process {
+                entry: BlockPos::new(3, 64, 5),
+                time: threshold,
+                inside: true,
+            });
+            game.handle_server_portal(12);
+            assert!(!game.has_pending_travel(12));
+            assert_eq!(game.guest_portal_cooldown(12), 0);
+            let process = game.guest_portal(12).unwrap().process.unwrap();
+            assert_eq!((process.time, process.inside), (threshold, false));
+        });
+    }
+
+    /// The `PortalCooldown` a dimension-travel listener reads of the player going through.
+    struct CooldownWitness(Arc<std::sync::Mutex<Vec<Option<i32>>>>);
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for CooldownWitness {
+        fn entity_travel_to_dimension(
+            &self,
+            host: &mut dyn ServerHost,
+            e: &mut mod_api::EntityTravelToDimensionEvent,
+        ) -> mod_api::Flow {
+            let host: &dyn mod_api::Host = host;
+            self.0.lock().unwrap().push(e.entity.portal_cooldown(host));
+            mod_api::Flow::Cancel
+        }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_travel_listener_reads_the_cooldown_the_portal_just_set() {
+        if !in_own_process(
+            "a_travel_listener_reads_the_cooldown_the_portal_just_set",
+            "listener",
+        ) {
+            return;
+        }
+        let heard = Arc::default();
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+            "cooldown-witness",
+            Box::new(CooldownWitness(Arc::clone(&heard))),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            super::super::native_guest_turn_tests::with_guests(|game| {
+                game.options.dedicated = Some(Vec::new());
+                let mut chunk = sunrise_client::chunk::Chunk::empty(0, 0);
+                chunk.lit = true;
+                game.world.chunks.insert((0, 0), Arc::new(chunk));
+                let portal = game
+                    .pack
+                    .assets
+                    .registry
+                    .default_state("minecraft:nether_portal")
+                    .unwrap();
+                game.world.set(3, 64, 5, portal).unwrap();
+                game.lan.as_mut().unwrap().hub.update_guest(12, |g| {
+                    g.position = [3.5, 64.0, 5.5];
+                    g.motion = Some(Box::new(
+                        sunrise_client::motion::PlayerMotion::new(
+                            game.motion,
+                            Vec3::new(3.5, 64.0, 5.5),
+                        )
+                        .unwrap(),
+                    ));
+                });
+                // A survival player whose wait reaches the portal's transition time this tick.
+                let threshold = game.ui.rules.int_at(
+                    sunrise_client::gamerules::vanilla::PLAYERS_NETHER_PORTAL_DEFAULT_DELAY,
+                );
+                game.guest_portal(12).unwrap().process =
+                    Some(sunrise_client::nether_portal::Process {
+                        entry: BlockPos::new(3, 64, 5),
+                        time: threshold,
+                        inside: true,
+                    });
+                game.handle_server_portal(12);
+                // Entity.handlePortal: setPortalCooldown comes before the travel is asked.
+                assert_eq!(*heard.lock().unwrap(), [Some(PLAYER_DELAY)]);
+                // The listener canceled the trip; a fresh wait must come first.
+                assert!(!game.has_pending_travel(12));
+                assert!(game.guest_portal(12).unwrap().process.is_none());
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_joining_player_keeps_its_saved_portal_cooldown() {
+        if !in_own_process("a_joining_player_keeps_its_saved_portal_cooldown", "join") {
+            return;
+        }
+        super::super::native_guest_turn_tests::with_guests(|game| {
+            // A player whose file was saved 7 ticks into its cooldown, before its first body.
+            let body =
+                sunrise_client::motion::PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5))
+                    .unwrap();
+            game.lan.as_mut().unwrap().hub.update_guest(12, |g| {
+                g.motion = None;
+                g.loaded_body = Some(sunrise_client::lan::guest::SavedBody::of(&body));
+                g.saved = Some(sunrise_core::nbt::Tag::compound([(
+                    "PortalCooldown",
+                    sunrise_core::nbt::Tag::Int(7),
+                )]));
+            });
+            let tag = game.as_guest(12, |g| g.player_nbt()).unwrap().unwrap();
+            assert_eq!(
+                tag.get("PortalCooldown"),
+                Some(&sunrise_core::nbt::Tag::Int(7))
+            );
+            // The countdown goes on in the player's record between its turns.
+            assert_eq!(game.lan.as_ref().unwrap().play[&12].portal.cooldown, 7);
         });
     }
 
@@ -1815,39 +1976,53 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn natural_carrier_moves_full_objects_and_readmits_the_tree_in_order() {
-        use mod_api::{AttachmentType, EntityConstructingEvent, Holder, Hooks, HostSide};
-        use std::sync::Mutex;
-        const STATE: AttachmentType<i32> = AttachmentType {
-            namespace: "natural_tree",
-            name: "state",
-            default: || 0,
-            codec: None,
-            copy_on_death: false,
-            sync: false,
+        use mod_api::{
+            AttachmentDescriptor, AttachmentKey, EntityConstructingEvent, Holder, Hooks, HostSide,
         };
-        struct Constructed(Arc<Mutex<Vec<Holder>>>);
+        use std::sync::Mutex;
+        struct Constructed(
+            Arc<Mutex<Vec<Holder>>>,
+            Arc<Mutex<Option<AttachmentKey<i32>>>>,
+        );
         #[mod_api::__subscriptions]
         impl Hooks for Constructed {
             fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
-                r.register_attachment_type("natural_tree:state", false)
+                let state = r
+                    .register_attachment_type(AttachmentDescriptor::new(
+                        "natural_tree:state",
+                        || 0i32,
+                    ))
                     .unwrap();
+                *self.1.lock().unwrap() = Some(state);
             }
             fn entity_constructing(&self, host: HostSide<'_>, event: &mut EntityConstructingEvent) {
                 self.0.lock().unwrap().push(event.holder);
                 if let HostSide::Server(host) = host {
-                    STATE.set(host, event.holder, 41).unwrap();
+                    let state = self
+                        .1
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .expect("Constructed registered");
+                    state.set(host, event.holder, 41).unwrap();
                 }
             }
         }
         for conflict in [false, true] {
             let calls = Arc::new(Mutex::new(Vec::new()));
+            let state_slot = Arc::new(Mutex::new(None));
             let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
                 "natural_tree",
-                Box::new(Constructed(calls.clone())),
+                Box::new(Constructed(calls.clone(), state_slot.clone())),
             )]
             .into();
             mod_platform::testing::with_mods(mods, || {
                 super::super::native_entity_refs::tests::with_game(|game| {
+                    let state = state_slot
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .expect("Constructed registered");
                     game.options.dedicated = Some(Vec::new());
                     let tag = sunrise_core::nbt::parse_snbt(r#"{
                     id:"minecraft:pig",UUID:[I;703,0,0,1],Pos:[1.0d,80.0d,2.0d],NoAI:1b,
@@ -1864,7 +2039,7 @@ mod tests {
                     let ids = [root, held, leaf, sibling];
                     assert!(game.persist.off_level.contains_key(&held));
                     assert!(game.persist.off_level.contains_key(&sibling));
-                    STATE.set(game, Holder::Entity(leaf), 77).unwrap();
+                    state.set(game, Holder::Entity(leaf), 77).unwrap();
                     game.persist.forced_meta.insert(leaf, [5, 6, 7, 8]);
                     game.portals.entities.entry(leaf).or_default().cooldown = 19;
                     let source = game.dim;
@@ -1907,9 +2082,9 @@ mod tests {
                     );
                     assert_eq!(game.persist.forced_meta.get(&leaf), Some(&[5, 6, 7, 8]));
                     assert_eq!(game.portals.entities[&leaf].cooldown, 19);
-                    assert_eq!(STATE.get(game, Holder::Entity(leaf)), Ok(77));
+                    assert_eq!(state.get(game, Holder::Entity(leaf), Clone::clone), Ok(77));
                     if !conflict {
-                        assert_eq!(STATE.get(game, Holder::Entity(held)), Ok(41));
+                        assert_eq!(state.get(game, Holder::Entity(held), Clone::clone), Ok(41));
                     }
                     assert!(game.mobs_below_off_level().contains(&leaf));
                     game.native_joins_flush(false, 0);
@@ -1932,7 +2107,7 @@ mod tests {
                         assert!(!game.persist.forced_meta.contains_key(&id));
                     }
                     game.enter_level(Dim::Nether).unwrap();
-                    assert_eq!(STATE.get(game, Holder::Entity(leaf)), Ok(77));
+                    assert_eq!(state.get(game, Holder::Entity(leaf), Clone::clone), Ok(77));
                     game.native_joins_flush(false, 0);
                     assert_eq!(*calls.lock().unwrap(), before);
                 })
@@ -2122,7 +2297,7 @@ mod transfer_lifetime_tests {
         default: || 0,
         codec: None,
         copy_on_death: false,
-        sync: false,
+        sync_codec: None,
     };
 
     fn removal<T: Rideable + sunrise_client::join_seq::Joined + HasAttachmentLifetime>(

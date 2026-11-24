@@ -1,4 +1,4 @@
-//! Isolated attachment stores for chunk-worker disk callbacks.
+//! Isolated attachment stores for server-thread chunk-disk callbacks.
 use crate::*;
 
 #[path = "chunk_disk/data.rs"]
@@ -65,7 +65,7 @@ impl ChunkDiskContext {
 }
 
 // no wire: local refusal of an in-process chunk disk job.
-/// Why a chunk disk job refused, with the failing mod and attachment when known.
+/// A refused chunk attachment operation or invalid job input, naming its mod and key when known.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ChunkDiskFailure {
@@ -74,13 +74,26 @@ pub struct ChunkDiskFailure {
     /// The attachment key, or empty for a failure outside a typed operation.
     pub key: String,
     /// The failed operation or missing capability.
-    pub reason: String,
+    pub reason: ChunkDiskFailureKind,
+}
+
+/// Why the chunk attachment edit did not publish.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+// no wire: local error from a chunk-disk attachment operation.
+pub enum ChunkDiskFailureKind {
+    /// The registered key has no persistence codec.
+    MissingPersistenceCodec,
+    /// The key or its typed store operation was refused.
+    Attachment(AttachmentError),
+    /// The proposed envelopes cannot be written and read as ordinary saved chunk NBT.
+    InvalidSavedNbt,
 }
 
 /// A disk callback's shared Host. It has no live backend and is never a
 /// `ServerHost`: live handle methods refuse, and world writes do not compile.
 /// Registry and settings reads use the frozen resource generation retained by
-/// the disk worker. Neither getter reads files. The inherited
+/// the snapshot. Neither getter reads files. The inherited
 /// [`ConfigHost::setting`](prelude::ConfigHost::setting) still returns an owned `Option<String>`.
 pub trait ChunkDiskHost: Host {
     /// Borrow the captured world, dimension, chunk, representation and phase.
@@ -90,9 +103,9 @@ pub trait ChunkDiskHost: Host {
     fn registry(&self, name: &str) -> Option<&[String]>;
 }
 
-// no wire: a borrowed worker-only Host.
+// no wire: a borrowed snapshot-only Host.
 /// Engine-side capability lasting only for one callback dispatch.
-// hidden: engine-side worker capability, built only by the persistence owner
+// hidden: engine-side snapshot capability, built only by the persistence owner
 #[doc(hidden)]
 #[non_exhaustive]
 pub struct OwningChunkDisk<'a> {
@@ -154,16 +167,16 @@ impl ChunkDiskHost for OwningChunkDisk<'_> {
     }
 }
 
-/// The worker's load entry point, discovered by the hook catalog generator.
-// hidden: worker entry point found by the hook catalog generator
+/// The owner's load entry point, discovered by the hook catalog generator.
+// hidden: owner entry point found by the hook catalog generator
 #[doc(hidden)]
 #[inline(never)]
 pub fn native_chunk_data_load(context: &OwningChunkDisk<'_>, data: &mut ChunkDiskData) {
     crate::dispatch_chunk_data_load(context, data);
 }
 
-/// The worker's save entry point, discovered by the hook catalog generator.
-// hidden: worker entry point found by the hook catalog generator
+/// The owner's save entry point, discovered by the hook catalog generator.
+// hidden: owner entry point found by the hook catalog generator
 #[doc(hidden)]
 #[inline(never)]
 pub fn native_chunk_data_save(context: &OwningChunkDisk<'_>, data: &mut ChunkDiskData) {
@@ -179,13 +192,3 @@ pub use job::ChunkDiskJob;
 #[cfg(test)]
 #[path = "chunk_disk/tests.rs"]
 mod tests;
-
-/// Build the job refusal recorded when a chunk-disk listener unwinds through
-/// [`crate::runtime::invoke`].
-pub(crate) fn unwound_failure(mod_id: &'static str) -> ChunkDiskFailure {
-    ChunkDiskFailure {
-        mod_id: mod_id.into(),
-        key: String::new(),
-        reason: "native listener unwound".into(),
-    }
-}

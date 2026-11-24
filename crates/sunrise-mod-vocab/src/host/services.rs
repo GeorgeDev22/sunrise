@@ -179,7 +179,9 @@ pub trait Commands {
 /// The levels service, reached through its host.
 pub trait Levels {
     /// Side: server.
-    /// Loaded server levels, in vanilla dimension order. Empty without a server world.
+    /// Loaded server levels, in creation order: the Overworld first, then the
+    /// other configured levels in registry traversal, then later opens.
+    /// This is the order used for full saves and shutdown. Empty without a server world.
     fn list_levels(&self) -> Vec<LevelRef> {
         unimplemented!("Levels::list_levels")
     }
@@ -315,11 +317,12 @@ pub trait RenderAssets {
     }
     /// Side: client.
     /// Published asset/data read: available in Setup, Reloading and World.
-    /// Resolve a pipeline registered in `register_render_pipelines` once in `client_setup` and
-    /// again in `client_resources_reloaded`, not each frame. `Unknown` for an id no mod
-    /// registered, `Invalid` for one whose shader the current resources don't give or that
+    /// Resolve the handle of a registered render pipeline by ID once in `client_setup` and
+    /// again in `client_resources_reloaded`, not each frame. `Unknown` for an ID
+    /// no mod registered, `Invalid` for one whose shader the current resources don't give or that
     /// didn't compile. Nothing is read or compiled here.
     fn render_pipeline(&self, id: &Identifier) -> Result<RenderPipelineRef, RenderPipelineError> {
+        let _ = id;
         unimplemented!("RenderAssets::render_pipeline")
     }
     /// Side: client.
@@ -372,9 +375,7 @@ pub trait RenderAssets {
 
 /// Client-side persistent copies of resolved models.
 pub trait InstanceGroups {
-    /// Allocate up to 16,384 copies, initially length zero. Each mod may reserve 65,536
-    /// copies total (an empty group reserves one slot). Only visible copies in the drawn
-    /// length, not capacity, consume the view budget. At most 16,384 groups per view.
+    /// Allocate storage for `capacity` copies, initially length zero.
     /// Create at setup/reload, not each frame. Visible GPU-routed copies upload each drawn frame.
     /// Reload, world close, disabling the owning mod, or explicit destroy retires the group.
     /// Re-enabling a mod never revives its old handles; recreate groups after publication.

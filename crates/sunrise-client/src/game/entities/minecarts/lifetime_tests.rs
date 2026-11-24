@@ -111,7 +111,7 @@ static VALUE: AttachmentType<i32> = AttachmentType {
     default: || 0,
     codec: None,
     copy_on_death: false,
-    sync: false,
+    sync_codec: None,
 };
 
 struct CancelCartDismount {
@@ -470,7 +470,7 @@ fn a_bound_cart_commits_the_ridden_tick() {
         game.player = Some(
             sunrise_client::motion::PlayerMotion::new(
                 game.motion,
-                player_cart_seat(Vec3::new(0.5, 70.0, 0.5)),
+                Vec3::new(0.5, 70.0 + SEAT, 0.5),
             )
             .unwrap(),
         );

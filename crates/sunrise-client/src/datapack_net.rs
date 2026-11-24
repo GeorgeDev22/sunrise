@@ -4,8 +4,8 @@
 //! with a snapshot of the ones both sides have, before any registry data. A required registry
 //! the client did not offer ends the join with a reason; an optional one is left out and
 //! nothing is sent in its place. The client checks the snapshot against its own declarations
-//! before it keeps anything, and a snapshot that fails ends the join. The set a server last
-//! published and the set a client received are held here, for the lan thread and the game.
+//! before it keeps anything, and a snapshot that fails ends the join. The server publishes its set for joining clients; each client configuration owns
+//! the set it received.
 //!
 //! A `/reload` that publishes a new set sends each joined Sunrise client a new snapshot
 //! on the same channel, built from the offer owned by its live connection. The
@@ -20,8 +20,6 @@ pub const OFFER_CHANNEL: &str = "sunrise:datapack_offer";
 type Held = Mutex<Option<Arc<mod_api::DatapackRegistrySet>>>;
 /// What this process's server last published.
 static SERVED: Held = Mutex::new(None);
-/// What this process's client last received from a server.
-static RECEIVED: Held = Mutex::new(None);
 
 #[cfg(feature = "test-publication-scope")]
 thread_local! {
@@ -83,17 +81,6 @@ pub fn served() -> Option<Arc<mod_api::DatapackRegistrySet>> {
         return local;
     }
     held(&SERVED)
-}
-
-/// The set this process's client received from the server it joined, if the server sent one.
-pub fn received() -> Option<Arc<mod_api::DatapackRegistrySet>> {
-    held(&RECEIVED)
-}
-
-/// Forgets what an earlier join received, as a new join starts.
-pub fn clear_received() {
-    put(&RECEIVED, None);
-    clear_transfer();
 }
 
 /// What the client sends its server: its synchronized registries and their schemas, or `None`
@@ -164,15 +151,6 @@ fn step_for(
             ),
         },
     }
-}
-
-/// The client's side of a snapshot: checks it against what the client declared and keeps it as
-/// the set its mods read, or says why the join must end. Nothing is kept on failure.
-pub fn accept(bytes: &[u8]) -> Result<(), String> {
-    let declarations = mod_api::__private::datapack_registry_declarations();
-    let received = receive(declarations, bytes)?;
-    put(&RECEIVED, Some(Arc::new(received)));
-    Ok(())
 }
 
 /// Validates a received snapshot against this client's declarations and builds the replacement set.
@@ -360,4 +338,4 @@ pub use delivery::reload_connection;
 
 #[path = "datapack_transport.rs"]
 mod transport;
-pub use transport::{accept_chunk, chunks, clear_transfer, finish_transfer};
+pub use transport::{Receiver, chunks};

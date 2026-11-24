@@ -5,8 +5,8 @@
 //! a panic. A panic disables that mod's callback for that hook for the session, reports the mod
 //! and hook in the error log, and queues a local client error toast. A headless dedicated server
 //! logs the error without presenting a toast. A phase refusal is reported each time and does not
-//! disable the callback. Startup [`invoke_registration`] uses the same panic boundary for the
-//! once-only `Hooks::register` call.
+//! disable the callback. Once-only callbacks such as startup `Hooks::register` and model layer
+//! suppliers use the same panic boundary; they have no future invocation to disable.
 //!
 //! Dispatch and the owning publication boundary discard unfinished work. Later eligible listeners
 //! still run from the last accepted outputs; only a completed proposal can cancel or replace.
@@ -258,7 +258,7 @@ pub(crate) fn install(mods: Mods) -> &'static Installed {
 // hidden: the game's own decide/fire/apply actions read it; it is not a mod-facing call.
 #[doc(hidden)]
 pub fn isolated_failures() -> u64 {
-    LISTENER_SERIAL.get().1
+    ISOLATED_FAILURES.get()
 }
 
 /// Dispatch keys include engine-invoked callbacks that are not themselves catalog hooks.
@@ -300,8 +300,7 @@ impl Callback {
 /// untouched, unlike a whole-mod disable. Returns `true` only on the first panic for
 /// `(hook, id)`, so the error log line and error toast fire once.
 fn poison(callback: Callback, id: &'static str) -> bool {
-    let (entered, trapped) = LISTENER_SERIAL.get();
-    LISTENER_SERIAL.set((entered, trapped.wrapping_add(1)));
+    ISOLATED_FAILURES.set(ISOLATED_FAILURES.get().wrapping_add(1));
     installed().is_none_or(|installed| poison_installed(installed, callback, id))
 }
 
@@ -405,6 +404,29 @@ pub(crate) fn log_and_queue_panic(
     log_and_queue_named_panic(installed(), hook, mod_id, None, payload);
 }
 
+fn log_and_queue_once_panic(
+    hook: &'static str,
+    mod_id: &'static str,
+    payload: &(dyn std::any::Any + Send),
+) {
+    let reason = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("panic");
+    log::error!("mod {mod_id} panicked in {hook} (callback discarded): {reason}");
+    if let Some(installed) = installed() {
+        let mut queue = installed
+            .hook_panics
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        queue.push(HookPanicReport { mod_id, hook });
+        installed
+            .has_hook_panics
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub(crate) fn log_and_queue_named_panic(
     installed: Option<&Installed>,
     hook: &'static str,
@@ -451,6 +473,17 @@ pub(crate) fn invoke<T>(
     })
 }
 
+/// Run a callback called only once by its owner, without poisoning any other callback of the mod.
+pub(crate) fn invoke_once<T>(
+    hook: &'static str,
+    mod_id: &'static str,
+    call: impl FnOnce() -> T,
+) -> Option<T> {
+    contain_callback(call, |payload| {
+        log_and_queue_once_panic(hook, mod_id, payload);
+    })
+}
+
 #[cold]
 pub(crate) fn report_output_refusal(mod_id: &str, hook: &str, field: &str) {
     log::warn!(
@@ -470,6 +503,18 @@ pub(crate) fn invoke_registered_codec<T>(
     if poisoned.load(Ordering::Acquire) {
         return Err(format!("mod {mod_id}: {operation} disabled after a panic"));
     }
+    finish_registered_codec(mod_id, operation, poisoned, call)
+}
+
+/// The same diagnostic fence without a precheck: a value already acquired by a codec
+/// still needs to be released after the codec panics and disables itself.
+pub(crate) fn finish_registered_codec<T>(
+    mod_id: &'static str,
+    operation: &'static str,
+    poisoned: &std::sync::atomic::AtomicBool,
+    call: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    use std::sync::atomic::Ordering;
     let _owner = mark_mod(mod_id, operation);
     contain_callback(call, |payload| {
         if !poisoned.swap(true, Ordering::AcqRel) {
@@ -535,8 +580,7 @@ pub fn call_session_callback<T>(
 ) -> Result<T, String> {
     let _owner = mark_mod(owner, operation);
     contain_callback(call, |payload| {
-        let (entered, trapped) = LISTENER_SERIAL.get();
-        LISTENER_SERIAL.set((entered, trapped.wrapping_add(1)));
+        ISOLATED_FAILURES.set(ISOLATED_FAILURES.get().wrapping_add(1));
         let first = installed().is_none_or(|installed| {
             installed
                 .named_poison
@@ -1035,7 +1079,6 @@ fn listening_matching<'a>(
             {
                 continue;
             }
-            bump_listener_serial();
             return Some((subscriber.receives_cancelled, entry));
         }
         None
@@ -1054,7 +1097,6 @@ pub(crate) fn listening_kind_owner(hook: HookId, kind: &str) -> Option<&'static 
     {
         return None;
     }
-    bump_listener_serial();
     Some(&installed.mods[index])
 }
 
@@ -1090,70 +1132,8 @@ impl ListenerScope {
 }
 
 thread_local! {
-    /// Listener entries (including nested hooks) and poisoned traps on this thread.
-    static LISTENER_SERIAL: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
-}
-
-#[inline]
-fn bump_listener_serial() {
-    let (entered, trapped) = LISTENER_SERIAL.get();
-    LISTENER_SERIAL.set((entered.wrapping_add(1), trapped));
-}
-
-pub(crate) fn listener_serial() -> u64 {
-    LISTENER_SERIAL.get().0
-}
-
-#[cfg(test)]
-mod listener_lease_tests {
-    use super::*;
-    use sunrise_mod_runtime::pending_children::{Decision, Error, PendingChildren};
-
-    #[test]
-    fn entering_a_different_hook_expires_a_retained_pending_child() {
-        struct Listener;
-        #[mod_api::__subscriptions]
-        impl crate::Hooks for Listener {
-            fn mob_split(
-                &self,
-                _: &mut dyn crate::ServerHost,
-                _: &mut crate::MobSplitEvent<'_>,
-            ) -> Flow {
-                Flow::Continue
-            }
-            fn baby_entity_spawn(
-                &self,
-                _: &mut dyn crate::ServerHost,
-                _: &mut crate::BabyEntitySpawnEvent<'_>,
-            ) -> Flow {
-                Flow::Continue
-            }
-        }
-        install(vec![ModEntry::new("lease-test", Box::new(Listener))].into());
-        let mut arena = PendingChildren::default();
-        arena
-            .run(
-                1,
-                1,
-                vec![7u32],
-                |arena, action| {
-                    let _outer = listening(generated::HookId::MobSplit).next().unwrap();
-                    arena.sync_listener(listener_serial()).unwrap();
-                    let child = arena.borrow(action, 0).unwrap();
-                    assert_eq!(arena.get(child), Ok(&7));
-                    let _nested = listening(generated::HookId::BabyEntitySpawn)
-                        .next()
-                        .unwrap();
-                    arena.sync_listener(listener_serial()).unwrap();
-                    assert_eq!(arena.get(child), Err(Error::Expired));
-                    let fresh = arena.borrow(action, 0).unwrap();
-                    assert_eq!(arena.get(fresh), Ok(&7));
-                    Decision::Accept
-                },
-                |_| true,
-            )
-            .unwrap();
-    }
+    /// Per-thread count of trapped listener failures on this thread.
+    static ISOLATED_FAILURES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

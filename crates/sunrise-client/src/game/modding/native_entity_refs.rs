@@ -270,11 +270,13 @@ impl Game<'_> {
     /// for viewing (`client_level_key`). None with no world open, or for a
     /// dimension the server hasn't loaded. API 373.
     pub(in crate::game) fn level(&self, dimension: &str) -> Option<LevelRef> {
-        let epoch = self.native_lifecycle.epoch()?;
         if !self.is_logical_server() {
-            return Some(LevelRef::new(epoch, self.client_level_key(dimension)?));
+            return self.client_level_by_name(dimension);
         }
-        let dim = std::iter::once(self.dim)
+        let epoch = self.native_lifecycle.epoch()?;
+        let dim = (!self.levels.active_closed)
+            .then_some(self.dim)
+            .into_iter()
             .chain(self.levels.parked_dims())
             .find(|d| d.id() == dimension)?;
         Some(self.level_ref(epoch, dim.key()))
@@ -304,14 +306,18 @@ impl Game<'_> {
             .as_ref()
             .map_or_else(|| self.dim.key(), |r| r.level_key)
     }
-    /// Loaded server levels, in vanilla dimension order. Empty without a server world.
+    /// Loaded server levels, in creation order. Empty without a server world.
     pub(super) fn native_list_levels(&self) -> Vec<LevelRef> {
-        if !self.is_logical_server() || self.native_lifecycle.epoch().is_none() {
+        let Some(epoch) = self
+            .native_lifecycle
+            .epoch()
+            .filter(|_| self.is_logical_server())
+        else {
             return Vec::new();
-        }
-        self.loaded_dims()
+        };
+        self.loaded_level_order()
             .into_iter()
-            .filter_map(|dim| self.level(dim.id()))
+            .map(|dim| self.level_ref(epoch, dim.key()))
             .collect()
     }
     fn level_entity_candidates(&self, level: LevelRef) -> impl Iterator<Item = EntityRef> + '_ {
@@ -1523,17 +1529,9 @@ pub(super) mod tests {
         let run = |case: &str| {
             let scratch = target.join(format!("fresh-case-{case}"));
             std::fs::create_dir(&scratch).unwrap();
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            let mut command = mod_platform::testing::fresh_case_command(name, flag, case);
             command
-                .args([
-                    "--ignored",
-                    "--exact",
-                    name,
-                    "--nocapture",
-                    "--test-threads=4",
-                ])
                 .current_dir(&scratch)
-                .env(flag, case)
                 .env("SUNRISE_TEST_RESOURCES", &resources)
                 .env("SUNRISE_NO_AUDIO", "1")
                 .env("SUNRISE_LAUNCHER_NO_SELF_UPDATE", "1");
@@ -3837,7 +3835,7 @@ pub(super) mod tests {
                 default: || 0i32,
                 codec: None,
                 copy_on_death: false,
-                sync: false,
+                sync_codec: None,
             };
             let holder = sunrise_mod_runtime::attachments::Holder::Player(2345);
             game.options.dedicated = Some(Vec::new());

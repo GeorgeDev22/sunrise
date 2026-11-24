@@ -481,11 +481,9 @@ impl Game<'_> {
     pub(in crate::game) fn native_client_level_load(&mut self, dimension: &str) {
         self.fire_client_level_load(dimension);
     }
-    /// The client dropped its level for `dimension` (`LevelEvent.Unload`
-    /// from `Minecraft.setLevel` and `disconnect`): replaced by another
-    /// dimension's, or on leaving the server. Once for each
-    /// `native_client_level_load`. Not told when the game itself quits.
-    /// Client-side.
+    /// NeoForge's client `LevelEvent.Unload` from `Minecraft.setLevel`,
+    /// `clearClientLevel` or `disconnect`: dimension replacement (after the
+    /// new Load), reconfiguration, ordinary leave or quit. Once per Load.
     pub(in crate::game) fn native_client_level_unload(&mut self, dimension: &str) {
         self.fire_client_level_unload(dimension);
     }
@@ -514,19 +512,6 @@ impl Game<'_> {
     /// illuminating the surrounding block or changing gameplay light.
     pub(in crate::game) fn native_emissive(&self, layers: &mut Vec<(&'static str, &'static str)>) {
         self.fire_emissive(layers);
-    }
-    /// The world's phases, read-only; `error_text` carries the engine's
-    /// error text for `WorldOpenFailed` and `WorldCloseFailed`, empty otherwise.
-    /// Server-side. A server loop or final save failure fires `WorldCloseFailed`.
-    /// A normal stop with only individually reported record failures still fires
-    /// `WorldCloseFinal`.
-    pub(in crate::game) fn native_world_lifecycle(
-        &mut self,
-        context: &LifecycleContext,
-        phase: WorldPhase,
-        error_text: &str,
-    ) {
-        self.fire_world_lifecycle(context, phase, error_text);
     }
     /// After admission, collect once before building and sending this player's recipes.
     /// Reload asks once per online player before their recipes are re-sent; none when empty.
@@ -590,34 +575,52 @@ impl Game<'_> {
     /// loaded yet (NeoForge's `ServerAboutToStartEvent`, "called before the
     /// server begins loading anything"). Vanilla's `MinecraftServer.loadLevel`
     /// start. Server-side: the single player server thread once Play is
-    /// pressed, a dedicated server once its settings are read. Each is
-    /// followed by `native_server_started` or
-    /// `native_world_lifecycle`'s `WorldOpenFailed`. `dedicated` tells a dedicated server from the single
-    /// player one.
+    /// pressed, a dedicated server once its network listener has bound. On a successful
+    /// open this is followed by `native_level_load`, `native_server_starting`,
+    /// and `native_server_started`; a failed open skips `native_server_starting`,
+    /// `native_server_started`, and `native_server_stopping`, still runs
+    /// `stopServer` teardown (`native_level_unload` for opened levels), and
+    /// reaches `native_server_stopped`. `dedicated` tells a dedicated server
+    /// from the single player one.
     pub(in crate::game) fn native_server_about_to_start(&mut self, dedicated: bool) {
         self.fire_server_about_to_start(dedicated);
     }
-    /// Before play can be accepted: after the dedicated world loads or at
-    /// the integrated server's early startup notice.
+    /// Fired once on both dedicated and integrated servers after world and
+    /// level loading (`native_level_load`), adopted datapack and text setup,
+    /// and spawn preparation, before accepting play (NeoForge's
+    /// `ServerStartingEvent` at the end of `DedicatedServer.initServer` and
+    /// `IntegratedServer.initServer`). Does not fire if startup fails before
+    /// that point; a failed startup still runs teardown and reaches
+    /// `native_server_stopped`.
     pub(in crate::game) fn native_server_starting(&mut self, dedicated: bool) {
         self.fire_server_starting(dedicated);
     }
-    /// Server teardown has finished, including the final save if possible.
+    /// Fired once at the end of server teardown (NeoForge's
+    /// `ServerStoppedEvent` via `ServerLifecycleHooks.handleServerStopped`),
+    /// after `stopServer` completes (player cleanup, final save attempt for an
+    /// adopted world, network teardown, `native_level_unload` for opened
+    /// levels, and storage release), on both integrated and dedicated servers.
+    /// Always fires once startup has begun, even when startup failed, the tick
+    /// loop errored or panicked, the final save failed, or a shutdown listener
+    /// panicked. Server config unloading follows this notification.
     pub(in crate::game) fn native_server_stopped(&mut self, dedicated: bool) {
         self.fire_server_stopped(dedicated);
     }
     /// The server opened its worlds and is about to tick (NeoForge's
-    /// `ServerStartedEvent`): every level loaded, no player joined. Where
-    /// `WorldOpenReady` fired: the end of the open, before the tick loop.
+    /// `ServerStartedEvent`): every level loaded, no player joined, before the
+    /// tick loop. Fired once per open that succeeds; a failed open skips this
+    /// and still runs teardown to reach `native_server_stopped`. `dedicated`
+    /// tells a dedicated server from the single player one.
     pub(in crate::game) fn native_server_started(&mut self, dedicated: bool) {
         self.fire_server_started(dedicated);
     }
-    /// The server begins teardown (NeoForge's `ServerStoppingEvent`):
-    /// the start of vanilla's `MinecraftServer.stopServer`, with the worlds
-    /// still loaded and the players still connected and not yet saved, so a
-    /// mod can save its own data or tell them. `native_world_lifecycle`'s
-    /// `WorldCloseFinal` follows once the worlds are saved. A server whose loop
-    /// fails still fires this before the final save attempt and `native_server_stopped`.
+    /// Fired once at the start of an orderly server shutdown (NeoForge's
+    /// `ServerStoppingEvent` in `MinecraftServer.runServer`, after the tick
+    /// loop exits normally and before `stopServer`), with the worlds still
+    /// loaded and the players still connected and not yet saved, so a mod can
+    /// save its own data or tell them. Runs only on orderly shutdown: a failed
+    /// open or a tick error/panic skips this and goes straight to `stopServer`
+    /// teardown (`native_level_unload`) and `native_server_stopped`.
     pub(in crate::game) fn native_server_stopping(&mut self, dedicated: bool) {
         self.fire_server_stopping(dedicated);
     }
@@ -634,11 +637,11 @@ impl Game<'_> {
     ) {
         self.fire_server_tick(context, phase);
     }
-    /// Before an authoritative server level's tick pass. `dimension` is its ID.
+    /// Before a level's tick pass on either logical side.
     pub(in crate::game) fn native_level_tick_pre(&mut self, level: LevelRef) {
         self.fire_level_tick_pre(level);
     }
-    /// After a successful authoritative server level tick pass.
+    /// After a successful level tick pass on either logical side.
     pub(in crate::game) fn native_level_tick_post(&mut self, level: LevelRef) {
         self.fire_level_tick_post(level);
     }
@@ -923,24 +926,23 @@ impl Game<'_> {
     pub(in crate::game) fn native_block_entity_ticks(&self, block: &str, ticks: &mut bool) {
         self.fire_block_entity_ticks(block, ticks);
     }
-    /// A `minecraft:post_attack` effect of a mod's own kind, on a mob a
-    /// player's weapon hit: the entry says `enchanted` attacker and `affected`
-    /// victim, its `requirements` passed, and its `effect` names a `type` in a
-    /// namespace outside `minecraft:`. Told the enchantment id, the kind, the
-    /// `effect` payload as a borrowed `Tag`, the level and the mob's id (it may have just died). The
-    /// acting player is the one whose weapon carries the enchantment. Each
-    /// such entry is told once a hit, and once for each mob a sweep lands on.
-    /// A hit on a player, and an entry inside `minecraft:all_of`, aren't told
-    /// yet. An unclaimed kind does nothing.
+    /// A `minecraft:post_attack` effect of a mod's own kind, after a melee hit
+    /// landed: a player's hit on a mob or another player, or an armed mob's hit
+    /// on a mob or a player. The enchantment's `slots` include the main hand,
+    /// the entry says `enchanted` attacker and `affected` victim, its
+    /// `requirements` passed (judged with the hit's damage type), and its
+    /// `effect` names a `type` in a namespace outside `minecraft:`. Told the enchantment id, the kind, the
+    /// `effect` payload as a borrowed `Tag`, the level, the `attacker`, the
+    /// `victim` (it may have just died) and the enchanted `weapon`: the stack
+    /// the attacker hit with (`getWeaponItem`, taken before the hit; a spear
+    /// stab's own stack), which may since have broken or been dropped. Each such entry is told once a
+    /// hit, and once for each mob or player a sweep lands on. An entry inside
+    /// `minecraft:all_of` isn't told yet. An unclaimed kind does nothing.
     pub(in crate::game) fn native_enchant_effect(
         &mut self,
-        enchantment: &str,
-        kind: &str,
-        data: &sunrise_core::nbt::Tag,
-        level: u32,
-        victim: u32,
+        call: super::fire::EnchantEffectCall<'_>,
     ) {
-        self.fire_enchant_effect(enchantment, kind, data, level, victim);
+        self.fire_enchant_effect(call);
     }
     /// Block `block`'s registered item slots (`WorldlyContainer`), read from
     /// its per-block declaration when the ticking table is built.
@@ -3124,14 +3126,13 @@ impl Game<'_> {
     /// The small bar `GuiGraphicsExtractor.itemDecorations` draws under an
     /// item, wherever the game shows one: `bar` arrives holding vanilla's value
     /// (the damage bar, or a bundle's fullness already applied) and may be
-    /// replaced (width `0..=13`, colour `rgb`) or set to `None` to hide it.
+    /// replaced (signed pixel width and RGB colour) or set to `None` to hide it.
     /// Asked each frame a stack is drawn. Client-side.
     pub(in crate::game) fn native_item_bar(&self, stack: &ItemStack, bar: &mut Option<(i32, u32)>) {
         self.fire_item_bar(stack, bar);
     }
     /// Append an item's custom decorations after its default bar, cooldown and count.
-    /// Coordinates are the icon's top-left in GUI units, as the batch takes them;
-    /// no item translation is active.
+    /// The icon origin is in the canvas's local coordinates, with the decoration pose active.
     /// Runs wherever the shared item-decoration path is used (hotbar, menus, tooltips,
     /// and the other screens that draw item icons: advancements, beacon, stats, trading).
     pub(in crate::game) fn native_item_decorations(
@@ -3139,7 +3140,7 @@ impl Game<'_> {
         stack: &ItemStack,
         x: f32,
         y: f32,
-        draw: &mut HudBatch,
+        draw: &mut dyn mod_api::GuiCanvas,
     ) {
         self.fire_item_decorations(stack, x, y, draw);
     }
@@ -3350,7 +3351,11 @@ impl Game<'_> {
     /// particles); `damage_multiplier` starts at 1.5 for vanilla's critical and
     /// 1.0 otherwise, and scales the damage only while `critical` ends true. Not fired for a
     /// target that is no living entity (a dragon part) or when the hit does
-    /// no damage. Fires on the Game that runs the attack.
+    /// no damage. Fires on the Game that runs the attack, and on the attacking
+    /// client, which only asks: once for each melee attack the local player
+    /// sends on a living entity, with `vanilla_critical` from what the client
+    /// knows; what a listener writes there changes no packet, no server
+    /// decision and nothing drawn.
     pub(in crate::game) fn native_critical_hit(
         &mut self,
         target_kind: &str,
@@ -3453,25 +3458,21 @@ impl Game<'_> {
     /// `dimension`'s level opened on the server (NeoForge's `LevelEvent.Load`,
     /// posted in `MinecraftServer.createLevels`): before any of its chunks
     /// (`native_chunk_load`), so a mod sets up what it keeps for the level
-    /// here. At startup the Overworld, Nether and End are published and
-    /// announced in that order, before `server_started`, with each level in
-    /// place, and stay open until server shutdown. A custom level closed while
-    /// idle fires this again when it reopens.
+    /// here. The Overworld opens first, then the other configured levels in
+    /// LEVEL_STEM registry traversal order, before `server_started`.
     /// An explicitly opened runtime level can fire while parked: `dimension`
     /// names that level, not the Host's current one. Once for each open;
-    /// `native_level_unload` follows. Server-side.
+    /// `native_level_unload` follows a successful close. Server-side.
     pub(in crate::game) fn native_level_load(&mut self, dimension: &str) {
         self.fire_level_load(dimension);
     }
     /// `dimension`'s level closed (NeoForge's `LevelEvent.Unload`, posted after
     /// `level.close()` in `MinecraftServer.stopServer`), after its last save:
-    /// drop what the mod kept for it. A custom level closes once nobody has
-    /// been in it for 300 ticks, after its chunks' unloads; built-in levels
-    /// (Overworld, Nether, End) stay open until server shutdown, unloading
-    /// only their unticketed chunks while idle. Every level still open closes
-    /// when the server stops, before `WorldCloseFinal`, and when its open or
-    /// its loop fails, before `WorldOpenFailed` or `WorldCloseFailed`. Once for
-    /// each `native_level_load`. Don't read its blocks. Server-side.
+    /// drop what the mod kept for it. Idle chunk eviction does not close the level.
+    /// Server teardown closes the remaining levels after network teardown and a
+    /// successful final save, before storage release and `native_server_stopped`.
+    /// A failed save or a level's own close failure does not fire this hook.
+    /// Don't read its blocks. Server-side.
     pub(in crate::game) fn native_level_unload(&mut self, dimension: &str) {
         self.fire_level_unload(dimension);
     }
@@ -3493,7 +3494,7 @@ impl Game<'_> {
     /// memory of what never saved. Its blocks and block entities are there,
     /// but its saved entities join afterwards and its light may not be ready:
     /// change the world from a later tick. The chunks around the spawn come
-    /// before `WorldOpenReady`. Not told of a chunk a client receives.
+    /// before `native_server_started`. Not told of a chunk a client receives.
     /// Server-side.
     pub(in crate::game) fn native_chunk_load(
         &mut self,
@@ -3739,9 +3740,9 @@ impl Game<'_> {
     /// world's spawning made it, false when something else did (a breed, a
     /// raid, a spawner, a conversion, `/summon`, and the second mob of a
     /// jockey the world spawned). One call a mob: a `/summon` with passengers
-    /// tells each. Not told of a mob loaded with its chunk, leaving a hive or
-    /// changing level. It only hears; the mob is already among the game's
-    /// mobs. Server-side.
+    /// tells each. Natural spawns tell the source level after each successful
+    /// admission, before the spawn state's callback. Not told of a mob loaded
+    /// with its chunk, leaving a hive or changing level. Server-side.
     pub(in crate::game) fn native_mob_spawned(
         &mut self,
         dimension: &str,
@@ -4173,9 +4174,9 @@ impl GameLevel<'_> {
 /// Helpers for native mods, kept as stable as the hook points.
 // Native mods use these; nothing in Sunrise does.
 impl Game<'_> {
-    /// The server-owned holders' attachments; `TYPE.get(host, holder)` reads
-    /// one. On a client it is the copy of what the server synced: `set` and
-    /// `remove` change only the copy.
+    /// The server-owned holders' attachments; `key.get(host, holder, read)` reads
+    /// one through an issued `AttachmentKey`. On a client it is the copy of
+    /// what the server synced: `set` and `remove` change only the copy.
     pub(in crate::game) fn attachments(&mut self) -> &mut dyn AttachmentStore {
         self
     }
@@ -4384,7 +4385,7 @@ impl Game<'_> {
             return false;
         }
         let start = batch.vertices.len();
-        self.draw_item_model(batch, &ItemStack::new(item, 1), at[0], at[1]);
+        self.draw_item_model(batch, &ItemStack::new(item, 1), at[0], at[1], 0);
         batch.scale_since(start, at[0], at[1], size / 16.0, size / 16.0);
         true
     }
@@ -4407,8 +4408,8 @@ impl Game<'_> {
             return false;
         }
         let start = batch.vertices.len();
-        self.draw_item_model(batch, stack, at[0], at[1]);
-        self.draw_item_decorations(batch, stack, at[0], at[1], Some(String::new()));
+        self.draw_item_model(batch, stack, at[0], at[1], 0);
+        self.draw_item_decorations(batch, stack, at[0], at[1], Some(""));
         batch.scale_since(start, at[0], at[1], size / 16.0, size / 16.0);
         true
     }
@@ -4434,7 +4435,7 @@ impl Game<'_> {
         );
         stack.extra = Some(Box::new(data));
         let start = batch.vertices.len();
-        self.draw_item_model(batch, &stack, at[0], at[1]);
+        self.draw_item_model(batch, &stack, at[0], at[1], 0);
         batch.scale_since(start, at[0], at[1], size / 16.0, size / 16.0);
         true
     }

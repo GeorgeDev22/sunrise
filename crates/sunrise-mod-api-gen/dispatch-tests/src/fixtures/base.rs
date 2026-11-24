@@ -799,8 +799,6 @@ mod stubs {
     pub(super) struct ServerPlayer;
     #[derive(Clone, Copy)]
     pub(super) struct ServerTickPhase;
-    #[derive(Clone, Copy)]
-    pub(super) struct WorldPhase;
 }
 
 mod api {

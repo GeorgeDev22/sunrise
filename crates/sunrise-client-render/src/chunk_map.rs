@@ -232,6 +232,22 @@ impl ChunkMap {
         }
     }
 
+    /// Read an existing loaded column without creating saved extras or an index binding.
+    pub fn attachments(&self, key: &Key) -> Result<Option<&Attachments>, AttachmentError> {
+        use sunrise_core::nbt::JavaString;
+        static KEY: std::sync::LazyLock<JavaString> =
+            std::sync::LazyLock::new(|| ATTACHMENTS_KEY.into());
+        let column = self
+            .columns
+            .get(key)
+            .ok_or(AttachmentError::MissingHolder)?;
+        let Some(saved) = &column.saved else {
+            return Ok(None);
+        };
+        attachment_compound(saved.root.get(&KEY))?;
+        Ok(Some(&saved.attachments))
+    }
+
     /// The live map, rebound after extras COW but never merely for lighting COW.
     pub fn attachments_mut(&mut self, key: &Key) -> Result<&mut Attachments, AttachmentError> {
         let chunk = self
@@ -621,7 +637,7 @@ mod tests {
             },
         }),
         copy_on_death: false,
-        sync: false,
+        sync_codec: None,
     };
     fn observe(map: &mut ChunkMap, index: &Index, dimension: DimensionKey) -> Arc<AtomicUsize> {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -645,7 +661,7 @@ mod tests {
     fn saved_chunk() -> Arc<Chunk> {
         let mut source = Attachments::default();
         VALUE.set(&mut source, Holder::Chunk([3, 5]), 7).unwrap();
-        let form = source.to_nbt();
+        let form = source.try_to_nbt().unwrap();
         let mut chunk = Chunk::empty(3, 5);
         chunk.saved = Some(Arc::new(crate::chunk::ChunkExtras {
             attachments: Attachments::from_nbt(form),
@@ -803,7 +819,7 @@ mod tests {
             default: || unreachable!(),
             codec: None,
             copy_on_death: false,
-            sync: false,
+            sync_codec: None,
         };
         let index = Index::default();
         let drops = Arc::new(Mutex::new(Vec::new()));

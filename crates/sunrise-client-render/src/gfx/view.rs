@@ -156,6 +156,15 @@ pub fn cull_frustum(
 }
 
 impl Renderer {
+    /// Whether order-independent transparency is active for the given option value on this
+    /// renderer (no shader pack post-chain, no native pack, and device supports OIT).
+    pub fn oit_active_for(&self, improved_transparency: bool) -> bool {
+        improved_transparency
+            && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
+            && self.native.is_none()
+            && super::oit::supported(&self.device)
+    }
+
     /// The views `render` draws `frame` from.
     pub fn views(&self, frame: &Frame) -> ViewSet {
         ViewSet::for_frame(frame, self.config.width, self.config.height)
@@ -299,6 +308,76 @@ mod tests {
         assert_eq!(set.views(), &[view]);
         assert_eq!(*set.primary(), view);
         assert_eq!(*set.cull(), view);
+    }
+
+    #[test]
+    fn primary_renderable_sections_include_compiled_air_and_apply_canonical_culling() {
+        use crate::fast_hash::{FxHashMap, FxHashSet};
+        use crate::section_mask::SectionMask;
+
+        let mut detail_columns: FxHashMap<(i32, i32), SectionMask> = FxHashMap::default();
+        // Camera sits at (8, 8, 8) looking toward -Z (yaw 180, pitch 0).
+        // min_y = 0 so section index 0 covers y = [0, 16).
+        // (0, 0, -1): compiled air section in front of camera -> included with empty = true.
+        // (0, 0, -2): non-empty resident section in front -> included with empty = false.
+        // (0, 0, 2): behind the primary camera -> excluded by primary frustum.
+        // (0, 0, -3): in front, within detail radius, but unreachable under cave culling -> excluded.
+        // (0, 0, -6): past detail radius (radius = 3), not in lod_cutout -> excluded.
+        // (0, 0, -7): past detail radius, in lod_cutout -> included.
+        let mut mask = SectionMask::EMPTY;
+        mask.insert(0);
+        detail_columns.insert((0, -1), mask);
+        detail_columns.insert((0, -2), mask);
+        detail_columns.insert((0, 2), mask);
+        detail_columns.insert((0, -3), mask);
+        detail_columns.insert((0, -6), mask);
+        detail_columns.insert((0, -7), mask);
+
+        let mut sections = super::super::resident::Resident::<bool>::default();
+        sections.set_min_y(0);
+        // Only (0, 0, -2) and (0, 0, -7) have non-empty meshes (`false` means non-empty here).
+        sections.insert((0, 0, -2), false);
+        sections.insert((0, 0, 2), false);
+        sections.insert((0, 0, -3), false);
+        sections.insert((0, 0, -6), false);
+        sections.insert((0, 0, -7), false);
+
+        let mut lod_cutout: FxHashSet<(i32, i32)> = FxHashSet::default();
+        lod_cutout.insert((0, -7));
+
+        let camera = DVec3::new(8.0, 8.0, 8.0);
+        let view = View::screen(180.0, 0.0, 70.0, 16.0 / 9.0, 512.0);
+        let frustum = super::super::Frustum::from_planes(super::super::frustum(
+            view.view_proj(Mat4::IDENTITY),
+        ));
+
+        let mut selected = Vec::new();
+        let mut draws = Vec::new();
+        sections.walk(
+            camera,
+            3,
+            &frustum,
+            |key| key != (0, 0, -3),
+            |x, z| lod_cutout.contains(&(x, z)),
+            true,
+            &mut draws,
+            Some(super::super::resident::PrimarySelection {
+                frustum: &frustum,
+                detail_columns: &detail_columns,
+                out: &mut selected,
+            }),
+        );
+        assert_eq!(
+            selected
+                .iter()
+                .map(|&(_, key, slot)| (key, slot.is_none()))
+                .collect::<Vec<_>>(),
+            [((0, 0, -1), true), ((0, 0, -2), false), ((0, 0, -7), false)]
+        );
+        assert_eq!(
+            draws.iter().map(|v| v.key).collect::<Vec<_>>(),
+            [(0, 0, -7)]
+        );
     }
 
     #[test]

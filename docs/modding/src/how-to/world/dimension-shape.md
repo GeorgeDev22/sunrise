@@ -99,8 +99,10 @@ may come from a mod that loads later.
 
 A registered dimension is the level stem and dimension type a data pack would give, below every
 data pack: a pack with `data/mymod/dimension/pocket.json` or `data/mymod/dimension_type/pocket.json`
-replaces that half of it, in the worlds that have the pack.
-
+replaces that half of it, in the worlds that have the pack. A `minecraft:flat` stem uses the
+resolved dimension's build range and the world pack's biome registry. Its `features`, `lakes` and
+`structure_overrides` use the same generator as a flat Overworld. Invalid layer heights fail
+world loading with the dimension id in the error.
 
 ## Sending a player to a dimension
 

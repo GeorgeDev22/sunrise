@@ -99,8 +99,8 @@ fn early_server_game_rules_saved_and_creation_values() {
                             game.prepare_early_game_rules(loader).unwrap()
                         };
                         game.native_server_about_to_start(dedicated);
-                        game.native_server_starting(dedicated);
                         game.finish_open_world(prepared).unwrap();
+                        game.native_server_starting(dedicated);
                         assert_rules(game);
                         let level = game.level(game.dim.id()).unwrap();
                         assert_eq!(

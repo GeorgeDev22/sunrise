@@ -153,7 +153,11 @@ mod model_layers {
                         ("second", "second:golem#main")
                     ]
                 );
-                let model = (layers[0].answer.supplier)().bake_root();
+                let model = layers[0]
+                    .answer
+                    .build(layers[0].mod_id)
+                    .expect("layer builds")
+                    .bake_root();
                 let head = model.get_child("head").expect("the head part");
                 assert_eq!((head.y, head.polygons.len()), (6.0, 6));
             },

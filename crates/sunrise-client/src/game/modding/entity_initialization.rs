@@ -20,7 +20,7 @@ pub(super) struct EntityInitialization {
     /// The object holders already told (entity IDs and separate player UUIDs). An entity is forgotten when it leaves the world (`forget_entity`:
     /// death, a chunk unloading), so the next one made from its data is
     /// told again, as vanilla constructs a new entity for each of those.
-    initialized: HashSet<Holder>,
+    pub(super) initialized: HashSet<Holder>,
     /// Each LAN guest's connection when its player was last told: a new connection is a new
     /// `ServerPlayer`.
     players: HashMap<u128, u32>,
@@ -42,8 +42,18 @@ impl Game<'_> {
             return;
         }
         let previous = self.entity_initialization.active.replace(holder);
-        self.native_entity_constructing(holder, kind);
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.native_entity_constructing(holder, kind);
+            #[cfg(test)]
+            if let Holder::Entity(id) = holder {
+                use super::pending_births::escaping_fault::{self, At};
+                escaping_fault::reach(At::Constructed, id);
+            }
+        }));
         self.entity_initialization.active = previous;
+        if let Err(panic) = run {
+            std::panic::resume_unwind(panic);
+        }
         // Listener stores skip binding while their holder is being constructed.
         // A resident part has no separate join callback, so finish its binding
         // here even when construction was triggered by an inspection.
@@ -130,7 +140,15 @@ impl Game<'_> {
             .lan
             .as_mut()
             .and_then(|host| host.hub.guests.attachments_mut(conn))
-            .map(|attachments| attachments.to_nbt());
+            .and_then(|attachments| match attachments.try_to_nbt() {
+                Ok(data) => Some(data),
+                Err(error) => {
+                    log::warn!(
+                        "Sunrise: guest player attachments could not be snapshotted: {error}"
+                    );
+                    None
+                }
+            });
         self.initialize_entity(Holder::Player(uuid), "minecraft:player");
         if let Some(data) = data
             && let Some(attachments) = self

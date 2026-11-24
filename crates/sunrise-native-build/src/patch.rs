@@ -24,6 +24,8 @@ pub const CRATE: &str = "sunrise_patched";
 pub struct Patch {
     pub rlibs: Vec<(String, PathBuf)>,
     pub installs: Vec<String>,
+    /// The mods whose libraries the patched crates link.
+    pub mods: Vec<String>,
 }
 
 fn install_expression(target: &str, mods: &[&str], install: &str) -> String {
@@ -211,6 +213,11 @@ pub fn build(
     prepared.log()?;
     Ok(Some(Patch {
         rlibs: compiled,
+        mods: prepared
+            .bundles
+            .iter()
+            .map(|bundle| bundle.manifest.id.clone())
+            .collect(),
         installs: prepared.installs,
     }))
 }

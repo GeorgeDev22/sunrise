@@ -1,5 +1,6 @@
 use super::*;
 use crate::game::native_entity_refs::tests::run_fresh_cases;
+use crate::game::{native_client_session::tests::logged_client, remote::RemoteDimensionEntry};
 use mod_api::{
     DatapackEntry, DatapackField, DatapackFieldKind, DatapackReadError as E, DatapackRegistrySync,
     LevelRef, Registrar, RegistrationContext, WorldEpoch,
@@ -183,19 +184,29 @@ fn native_datapack_host_reads_enforce_level_session_and_generation() {
                 else {
                     panic!("snapshot required");
                 };
-                sunrise_client::datapack_net::clear_received();
-                sunrise_client::datapack_net::accept(&bytes).unwrap();
                 game.options.execution_role = crate::game::execution_role::ExecutionRole::Client;
-                assert_eq!(parked.datapack_entries(game, "registry_test:spell"), None);
-                assert_eq!(
-                    parked.datapack_read(
-                        game,
-                        "registry_test:spell",
-                        "registry_test:fire",
-                        &mut unexpected_visit,
-                    ),
-                    Err(E::UnknownRegistry)
+                let _server = logged_client(game);
+                game.enter_remote_dimension(
+                    &sunrise_protocol::packets::play::SpawnInfo {
+                        dimension_type: 0,
+                        dimension: "minecraft:overworld".into(),
+                        seed: 0,
+                        game_type: 1,
+                        previous_game_type: None,
+                        debug: false,
+                        flat: true,
+                        last_death: None,
+                        portal_cooldown: 0,
+                        sea_level: 63,
+                    },
+                    RemoteDimensionEntry::Login,
+                    sunrise_client::level_loading::Reason::Other,
                 );
+                let receiver = &mut game.remote.as_mut().unwrap().datapacks;
+                for chunk in sunrise_client::datapack_net::chunks(&bytes).unwrap() {
+                    receiver.accept_chunk(&chunk).unwrap();
+                }
+                let level = game.level("minecraft:overworld").unwrap();
                 assert_eq!(
                     level.datapack_entries(game, "registry_test:spell"),
                     Some(vec!["registry_test:fire".into()])
@@ -207,14 +218,13 @@ fn native_datapack_host_reads_enforce_level_session_and_generation() {
                         "registry_test:spell",
                         "registry_test:fire",
                         &mut |entry| {
-                            // Clearing takes the publication lock and drops its reference to the set.
-                            sunrise_client::datapack_net::clear_received();
                             assert_eq!(entry.get("power"), Some(&DatapackValue::Int(19)));
                             visits += 1;
                         },
                     )
                     .unwrap();
                 assert_eq!(visits, 1);
+                game.remote.as_mut().unwrap().datapacks = Default::default();
                 assert_eq!(
                     level.datapack_read(
                         game,

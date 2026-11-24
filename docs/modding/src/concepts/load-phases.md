@@ -43,7 +43,7 @@ on a resource load; see [Model drawing](../how-to/client/model-drawing.md).
 The client runs `client_setup` once after applying initial assets, then loads Client and Common
 configs before title, connection, input, render or tick callbacks. A dedicated server loads
 Common configs before its first world. Server configs load before `server_about_to_start` and
-unload after `server_stopping` for each world; opening another world does not repeat startup
+unload after `server_stopped` for each world; opening another world does not repeat startup
 registration or client setup. Use registration and the first server reload for common setup,
 `server_about_to_start` for server setup, and declared dependencies for intermod ordering.
 A panic in a live config callback does not undo settings writes that already took effect or

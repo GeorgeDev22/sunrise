@@ -4652,7 +4652,6 @@ mod climbable_tests;
 fn fall_reset_hit(w: &MobWorld, from: Vec3, moved: Vec3) -> bool {
     let reset = w.block_tags.get("minecraft:fall_damage_resetting");
     crate::entities::fall_reset_hit(
-        w.loop_context,
         w.world,
         w.fluid_tables,
         |p| {

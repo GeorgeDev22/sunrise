@@ -2683,9 +2683,9 @@ impl Game<'_> {
             batch.text_styled(atlas, title, x + 30.0, y + 7.0, 0xFF50_0050, false);
             batch.text_styled(atlas, description, x + 30.0, y + 18.0, 0xFF00_0000, false);
             let start = batch.vertices.len();
-            self.draw_item_model(batch, &ItemStack::new(station, 1), x + 3.0, y + 3.0);
+            self.draw_item_model(batch, &ItemStack::new(station, 1), x + 3.0, y + 3.0, 0);
             batch.scale_since(start, x, y, 0.6, 0.6);
-            self.draw_item_model(batch, item, x + 8.0, y + 8.0);
+            self.draw_item_model(batch, item, x + 8.0, y + 8.0, 0);
             return;
         }
         let atlas = &self.gui.atlas;

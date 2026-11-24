@@ -76,25 +76,6 @@ impl ProjectileWorld for ProjWorld<'_, '_> {
     fn targets(&self) -> &[(Who, Aabb)] {
         self.targets
     }
-    /// `BaseFireBlock.entityInside` for a thrown projectile: fire and soul
-    /// fire set it alight for 160 ticks.
-    #[inline]
-    fn ignites(&self, p: [i32; 3]) -> bool {
-        let state = self.w.world.block(p[0], p[1], p[2]);
-        matches!(
-            &*self.w.facts.get(state).name,
-            "minecraft:fire" | "minecraft:soul_fire"
-        )
-    }
-    #[inline]
-    fn lava_height(&self, p: BlockPos) -> Option<f64> {
-        sunrise_client::entities::fluid_height(
-            self.w.world,
-            self.w.fluid_tables,
-            p,
-            sunrise_world::fluid::FluidKind::Lava,
-        )
-    }
     #[inline]
     fn empty(&self, p: [i32; 3]) -> bool {
         self.w.facts.is_air(self.w.world.block(p[0], p[1], p[2]))

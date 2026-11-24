@@ -54,19 +54,20 @@ pub trait Hooks {
         version = 4
     )]
     fn config_reloading(config: &ConfigFile);
-    /// A `Server` config is dropped as its server stops
-    /// (`ModConfigEvent.Unloading`), after `server_stopping`; the next
+    /// A `Server` config is dropped after `server_stopped`
+    /// (`ServerLifecycleHooks.handleServerStopped`, `ModConfigEvent.Unloading`).
+    /// Final level save and unload listeners can still use it. The next
     /// world reads it again. `Client` and `Common` configs stay until the
-    /// game quits. Receives the stopping game's [`ServerHost`], before the
-    /// final save and teardown. A panic disables only that mod’s unload callback,
-    /// not other listeners or the rest of teardown. Live writes outside a journal stand.
+    /// game quits. Receives the stopping game's [`ServerHost`]. A panic disables
+    /// only that mod's unload callback, not other listeners or the rest of
+    /// teardown. Live writes outside a journal stand.
     #[hook(
         dispatch = "flat",
         side = "server",
         contract = "listen",
         neoforge = "ModConfigEvent.Unloading",
         cancellable = false,
-        version = 4
+        version = 5
     )]
     fn config_unloading(config: &ConfigFile);
 }

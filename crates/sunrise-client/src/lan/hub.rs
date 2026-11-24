@@ -287,6 +287,8 @@ pub struct TrackingBatch {
 pub struct AttachmentSnapshot {
     pub player: u128,
     pub holder: Holder,
+    /// For an entity pairing already written, the holder and watermark its bundle covered.
+    pub paired_sync_from: Option<(Holder, u64)>,
 }
 
 /// Queues `holders` as snapshots for `player`.
@@ -295,11 +297,11 @@ fn queue_snapshots(
     player: u128,
     holders: impl IntoIterator<Item = Holder>,
 ) {
-    snapshots.extend(
-        holders
-            .into_iter()
-            .map(|holder| AttachmentSnapshot { player, holder }),
-    );
+    snapshots.extend(holders.into_iter().map(|holder| AttachmentSnapshot {
+        player,
+        holder,
+        paired_sync_from: None,
+    }));
 }
 
 /// Moves a guest's tracking events into `out`, one batch, and the entities it
@@ -321,12 +323,13 @@ fn take_tracking(
     }
     if !events.is_empty() {
         if sync_attachments {
-            let started = events.iter().filter(|e| e.start);
-            queue_snapshots(
-                snapshots,
-                g.uuid,
-                started.map(|e| Holder::Entity(e.entity as u32)),
-            );
+            snapshots.extend(events.iter().filter(|event| event.start).map(|event| {
+                AttachmentSnapshot {
+                    player: g.uuid,
+                    holder: Holder::Entity(event.entity as u32),
+                    paired_sync_from: event.attachment_sync_from,
+                }
+            }));
         }
         out.push(TrackingBatch {
             player: g.uuid,
@@ -1042,30 +1045,32 @@ impl Hub {
     /// Entity deltas follow the same tracker as pairing, including held viewers.
     /// Own-player, level, chunk and block-entity routing otherwise stays unchanged.
     pub fn attachment_recipients(&self, holder: Holder) -> Vec<super::PlayerSender> {
+        self.attachment_recipient_rows(holder)
+            .map(|guest| guest.sender.clone())
+            .collect()
+    }
+    /// The eligible guest rows, for per-pairing cutoffs on ordered updates.
+    pub fn attachment_recipient_rows(&self, holder: Holder) -> impl Iterator<Item = &Guest> {
         let owner = match holder {
             Holder::Player(uuid) => self.holder_guest(uuid, &self.config.dimension),
             _ => None,
         };
-        self.guests
-            .iter()
-            .filter(|g| {
-                let sees = match holder {
-                    Holder::Entity(id) => self.watches(g) && g.tracker.is_tracking(id as i32),
-                    Holder::Player(_) => owner.is_some_and(|o| {
-                        (g.conn == o.conn && g.participates_online())
-                            || (self.watches(g) && g.tracker.is_tracking(o.entity_id))
-                    }),
-                    Holder::Level => self.here(g),
-                    Holder::Chunk([x, z]) => self.here(g) && g.sent_chunks.contains(&(x, z)),
-                    Holder::BlockEntity([x, _, z]) => {
-                        self.here(g) && g.sent_chunks.contains(&(x >> 4, z >> 4))
-                    }
-                    _ => false,
-                };
-                sees && g.negotiated_attachment_sync()
-            })
-            .map(|g| g.sender.clone())
-            .collect()
+        self.guests.iter().filter(move |g| {
+            let sees = match holder {
+                Holder::Entity(id) => self.watches(g) && g.tracker.is_tracking(id as i32),
+                Holder::Player(_) => owner.is_some_and(|o| {
+                    (g.conn == o.conn && g.participates_online())
+                        || (self.watches(g) && g.tracker.is_tracking(o.entity_id))
+                }),
+                Holder::Level => self.here(g),
+                Holder::Chunk([x, z]) => self.here(g) && g.sent_chunks.contains(&(x, z)),
+                Holder::BlockEntity([x, _, z]) => {
+                    self.here(g) && g.sent_chunks.contains(&(x >> 4, z >> 4))
+                }
+                _ => false,
+            };
+            sees && g.negotiated_attachment_sync()
+        })
     }
 
     /// How many passes the level in place's entity tracking has run (None before its first).
@@ -1850,9 +1855,18 @@ impl Hub {
 
     /// ClientboundUpdateMobEffectPacket for one of the guest's effects.
     fn send_effect(&mut self, i: usize, e: &EffectInstance, blend: bool) -> Option<SentEffect> {
-        self.send_entity_effect(i, self.guests[i].entity_id, e, blend)?;
+        let effect = self
+            .sync
+            .id("minecraft:mob_effect", crate::brewing::namespaced(e.id))?;
         let flags = PlayerEffects::flags(e);
         let g = &self.guests[i];
+        g.send(&C::UpdateMobEffect(play::UpdateMobEffect {
+            id: g.entity_id,
+            effect,
+            amplifier: e.amplifier,
+            duration: e.duration,
+            flags: flags | if blend { 8 } else { 0 },
+        }));
         Some(SentEffect {
             id: e.id,
             amplifier: e.amplifier,
@@ -1860,29 +1874,6 @@ impl Hub {
             duration: e.duration,
             tick_count: g.effects.tick_count,
         })
-    }
-
-    /// `new ClientboundUpdateMobEffectPacket(entityId, effect, blend)` to guest `i`, for its own
-    /// effect or another entity's (`PlayerList.sendActiveEffects`). None for an effect the
-    /// registry sync does not name.
-    pub fn send_entity_effect(
-        &self,
-        i: usize,
-        entity_id: i32,
-        e: &EffectInstance,
-        blend: bool,
-    ) -> Option<()> {
-        let effect = self
-            .sync
-            .id("minecraft:mob_effect", crate::brewing::namespaced(e.id))?;
-        self.guests[i].send(&C::UpdateMobEffect(play::UpdateMobEffect {
-            id: entity_id,
-            effect,
-            amplifier: e.amplifier,
-            duration: e.duration,
-            flags: PlayerEffects::flags(e) | if blend { 8 } else { 0 },
-        }));
-        Some(())
     }
 
     /// PlayerList.sendActivePlayerEffects: every effect, unblended, when the
@@ -8461,6 +8452,10 @@ mod tests {
     }
 
     fn assert_player_initial_sync(held: bool) {
+        crate::lan::entity::with_synced_tags(&["test:badge"], || player_initial_sync(held));
+    }
+
+    fn player_initial_sync(held: bool) {
         use sunrise_core::nbt::Tag;
         use sunrise_mod_runtime::attachments::{AttachmentSync, Holder};
         use sunrise_protocol::{
@@ -8652,7 +8647,7 @@ mod tests {
                 "placement keeps the existing pair"
             );
             assert!(
-                replica.synced().is_empty(),
+                replica.entry("test", "badge").unwrap().is_none(),
                 "no stale badge after placement"
             );
         }

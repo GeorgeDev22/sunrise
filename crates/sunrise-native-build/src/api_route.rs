@@ -44,9 +44,22 @@ pub(super) fn compile(
     }
     libraries.insert("mod_vocab", prebuilt::library(&runtime_deps, "mod_vocab")?);
     let mut rlibs: HashMap<&str, PathBuf> = HashMap::new();
+    let mut identities = crate::library_record::Identities::default();
     for (n, &index) in resolution.order.iter().enumerate() {
         let project = &projects[index];
-        (options.on_mod)(&project.bundle.manifest.id, n + 1, resolution.order.len());
+        let manifest = &project.bundle.manifest;
+        (options.on_mod)(&manifest.id, n + 1, resolution.order.len());
+        let source = crate::source_digest(project.bundle)
+            .ok_or(crate::host::tr("Could not hash native mod inputs"))?;
+        let identity = identities.next(
+            sdk.commit(),
+            &manifest.id,
+            &manifest.version.to_string(),
+            &source,
+            declared[index]
+                .iter()
+                .map(|dependency| dependency.id.as_str()),
+        );
         let (rlib, _) = prebuilt::compile_mod(
             project,
             &declared[index],
@@ -56,13 +69,12 @@ pub(super) fn compile(
             &rlibs,
             &prebuilt::library_entry(
                 &api::template(&api.join(TEMPLATE))?,
-                &[&project.bundle.manifest],
-                sdk.commit(),
-                &project.bundle.manifest.id,
-                &project.bundle.manifest.version.to_string(),
+                &[manifest],
+                &identity,
                 &[],
             ),
-            sdk.commit(),
+            &identities,
+            &source,
             options.check_only,
         )?;
         rlibs.insert(project.bundle.manifest.id.as_str(), rlib);

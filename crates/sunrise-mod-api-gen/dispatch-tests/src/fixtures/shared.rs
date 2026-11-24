@@ -288,8 +288,8 @@ mod generated {
     }
     include!(concat!(env!("OUT_DIR"), "/mod_api_generated.rs"));
     pub(super) use self::mod_api::InlineImageReplacement;
-    use self::mod_api::StandaloneModelRegistration;
     pub(super) use self::mod_api::{BlockFace, BlockKey, BlockState, CrosshairTarget};
+    use self::mod_api::{GuiCanvas, StandaloneModelRegistration};
     pub use sunrise_mod_api_macros::__subscriptions;
 }
 use generated::*;

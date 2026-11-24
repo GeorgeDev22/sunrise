@@ -7,7 +7,6 @@
   "crate::entity::types::Billboard",
   "crate::world::biome_modifier::BiomeModifierError",
   "crate::world::dimension::BiomeSourceKind",
-  "crate::client::hud_layout::Blend",
   "crate::block::types::BlockEntityError",
   "crate::block::types::BlockFace",
   "crate::block::types::BlockInteraction",
@@ -130,6 +129,5 @@
   "crate::world::types::TriState",
   "crate::client::camera::UseItem",
   "crate::item::types::UsePhase",
-  "crate::client::world_draw::WorldDepth",
-  "crate::world::types::WorldPhase"
+  "crate::client::world_draw::WorldDepth"
 ]

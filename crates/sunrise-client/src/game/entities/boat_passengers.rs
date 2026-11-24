@@ -273,23 +273,13 @@ impl Game<'_> {
         self.seated_passenger_count(b.id) < b.max_passengers() && !b.under_water()
     }
     /// Where the player in boat `i` sits: in the middle alone, in front of a
-    /// mob, behind a player who got in first (`getPassengers().indexOf`).
+    /// mob.
     pub(super) fn player_boat_seat(&self, i: usize) -> Vec3 {
         let b = &self.boats[i];
         let players = self.boat_players(b.id);
         // The seated list, with the rider counted before its own link exists.
-        let order = self.passenger_order(b.id);
-        let count = order.len() + usize::from(players == 0);
-        let own = self.riding_player().map(|(id, _)| id);
-        let index = order.iter().position(|&id| Some(id) == own).unwrap_or(0);
-        b.seat(index, count, false, PLAYER_RIDING_OFFSET, false)
-    }
-    /// `AbstractBoat.positionRider` for the acting player in boat `i`, at the mount and every tick
-    /// after it: its seat, and `clampRotation` keeping its look within 105 degrees of the boat. A
-    /// server player is not authoritative there, so the boat's own turn is not added.
-    pub(in crate::game) fn position_boat_player(&mut self, i: usize) -> Vec3 {
-        self.yaw = sunrise_client::camera::clamp_boat_rotation(self.yaw, self.boats[i].yaw).0;
-        self.player_boat_seat(i)
+        let count = self.passenger_order(b.id).len() + usize::from(players == 0);
+        b.seat(0, count, false, PLAYER_RIDING_OFFSET, false)
     }
     /// `getRootVehicle` of mob `j`: the mob or boat at the bottom of what it
     /// rides, None when it rides nothing.

@@ -887,7 +887,7 @@ impl Game<'_> {
     /// A general row's own compound with its attachments, before its passengers.
     pub(super) fn general_own_nbt(&mut self, id: u32, transferring: bool) -> Option<Tag> {
         let mut tag = self.general_row_record(id, transferring)?.to_tag();
-        crate::game::persist::write_attachments(&mut tag, id, &self.entity_attachments);
+        self.write_entity_attachments(&mut tag, id);
         Some(tag)
     }
 
@@ -1294,6 +1294,7 @@ fn general_tree_uuid_admission_refused(game: &Game<'_>, record: &GeneralEntityRe
 }
 
 impl Entity for GeneralRow {
+    const SERIALIZES_ATTACHMENTS: bool = true;
     fn id(&self) -> u32 {
         self.id
     }

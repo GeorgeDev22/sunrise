@@ -349,7 +349,7 @@ impl Game<'_> {
         if let Some(stack) = self.held().cloned() {
             self.award_stat("used", &stack.item, 1);
             if hurt {
-                self.post_attack(index);
+                self.post_attack(index, "minecraft:spear");
             }
             self.weapon_wear(&stack);
         }

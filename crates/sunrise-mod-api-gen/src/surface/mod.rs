@@ -55,12 +55,6 @@ const HOST_AREAS: &[(&str, &str, &str)] = &[
     ("ClientSession", "client_host", "Ok(h.client_session())"),
     ("RenderAssets", "client_host", "Ok(h.render_assets())"),
     ("InstanceGroups", "client_host", "Ok(h.instance_groups())"),
-    // Type metadata belongs to load, so retained snapshots need no live world host.
-    (
-        "AttachmentDeclarations",
-        "",
-        "Ok(crate::__private::attachment_declarations())",
-    ),
     // A level hook's host first: inside a level write it is the one the call hands over.
     (
         "AttachmentStore",

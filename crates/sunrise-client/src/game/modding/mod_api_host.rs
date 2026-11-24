@@ -1,6 +1,6 @@
 use super::Game;
 use super::api_values::{TryIntoApi, TryIntoEngine};
-use mod_api::{AttachmentAccess, BlockPos, Direction};
+use mod_api::{AttachmentAccess, AttachmentError, Attachments, BlockPos, Direction, Holder};
 use {
     sunrise_mod_runtime::attachments::{ATTACHMENTS_KEY, attachment_compound},
     sunrise_world::level::Ticks,
@@ -10,7 +10,6 @@ fn world_attachments(
     world: &mut sunrise_client::world::World,
     holder: mod_api::Holder,
 ) -> Result<&mut mod_api::Attachments, mod_api::AttachmentError> {
-    use mod_api::{AttachmentError, Holder};
     if holder == Holder::Level {
         return Ok(&mut world.attachments);
     }
@@ -27,19 +26,78 @@ fn world_attachments(
                 .and_then(|e| e.block_entity_sources.iter().find(|(p, _)| *p == pos))
                 .and_then(|(_, tag)| tag.get(ATTACHMENTS_KEY)),
         )?;
-        let map = world
+        return world
             .block_entities
             .attachments_mut(pos)
-            .ok_or(AttachmentError::MissingHolder)?;
-        world.modified.insert((x >> 4, z >> 4));
-        return Ok(map);
+            .ok_or(AttachmentError::MissingHolder);
     }
     let Holder::Chunk([x, z]) = holder else {
         return Err(AttachmentError::MissingHolder);
     };
-    let map = world.chunks.attachments_mut(&(x, z))?;
-    world.modified.insert((x, z));
-    Ok(map)
+    world.chunks.attachments_mut(&(x, z))
+}
+
+fn world_attachment_ref(
+    world: &sunrise_client::world::World,
+    holder: Holder,
+) -> Result<Option<&Attachments>, AttachmentError> {
+    match holder {
+        Holder::Level => Ok(Some(&world.attachments)),
+        Holder::Chunk([x, z]) => world.chunks.attachments(&(x, z)),
+        Holder::BlockEntity([x, y, z]) => {
+            let pos = (x, y, z);
+            let chunk = world
+                .chunks
+                .get(&(x >> 4, z >> 4))
+                .ok_or(AttachmentError::MissingHolder)?;
+            attachment_compound(
+                chunk
+                    .saved
+                    .as_ref()
+                    .and_then(|extras| {
+                        extras
+                            .block_entity_sources
+                            .iter()
+                            .find(|(at, _)| *at == pos)
+                    })
+                    .and_then(|(_, tag)| tag.get(ATTACHMENTS_KEY)),
+            )?;
+            if world.block_entities.generation(&pos).is_none() {
+                return Err(AttachmentError::MissingHolder);
+            }
+            Ok(world.block_entities.attachments(pos))
+        }
+        _ => Err(AttachmentError::MissingHolder),
+    }
+}
+
+fn world_attachment_changed(
+    world: &mut sunrise_client::world::World,
+    holder: Holder,
+    persist: bool,
+    sync: bool,
+) {
+    if sync {
+        world.attachment_syncs.insert(holder);
+    }
+    if persist {
+        match holder {
+            Holder::Chunk([x, z]) => {
+                world.modified.insert((x, z));
+            }
+            Holder::BlockEntity([x, _, z]) => {
+                world.modified.insert((x >> 4, z >> 4));
+            }
+            _ => {}
+        }
+    }
+}
+
+enum LocalAttachmentSlot {
+    Entity(u32),
+    ActingPlayer,
+    Guest(u32),
+    World,
 }
 
 /// The entity families whose saved maps bind an owning lifetime
@@ -138,7 +196,6 @@ impl Game<'_> {
             self.initialize_entity_on_access(holder);
         }
         if self.native_authoritative() {
-            self.world.attachment_syncs.insert(holder);
             return self.attachment_map_quiet(holder, access);
         }
         let Some(remote) = self.remote.as_mut() else {
@@ -148,6 +205,36 @@ impl Game<'_> {
         self.bind_remote_attachment(holder);
         let remote = self.remote.as_mut().unwrap();
         Ok(remote.attachments.get_mut(&holder).unwrap())
+    }
+
+    pub(super) fn attachment_map_read(
+        &mut self,
+        holder: Holder,
+    ) -> Result<Option<&Attachments>, AttachmentError> {
+        if !self.native_authoritative() {
+            if self.client_attachment_entity_exists(holder) {
+                self.initialize_entity_on_access(holder);
+            }
+            let remote = self.remote.as_ref().ok_or(AttachmentError::MissingHolder)?;
+            return Ok(remote.attachments.get(&holder).map(|resident| &**resident));
+        }
+        match self.resolve_attachment_slot(holder)? {
+            LocalAttachmentSlot::Entity(id) => Ok(self.entity_attachments.get(&id)),
+            LocalAttachmentSlot::ActingPlayer => Ok(Some(&self.player_state.attachments)),
+            LocalAttachmentSlot::Guest(conn) => {
+                let guests = &self
+                    .lan
+                    .as_ref()
+                    .ok_or(AttachmentError::MissingHolder)?
+                    .hub
+                    .guests;
+                let index = guests
+                    .connection_index(conn)
+                    .ok_or(AttachmentError::MissingHolder)?;
+                Ok(Some(&guests[index].attachments))
+            }
+            LocalAttachmentSlot::World => world_attachment_ref(&self.world, holder),
+        }
     }
 
     /// `attachment_map` without recording the holder for the sync. Inside a transaction, the
@@ -216,10 +303,52 @@ impl Game<'_> {
     /// their state is (swapped in for a guest's turn, or kept beside), the world's others.
     pub(super) fn attachment_slot(
         &mut self,
-        holder: mod_api::Holder,
+        holder: Holder,
         access: AttachmentAccess,
-    ) -> Result<&mut mod_api::Attachments, mod_api::AttachmentError> {
-        use mod_api::AttachmentError;
+    ) -> Result<&mut Attachments, AttachmentError> {
+        match self.resolve_attachment_slot(holder)? {
+            LocalAttachmentSlot::Entity(id) => {
+                if access == AttachmentAccess::Store {
+                    if self
+                        .persist
+                        .removals
+                        .contains(&super::commands::Target::Painting(id))
+                    {
+                        return Err(AttachmentError::MissingHolder);
+                    }
+                    if self.entity_initialization.active != Some(holder) {
+                        self.entity_attachments.entry(id).or_default();
+                        self.bind_resident_entity_attachments(id)?;
+                    }
+                }
+                Ok(self.entity_attachments.entry(id).or_default())
+            }
+            LocalAttachmentSlot::ActingPlayer => {
+                if access == AttachmentAccess::Store
+                    && let Some(conn) = self.lan_acting
+                {
+                    self.bind_player_attachments(conn, true);
+                }
+                Ok(&mut self.player_state.attachments)
+            }
+            LocalAttachmentSlot::Guest(conn) => {
+                if access == AttachmentAccess::Store {
+                    self.bind_player_attachments(conn, true);
+                }
+                Ok(self
+                    .lan
+                    .as_mut()
+                    .and_then(|host| host.hub.guests.attachments_mut(conn))
+                    .ok_or(AttachmentError::MissingHolder)?)
+            }
+            LocalAttachmentSlot::World => world_attachments(&mut self.world, holder),
+        }
+    }
+
+    fn resolve_attachment_slot(
+        &mut self,
+        holder: Holder,
+    ) -> Result<LocalAttachmentSlot, AttachmentError> {
         if let mod_api::Holder::Entity(id) = holder {
             if self.entity_initialization.active != Some(holder) {
                 use super::entity_residency::SlotAccess;
@@ -274,21 +403,7 @@ impl Game<'_> {
                     .get(&id)
                     .and_then(|tag| tag.get(ATTACHMENTS_KEY)),
             )?;
-            if access == AttachmentAccess::Store
-                && self
-                    .persist
-                    .removals
-                    .contains(&super::commands::Target::Painting(id))
-            {
-                return Err(AttachmentError::MissingHolder);
-            }
-            if access == AttachmentAccess::Store
-                && self.entity_initialization.active != Some(holder)
-            {
-                self.entity_attachments.entry(id).or_default();
-                self.bind_resident_entity_attachments(id)?;
-            }
-            return Ok(self.entity_attachments.entry(id).or_default());
+            return Ok(LocalAttachmentSlot::Entity(id));
         }
         if let mod_api::Holder::Player(uuid) = holder {
             let cloning = self.cloning_guest(uuid).map(|guest| guest.conn);
@@ -305,12 +420,7 @@ impl Game<'_> {
             }
             self.initialize_entity_on_access(holder);
             if self.lan_acting_uuid == Some(uuid) {
-                if access == AttachmentAccess::Store
-                    && let Some(conn) = self.lan_acting
-                {
-                    self.bind_player_attachments(conn, true);
-                }
-                return Ok(&mut self.player_state.attachments);
+                return Ok(LocalAttachmentSlot::ActingPlayer);
             }
             let conn = cloning
                 .or_else(|| {
@@ -326,16 +436,9 @@ impl Game<'_> {
             if self.lan_guest_swaps.contains(&conn) {
                 return Err(AttachmentError::MissingHolder);
             }
-            if access == AttachmentAccess::Store {
-                self.bind_player_attachments(conn, true);
-            }
-            return Ok(self
-                .lan
-                .as_mut()
-                .and_then(|host| host.hub.guests.attachments_mut(conn))
-                .ok_or(AttachmentError::MissingHolder)?);
+            return Ok(LocalAttachmentSlot::Guest(conn));
         }
-        world_attachments(&mut self.world, holder)
+        Ok(LocalAttachmentSlot::World)
     }
 }
 
@@ -759,6 +862,23 @@ impl mod_api::AttachmentHost for Game<'_> {
     ) -> Result<(), mod_api::AttachmentError> {
         mod_api::__private::validate_attachment_use(namespace, name, sync)
     }
+    fn validate_attachment_key(
+        &self,
+        write: &mod_api::AttachmentStoreKey<'_>,
+    ) -> Result<(), mod_api::AttachmentError> {
+        mod_api::__private::validate_attachment_key(write)
+    }
+    fn read_attachments(
+        &mut self,
+        holder: Holder,
+    ) -> Result<Option<&Attachments>, AttachmentError> {
+        self.attachment_map_read(holder)
+    }
+    fn attachment_changed(&mut self, holder: Holder, persist: bool, sync: bool) {
+        if self.native_authoritative() {
+            world_attachment_changed(&mut self.world, holder, persist, sync);
+        }
+    }
     fn attachments(
         &mut self,
         holder: mod_api::Holder,
@@ -777,6 +897,24 @@ impl mod_api::AttachmentHost for super::GameLevel<'_> {
     ) -> Result<(), mod_api::AttachmentError> {
         mod_api::__private::validate_attachment_use(namespace, name, sync)
     }
+    fn validate_attachment_key(
+        &self,
+        write: &mod_api::AttachmentStoreKey<'_>,
+    ) -> Result<(), mod_api::AttachmentError> {
+        mod_api::__private::validate_attachment_key(write)
+    }
+    fn read_attachments(
+        &mut self,
+        holder: Holder,
+    ) -> Result<Option<&Attachments>, AttachmentError> {
+        if !self.native_authoritative {
+            return Err(AttachmentError::MissingHolder);
+        }
+        world_attachment_ref(self.world, holder)
+    }
+    fn attachment_changed(&mut self, holder: Holder, persist: bool, sync: bool) {
+        world_attachment_changed(self.world, holder, persist, sync);
+    }
     fn attachments(
         &mut self,
         holder: mod_api::Holder,
@@ -785,7 +923,6 @@ impl mod_api::AttachmentHost for super::GameLevel<'_> {
         if !self.native_authoritative {
             return Err(mod_api::AttachmentError::MissingHolder);
         }
-        self.world.attachment_syncs.insert(holder);
         world_attachments(self.world, holder)
     }
 }
@@ -884,6 +1021,23 @@ impl mod_api::AttachmentHost for super::native_hooks::HitLevel<'_> {
         sync: bool,
     ) -> Result<(), mod_api::AttachmentError> {
         mod_api::__private::validate_attachment_use(namespace, name, sync)
+    }
+    fn validate_attachment_key(
+        &self,
+        write: &mod_api::AttachmentStoreKey<'_>,
+    ) -> Result<(), mod_api::AttachmentError> {
+        mod_api::__private::validate_attachment_key(write)
+    }
+    fn read_attachments(
+        &mut self,
+        holder: Holder,
+    ) -> Result<Option<&Attachments>, AttachmentError> {
+        self.0.attachments_read(holder).map(Some)
+    }
+    fn attachment_changed(&mut self, holder: Holder, _: bool, sync: bool) {
+        if sync {
+            self.0.attachment_sync_queued(holder);
+        }
     }
     fn attachments(
         &mut self,

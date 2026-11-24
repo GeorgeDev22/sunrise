@@ -1450,7 +1450,13 @@ impl Game<'_> {
                 | Target::Bolt(_)
         ) {
             let mut tag = self.command_target_nbt(target)?;
-            super::persist::write_attachments(&mut tag, id, &self.entity_attachments);
+            if let Err(error) =
+                super::persist::write_attachments(&mut tag, id, &self.entity_attachments)
+            {
+                log::error!(
+                    "Sunrise: portal transfer attachment encode failed for entity {id}: {error}"
+                );
+            }
             let state = self.take_transferred_entity_state(id);
             // Remove only the resident body: no death, drops, or discard effects.
             match target {
@@ -1554,7 +1560,13 @@ impl Game<'_> {
             })?;
             (tag, List::Projectile, i)
         };
-        super::persist::write_attachments(&mut tag, id, &self.entity_attachments);
+        if let Err(error) =
+            super::persist::write_attachments(&mut tag, id, &self.entity_attachments)
+        {
+            log::error!(
+                "Sunrise: portal transfer attachment encode failed for entity {id}: {error}"
+            );
+        }
         let state = self.take_transferred_entity_state(id);
         match list {
             List::Item => {
@@ -1697,6 +1709,11 @@ impl Game<'_> {
             self.native_entity_portal(self.dim.id(), id, [entry.x, entry.y, entry.z]);
         }
     }
+    /// Whether a portal arrival still needs this level, without collecting its chunks.
+    pub(super) fn has_portal_arrivals(&self, dim: Dim) -> bool {
+        self.portals.arrivals.iter().any(|a| a.plan.dim == dim)
+    }
+
     /// The chunks of the arrivals still waiting to land in `dim`, for the
     /// streaming `extra` areas that light them: vanilla's portal ticket
     /// (`Entity.teleport` adds `TicketType.PORTAL` at the destination) keeps
@@ -1954,7 +1971,14 @@ impl Game<'_> {
             }
         }
         let transferred = if f.id != 0 {
-            super::persist::write_attachments(&mut tag, f.id, &self.entity_attachments);
+            if let Err(error) =
+                super::persist::write_attachments(&mut tag, f.id, &self.entity_attachments)
+            {
+                log::error!(
+                    "Sunrise: portal transfer attachment encode failed for entity {}: {error}",
+                    f.id
+                );
+            }
             let state = self.take_transferred_entity_state(f.id);
             self.forget_entity(f.id);
             Some(TransferredArrivalState::Entity(state))

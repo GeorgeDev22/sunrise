@@ -170,28 +170,12 @@ fn handle_records_have_declared_field_bytes() {
         },
         (level, [7i32, -8, 9], 83u64),
     );
-    // epoch, lend, action, slot: a standalone lend has no action and slot 0.
-    fields(UnspawnedMobRef::new(epoch, 61), (epoch, 61u64, 0u64, 0u32));
-    fields(
-        UnspawnedMobRef::pending(epoch, 62, 63, 7),
-        (epoch, 63u64, 62u64, 7u32),
-    );
-    // epoch, action, lease.
-    fields(
-        PendingChildrenRef::new(epoch, 62, 63),
-        (epoch, 62u64, 63u64),
-    );
-    fields(
-        UnattachedMob::new(UnspawnedMobRef::pending(epoch, 62, 63, 7)),
-        (UnspawnedMobRef::pending(epoch, 62, 63, 7),),
-    );
     fields(ModelRef::from_parts(31, 7).unwrap(), (31u64, 7u32));
     fields(
         crate::BakedModelKey::from_parts(43, 11).unwrap(),
         (43u64, 11u32),
     );
     fields(InstanceGroupRef::from_parts(37, 9).unwrap(), (37u64, 9u32));
-    fields(RenderPipelineRef::from_parts(41, 5).unwrap(), (41u64, 5u32));
 }
 
 #[test]
@@ -384,7 +368,6 @@ fn newtype_widths_and_unit_enum_tags_match_their_encodings() {
     fields(crate::UnresolvedFluid(0x100000003), (0x100000003u64,));
     fields(WorldEpoch::new(47), (47u64,));
     fields(TickId::new(19), (19u64,));
-    fields(SoundRef { id: 71 }, (71u64,));
     fields(crate::__private::biome_id(11), (11u32,));
     fields(crate::__private::mod_color_resolver(13), (13u32,));
     fields(BlockUpdateFlags(17), (17u32,));

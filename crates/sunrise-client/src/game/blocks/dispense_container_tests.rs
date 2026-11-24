@@ -924,7 +924,7 @@ fn a_transaction_in_the_fluid_pickup_listener_does_not_delay_later_attachment_re
         default: || 0,
         codec: None,
         copy_on_death: false,
-        sync: false,
+        sync_codec: None,
     };
     let notices = Notices {
         reopen_on_pickup: true,

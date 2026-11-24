@@ -20,20 +20,22 @@ pub trait DrawClientHost {
     /// @API:model_layers@.
     fn bake_layer(&self, layer: &str) -> Option<ModelPart>;
 }
-/// What the HUD, screen and tooltip hooks draw with, in GUI pixels: one per hook call.
+/// Drawing surface lent to a HUD, screen or tooltip hook. Coordinates are in logical GUI pixels.
+/// Use [`Self::with_scissor`] to clip the full context, including widgets and scenes, or
+/// [`Self::draw_gui`] to draw a checked group of primitives with a scoped pose and scissor.
 pub trait DrawContext {
     /// The GUI's size in GUI pixels, width then height.
     fn size(&self) -> [f32; 2] {
         unimplemented!("DrawContext::size")
     }
     /// Item `item`'s icon drawn with model `model` (`minecraft:paper` as
-    /// `mymod:wheel_icon`, an `item_model` of a content mod's), as `native_item`
+    /// `mymod:wheel_icon`, an `item_model` of a content mod's), as [`Self::item`]
     /// draws one; false for an unknown item.
     fn item_model(&mut self, item: ItemKey, model: &str, at: [f32; 2], size: f32) -> bool {
         unimplemented!("DrawContext::item_model")
     }
     /// A quad of corners `points` (in order round it) in GUI pixels, `argb`:
-    /// a wedge, a slanted bar, what `native_fill`'s rectangles can't draw.
+    /// a wedge, a slanted bar, or another shape that [`Self::fill`] can't draw.
     fn quad(&mut self, points: [[f32; 2]; 4], argb: u32) {
         unimplemented!("DrawContext::quad")
     }
@@ -41,12 +43,12 @@ pub trait DrawContext {
     fn fill(&mut self, rect: [f32; 4], argb: u32) {
         unimplemented!("DrawContext::fill")
     }
-    /// `GuiGraphics.fillGradient`: rectangle `rect` (`[x, y, w, h]` in GUI pixels, as
-    /// [`fill`](Self::fill) takes it) blending from ARGB `top` at `y` to `bottom` at `y + h`.
-    /// It follows the current pose and clip ([`push_clip`](Self::push_clip)) as `fill` does.
-    /// Zero area, inversion on exactly one axis, or a non-finite coordinate draws nothing.
-    /// With both `w` and `h` negative, bounds are sorted and colours flipped, keeping
-    /// `top` at `y`, now the lower edge.
+    /// `GuiGraphics.fillGradient`: fill `[x, y, w, h]` in GUI pixels, blending from straight-alpha
+    /// ARGB `top` at `y` to `bottom` at `y + h`. [`Self::with_scissor`] clips the ramp without
+    /// changing its colours. Zero area, inversion on exactly one axis, or non-finite geometry
+    /// draws nothing. With both axes inverted, the bounds are sorted and the colours flipped,
+    /// keeping `top` at `y`, now the lower edge. For a posed or checked draw, use
+    /// [`GuiCanvas::fill_gradient`] inside [`Self::draw_gui`].
     fn fill_gradient(&mut self, rect: [f32; 4], top: u32, bottom: u32) {
         unimplemented!("DrawContext::fill_gradient")
     }
@@ -65,8 +67,9 @@ pub trait DrawContext {
     fn item(&mut self, item: ItemKey, at: [f32; 2], size: f32) -> bool {
         unimplemented!("DrawContext::item")
     }
-    /// A line of text at `(x, y)` in GUI pixels, in `argb` as vanilla's `GuiGraphics` takes it
-    /// (`0xFFFFFFFF` is opaque white). Fully transparent text draws nothing, as vanilla's.
+    /// Plain text at `[x, y]` in GUI pixels, with straight-alpha `argb` (`0xFFFFFFFF` is opaque
+    /// white). Fully transparent text draws nothing. For a styled [`Text`], use
+    /// [`GuiCanvas::text`] inside [`Self::draw_gui`].
     fn text(&mut self, text: &str, at: [f32; 2], argb: u32, shadow: bool) {
         unimplemented!("DrawContext::text")
     }
@@ -92,9 +95,9 @@ pub trait DrawContext {
     fn with_tooltip_font_raw(&self, font: &Identifier, f: &mut dyn FnMut(&dyn TooltipFont)) {
         unimplemented!("DrawContext::with_tooltip_font_raw")
     }
-    /// `text` scaled by `scale` about `at`, its top-left corner: what a GUI pose of translate,
-    /// scale and translate back around `text` draws (`PoseStack.scale` in vanilla's HUD), without
-    /// a `gui_paint` buffer. `0.5` is the half-size line under a widget's label.
+    /// A plain line as in [`Self::text`], scaled about `at`, its top-left corner. For styled
+    /// text use [`GuiCanvas::text`] in a [`GuiCanvas::scope`] with translate to `at`, scale,
+    /// then translate back, as with vanilla's GUI pose.
     fn text_scaled(&mut self, text: &str, at: [f32; 2], scale: f32, argb: u32, shadow: bool) {
         unimplemented!("DrawContext::text_scaled")
     }
@@ -106,14 +109,16 @@ pub trait DrawContext {
     fn item_stack(&mut self, stack: &ItemStack, at: [f32; 2], size: f32) -> bool {
         unimplemented!("DrawContext::item_stack")
     }
-    /// Paint GUI extraction calls through this window's atlas, including player faces, under
-    /// their poses: every op, an `Item` as vanilla's `item` then `itemDecorations` (the stack of
-    /// the local player's hotbar slot, scaled about its pivot, then its decorations unscaled) and
-    /// a `Blit` of every [`Blend`](crate::client::hud_layout::Blend). An op it cannot draw (invalid
-    /// text metadata, an unknown slot, texture or sprite) refuses the whole
-    /// buffer with a [`GuiPaintError`] naming the op, and nothing of it is drawn.
-    fn gui_paint(&mut self, draws: &[GuiDraw]) -> Result<(), GuiPaintError> {
-        unimplemented!("DrawContext::gui_paint")
+    /// Lend a [`GuiCanvas`] with an identity pose for one drawing group, within the context's
+    /// current scissor. Draws commit in order on `Ok(())`; returning a refusal with `?` or
+    /// unwinding discards the whole group, including successful nested scopes. Return
+    /// [`GuiDrawError::Abort`] to discard it explicitly. The callback's own state changes
+    /// and independent host calls are not rolled back.
+    fn draw_gui(
+        &mut self,
+        draw: &mut dyn FnMut(&mut dyn GuiCanvas) -> Result<(), GuiDrawError>,
+    ) -> Result<(), GuiDrawError> {
+        Err(GuiDrawError::Unavailable)
     }
     /// Vanilla's nine-slice widget rendering. `color` is ARGB, as `fill` uses.
     fn gui_nine_slice(&mut self, sprite: &str, rect: [f32; 4], color: u32) {
@@ -124,60 +129,9 @@ pub trait DrawContext {
     fn gui_tooltip(&mut self, lines: &[Text], at: [f32; 2]) -> Result<(), TextFormError> {
         unimplemented!("DrawContext::gui_tooltip")
     }
-    /// The width of `text` in GUI pixels, as `native_text` draws it on `draw` (`Font.width`).
+    /// The width of `text` in GUI pixels as [`Self::text`] draws it (`Font.width`).
     fn text_width(&self, text: &str) -> f32 {
         unimplemented!("DrawContext::text_width")
-    }
-    /// Lays `text` out as the lines a label shows, wrapped to `max_width` GUI pixels at `scale` and
-    /// placed by `align`: measurement and layout only, nothing is drawn, and no widget, theme or
-    /// state is involved. Draw each line where it says, and the label is the mod's own.
-    ///
-    /// The layout is measured unscaled and answered scaled: the text wraps at `max_width / scale`
-    /// GUI pixels, and every dimension and position it answers — each line's `at` and `width`, the
-    /// block's `width` and `height` — is in scaled GUI pixels. `scale` of one is the text as it
-    /// draws at its own size; `scale` of two is the label at twice the size, in a box of the same
-    /// `max_width`. Draw a line within [`GuiDraw::Push`](crate::GuiDraw::Push) of
-    /// [`PoseOp::Scale`](crate::client::hud_layout::PoseOp::Scale) at its `at` divided by `scale`
-    /// (the answer's positions are already scaled, and the pose scales them again), and its
-    /// glyphs cover the scaled box it measured.
-    ///
-    /// Wrapping is vanilla's (`Font.split`, as [`crate::ClientTextClientHost::text_split`] wraps):
-    /// a line breaks at a space that fits, a single word wider than the box is broken at a
-    /// character rather than dropped, and an explicit `\n` starts a new line, so a trailing `\n`
-    /// leaves an empty last line. A width below one pixel — `max_width` itself, or `max_width /
-    /// scale` — still wraps, at one pixel, as `Font.split` does: too narrow a box gives one
-    /// character a line rather than none, and a line is still wider than `max_width` when one
-    /// character alone is.
-    ///
-    /// Every style and colour inside the component is kept in each line's `Text`, and each line's
-    /// `width` is what `Font.width` answers for it, styles included. The lines carry no `§` codes:
-    /// the split keeps them, and each line's codes are then applied to the characters that follow
-    /// them and dropped, so a line drawn alone draws exactly what it measured. A `§r` goes back to
-    /// the style its run carried, so right after a break it restores the style the tail run
-    /// carried out of the break (a bold run stays bold), not no style.
-    ///
-    /// One line is `Font.lineHeight` times `scale` high, and the last line's `at[1]` plus one line
-    /// height is exactly [`TextLines::height`]: a scroll container sizes its content from it. A
-    /// centred line sits at `wrapWidth / 2 - floor(lineWidth / 2)`, scaled afterwards, both widths
-    /// unscaled, as vanilla's `TextAlignment.CENTER.calculateLeft` floors the half line width.
-    /// Empty text has no line at all, and then `width` and `height` are zero.
-    ///
-    /// Draw each line through [`gui_paint`](Self::gui_paint)'s
-    /// [`GuiDraw::Text`](crate::GuiDraw::Text): [`text`](Self::text) draws plain characters, so a
-    /// styled label is `GuiDraw::Text`'s.
-    ///
-    /// Refuses, answering no line at all (a [`TextLinesRefusal`], never a partial layout):
-    /// a `max_width` that is not finite or that dividing by `scale` overflows, a `scale` that is
-    /// not finite or is zero or less, text that wraps into more than 512 lines, and lines holding
-    /// more than 8192 characters together. Component depth is not a layout limit.
-    fn text_lines(
-        &self,
-        text: &Text,
-        max_width: f32,
-        align: TextAlign,
-        scale: f32,
-    ) -> Result<TextLines, TextLinesRefusal> {
-        unimplemented!("DrawContext::text_lines")
     }
     /// Fluid `fluid` (`minecraft:water`, `mymod:oil`) drawn as a square with its top left at `at`, `size`
     /// GUI pixels wide (16 in a slot): the sprite its look names (`data/<mod>/sunrise/fluid/<name>.json`)
@@ -215,24 +169,20 @@ pub trait DrawContext {
     ) -> Result<(), SceneError> {
         Err(SceneError::Unavailable)
     }
-    /// `GuiGraphics.enableScissor`: what this hook call draws from now on, until the matching
-    /// [`pop_clip`](Self::pop_clip), is cut to `rect` (`[x, y, w, h]` in GUI pixels, as
-    /// [`fill`](Self::fill) takes it), the visible part of a sprite, glyph or item kept.
-    /// Clips nest: an inner one is cut to the one around it, so it never shows more than that
-    /// does. A negative width or height clips everything. What a scrolling list, a scrolling
-    /// label or a viewport into a larger page draws through; a scene from
-    /// [`draw_scene`](Self::draw_scene) keeps its own box. A clip still open when the hook call
-    /// returns is closed then, so it also cuts what later listeners of the same call draw:
-    /// close what you open. Refuses a rectangle that is not finite and a 65th open clip,
-    /// leaving the clips as they were. A client's call; nothing is clipped on a server.
-    fn push_clip(&mut self, rect: [f32; 4]) -> Result<(), GuiClipRefusal> {
-        unimplemented!("DrawContext::push_clip")
-    }
-    /// `GuiGraphics.disableScissor`: closes the clip [`push_clip`](Self::push_clip) opened
-    /// last, so what is drawn next is cut only by the clips around it. Refuses with
-    /// [`GuiClipRefusal::NoneOpen`] when this hook call has none open.
-    fn pop_clip(&mut self) -> Result<(), GuiClipRefusal> {
-        unimplemented!("DrawContext::pop_clip")
+    /// Run `draw` with the full drawing context clipped to `rect` (`[x, y, w, h]` in GUI pixels,
+    /// as [`fill`](Self::fill) takes it), like `GuiGraphics.enableScissor` / `disableScissor`.
+    /// Draw through the context passed to the callback. Clips nest by intersection; a nonpositive
+    /// extent clips everything. The enclosing clip is restored when the callback returns or
+    /// unwinds. [`GuiClipRefusal`] means the callback was not called.
+    ///
+    /// The callback returns `()` and the scope does not roll back draws. For a fallible group
+    /// of primitives with a local pose and scissor, use [`GuiCanvas::scope`] inside [`Self::draw_gui`].
+    fn with_scissor(
+        &mut self,
+        rect: [f32; 4],
+        draw: &mut dyn FnMut(&mut dyn DrawContext),
+    ) -> Result<(), GuiClipRefusal> {
+        Err(GuiClipRefusal::Unavailable)
     }
     /// Draws living entity `entity` standing in `view.rect`, `view.size` GUI
     /// pixels a block, turned as `view.look` says: vanilla's
@@ -261,7 +211,7 @@ pub trait DrawContext {
     ///   drew before or after it, and later drawing covers it in call order. An item's faces meet
     ///   each other by depth, as a model's do, and its enchantment glint follows them; the
     ///   OptiFine CIT glint layers of a stack are not drawn on this path yet (sunrise#3555). There
-    ///   is no z input. Both are cut by the clips opened with [`DrawContext::push_clip`], as
+    ///   is no z input. Both are cut by the clips opened with [`DrawContext::with_scissor`], as
     ///   `fill` is.
     ///
     /// A client's call, available with [`crate::MenuScreen::with_draw`] or
@@ -563,30 +513,34 @@ pub trait CameraDrawContext {
         unimplemented!("CameraDrawContext::sprite")
     }
 }
-/// Per-view untextured geometry, cleared even without listeners; `usage` reports fixed setup-time limits shared across listeners and depth modes.
+/// Per-view world geometry, cleared even without listeners; backing storage grows dynamically.
 pub trait WorldDrawContext {
     /// Draw a retained group once per view, with per-view culling and the batch route rules.
-    /// Repeated submissions in one view are ignored. Only visible copies consume its budget.
-    /// The shared limit is 16,384 visible copies and 16,384 groups per view. Refusal is atomic.
+    /// Repeated submissions in one view are ignored. Updates made to the group's records, active
+    /// length, or group transform during `Hooks::prepare_render_buffers` take effect on this same
+    /// frame before instance uploads. Storage grows dynamically across views.
     /// Shader packs and overlays use the same CPU path as transient model batches.
     /// Retired or foreign groups return [`GroupError::Stale`], even if drawn earlier this view.
     fn draw_instance_group(&mut self, group: InstanceGroupRef) -> Result<(), GroupError> {
         unimplemented!("WorldDrawContext::draw_instance_group")
     }
-    /// Submit unlit ARGB world lines atomically. Invalid coordinates or widths,
-    /// or a batch exceeding the view's fixed capacity, leave the batch unchanged.
+    /// Submit unlit ARGB world lines atomically. Invalid coordinates or widths leave the
+    /// submitted geometry unchanged.
     fn lines(&mut self, lines: &[WorldLine]) -> Result<(), DrawError> {
         unimplemented!("WorldDrawContext::world_draw_lines")
     }
     /// Submit unlit, alpha-blended world quads atomically, using the white atlas texel.
+    /// Refuses non-finite coordinates ([`DrawError::NonFinite`]); quad storage grows
+    /// dynamically into the GPU buffers with no fixed per-view cap.
     fn quads(&mut self, quads: &[WorldQuad]) -> Result<(), DrawError> {
         unimplemented!("WorldDrawContext::world_draw_quads")
     }
-    /// Submit world quads drawn by the mod pipeline `pipeline`, atomically: its shader gets each
-    /// quad's texture coordinate and colour, and its blend and depth modes apply. The quads
-    /// count against the same per-view capacity as [`quads`](Self::quads), and within a stage
-    /// they draw after its plain quads and lines, in the order submitted. On `Err`, nothing
-    /// from this call is drawn.
+    /// Submit world quads drawn by the mod pipeline `pipeline`: its shader gets each
+    /// quad's texture coordinate and colour, and its blend and depth modes apply. Checks
+    /// `RenderPipelineRef` validity and staleness ([`PipelineDrawError::Pipeline`]), skips
+    /// any quad with non-finite coordinates or UVs individually without rejecting valid quads
+    /// in the same slice, and lets quad storage grow dynamically into the GPU buffers. Within
+    /// a stage, pipeline quads draw after its plain quads and lines, in the order submitted.
     fn pipeline_quads(
         &mut self,
         pipeline: RenderPipelineRef,
@@ -603,13 +557,9 @@ pub trait WorldDrawContext {
     /// it, twice, as an unsneaking name: opaque in the world (sky and block light each at least
     /// 2, or exactly [`NameTagOptions::light`] with [`NameTagOptions::exact_light`]), and
     /// faded on the backdrop over everything, walls included, unlit. Labels draw with the
-    /// world's name tags, far to near, whatever the stage. Each glyph and backdrop quad, both
-    /// copies counted, takes one of the view's 4,096 quads shared with
-    /// [`quads`](Self::quads) ([`usage`](Self::usage)).
-    /// Refuses a non-finite `at` ([`DrawError::NonFinite`]), unrepresentable component metadata
-    /// ([`DrawError::TextRefused`]),
-    /// and a label past the quads left ([`DrawError::CapacityExceeded`]); on `Err` nothing
-    /// is drawn.
+    /// world's name tags, far to near, whatever the stage.
+    /// Refuses a non-finite `at` ([`DrawError::NonFinite`]); on `Err` nothing is drawn.
+    /// Only visible text and styles are used, not click, hover or opaque metadata.
     fn name_tag(
         &mut self,
         at: [f64; 3],
@@ -618,12 +568,7 @@ pub trait WorldDrawContext {
     ) -> Result<(), DrawError> {
         unimplemented!("WorldDrawContext::name_tag")
     }
-    /// Queued counts and fixed capacities, shared by both depth modes and all listeners.
-    /// Capacity is allocated during setup, never grown during submission.
-    fn usage(&self) -> WorldDrawUsage {
-        unimplemented!("WorldDrawContext::world_draw_usage")
-    }
-    /// Draw every copy in `instances` of the resolved `model`.
+    /// Draw every valid visible copy in `instances` of the resolved `model`.
     ///
     /// One batch per model. The engine uploads only the instance records on the opaque
     /// and cutout route, and bakes the same prepared geometry on the CPU when a shader
@@ -639,10 +584,11 @@ pub trait WorldDrawContext {
     /// Tint is `0xAARRGGBB` and light is [`LightCoords`]: both stay in
     /// vanilla's space, and the engine converts them to the frame. A tint's alpha
     /// multiplies only faces that have a tint index, the same as vanilla's model
-    /// renderer; [`ModelInstance::color`] multiplies every face. The view budget is 16,384 copies. Pass at most that many: a longer
-    /// list is refused with [`InstanceError::CapacityExceeded`] before any copy is
-    /// examined. Within the bound, copies outside the frustum
-    /// are omitted and do not count. On `Err`, nothing from this call is drawn.
+    /// renderer; [`ModelInstance::color`] multiplies every face. Each copy is culled against
+    /// the view frustum first; individual visible copies with non-finite coordinates or
+    /// transforms, or light channels outside `0..=15`, are skipped without rolling back
+    /// valid copies in the same slice. Storage grows dynamically (falling back to CPU baking
+    /// beyond GPU buffer room). Stale or unknown models return [`InstanceError::Model`].
     fn draw_model_instances(
         &mut self,
         model: ModelRef,
@@ -650,5 +596,65 @@ pub trait WorldDrawContext {
     ) -> Result<(), InstanceError> {
         let _ = (model, instances);
         unimplemented!("WorldDrawContext::draw_model_instances")
+    }
+}
+/// CPU-side submission of batches for the current world view. The renderer uploads them after
+/// this hook, before it opens any pass that may draw them.
+pub trait PrepareRenderBuffersContext {
+    /// Prepare an atomic batch of unlit ARGB world lines for `stage`.
+    fn lines(
+        &mut self,
+        stage: RenderLevelStage,
+        lines: &[WorldLine],
+    ) -> Result<PreparedWorldDraw, DrawError>;
+
+    /// Prepare an atomic batch of unlit, alpha-blended world quads for `stage`.
+    fn quads(
+        &mut self,
+        stage: RenderLevelStage,
+        quads: &[WorldQuad],
+    ) -> Result<PreparedWorldDraw, DrawError>;
+}
+
+/// Draw batches prepared for the active standard render stage, in call order.
+pub trait WorldPassDrawContext {
+    /// Draw a batch returned by `PrepareRenderBuffersContext`. A batch for another view or
+    /// stage is refused, leaving the current pass unchanged.
+    fn draw(&mut self, batch: PreparedWorldDraw) -> Result<(), PreparedWorldDrawError>;
+}
+
+/// Draw batches prepared for the active order-independent transparency (OIT) sub-pass.
+pub trait WorldOitPassDrawContext {
+    /// Which OIT sub-pass is currently active (`DepthBounds`, `Transmittance`, or `Accumulate`).
+    fn oit_stage(&self) -> OitStage;
+
+    /// Draw a lines or quads batch prepared for this view and sub-pass, in call order.
+    fn draw(&mut self, batch: PreparedWorldDraw) -> Result<(), PreparedWorldDrawError>;
+}
+/// Stage capability passed to [`Hooks::render_level_stage`](crate::Hooks::render_level_stage).
+/// Distinguishes no-pass stages (`AfterSky`, `AfterLevel`), standard world render passes, and
+/// OIT translucent sub-passes.
+pub trait RenderLevelStageContext {
+    /// The active pass capability for this stage, or [`StagePass::None`] for no-pass stages.
+    fn pass(&mut self) -> StagePass<'_> {
+        StagePass::None
+    }
+    /// Whether this stage provides an active render pass.
+    fn has_render_pass(&self) -> bool {
+        false
+    }
+    /// Borrow the standard world-pass draw context if this is a standard pass stage.
+    fn world_pass(&mut self) -> Option<&mut dyn WorldPassDrawContext> {
+        match self.pass() {
+            StagePass::World(pass) => Some(pass),
+            StagePass::None | StagePass::Oit(_, _) => None,
+        }
+    }
+    /// Borrow the active OIT sub-pass stage and draw context if this is an OIT stage.
+    fn oit_pass(&mut self) -> Option<(OitStage, &mut dyn WorldOitPassDrawContext)> {
+        match self.pass() {
+            StagePass::Oit(stage, pass) => Some((stage, pass)),
+            StagePass::None | StagePass::World(_) => None,
+        }
     }
 }

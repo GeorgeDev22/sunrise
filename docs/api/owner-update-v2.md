@@ -3,7 +3,8 @@
 This is the `owner-update` contract for the old registry index. It does not apply to the new release route,
 where a reviewer must approve every release pull request.
 
-The submission service (`crates/sunrise-mod-registry`, `update_trailer`) signs the `owner-update` trailer with
+The submission service (`crates/sunrise-mod-registry`) opens owner updates in
+[sunrise-org/sunrise-mods](https://github.com/sunrise-org/sunrise-mods); its `update_trailer` signs the `owner-update` trailer with
 `REGISTRY_UPDATE_KEY`. The workflow and `scripts/owner_update.py` belong in the registry repository, not here.
 Before merging on the strength of the trailer, the workflow must pass all the checks below. Any failure leaves
 the pull request to a reviewer (remove the label and comment why).

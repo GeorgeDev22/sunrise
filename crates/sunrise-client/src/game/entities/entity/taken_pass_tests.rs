@@ -57,7 +57,7 @@ static LIFECYCLE_VALUE: AttachmentType<i32> = AttachmentType {
     default: || 0,
     codec: None,
     copy_on_death: false,
-    sync: false,
+    sync_codec: None,
 };
 
 /// Registration memory shared by slot-bearing adapters to the lifecycle walk.

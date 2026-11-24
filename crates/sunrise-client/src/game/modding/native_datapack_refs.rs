@@ -5,8 +5,9 @@ use mod_api::LevelRef;
 impl Game<'_> {
     /// The datapack registry set of this level's world session: on the logical server, the
     /// server's own set for both the active dimension and any parked loaded dimension
-    /// (matching vanilla `Level.registryAccess()` on `ServerLevel`); on a client, the set its
-    /// server sent at the join for the active client level.
+    /// (matching vanilla `Level.registryAccess()` on `ServerLevel`); on a client, the
+    /// synchronized set its connection received (also available for the constructing level
+    /// during `client_level_load` before installation).
     fn level_datapack_set(
         &self,
         level: LevelRef,
@@ -15,10 +16,11 @@ impl Game<'_> {
             self.native_level_world(level)?;
             self.mods.datapack_registries.clone()
         } else {
-            if !self.level_handle_current(level) || level.dimension() != self.native_level_key() {
-                return None;
+            let remote = self.remote.as_ref()?;
+            if self.client_own_level() != Some(level) {
+                remote.constructing(level)?;
             }
-            sunrise_client::datapack_net::received()
+            remote.datapacks.received().cloned()
         }
     }
 

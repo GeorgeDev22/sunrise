@@ -482,7 +482,7 @@ impl Game<'_> {
                 && self.mobs[i].join == join
                 && !self.mobs[i].removed
             {
-                self.weapon_hit(i);
+                self.weapon_hit(i, sunrise_client::health::damage_type(source.kind, false));
             }
             // Player.attack: causeFoodExhaustion(0.1F) only when the hit hurt
             // (inside `if (wasHurt)`), after damageStatsAndHearts.

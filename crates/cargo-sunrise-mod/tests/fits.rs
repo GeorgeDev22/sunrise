@@ -243,6 +243,48 @@ fn pin_without_a_build_moves_to_the_current_nightly() {
 
 #[test]
 #[ignore = "daily"]
+fn check_answers_a_made_for_build_before_reading_its_surface() {
+    // A build id whose SDK this tool can fetch but whose surface it cannot read.
+    const FUTURE: &str = "cafebabecafebabecafebabecafebabecafebabe";
+    // A schema from a newer tool: the build is signed and known, its surface unreadable here.
+    const SURFACE: &str = r#"{"schema":9999,"hash":"ab"}"#;
+    let project = Project::new("future-surface", &[]);
+    let sdk = &project.sdk;
+    sdk.release_with_surface(FUTURE, MIXINS, None, SURFACE);
+    // A package made for exactly that build: its identity answers, whatever its surface says.
+    let manifest = format!(
+        "id = 'example'\nname = 'Example'\nversion = '0.1.0'\napi = '0.2'\ncapabilities = ['registries']\n\
+         [native]\ngame = '26.3'\nsunrise = '{FUTURE}'\n"
+    );
+    let uses = serde_json::to_vec(&UsesTable {
+        schema: PLAIN_SCHEMA,
+        made_for: FUTURE.into(),
+        entries: vec![],
+    })
+    .unwrap();
+    let files: Vec<(&str, &[u8])> = vec![
+        (
+            "Cargo.toml",
+            b"[package]\nname = 'example'\nversion = '0.1.0'\n",
+        ),
+        ("src/lib.rs", b""),
+        (USES_FILE, &uses),
+    ];
+    let file = "example.smod";
+    fs::write(
+        project.dir.join(file),
+        Package::write_files(&manifest, &files).unwrap(),
+    )
+    .unwrap();
+    let report = assert_answer(project.run(&["check", file, "--build", FUTURE]), 0, &[]);
+    assert!(
+        report.lines().any(|line| line.ends_with("  made for")),
+        "{report}"
+    );
+}
+
+#[test]
+#[ignore = "daily"]
 fn pin_moves_a_mod_off_a_build_whose_surface_schema_the_tool_does_not_read() {
     let project = Project::made("pin-old-schema", &[], 1);
     let check = project.run(&["check", "--build", OLD]);

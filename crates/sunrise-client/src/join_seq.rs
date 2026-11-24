@@ -879,6 +879,20 @@ impl<T: sunrise_mod_runtime::attachments::HasAttachmentLifetime> JoinList<T, fal
         self.written();
         checked_edit(&mut self.0[index], edit)
     }
+    /// Edit one entity while lending the other rows read-only, with the same
+    /// registration check as [`Self::update`].
+    pub fn update_with_rest<R>(
+        &mut self,
+        index: usize,
+        edit: impl FnOnce(&mut T, &[T], &[T]) -> R,
+    ) -> R {
+        self.written();
+        let (before, at_and_after) = self.0.split_at_mut(index);
+        let (at, after) = at_and_after
+            .split_first_mut()
+            .expect("a valid entity index");
+        checked_edit(at, |at| edit(at, before, after))
+    }
     pub fn for_each_mut(&mut self, mut edit: impl FnMut(&mut T)) {
         self.written();
         for entity in &mut self.0 {

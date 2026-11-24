@@ -107,13 +107,13 @@ fn a_collider_is_set_read_refused_saved_and_loaded() {
         // Saved with the entity, and read back by the entity that loads it.
         let id = entity.id();
         let mut tag = Tag::Compound(Compound::new());
-        super::persist::write_attachments(&mut tag, id, &game.entity_attachments);
+        super::persist::write_attachments(&mut tag, id, &game.entity_attachments).unwrap();
         assert!(tag.get(SAVE_KEY).is_some(), "the save holds the collider");
         let want = entity.collider(game);
         assert_eq!(entity.set_collider(game, None), Ok(()));
         assert_eq!(entity.collider(game), None);
         let mut cleared = Tag::Compound(Compound::new());
-        super::persist::write_attachments(&mut cleared, id, &game.entity_attachments);
+        super::persist::write_attachments(&mut cleared, id, &game.entity_attachments).unwrap();
         assert!(cleared.get(SAVE_KEY).is_none(), "none is not saved");
         game.load_saved_collider(id, &tag);
         assert_eq!(entity.collider(game), want);

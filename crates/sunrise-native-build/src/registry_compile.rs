@@ -151,6 +151,8 @@ pub(super) fn stage_and_cargo(
     // Each mod's staged folder and library root, for the shared registry library.
     let mut mod_dirs = BTreeMap::new();
     let mut mod_roots = BTreeMap::new();
+    // Each mod's source digest and the native mods it links, by mod id.
+    let mut sources: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
     let packages: BTreeMap<_, _> = projects
         .iter()
         .map(|project| {
@@ -222,6 +224,15 @@ pub(super) fn stage_and_cargo(
                     );
                 }
                 wrapper_deps.insert(format!("mod_{position}"), dependency.into());
+                let source =
+                    super::source_digest(bundle).ok_or(tr("Could not hash native mod inputs"))?;
+                let linked = targets
+                    .iter()
+                    .filter(|target| target.package.is_some())
+                    .map(|target| target.dependency.id.clone())
+                    .collect();
+                sources.insert(id.clone(), (source, linked));
+                // The identity is written once cargo has resolved the graph it names.
                 let root = stage_library(
                     &dest,
                     &mut manifest,
@@ -229,9 +240,7 @@ pub(super) fn stage_and_cargo(
                     &prebuilt::library_entry(
                         &template,
                         &[&bundle.manifest],
-                        sdk.commit(),
-                        id,
-                        &bundle.manifest.version.to_string(),
+                        prebuilt::IDENTITY_MARKER,
                         &[],
                     ),
                 )?;
@@ -387,8 +396,7 @@ pub(super) fn stage_and_cargo(
         .as_ref()
         .map(|patch| patch.installs.as_slice())
         .unwrap_or(&[]);
-    let mut entry =
-        prebuilt::library_entry(&template, &[], sdk.commit(), "sunrise_patch", "0", installs);
+    let mut entry = prebuilt::library_entry(&template, &[], prebuilt::IDENTITY_MARKER, installs);
     entry.push_str(prebuilt::PATCH_HOST_LINK);
     fs::write(out.join("src/lib.rs"), entry).map_err(|e| e.to_string())?;
     let mut manifest = toml::toml! { [package] name = "sunrise_patch" version = "0.0.0" edition = "2024" [lib] crate-type = ["dylib"] [workspace] resolver = "2" };
@@ -496,6 +504,42 @@ pub(super) fn stage_and_cargo(
     }
     let resolved = super::read_lock(out)?;
     plan.check_resolved(&super::registry_lock::RegistryLock::parse(&resolved)?)?;
+    // One workspace unifies the crates.io graph of the whole install set: another mod can move a
+    // version or enable a feature under a mod whose files did not change, so each library's
+    // identity names its graph as cargo just resolved it, after its source digest.
+    let graphs = super::registry_inventory::graphs(rust, out, &mod_dirs)?;
+    let mut identities = super::library_record::Identities::default();
+    let fill = |path: &Path, identity: &str| -> Result<(), String> {
+        let entry = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        fs::write(path, entry.replace(prebuilt::IDENTITY_MARKER, identity))
+            .map_err(|e| format!("{}: {e}", path.display()))
+    };
+    for &index in &resolution.order {
+        let manifest = &projects[index].bundle.manifest;
+        let (source, linked) = &sources[&manifest.id];
+        let identity = identities.next(
+            sdk.commit(),
+            &manifest.id,
+            &manifest.version.to_string(),
+            &format!("{source}+{}", graphs[&manifest.id]),
+            linked.iter().map(String::as_str),
+        );
+        fill(
+            &mod_roots[&manifest.id].with_file_name("__sunrise_entry.rs"),
+            &identity,
+        )?;
+    }
+    let identity = identities.next(
+        sdk.commit(),
+        "sunrise_patch",
+        "0",
+        "none",
+        patch
+            .iter()
+            .flat_map(|patch| &patch.bundles)
+            .map(|bundle| bundle.manifest.id.as_str()),
+    );
+    fill(&out.join("src/lib.rs"), &identity)?;
     let mut game_names = plan.game.game_package_names();
     for registry in patches.values() {
         for name in registry.as_table().expect("validated SDK patches").keys() {
@@ -619,13 +663,8 @@ pub(super) fn stage_and_cargo(
         let project = &projects[index];
         let library = release.join(prebuilt::dylib_name(&project.crate_name()));
         super::library_record::validate_exports(&library, &project.bundle.manifest.id)?;
-        super::library_record::stamp(
-            &library,
-            sdk.commit(),
-            &project.bundle.manifest.id,
-            &project.bundle.manifest.version.to_string(),
-            false,
-        )?;
+        let id = &project.bundle.manifest.id;
+        super::library_record::stamp(&library, id, identities.recorded(id), false)?;
         runtime.push(library);
     }
     if shared.is_some() {
@@ -636,7 +675,12 @@ pub(super) fn stage_and_cargo(
     }
     let library = release.join(prebuilt::dylib_name("sunrise_patch"));
     super::library_record::validate_exports(&library, "sunrise_patch")?;
-    super::library_record::stamp(&library, sdk.commit(), "sunrise_patch", "0", true)?;
+    super::library_record::stamp(
+        &library,
+        "sunrise_patch",
+        identities.recorded("sunrise_patch"),
+        true,
+    )?;
     runtime.push(library);
     for library in outputs.runtime(
         &metadata.runtime_packages()?,

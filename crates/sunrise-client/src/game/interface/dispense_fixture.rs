@@ -869,7 +869,10 @@ impl Game<'_> {
                     }
                 }
                 if hurt {
-                    self.weapon_hit(index);
+                    self.weapon_hit(
+                        index,
+                        sunrise_client::health::damage_type(source.kind, false),
+                    );
                 }
                 (bonus, hurt)
             }

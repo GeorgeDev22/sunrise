@@ -1,6 +1,7 @@
 //! Native worker adapters for API-owned structure behaviours.
 use super::native_pool_elements::{
-    Elements, element_ref, engine_element, engine_placement, engine_projection,
+    Elements, api_projection, api_rotation, element_ref, engine_element, engine_jigsaw,
+    engine_placement, engine_projection,
 };
 use super::native_structures::engine_rotation;
 use super::native_worldgen::WorkerResources;
@@ -232,8 +233,57 @@ impl GenerationContext for Start<'_> {
             pool.max_size(self.inputs.resources),
         ))
     }
-    fn elements(&self) -> &dyn mod_api::ElementContext {
-        &self.elements
+    fn elements(&mut self) -> (&dyn mod_api::ElementContext, &mut dyn RandomSource) {
+        (&self.elements, &mut self.random)
+    }
+    fn attach_jigsaw(
+        &mut self,
+        source: &mut mod_api::PoolPiece,
+        jigsaw: &mod_api::JigsawBlock,
+        candidate: &mod_api::PoolElementRef,
+        space: &mut mod_api::JigsawSpace,
+        use_expansion_hack: bool,
+    ) -> Option<mod_api::PoolPiece> {
+        let sunrise_world::worldgen::structure::start::Piece::Pool(mut engine_source) =
+            engine_pool_piece(source.clone())?
+        else {
+            return None;
+        };
+        let child = self.inputs.attach(
+            &mut engine_source,
+            &engine_jigsaw(jigsaw.clone()),
+            &engine_element(candidate)?,
+            space,
+            use_expansion_hack,
+            &mut *self.inner,
+            &mut *self.random.0,
+        )?;
+        source
+            .junctions
+            .push(api_junction(*engine_source.junctions.last()?));
+        let mut piece = mod_api::PoolPiece::new(
+            element_ref(child.element),
+            child.position,
+            child.ground_level_delta,
+            api_rotation(child.rotation),
+            child.bounding_box,
+            source.liquid,
+        );
+        piece.junctions = child.junctions.into_iter().map(api_junction).collect();
+        Some(piece)
+    }
+}
+
+/// An engine junction as the API's.
+fn api_junction(
+    junction: sunrise_world::worldgen::structure::jigsaw::Junction,
+) -> mod_api::JigsawJunction {
+    mod_api::JigsawJunction {
+        source_x: junction.source_x,
+        source_ground_y: junction.source_ground_y,
+        source_z: junction.source_z,
+        delta_y: junction.delta_y,
+        dest_projection: api_projection(junction.dest_projection),
     }
 }
 

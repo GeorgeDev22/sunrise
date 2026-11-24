@@ -423,11 +423,11 @@ impl Game<'_> {
     /// at `index`: the item's `hurtEnemy` (the "used" statistic of a weapon),
     /// the post-attack enchantments, then `postHurtEnemy` with the weapon's
     /// wear.
-    pub(super) fn weapon_hit(&mut self, index: usize) {
+    pub(super) fn weapon_hit(&mut self, index: usize, damage_type: &str) {
         let Some(stack) = self.held().cloned() else {
             // An empty hand still meets the victim's own post-attack
             // enchantments (Thorns).
-            self.post_attack(index);
+            self.post_attack(index, damage_type);
             return;
         };
         let items = self.res.items();
@@ -442,7 +442,7 @@ impl Game<'_> {
         if weapon.is_some() {
             self.award_stat("used", &stack.item, 1);
         }
-        self.post_attack(index);
+        self.post_attack(index, damage_type);
         // MaceItem.postHurtEnemy
         if smash && let Some(p) = self.player.as_mut() {
             p.fall_distance = 0.0;
@@ -504,20 +504,23 @@ impl Game<'_> {
         self.audio.play(sound, Some(feet), 1.0, 1.0);
         Some(fall)
     }
-    /// What a server's guest does after their hit landed on another player:
-    /// the weapon's side, the exhaustion and the sprint a knockback stops.
+    /// What a server's guest does after their hit landed on the player with
+    /// entity id `victim`: the weapon's side, the exhaustion and the sprint a
+    /// knockback stops.
     /// Returns the attacker's motion when a smash set it, which
     /// `MaceItem.hurtEnemy` sends at once (`ClientboundSetEntityMotionPacket`),
     /// not at the end of the tick after gravity (#8246). The mark from before
     /// the hit stays.
     pub(in crate::game) fn pvp_hit_after(
         &mut self,
+        victim: u32,
         victim_on_ground: bool,
         stops_sprint: bool,
+        weapon: Option<&ItemStack>,
     ) -> Option<Vec3> {
         let p = self.player.as_mut()?;
         let marked = std::mem::take(&mut p.health.sync_velocity);
-        self.weapon_hit_player(victim_on_ground);
+        self.weapon_hit_player(victim, victim_on_ground, weapon);
         let p = self.player.as_mut()?;
         let sent = std::mem::replace(&mut p.health.sync_velocity, marked).then_some(p.velocity);
         self.pvp_exhaustion();
@@ -526,21 +529,41 @@ impl Game<'_> {
         }
         sent
     }
-    /// `Player.itemAttackInteraction` after the player's hit hurt another
-    /// player: the weapon's side of it, as `weapon_hit` does for a mob. A
+    /// `Player.itemAttackInteraction` after the player's hit hurt the player
+    /// `victim`: the weapon's side of it, as `weapon_hit` does for a mob. A
     /// smash stops the fall and its Wind Burst (a `post_attack` explosion on
-    /// the attacker) launches the attacker.
-    pub(super) fn weapon_hit_player(&mut self, victim_on_ground: bool) {
-        let Some(stack) = self.held().cloned() else {
-            return;
-        };
-        let smash = self.smash_attack();
+    /// the attacker) launches the attacker. `weapon`: the stack taken before
+    /// the hit ([`native_post_attack_weapon`](Self::native_post_attack_weapon)),
+    /// for mods' own `post_attack` kinds.
+    pub(super) fn weapon_hit_player(
+        &mut self,
+        victim: u32,
+        victim_on_ground: bool,
+        weapon: Option<&ItemStack>,
+    ) {
+        let held = self.held().cloned();
+        let smash = held.is_some() && self.smash_attack();
         if smash {
             self.mace_smash_self(victim_on_ground);
         }
-        if self.res.items().weapon_damage(&stack).is_some() {
+        if let Some(stack) = &held
+            && self.res.items().weapon_damage(stack).is_some()
+        {
             self.award_stat("used", &stack.item, 1);
         }
+        if let Some(weapon) = weapon {
+            let attacker = self.consuming_player_entity().id();
+            self.native_weapon_post_attack(
+                weapon,
+                (attacker, "minecraft:player"),
+                (victim, "minecraft:player"),
+                // The type `pvp_land` hurt the player with.
+                "minecraft:player_attack",
+            );
+        }
+        let Some(stack) = held else {
+            return;
+        };
         self.post_attack_bursts(&stack, "minecraft:player");
         // MaceItem.postHurtEnemy
         if smash && let Some(p) = self.player.as_mut() {
@@ -786,7 +809,7 @@ impl Game<'_> {
                 let mut credit = plan.lend(&mut self.last_hurt_by_player);
                 let level = crate::game::entity::damage_level_of!(self, &attack, &mut credit, None);
                 self.mobs[i].knockback(level, 0.4, xd, zd, &source, amount);
-                self.post_attack(i);
+                self.post_attack(i, sunrise_client::health::damage_type(source.kind, false));
             }
         }
         // `getEntitiesOfClass(LivingEntity.class)` takes the other players too.

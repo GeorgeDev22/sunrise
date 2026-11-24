@@ -165,13 +165,13 @@ impl Watchdog {
 }
 
 /// What the startup read before the game's resources were loaded.
-struct Setup {
-    props: ServerProperties,
-    universe: PathBuf,
-    level_name: String,
-    port: Option<u16>,
+pub(in crate::game) struct Setup {
+    pub(in crate::game) props: ServerProperties,
+    pub(in crate::game) universe: PathBuf,
+    pub(in crate::game) level_name: String,
+    pub(in crate::game) port: Option<u16>,
     /// `--allowMissingMods`: open a world whose saved mods are missing (`missing_mods`).
-    allow_missing_mods: bool,
+    pub(in crate::game) allow_missing_mods: bool,
 }
 static SETUP: OnceLock<Mutex<Option<Setup>>> = OnceLock::new();
 /// usercache.json (Services.nameToIdCache): used by the server thread only.
@@ -876,27 +876,33 @@ const BROADCAST: &[&str] = &[
 
 impl Game<'_> {
     /// DedicatedServer.initServer and MinecraftServer.runServer.
-    // The epoch starts at world open; failures before that send no lifecycle event.
     pub(super) fn run_dedicated(&mut self) -> Result<()> {
-        self.run_server_lifecycle(true, Self::run_dedicated_inner)
-    }
-
-    fn run_dedicated_inner(&mut self, startup_began: &mut bool) -> Result<()> {
         // This thread ticks the server (MinecraftServer.spin's priority).
         sunrise_threads::favour_current();
         self.join_world_rest()?;
+        let setup = SETUP
+            .get()
+            .and_then(|m| m.lock().unwrap().take())
+            .ok_or("dedicated server not prepared")?;
+        self.run_dedicated_with_setup(setup)
+    }
+
+    pub(in crate::game) fn run_dedicated_with_setup(&mut self, setup: Setup) -> Result<()> {
+        self.run_server_lifecycle(true, |game| game.run_dedicated_inner(setup))
+    }
+
+    fn run_dedicated_inner(
+        &mut self,
+        setup: Setup,
+    ) -> Result<super::server_lifecycle::ServerRunOutcome> {
         let Setup {
             props,
             universe,
             level_name,
             port,
             allow_missing_mods,
-        } = SETUP
-            .get()
-            .and_then(|m| m.lock().unwrap().take())
-            .ok_or("dedicated server not prepared")?;
+        } = setup;
         let world_dir = std::env::current_dir()?.join(&universe).join(&level_name);
-        let new_world = self.prepare_world_metadata(&world_dir, &props, allow_missing_mods)?;
         // The console thread starts first, as in initServer.
         let (tx, console) = mpsc::channel();
         std::thread::Builder::new()
@@ -973,6 +979,21 @@ impl Game<'_> {
                 }
             ),
         );
+        // DedicatedServer.initServer binds the TCP socket before ServerAboutToStartEvent
+        // and before preparing the level; a bind failure returns false so runServer skips
+        // ServerStartedEvent/ServerStoppingEvent and runs only stopServer/ServerStoppedEvent.
+        let bind = (!props.server_ip.is_empty())
+            .then(|| props.server_ip.parse().ok())
+            .flatten();
+        let listener = match sunrise_client::lan::Lan::bind(bind, port) {
+            Ok(listener) => listener,
+            Err(e) => {
+                log("WARN", "**** FAILED TO BIND TO PORT!");
+                log("WARN", &format!("The exception was: {e}"));
+                log("WARN", "Perhaps a server is already running on that port?");
+                return Ok(super::server_lifecycle::ServerRunOutcome::FailedInit(e));
+            }
+        };
         if online.is_none() {
             log("WARN", "**** SERVER IS RUNNING IN OFFLINE/INSECURE MODE!");
             log(
@@ -997,6 +1018,7 @@ impl Game<'_> {
         self.server_lists = Some(lists.clone());
         log("INFO", &format!("Preparing level \"{level_name}\""));
         let level_load_started = Instant::now();
+        let new_world = self.prepare_world_metadata(&world_dir, &props, allow_missing_mods)?;
         let folder = world_dir.to_string_lossy().into_owned();
         // The mods' common and server configs, read before the server starts.
         self.native_configs_server_start(&world_dir, true);
@@ -1008,7 +1030,6 @@ impl Game<'_> {
             None,
             Arc::new(crate::game::api_values::game_rule_registry()),
         )?)?;
-        *startup_began = true;
         self.native_server_about_to_start(true);
         self.native_lifecycle_open_started();
         // The registries the server sends are read while the world prepares.
@@ -1070,7 +1091,6 @@ impl Game<'_> {
         self.settings.simulation_distance = props.simulation_distance.clamp(2, 32);
         // Nothing is kept around the spawn while nobody is on.
         self.streaming.radius = -1;
-        self.settle_spawn()?;
         self.prepare_levels()?;
         let level_load_time = level_load_started.elapsed();
         let gate_lists = lists.clone();
@@ -1110,11 +1130,8 @@ impl Game<'_> {
                  (Sunrise has no Velocity forwarding any more): turn [transfer] off"
                 .into());
         }
-        self.start_loaded_dedicated_world(&opened_packs);
         let net = NetConfig {
-            bind: (!props.server_ip.is_empty())
-                .then(|| props.server_ip.parse().ok())
-                .flatten(),
+            bind,
             port,
             motd: props.motd.clone(),
             max_players: props.max_players.max(0) as usize,
@@ -1126,7 +1143,7 @@ impl Game<'_> {
             secure_chat: Some(secure_chat),
             accepts_transfers: props.accepts_transfers,
             announce: false,
-            listen: true,
+            listen: false,
             bypasses_limit: Some(Arc::new(move |uuid| {
                 bypass_lists
                     .lock()
@@ -1196,11 +1213,9 @@ impl Game<'_> {
         if let Some(sync) = sync {
             sync.adopt(&self.pack_files());
         }
-        if let Err(e) = self.lan_host(settings, net, config) {
-            log("WARN", "**** FAILED TO BIND TO PORT!");
-            log("WARN", &format!("The exception was: {e}"));
-            log("WARN", "Perhaps a server is already running on that port?");
-            return Ok(());
+        self.lan_host(settings, net, config)?;
+        if let Some(host) = self.lan.as_mut() {
+            host.settings.port = host.hub.lan.listen_on(listener, false)?;
         }
         if let Some(transfers) = transfers
             && let Some(host) = self.lan.as_mut()
@@ -1245,13 +1260,15 @@ impl Game<'_> {
                 .is_none_or(|v| v.trim() != "false");
         }
         log("INFO", &startup_done(level_load_time));
-        // DedicatedServer.initServer ends with saveEverything(false, true, true).
+        // DedicatedServer.initServer ends with saveEverything(false, true, true)
+        // followed by handleServerStarting(this), then runServer fires ServerStartedEvent.
         if self.save_dedicated_checkpoint("server startup")? == 0 {
             self.log_saved_levels();
         }
         if let Some(host) = self.lan.as_mut() {
             host.hub.entity_range_percent = props.entity_broadcast_range_percentage;
         }
+        self.start_loaded_dedicated_world(&opened_packs);
         // The dedicated server's open is complete before its first tick.
         self.native_lifecycle_world_ready();
         let mut state = ServerState {
@@ -1485,38 +1502,13 @@ impl Game<'_> {
         self.perf_captures_done(done);
         match crashed {
             Some(message) => std::panic::resume_unwind(Box::new(message)),
-            None => Ok(()),
+            None => Ok(super::server_lifecycle::ServerRunOutcome::Orderly),
         }
     }
 
-    /// Load the spawn area and find the world spawn as single player does,
-    /// without keeping a player there. A dedicated server only finds the world
-    /// spawn (MinecraftServer.setInitialSpawn): a player's spawn is found as
-    /// one joins.
-    pub(super) fn settle_spawn(&mut self) -> Result<()> {
+    /// Prepare the integrated owner's player separately from setInitialSpawn.
+    pub(super) fn settle_player_spawn(&mut self) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(600);
-        if self.is_dedicated_server() {
-            if self.level.spawn.is_none() {
-                let [x, y, z] = loop {
-                    self.update_world();
-                    if let Some(pos) = self.find_world_spawn()? {
-                        break pos;
-                    }
-                    if Instant::now() > deadline {
-                        return Err("the spawn area did not load".into());
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
-                };
-                self.level.spawn = Some([f64::from(x), f64::from(y), f64::from(z)]);
-                self.level.world_spawn.get_or_insert([x, y, z]);
-                self.streaming.extra.clear();
-            }
-            self.spawn = self
-                .level
-                .spawn
-                .map(|s| sunrise_core::geometry::Vec3::new(s[0] + 0.5, s[1], s[2] + 0.5));
-            return Ok(());
-        }
         while self.player.is_none() {
             self.update_world();
             self.spawn_player()?;
@@ -2369,57 +2361,28 @@ impl Game<'_> {
         true
     }
 
-    /// MinecraftServer.stopServer: players saved and sent away, worlds saved.
-    /// MinecraftServer.saveAllChunks, not silent: one line per level, in
-    /// the server's level order.
-    fn log_saved_levels(&self) {
-        for dimension in [
-            "minecraft:overworld",
-            "minecraft:the_nether",
-            "minecraft:the_end",
-        ] {
+    /// MinecraftServer.saveAllChunks, not silent: one line per loaded level,
+    /// in the server's creation order.
+    pub(super) fn log_saved_levels(&self) {
+        for dim in self.loaded_level_order() {
             log(
                 "INFO",
                 &format!(
-                    "Saving chunks for level 'ServerLevel[{}]'/{dimension}",
-                    self.level.name
+                    "Saving chunks for level 'ServerLevel[{}]'/{}",
+                    self.level.name,
+                    dim.id()
                 ),
             );
         }
     }
 
-    pub(super) fn stop_dedicated(&mut self, crashed: bool, run_error: Option<&str>) -> Result<()> {
+    pub(super) fn stop_dedicated(&mut self, crashed: bool) -> Result<()> {
         self.streaming.abort_generation();
         self.levels.abort_parked_generation();
-        // A failed open keeps its opening phase until the final save attempts finish.
-        if run_error.is_none() || !self.native_lifecycle.is_opening() {
-            self.native_lifecycle.begin_close();
-        }
-        self.native_configs_server_stop();
+        // The close request starts before player and world saves.
+        self.native_lifecycle.begin_close();
         log("INFO", "Stopping server");
-        self.native_players_leaving();
-        log("INFO", "Saving players");
-        // PlayerList.removeAll: each player's file, with the vehicle it
-        // alone rides, then its records.
-        if !crashed {
-            self.save_leaving_guests();
-        }
-        if let Some(h) = self.lan.as_mut() {
-            let conns: Vec<u32> = h.hub.guests.iter().map(|g| g.conn).collect();
-            for conn in conns {
-                h.hub.kick(
-                    conn,
-                    translatable("multiplayer.disconnect.server_shutdown", &[]),
-                );
-            }
-        }
-        std::thread::sleep(Duration::from_millis(100));
-        log("INFO", "Saving worlds");
-        let result = self.finish_server_save(crashed, run_error);
-        if result.is_ok() {
-            self.log_saved_levels();
-        }
-        result
+        self.finish_server_save(true, crashed)
     }
 }
 
@@ -2471,41 +2434,6 @@ impl Game<'_> {
         }
         Ok(failed)
     }
-
-    pub(super) fn stop_after_crash(&mut self, message: &str) -> Result<()> {
-        // Single player's server thread (`integrated.rs`) has no console: it logs to the game's log.
-        let integrated = self.serving.is_some();
-        let warn = |message: &str| {
-            if integrated {
-                log::warn!("Sunrise: {message}");
-            } else {
-                log("WARN", message);
-            }
-        };
-        let cause = if integrated {
-            // `message` already says whether the tick panicked or failed.
-            log::error!("Sunrise: {message}");
-            message.to_owned()
-        } else {
-            log("ERROR", &format!("The server thread panicked: {message}"));
-            format!("the server thread panicked: {message}")
-        };
-        self.exclude_interrupted_players(true, warn);
-        if integrated {
-            // `IntegratedServer.stopServer`'s steps; `save_guest` skips the guest unplaced above.
-            return self.stop_integrated(true, Some(&cause));
-        }
-        log("INFO", "Saving worlds");
-        match self.save_dedicated_checkpoint("crash shutdown") {
-            Ok(0) => self.log_saved_levels(),
-            Ok(_) => (),
-            Err(error) => log::error!("Exception saving during crash shutdown: {error}"),
-        }
-        self.lan_close(false);
-        // The crash, not any record failure during its checkpoint, fails this close.
-        self.native_lifecycle_close_failed(&cause);
-        Err(cause.into())
-    }
 }
 
 #[cfg(test)]
@@ -2513,104 +2441,103 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn dedicated_checkpoints_continue_only_after_record_refusals() {
-        use crate::game::{
-            execution_role::ExecutionRole,
-            native_entity_refs::tests::{fixture_root, with_game_role},
-        };
-        use mod_api::{Authority, Hooks, ModEntry, ServerHost, WorldLifecycleEvent, WorldPhase};
-        use std::sync::{Arc, Mutex};
-        use sunrise_client::save::{LevelShape, SaveDir};
-        use sunrise_core::nbt::{DISK_WRITE_NESTING_GUARD, Tag};
-
-        struct CloseEvents(Arc<Mutex<Vec<(WorldPhase, String)>>>);
-        #[mod_api::__subscriptions]
-        impl Hooks for CloseEvents {
-            fn world_lifecycle(&self, _: &mut dyn ServerHost, event: &mut WorldLifecycleEvent<'_>) {
-                if matches!(
-                    event.phase,
-                    WorldPhase::WorldCloseFailed | WorldPhase::WorldCloseFinal
-                ) {
-                    self.0
-                        .lock()
-                        .unwrap()
-                        .push((event.phase, event.error_text.to_owned()));
-                }
-            }
-        }
-
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let mods = vec![ModEntry::new(
-            "crash_close_events",
-            Box::new(CloseEvents(events.clone())),
-        )]
-        .into();
-        mod_platform::testing::with_mods(mods, || {
-            with_game_role(fixture_root(), ExecutionRole::DedicatedServer, |game| {
-                game.native_lifecycle.begin_open(Authority::DedicatedServer);
-                game.native_lifecycle.world_open_ready().unwrap();
-                let dir = tempfile::tempdir().unwrap();
-                game.world_root = dir.path().to_path_buf();
-                game.save = Arc::new(SaveDir::new(
-                    game.world_root.clone(),
-                    LevelShape::OVERWORLD,
-                    Some(Default::default()),
-                ));
-                assert_eq!(
-                    game.save_dedicated_checkpoint("startup fixture").unwrap(),
-                    0
-                );
-                let fail_next_save = |game: &mut crate::game::Game<'_>| {
-                    let key = (2, 0);
-                    let mut chunk = sunrise_client::chunk::Chunk::with_layout(
-                        key.0,
-                        key.1,
-                        game.world.layout(),
-                    );
-                    let invalid = (0..=DISK_WRITE_NESTING_GUARD)
-                        .fold(Tag::Int(0), |nested, _| Tag::List(vec![nested]));
-                    Arc::make_mut(chunk.saved.get_or_insert_with(Default::default))
-                        .root
-                        .insert("test:invalid".into(), invalid);
-                    game.world.chunks.insert(key, Arc::new(chunk));
-                    game.world.modified.insert(key);
+        crate::game::in_own_process(
+            "game::dedicated::tests::dedicated_checkpoints_continue_only_after_record_refusals",
+            || {
+                use crate::game::{
+                    execution_role::ExecutionRole,
+                    native_entity_refs::tests::{fixture_root, with_game_role},
                 };
-                for phase in ["startup fixture", "pause fixture"] {
-                    fail_next_save(game);
-                    assert_eq!(game.save_dedicated_checkpoint(phase).unwrap(), 1);
-                }
-                assert_eq!(game.save.record_save_failures(), 2);
-                assert_eq!(game.save_dedicated_checkpoint("no new edits").unwrap(), 0);
+                use mod_api::{Authority, Hooks, ModEntry, ServerHost, ServerStoppedEvent};
+                use std::sync::{Arc, Mutex};
+                use sunrise_client::save::{LevelShape, SaveDir};
+                use sunrise_core::nbt::{DISK_WRITE_NESTING_GUARD, Tag};
 
-                fail_next_save(game);
-                let cause = "injected dedicated crash";
-                let error = game.stop_after_crash(cause).unwrap_err();
-                assert!(error.to_string().contains(cause));
-                {
-                    let events = events.lock().unwrap();
-                    assert_eq!(events.len(), 1);
-                    assert_eq!(events[0].0, WorldPhase::WorldCloseFailed);
-                    assert!(events[0].1.contains(cause));
+                struct CloseEvents(Arc<Mutex<usize>>);
+                #[mod_api::__subscriptions]
+                impl Hooks for CloseEvents {
+                    fn server_stopped(&self, _: &mut dyn ServerHost, _: &mut ServerStoppedEvent) {
+                        *self.0.lock().unwrap() += 1;
+                    }
                 }
-                assert_eq!(game.save.record_save_failures(), 3);
 
-                let blocked = dir.path().join("level.dat_new");
-                std::fs::create_dir(&blocked).unwrap();
-                let expected = std::fs::write(blocked, b"test").unwrap_err();
-                let error = game.save_dedicated_checkpoint("pause fixture").unwrap_err();
-                assert_eq!(
-                    error.downcast_ref::<std::io::Error>().unwrap().kind(),
-                    expected.kind()
-                );
-                game.native_lifecycle.begin_open(Authority::DedicatedServer);
-                game.native_lifecycle.world_open_ready().unwrap();
-                let error = game.stop_after_crash(cause).unwrap_err();
-                assert!(error.to_string().contains(cause));
-                let events = events.lock().unwrap();
-                assert_eq!(events.len(), 2);
-                assert_eq!(events[1].0, WorldPhase::WorldCloseFailed);
-                assert!(events[1].1.contains(cause));
-            });
-        });
+                let events = Arc::new(Mutex::new(0usize));
+                let mods = vec![ModEntry::new(
+                    "crash_close_events",
+                    Box::new(CloseEvents(events.clone())),
+                )]
+                .into();
+                mod_platform::testing::with_mods(mods, || {
+                    with_game_role(fixture_root(), ExecutionRole::DedicatedServer, |game| {
+                        game.native_lifecycle.begin_open(Authority::DedicatedServer);
+                        game.native_lifecycle.world_open_ready().unwrap();
+                        let dir = tempfile::tempdir().unwrap();
+                        game.world_root = dir.path().to_path_buf();
+                        game.save = Arc::new(SaveDir::new(
+                            game.world_root.clone(),
+                            LevelShape::OVERWORLD,
+                            Some(Default::default()),
+                        ));
+                        game.session_lock =
+                            Some(sunrise_client::save::SessionLock::acquire(dir.path()).unwrap());
+                        game.world_adopted = true;
+                        assert_eq!(
+                            game.save_dedicated_checkpoint("startup fixture").unwrap(),
+                            0
+                        );
+                        let fail_next_save = |game: &mut crate::game::Game<'_>| {
+                            let key = (2, 0);
+                            let mut chunk = sunrise_client::chunk::Chunk::with_layout(
+                                key.0,
+                                key.1,
+                                game.world.layout(),
+                            );
+                            let invalid = (0..=DISK_WRITE_NESTING_GUARD)
+                                .fold(Tag::Int(0), |nested, _| Tag::List(vec![nested]));
+                            Arc::make_mut(chunk.saved.get_or_insert_with(Default::default))
+                                .root
+                                .insert("test:invalid".into(), invalid);
+                            game.world.chunks.insert(key, Arc::new(chunk));
+                            game.world.modified.insert(key);
+                        };
+                        for phase in ["startup fixture", "pause fixture"] {
+                            fail_next_save(game);
+                            assert_eq!(game.save_dedicated_checkpoint(phase).unwrap(), 1);
+                        }
+                        assert_eq!(game.save.record_save_failures(), 2);
+                        assert_eq!(game.save_dedicated_checkpoint("no new edits").unwrap(), 0);
+
+                        fail_next_save(game);
+                        let cause = "injected dedicated crash";
+                        let error = game
+                            .run_server_lifecycle(true, |_| panic!("{cause}"))
+                            .unwrap_err();
+                        assert!(error.to_string().contains(cause));
+                        assert_eq!(*events.lock().unwrap(), 1);
+                        assert_eq!(game.save.record_save_failures(), 3);
+
+                        let blocked = dir.path().join("level.dat_new");
+                        std::fs::create_dir(&blocked).unwrap();
+                        let expected = std::fs::write(blocked, b"test").unwrap_err();
+                        let error = game.save_dedicated_checkpoint("pause fixture").unwrap_err();
+                        assert_eq!(
+                            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                            expected.kind()
+                        );
+                        game.native_lifecycle.begin_open(Authority::DedicatedServer);
+                        game.native_lifecycle.world_open_ready().unwrap();
+                        game.session_lock =
+                            Some(sunrise_client::save::SessionLock::acquire(dir.path()).unwrap());
+                        game.world_adopted = true;
+                        let error = game
+                            .run_server_lifecycle(true, |_| panic!("{cause}"))
+                            .unwrap_err();
+                        assert!(error.to_string().contains(cause));
+                        assert_eq!(*events.lock().unwrap(), 2);
+                    });
+                });
+            },
+        );
     }
 
     #[test]

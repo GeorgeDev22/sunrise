@@ -93,11 +93,14 @@ impl Game<'_> {
     fn registry_datapacks(&self, registry: &str) -> Option<Arc<mod_api::DatapackRegistrySet>> {
         if self.is_logical_server() {
             self.mods.datapack_registries.clone()
-        } else if self.remote.is_some() {
-            // This set has already been filtered by the offer, sync policy and accepted schema.
-            sunrise_client::datapack_net::received().filter(|set| set.registry_available(registry))
         } else {
-            None
+            // This set has already been filtered by the offer, sync policy and accepted schema.
+            self.remote
+                .as_ref()?
+                .datapacks
+                .received()
+                .filter(|set| set.registry_available(registry))
+                .cloned()
         }
     }
 

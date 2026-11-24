@@ -925,10 +925,10 @@ fn only_the_first_local_client_is_the_client_start() {
     });
 }
 
-/// A world's moments reach a listener once each and in order: the server's start
-/// (`server_about_to_start`, then `server_started` where `WorldOpenReady` was, only once
-/// per open and not for a failed one), its stop (`server_stopping`, then the final close),
-/// and the client's own close (`client_stopping`).
+/// Server and client lifecycle moments reach a listener once each and in NeoForge's
+/// order: the server's start (`server_about_to_start`, `server_starting`, `server_started`
+/// once per open), its stop (`server_stopping`, `server_stopped`, `game_shutting_down`),
+/// and the client's own close (`client_stopping`, `client_stopped`, `game_shutting_down`).
 #[test]
 #[ignore = "daily"]
 fn the_lifecycle_moments_fire_once_each_in_order() {
@@ -982,13 +982,6 @@ fn the_lifecycle_moments_fire_once_each_in_order() {
                 .unwrap()
                 .push(format!("stopping dedicated={}", e.dedicated));
         }
-        fn world_lifecycle(
-            &self,
-            _host: &mut dyn ServerHost,
-            event: &mut mod_api::WorldLifecycleEvent<'_>,
-        ) {
-            self.0.lock().unwrap().push(format!("{:?}", event.phase));
-        }
         fn client_stopping(
             &self,
             _host: &mut dyn ClientHost,
@@ -1025,8 +1018,8 @@ fn the_lifecycle_moments_fire_once_each_in_order() {
             game.native_lifecycle_world_closed();
             log.lock().unwrap().clear();
             game.native_server_about_to_start(true);
-            game.native_server_starting(true);
             game.native_lifecycle_open_started();
+            game.native_server_starting(true);
             game.native_lifecycle_world_ready();
             game.native_lifecycle_world_ready();
             game.native_lifecycle.begin_close();
@@ -1048,7 +1041,6 @@ fn the_lifecycle_moments_fire_once_each_in_order() {
             "starting dedicated=true",
             "started dedicated=true",
             "stopping dedicated=true",
-            "WorldCloseFinal",
             "stopped dedicated=true",
             "shutting_down server",
             "client_stopping",

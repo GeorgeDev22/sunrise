@@ -129,6 +129,9 @@ fn main() -> ExitCode {
         Some("native-layout") => return native_build::layout(&args[1..]),
         Some("internals") => internals::run(&args[1..]),
         Some("pin") => pin_args(&args[1..]).and_then(|build| {
+            // The project's own manifest first: a content mod pins no build, and offline it must
+            // hear that rather than a lookup failure.
+            pinned_manifest(Path::new("."))?;
             // Resolved once: the report and the manifest name the same build, even when a Nightly
             // is published in between.
             let requested = build.unwrap_or(sunrise_release_sign::NIGHTLY);
@@ -387,15 +390,26 @@ fn pin_args(args: &[String]) -> Result<Option<&str>, String> {
     Ok(build)
 }
 
-/// Repins a native mod. Declared internals are checked against the new build before writing.
-/// `Cargo.toml` names the SDK by path, so the next command fetches the new one.
-fn repin(dir: &Path, fetch: FetchSdk, requested: &str, sunrise: &str) -> Result<(), String> {
+/// The manifest `pin` works on, read before any build is resolved: its path and text, and the
+/// refusal of a content mod, which pins no game build.
+fn pinned_manifest(dir: &Path) -> Result<(PathBuf, String, Manifest), String> {
     let path = dir.join(MANIFEST);
     let text = bounded::read(&path, bounded::MAX_MANIFEST)?;
     let manifest = Manifest::parse(&text)?;
-    let Some(native) = manifest.native.as_ref() else {
+    if manifest.native.is_none() {
         return Err(format!("{MANIFEST}: a content mod pins no game build"));
-    };
+    }
+    Ok((path, text, manifest))
+}
+
+/// Repins a native mod. Declared internals are checked against the new build before writing.
+/// `Cargo.toml` names the SDK by path, so the next command fetches the new one.
+fn repin(dir: &Path, fetch: FetchSdk, requested: &str, sunrise: &str) -> Result<(), String> {
+    let (path, text, manifest) = pinned_manifest(dir)?;
+    let native = manifest
+        .native
+        .as_ref()
+        .expect("pinned_manifest checked the pin");
     // The new build's SDK must exist and verify before anything is written; the mixins revision
     // is the SDK's own unless the manifest pins one.
     fetch(dir, sunrise).map_err(|e| sdk_fetch::named(requested, sunrise, e))?;

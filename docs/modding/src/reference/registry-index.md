@@ -383,7 +383,7 @@ The descriptor `<id>-<version>+<release>.binaries.json` names `id`, `version`, `
 and its URL is beside the descriptor in a release of the project's GitHub repository. `source` names that
 repository; if `source` is omitted, `repo` supplies it. The archive contains exactly the library and
 `identity.json`, both regular root files. `identity.json` has `target`, `file` (the library
-name), `sha256` (the library digest) and `identity` (`<build> <id> <version> <rust> unwind`). The same
+name), `sha256` (the library digest) and `identity` (the library's build identity, whose first four fields are `<build> <id> <version> <rust>` and whose last is `unwind`; see the native build's `records`). The same
 project key signs the source, every archive, and the descriptor. The descriptor binds each archive's
 bytes to the declared project, mod version and SDK host. Validation checks every host the SDK ships,
 without running or rebuilding any library. A binary for a package with a known `breaks` verdict is

@@ -51,12 +51,6 @@
       "canonical_path": "crate::world::dimension::BiomeSourceKind"
     },
     {
-      "name": "Blend",
-      "path": "crate::client::hud_layout::Blend",
-      "hash": "5027edf2d2f16269",
-      "canonical_path": "crate::client::hud_layout::Blend"
-    },
-    {
       "name": "BlockEntityError",
       "path": "crate::block::types::BlockEntityError",
       "hash": "b775b139eb9c224e",
@@ -802,12 +796,6 @@
       "path": "crate::client::world_draw::WorldDepth",
       "hash": "4409bd351ad1b1df",
       "canonical_path": "crate::client::world_draw::WorldDepth"
-    },
-    {
-      "name": "WorldPhase",
-      "path": "crate::world::types::WorldPhase",
-      "hash": "1322c39e2b688618",
-      "canonical_path": "crate::world::types::WorldPhase"
     }
   ],
   "retired_identities": [

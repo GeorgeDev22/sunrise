@@ -797,9 +797,9 @@ impl Level {
         self.write_internal(dir, None, false, false)
     }
 
-    /// `level.dat` without a new player file: the single-player owner's file stays as last
-    /// saved, and a legacy `Data.Player` (before the first normal save the owner's only copy)
-    /// stays in `level.dat`.
+    /// Write world metadata without saving the owner. The first `level.dat` names a
+    /// known profile, even before login. Later writes preserve the existing profile
+    /// reference and any legacy `Data.Player`.
     pub fn write_keeping_player(&mut self, dir: &Path) -> Result<()> {
         self.write_internal(dir, None, false, true)
     }
@@ -834,7 +834,18 @@ impl Level {
     ) -> Result<()> {
         fs::create_dir_all(dir)?;
         restore_level_dat(dir);
-        let mut root = compound_or_empty(read_dat(&dir.join("level.dat")));
+        let existing = read_dat(&dir.join("level.dat"));
+        // `saveAllChunks` passes the single-player profile independently of `PlayerList`.
+        // For an existing world with no placed owner, keep its on-disk reference (even
+        // when absent); `self.player_uuid` can name a different profile in that case.
+        let uuid = if upload {
+            None
+        } else if keep_legacy_player {
+            self.player_uuid.filter(|_| existing.is_none())
+        } else {
+            Some(self.ensure_player_uuid())
+        };
+        let mut root = compound_or_empty(existing);
         let legacy = root
             .get("Data")
             .is_some_and(|d| d.get("Player").is_some() || d.get("WorldGenSettings").is_some());
@@ -881,11 +892,6 @@ impl Level {
                 map.remove(&JavaString::from(key));
             }
         }
-        // An upload's level.dat names no player (`createTag(null)`); every other file
-        // names this world's own.
-        // A keep-owner write names nothing new: the on-disk `singleplayer_uuid` (or its absence)
-        // stays, so reopening loads the same owner file as before.
-        let uuid = (!upload && !keep_legacy_player).then(|| self.ensure_player_uuid());
         // A new world's first spawn point is its world spawn.
         if self.world_spawn.is_none() {
             self.world_spawn = self.spawn.map(|s| {

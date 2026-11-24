@@ -153,7 +153,10 @@ pub struct Frame<'a> {
     pub cave_culling: bool,
     /// Title screen: only the dedicated panorama cube map and the HUD.
     pub title: bool,
-    /// Lava, powder snow, blindness, darkness or a boss bar's world fog leaves out the sky pass
+    /// Whether `LevelRenderer.addSkyPass` would add the pass that owns NeoForge's
+    /// `RenderLevelStageEvent.AfterSky`, independent of Sunrise's sky drawing flags.
+    pub sky_pass: bool,
+    /// Lava, powder snow, blindness, darkness or a boss bar's world fog suppresses sky drawing
     /// (`fog::sky_pass_skipped`).
     pub sky_blocked: bool,
     /// Dimensions without a skybox (the Nether) clear to the fog colour.

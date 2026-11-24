@@ -6,29 +6,26 @@
 use super::*;
 use crate::game::native_entity_refs::tests::with_game;
 use mod_api::{
-    AttachmentCodec, AttachmentError, AttachmentType, EntityPart, EntityTickListenedEvent,
-    EntityTickPreEvent, Flow, GeneralEntityCategory, GeneralEntityTickEvent, GeneralSavePolicy,
-    Holder, Hooks, HostSide, Registrar, ServerHost,
+    AttachmentCodec, AttachmentDescriptor, AttachmentError, AttachmentKey, EntityPart,
+    EntityTickListenedEvent, EntityTickPreEvent, Flow, GeneralEntityCategory,
+    GeneralEntityTickEvent, GeneralSavePolicy, Holder, Hooks, HostSide, Registrar, ServerHost,
 };
 use std::sync::{Arc, Mutex};
 use sunrise_core::nbt::{Compound, Tag};
 
 /// The fixture counter: an attachment with a codec, so a saved row resumes
 /// its count and a quarantined record keeps it in its bytes.
-static COUNTER: AttachmentType<i32> = AttachmentType {
-    namespace: "mymod",
-    name: "counter",
-    default: || 0,
-    codec: Some(AttachmentCodec {
-        encode: |n| Ok([("n".into(), Tag::Int(*n))].into()),
-        decode: |tag: &Compound| match tag.get(&"n".into()) {
-            Some(Tag::Int(n)) => Ok(*n),
-            _ => Err(AttachmentError::Decode),
-        },
-    }),
-    copy_on_death: false,
-    sync: false,
+const COUNTER_CODEC: AttachmentCodec<i32> = AttachmentCodec {
+    encode: |n| Ok([("n".into(), Tag::Int(*n))].into()),
+    decode: |tag: &Compound| match tag.get(&"n".into()) {
+        Some(Tag::Int(n)) => Ok(*n),
+        _ => Err(AttachmentError::Decode),
+    },
 };
+
+fn counter_key() -> AttachmentKey<i32> {
+    mod_api::testing::attachment_key("mymod", "counter")
+}
 
 /// What the part saw, in call order: each row's id.
 type Trace = Arc<Mutex<Vec<u32>>>;
@@ -53,6 +50,7 @@ enum OnTick {
 /// per-instance state — two rows of one type share this one part, and their
 /// counters live apart in their attachments.
 struct Counter {
+    counter: AttachmentKey<i32>,
     trace: Trace,
     events: Events,
     /// Panics on this row's first tick only, after its write: the
@@ -73,8 +71,8 @@ impl EntityPart for Counter {
             .expect("live resident general entity");
         let host = event.subject.host();
         let holder = Holder::Entity(entity.id());
-        let value = COUNTER.get(host, holder).unwrap() + 1;
-        COUNTER.set(host, holder, value).unwrap();
+        let value = self.counter.get(host, holder, Clone::clone).unwrap() + 1;
+        self.counter.set(host, holder, value).unwrap();
         if self.panicking_on() == Some(entity.id())
             && !self.fired.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
@@ -127,7 +125,11 @@ struct Declare {
 #[mod_api::__subscriptions]
 impl Hooks for Declare {
     fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
-        r.register_attachment_type("mymod:counter", false).unwrap();
+        let counter = r
+            .register_attachment_type(
+                AttachmentDescriptor::new("mymod:counter", || 0i32).serialize(COUNTER_CODEC),
+            )
+            .unwrap();
         for (path, save) in [("robot", true), ("ghost", false)] {
             r.declare_general_entity(
                 path,
@@ -153,6 +155,7 @@ impl Hooks for Declare {
         r.entity_part(
             "mymod:robot",
             Counter {
+                counter,
                 trace: self.trace.clone(),
                 events: self.events.clone(),
                 panic_on: self.panic_on.clone(),
@@ -331,13 +334,15 @@ fn tick(game: &mut Game<'_>) {
 
 /// A row's counter, read through the same host surface the part writes.
 fn counter(game: &mut Game<'_>, id: u32) -> i32 {
-    COUNTER.get(game, Holder::Entity(id)).unwrap()
+    counter_key()
+        .get(game, Holder::Entity(id), Clone::clone)
+        .unwrap()
 }
 
 /// One robot row, its counter already at `value`.
 fn seeded_row(game: &mut Game<'_>, uuid: [i32; 4], value: i32) -> u32 {
     let id = spawn_tree(game, uuid, [0.5, 64.0, 0.5], Vec::new());
-    COUNTER.set(game, Holder::Entity(id), value).unwrap();
+    counter_key().set(game, Holder::Entity(id), value).unwrap();
     id
 }
 
@@ -641,7 +646,11 @@ fn a_reloaded_row_resumes_the_counter_and_refuses_its_old_handle() {
         let fresh = rows[0].id;
         assert_ne!(fresh, old);
         assert_eq!(counter(game, fresh), 41);
-        assert!(COUNTER.get(game, Holder::Entity(old)).is_err());
+        assert!(
+            counter_key()
+                .get(game, Holder::Entity(old), Clone::clone)
+                .is_err()
+        );
         tick(game);
         assert_eq!(counter(game, fresh), 42);
     });

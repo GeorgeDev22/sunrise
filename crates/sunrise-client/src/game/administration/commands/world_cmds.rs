@@ -4,7 +4,7 @@ use super::{Arg, Context, Game, R, Target, err, wrap_degrees};
 use crate::game::living_attributes::AttributeWrite;
 use crate::game::minecarts::CartHit;
 use sunrise_client::{
-    mobs::{Damage, DamageKind, MobEvent, NamedDamage, Who, finalize},
+    mobs::{Damage, DamageKind, MobEvent, Who, finalize},
     scoreboard_cmd::{Holder, Tracker},
     settings::SOUND_SOURCES,
     text::Text,
@@ -140,8 +140,7 @@ impl Game<'_> {
     /// factory chooses the type based on the attacker; an explicit registry
     /// type must not. Other registered types keep their id and tags as `Named`.
     pub(in crate::game) fn damage_kind(catalog: &DamageCatalog, ty: &str) -> DamageKind {
-        Self::builtin_damage_kind(ty)
-            .or_else(|| NamedDamage::registered(catalog, ty).map(DamageKind::Named))
+        sunrise_client::health::resolve_damage_kind(Some(catalog), ty)
             .unwrap_or(DamageKind::Generic)
     }
 
@@ -150,56 +149,8 @@ impl Game<'_> {
         catalog: &DamageCatalog,
         ty: &str,
     ) -> Option<DamageKind> {
-        match Self::builtin_damage_kind(ty) {
-            Some(kind) => catalog.id(ty).map(|_| kind),
-            None => NamedDamage::registered(catalog, ty).map(DamageKind::Named),
-        }
-    }
-
-    fn builtin_damage_kind(ty: &str) -> Option<DamageKind> {
-        Some(match ty.strip_prefix("minecraft:").unwrap_or(ty) {
-            "player_attack" => DamageKind::PlayerAttack,
-            "mace_smash" => DamageKind::MaceSmash,
-            "spear" => DamageKind::Spear,
-            "mob_attack" => DamageKind::MobAttack,
-            "mob_attack_no_aggro" => DamageKind::MobAttackNoAggro,
-            "arrow" => DamageKind::Arrow,
-            "thrown" => DamageKind::Thrown,
-            "fireball" => DamageKind::Fireball,
-            "wither_skull" => DamageKind::WitherSkull,
-            "fall" => DamageKind::Fall,
-            "on_fire" => DamageKind::OnFire,
-            "in_fire" => DamageKind::InFire,
-            "hot_floor" => DamageKind::HotFloor,
-            "campfire" => DamageKind::Campfire,
-            "lava" => DamageKind::Lava,
-            "drown" => DamageKind::Drown,
-            "dry_out" => DamageKind::DryOut,
-            "magic" => DamageKind::Magic,
-            "sting" => DamageKind::Sting,
-            "cactus" => DamageKind::Cactus,
-            "sweet_berry_bush" => DamageKind::SweetBerryBush,
-            "freeze" => DamageKind::Freeze,
-            "in_wall" => DamageKind::InWall,
-            "thorns" => DamageKind::Thorns,
-            "cramming" => DamageKind::Cramming,
-            "falling_anvil" => DamageKind::FallingAnvil,
-            "falling_block" => DamageKind::FallingBlock,
-            "fireworks" => DamageKind::Fireworks,
-            "generic_kill" => DamageKind::GenericKill,
-            "lightning_bolt" => DamageKind::LightningBolt,
-            "out_of_world" => DamageKind::OutOfWorld,
-            "outside_border" => DamageKind::OutsideBorder,
-            "sonic_boom" => DamageKind::SonicBoom,
-            "spit" => DamageKind::Spit,
-            "stalagmite" => DamageKind::Stalagmite,
-            "starve" => DamageKind::Starve,
-            "sulfur_cube_hot" => DamageKind::SulfurCubeHot,
-            "wind_charge" => DamageKind::WindCharge,
-            "wither" => DamageKind::Wither,
-            "generic" => DamageKind::Generic,
-            _ => return None,
-        })
+        catalog.id(ty)?;
+        sunrise_client::health::resolve_damage_kind(Some(catalog), ty)
     }
     /// `DamageCommand.damage`: apply its source and report an accepted hit.
     pub(super) fn cmd_damage(&mut self, ctx: &Context) -> R<i32> {
@@ -230,7 +181,7 @@ impl Game<'_> {
         // Destruction can remove the target before its success message is built.
         let discarded_name = matches!(target, Target::Item(_) | Target::Boat(_) | Target::Cart(_))
             .then(|| self.target_name(target));
-        let hurt = self.hurt_target(target, amount, &ty, by, cause, from);
+        let hurt = self.hurt_target(target, amount, &ty, by, cause.or(by), from);
         if !hurt {
             return Err(err("commands.damage.invulnerable", &[]));
         }
@@ -262,10 +213,10 @@ impl Game<'_> {
     ) -> bool {
         // Resolve the damage registry at the shared command/API boundary before
         // any target-specific path can mutate state or map it to a DamageKind.
-        if self.health_resources.damage.id(ty).is_none() {
+        if !amount.is_finite() || amount < 0.0 || self.health_resources.damage.id(ty).is_none() {
             return false;
         }
-        let attacker = cause.or(by).and_then(|t| self.network_entity_id(t));
+        let attacker = cause.and_then(|t| self.network_entity_id(t));
         let attack = self.command_attack(attacker.unwrap_or(0), by);
         self.with_attack(attack, |g| {
             g.hurt_target_from_source(target, amount, ty, by, cause, from)
@@ -347,22 +298,21 @@ impl Game<'_> {
             // The causing mob is the one the hit is credited to and thorns
             // answer; the source position gives the knockback its direction.
             Target::Player | Target::Guest(_) => {
-                // `DamageSource(type, by, cause)`: the death message names the
-                // causing entity, else the direct one. A mob is noted by
-                // `hurt_player_from`, a player here.
+                // `DamageSource.getLocalizedDeathMessage` can name the direct entity
+                // when there is no causing entity. Attribution still uses the cause.
                 let named = match cause.or(by) {
                     Some(t @ (Target::Player | Target::Guest(_))) => Some(self.target_name(t)),
                     _ => None,
                 };
-                let attacker = match cause.or(by) {
+                let attacker = match cause {
                     Some(Target::Mob(i)) => Some(Some(i)),
                     _ => Some(None),
                 };
                 // `DamageSource.isCreativePlayer`: a creative player's hit
                 // passes the victim's invulnerability (#916).
-                let creative_source = self.creative_source_of(cause.or(by));
+                let creative_source = self.creative_source_of(cause);
                 // resolvePlayerResponsibleForDamage: remember the causing player's UUID.
-                let by_player = match cause.or(by) {
+                let by_player = match cause {
                     Some(Target::Player) => self.lan_acting,
                     Some(Target::Guest(conn)) => Some(conn),
                     _ => None,
@@ -386,7 +336,7 @@ impl Game<'_> {
                 .unwrap_or(false)
             }
             Target::Mob(id) => {
-                let attacker = cause.or(by).and_then(|t| match t {
+                let attacker = cause.and_then(|t| match t {
                     Target::Player | Target::Guest(_) => Some(Who::Player),
                     Target::Mob(i) | Target::Dragon(i) | Target::Stand(i) => Some(Who::Mob(i)),
                     _ => None,
@@ -403,7 +353,7 @@ impl Game<'_> {
                 };
                 // DamageSource.getEntity is the causing player, even when
                 // another client issued the command or supplied the direct entity.
-                let guest = match cause.or(by) {
+                let guest = match cause {
                     Some(Target::Guest(conn)) if self.lan_acting != Some(conn) => Some(conn),
                     _ => None,
                 };
@@ -422,9 +372,9 @@ impl Game<'_> {
                     self.command_damage_mob(id, amount, damage)
                 }
             }
-            Target::Item(id) => self.hurt_item_entity(id, amount, ty, by, cause.or(by), from),
+            Target::Item(id) => self.hurt_item_entity(id, amount, ty, by, cause, from),
             Target::Boat(_) | Target::Cart(_) => {
-                self.command_damage_vehicle(target, amount, ty, by, cause.or(by), from)
+                self.command_damage_vehicle(target, amount, ty, by, cause, from)
             }
             Target::Dragon(id) => self.command_damage_dragon(
                 id,
@@ -433,7 +383,7 @@ impl Game<'_> {
                 Self::damage_kind(&self.health_resources.damage, ty),
                 (
                     by,
-                    cause.or(by),
+                    cause,
                     from.map(|[x, y, z]| sunrise_core::geometry::Vec3::new(x, y, z)),
                 ),
             ),
@@ -442,10 +392,10 @@ impl Game<'_> {
                 ty,
                 Self::damage_kind(&self.health_resources.damage, ty),
                 by,
-                cause.or(by),
+                cause,
                 from,
             ),
-            Target::Stand(id) => self.command_damage_stand(id, ty, cause.or(by)),
+            Target::Stand(id) => self.command_damage_stand(id, ty, cause),
             _ => false,
         }
     }

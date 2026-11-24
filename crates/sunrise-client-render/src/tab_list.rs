@@ -103,7 +103,7 @@ pub const SKIN_TEX: [i32; 2] = [64, 64];
 
 /// `PlayerFaceExtractor.extractRenderState`'s blits of a skin ([`SKIN_TEX`]): the face, then
 /// its hat layer when `hat`, each as its `uv` and `src`; upside down (from the bottom row, a
-/// negative height) when `flip`, for Dinnerbone and Grumm. [`face`] and `GuiDraw::PlayerFace`
+/// negative height) when `flip`, for Dinnerbone and Grumm. [`face`] and `GuiCanvas::player_face`
 /// both draw these.
 pub fn face_blits(hat: bool, flip: bool) -> impl Iterator<Item = ([f32; 2], [i32; 2])> {
     let (v, height) = if flip { (16.0, -8) } else { (8.0, 8) };

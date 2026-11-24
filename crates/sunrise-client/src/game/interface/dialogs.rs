@@ -856,7 +856,7 @@ impl Game<'_> {
                         continue;
                     };
                     // ItemDisplayWidget: the item at its corner, then its decorations.
-                    self.draw_item_model(batch, &stack, x, y);
+                    self.draw_item_model(batch, &stack, x, y, 0);
                     if *show_decorations {
                         self.draw_item_decorations(batch, &stack, x, y, None);
                     }

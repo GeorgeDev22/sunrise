@@ -254,42 +254,6 @@ fn json_backed_codecs_preflight_before_serde_recursion() {
                     _ => {}
                 }
             }
-            let mut model = crate::ModelPart::new(vec![], vec![], Default::default());
-            for _ in 0..10 {
-                model = crate::ModelPart::new(
-                    vec![],
-                    vec![("child".into(), model)],
-                    Default::default(),
-                );
-            }
-            let mut valid_model = Writer::new();
-            valid_model.put(&model);
-            assert_eq!(valid_model.error(), None);
-            let _ = Reader::decode::<crate::ModelPart>(valid_model.bytes()).unwrap();
-            for depth in 10..1024 {
-                if depth == 11 {
-                    let mut refused = Writer::new();
-                    refused.put(&model);
-                    assert_eq!(refused.error(), Some(WireError::Depth));
-                }
-                model = crate::ModelPart::new(
-                    vec![],
-                    vec![("child".into(), model)],
-                    Default::default(),
-                );
-            }
-            let mut out = Writer::new();
-            out.put(&model);
-            assert_eq!(out.error(), Some(WireError::Depth));
-            let mut parts = vec![model];
-            while let Some(mut part) = parts.pop() {
-                for (_, child) in part.children_mut() {
-                    parts.push(std::mem::replace(
-                        child,
-                        crate::ModelPart::new(vec![], vec![], Default::default()),
-                    ));
-                }
-            }
         })
         .unwrap()
         .join()

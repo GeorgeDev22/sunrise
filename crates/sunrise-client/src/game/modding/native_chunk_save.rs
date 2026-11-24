@@ -75,10 +75,9 @@ impl Game<'_> {
 }
 
 impl Game<'_> {
-    /// With a `chunk_data_save` listener, saves wait while an action savepoint
-    /// is open, so tentative state is never captured: unloads, and the plan
-    /// that causes them, are deferred until it closes (the design's "defer
-    /// unload when the gate refuses"). Never defers without a listener.
+    /// Defer eager saves, streaming/unload and closing-save polling at their
+    /// gameplay call sites while an action savepoint holds an entity pass open.
+    /// With no save listener these call sites do not take this deferral path.
     pub(super) fn defer_chunk_disk_save(&mut self) -> bool {
         if self.options.execution_role.is_client()
             || !mod_api::__private::listened(mod_api::HookId::ChunkDataSave)

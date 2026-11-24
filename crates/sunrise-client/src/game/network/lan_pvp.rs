@@ -74,6 +74,9 @@ pub(super) struct Strike {
     /// The weapon's `minecraft:ignite` (Fire Aspect) on the victim, in
     /// seconds (`EnchantmentHelper.doPostAttackEffects`).
     ignite: f32,
+    /// The weapon taken before the hit, for mods' own `post_attack` kinds
+    /// after it (lethal Thorns may empty the hand first).
+    pub(super) weapon: Option<sunrise_client::items::ItemStack>,
 }
 
 /// A player's blow on another player as the native hooks name it: the hit's
@@ -105,6 +108,7 @@ impl Strike {
             team: None,
             item: None,
             ignite: 0.0,
+            weapon: None,
         }
     }
 }
@@ -210,6 +214,8 @@ impl Game<'_> {
                 .map_or(0.0, |stack| self.items().weapon_disable_blocking(stack))
         };
         let ignite = self.weapon_ignite_seconds();
+        // `Player.getWeaponItem`: the main hand.
+        let weapon = self.native_post_attack_weapon(self.inventory[self.selected].as_ref());
         Some(Strike {
             attacker: self.lan_acting,
             creative: self.creative,
@@ -225,6 +231,7 @@ impl Game<'_> {
             team: self.player_team().cloned(),
             item: self.main_hand_custom_name(),
             ignite,
+            weapon,
         })
     }
 
@@ -756,9 +763,9 @@ impl Game<'_> {
                         let _ = p.ignite_for_ticks((sweep.ignite * 20.0) as i32);
                     }
                     // The swept player's thorns are dealt after the hit.
-                    return g.thorns_damage();
+                    return Some(g.thorns_damage());
                 }
-                Vec::new()
+                None
             })
         };
         let attacker_id = attacker.as_ref().map_or(attacker_id, |(id, _)| *id as i32);
@@ -770,7 +777,9 @@ impl Game<'_> {
                 continue;
             }
             let Victim::Guest(conn) = victim;
-            let thorns = self.guest_struck_by(conn, land).unwrap_or_default();
+            let Some(thorns) = self.guest_struck_by(conn, land).flatten() else {
+                continue;
+            };
             // doPostAttackEffects' victim side: its armour's thorns hurt the
             // attacker, as on a direct hit (pvp_land).
             let thorns_cause = self.player_attacker(victim.conn());
@@ -791,6 +800,25 @@ impl Game<'_> {
                         });
                     }
                 }
+            }
+            // doPostAttackEffects' attacker side, after the victim's: the mod
+            // kinds of the weapon the attacker holds now (`getWeaponItem`).
+            let weapon = match sweep.attacker {
+                // The attacker's turn is over: their record holds the hand.
+                Some(conn) => self.lan.as_ref().and_then(|host| {
+                    let g = host.hub.guest(conn)?;
+                    self.native_post_attack_weapon(g.inventory[g.selected].as_ref())
+                }),
+                None => self.native_post_attack_weapon(self.inventory[self.selected].as_ref()),
+            };
+            if let (Some(weapon), Some((attacker, _))) = (weapon, &attacker) {
+                self.native_weapon_post_attack(
+                    &weapon,
+                    (*attacker, "minecraft:player"),
+                    (id as u32, "minecraft:player"),
+                    // The type `land` hurt the player with.
+                    "minecraft:player_attack",
+                );
             }
         }
     }

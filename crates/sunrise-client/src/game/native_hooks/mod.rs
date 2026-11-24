@@ -12,7 +12,7 @@ pub(in crate::game) use block_entity_tick::ResidentBlockEntityAccess;
 pub(in crate::game) use build_creative_mode_tab_contents::CreativeCache;
 pub(in crate::game) use client_pick::ClientPick;
 pub(in crate::game) use fire::{
-    ConnectsToCall, EntityChangeBlockPreCall, HotbarAttackIndicatorProgressCall,
+    ConnectsToCall, EnchantEffectCall, EntityChangeBlockPreCall, HotbarAttackIndicatorProgressCall,
     ItemAfterVerticalCollisionCall, PlayerPongCall, PreRemoveSideEffectsCall, UpdateShapeCall,
 };
 use mod_api::{BlockEntityDataSource, BlockEntityRef, ClockAdjustment};
@@ -46,7 +46,7 @@ use mod_api::{
     NoteBlockChange, ParticleProviders, PathComputationType, Placement, PlayerRef,
     PoiTypeExtensions, RecipeBookCategory, ScreenId, ScreenOpening, ScreenTarget, ScreenWidgets,
     ScreenshotImage, ServerReloadListeners, ServerTickPhase, SpecialModelRenderers,
-    TicketController, ToolUse, VillagerProfessions, WorldPhase,
+    TicketController, ToolUse, VillagerProfessions,
 };
 use mod_api::{
     ActiveEffect, AttachmentStore, BlockClick, BlockUpdateFlags, BonemealSource, ChunkRef,
@@ -318,6 +318,7 @@ mod grindstone_take;
 #[cfg(test)]
 mod guest_death_lifecycle_tests;
 mod gui_render_post;
+mod gui_status_heights;
 mod gui_ticks;
 mod held_item_tint;
 mod highlight_tip;
@@ -460,6 +461,7 @@ mod portal_spawn;
 mod potion_brew_post;
 mod potion_brew_pre;
 mod pre_remove_side_effects;
+mod prepare_render_buffers;
 mod preset_title;
 mod rails;
 mod recipe_book_categories;

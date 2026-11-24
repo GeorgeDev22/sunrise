@@ -75,7 +75,7 @@ mod prepared_model;
 pub use prepared_model::fail_next_prepared_upload;
 pub use prepared_model::{
     PreparedInstanceBuilder, PreparedModelDraw, PreparedModelInstance, PreparedModelVertex,
-    PreparedModels, camera_matrix,
+    PreparedModels, camera_matrix, prepared_instance_room_for,
 };
 #[cfg(feature = "test-support")]
 pub use prepared_model::{
@@ -870,8 +870,18 @@ impl Renderer {
             );
         }
     }
+    /// Device `max_buffer_size`, for instance-room checks while `Renderer` is borrowed by `render`.
+    pub fn max_buffer_size(&self) -> u64 {
+        self.device.limits().max_buffer_size
+    }
+    /// Render `frame`, optionally driving mod world-render hooks (`FrameHooks`) at the renderer's
+    /// real visibility, sky, prepare, pass-stage, and post-world boundaries.
     #[sunrise_mod_api_macros::replaceable]
-    pub fn render(&mut self, frame: &Frame) -> Result<bool> {
+    pub fn render(
+        &mut self,
+        frame: &Frame,
+        hooks: Option<&mut dyn world_primitives::FrameHooks>,
+    ) -> Result<bool> {
         // A lost device cannot accept uploads either. Leave recovery to the
         // owner instead of submitting atlas patches to the invalid device.
         if self.device_lost() {
@@ -883,8 +893,8 @@ impl Renderer {
         }
         let scaled = self.screenshot_size();
         let rendered = match scaled {
-            Some(size) => self.draw_scaled_frame(frame, size),
-            None => self.draw_frame(frame, None, self.output),
+            Some(size) => self.draw_scaled_frame(frame, size, hooks),
+            None => self.draw_frame(frame, None, self.output, hooks),
         };
         self.finish_prepared_frame();
         // A frame that was not drawn still submits the section copies and

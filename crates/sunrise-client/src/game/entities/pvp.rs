@@ -773,7 +773,7 @@ impl Game<'_> {
                 }
                 Icon::Slot(slot) => {
                     if let Some(stack) = self.stack_in(*slot) {
-                        self.draw_item_model(batch, stack, ix, iy);
+                        self.draw_item_model(batch, stack, ix, iy, 0);
                     }
                 }
                 Icon::Sprite(name) => {

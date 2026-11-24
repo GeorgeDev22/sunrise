@@ -23,7 +23,7 @@ files `config/<mod id>.<ext>` and `config/<mod id>-<rest>`.
 3. When the file changes on disk, `config_reloading` brings the new text. The game checks modification times once a
    second; a save with the same text, a removed file or an unreadable one fires nothing and keeps the last text.
 4. A `Server` config is per world: it loads before `server_about_to_start` from the world's `serverconfig/`, and
-   `config_unloading` drops it after `server_stopping`. `Client` and `Common` configs load once and stay until the
+   `config_unloading` drops it after `server_stopped`. It remains available through the final level saves and unloads. `Client` and `Common` configs load once and stay until the
    game quits.
 
 `register_configs` and `config_loading` take `&dyn ConfigContext` for settings reads and config files, without

@@ -1271,17 +1271,3 @@ pub(in crate::game) fn stack_can_be_hurt_by(
         .and_then(|components| components.get("minecraft:damage_resistant"));
     sunrise_client::item_damage::stack_can_be_hurt_by(default, catalog, stack, name)
 }
-
-pub(in crate::game) const ITEM_ENVIRONMENT_DAMAGE: [&str; 4] = [
-    "minecraft:on_fire",
-    "minecraft:lava",
-    "minecraft:in_fire",
-    "minecraft:cactus",
-];
-
-pub(in crate::game) fn item_damage_resolver<'a>(
-    models: &'a sunrise_assets::item_model::ItemModels,
-    catalog: &'a sunrise_world::damage_source::Catalog,
-) -> impl Fn(&ItemStack, &str) -> bool + 'a {
-    move |stack, damage| stack_can_be_hurt_by(models, catalog, stack, damage).unwrap_or(true)
-}

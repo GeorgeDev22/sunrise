@@ -142,7 +142,23 @@ jobs:
           retention-days: 3
       - name: Clippy
         run: cargo clippy --locked -p sunrise-client -p sunrise-client-lib -p sunrise-client-render --lib --tests --bins -- -D warnings
-      # The unit tests of the change being checked: PR #4167's mount packets (seats, carts, boats, effects)
+      # The unit tests of the change being checked: PR #4166's player portal cooldown.
       - name: The change's unit tests
         run: |
-          cargo test --locked -p sunrise-client --lib -- boarding:: boat_passengers minecart passengers seats:: mounts:: ambient hidden_effect send_effect active_effects weaker_longer_effect an_effect_added_again a_mobs_effect_keeps hidden_only_updates
+          cargo test --locked -p sunrise-client-lib --lib -- nether_portal::
+          cargo test --locked -p sunrise-client --lib -- server_travel::
+      # The same lib test binary with the three fixes reverted (.github/cloud-build/revert.patch),
+      # to show each new test fails without its fix.
+      - name: The lib test binary without the fixes
+        run: |
+          git apply .github/cloud-build/revert.patch
+          cargo test --locked -p sunrise-client --lib --no-run --message-format=json > reverted.json
+          mkdir -p revertbin
+          python3 -c "import json,shutil;[shutil.copy(m['executable'],'revertbin/'+m['target']['name']+'-'+m['target']['kind'][0]) for m in map(json.loads,open('reverted.json')) if m.get('reason')=='compiler-artifact' and m.get('profile',{}).get('test') and m.get('executable') and m['target']['name']=='sunrise_client']"
+          ls -la revertbin
+          tar -czf sunrise-reverted-tests.tar.gz revertbin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sunrise-reverted-tests
+          path: sunrise-reverted-tests.tar.gz
+          retention-days: 3

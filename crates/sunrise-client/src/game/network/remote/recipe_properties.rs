@@ -26,11 +26,20 @@ impl Game<'_> {
         if self.mod_screen.is_some() {
             self.remote_close_local();
         }
+        self.unload_client_level();
         self.native_lifecycle.begin_close();
         self.native_lifecycle_world_closed();
         self.recipe_ui.server_properties = Default::default();
         self.recipe_ui.server_stations = None;
         self.refresh_recipe_property_context();
+    }
+
+    /// `Minecraft.setLevel` / `clearClientLevel`: once per installed level,
+    /// while it is still the active level and its chunks and handles resolve.
+    pub(super) fn unload_client_level(&mut self) {
+        if let Some(dimension) = self.remote.as_mut().and_then(|r| r.heard_level.take()) {
+            self.native_client_level_unload(&dimension);
+        }
     }
 
     pub(super) fn remote_recipe_properties(

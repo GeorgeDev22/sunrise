@@ -42,6 +42,13 @@ pub trait EntityRidingBackend {
     /// On a client, whether any passenger boarded from the server's list.
     /// Stale or untracked handles return `None`.
     fn entity_is_vehicle(&self, entity: EntityRef) -> Option<bool>;
+    /// Side: both.
+    /// Whether the HUD draws this entity's hearts in place of the food bar while the local
+    /// player rides it (`Entity.showVehicleHealth`): true for a living entity
+    /// (`LivingEntity`: a mob, a player, an armor stand or the dragon), false for anything
+    /// else, such as a boat or a minecart. On a client, any entity the server shows this
+    /// window answers from its type. `None` for a stale or untracked handle.
+    fn entity_shows_vehicle_health(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
     /// Every entity riding this one, at any depth (`Entity.getIndirectPassengers`): each
     /// passenger in boarding order, followed by those riding it. Traverses retained

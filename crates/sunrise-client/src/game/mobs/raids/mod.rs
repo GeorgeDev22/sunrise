@@ -2,7 +2,7 @@
 //! their waves, boss bar, victory and the raiders' bookkeeping. The rules are
 //! `sunrise_client::patrol` and `sunrise_client::raid`; this is the game's
 //! side of them.
-use super::{Dim, Game, creatures::Finalized};
+use super::{Dim, Game};
 use std::collections::{HashMap, HashSet};
 use sunrise_client::mobs::villager as mobs_villager;
 use sunrise_client::{
@@ -202,7 +202,7 @@ impl PatrolLevel for PatrolCx<'_, '_, '_> {
     /// and every guest in the level.
     fn patrol_players(&self) -> Vec<([i32; 3], bool)> {
         self.level
-            .players
+            .players()
             .iter()
             .map(|p| (block_of(p.position), p.spectator))
             .collect()
@@ -882,7 +882,7 @@ impl Game<'_> {
         } else {
             sunrise_client::mobs::spawn_rules::Reason::Event
         };
-        if self.finalize_with(&mut mob, spawn_reason, None) == Finalized::Cancelled {
+        if !self.finalize_with(&mut mob, spawn_reason, None) {
             return None;
         }
         let id = mob.id;

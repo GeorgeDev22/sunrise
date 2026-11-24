@@ -246,11 +246,12 @@ server), but it is never compared at join, so players joining need not have it. 
 load when it carries what every joining client must know: registry declarations (`data/<id>/sunrise/`, or blocks,
 items, block entity types and fluids its code declares), a listener on a client-side hook, a part that listens to one,
 a required payload the server sends to clients, or a synced attachment type it declares.
-For attachments, “carries” means **declares**: a server package may use another loaded package A's synced
+For attachments, “carries” means **declares**: a server package may look up and use another loaded package A's synced
 attachment, because clients compare A and decode the value through A. If A is itself a server package, A is the
-declarer refused by name. Attachment load checks declaration conflicts (including foreign namespaces) first,
-then undeclared uses naming the calling package and id, then server-package declarations; no content is admitted
-after a refusal. See [attachments](../concepts/attachments.md) for the declaration API.
+declarer refused by name. Attachment load checks registration refusals (invalid descriptors, duplicate IDs, and stale
+part-state keys) first, then server-package synced declarations (matched by the declaring package's owner ID
+regardless of attachment namespace); no content is admitted after a refusal. See [attachments](../concepts/attachments.md)
+for the declaration API.
 Assets, lang and data vanilla syncs itself (recipes, loot, tags) are allowed. Where a hook runs is still the hook's own side: the manifest says what a client must have, not where a
 hook runs. A vanilla or other
 non-Sunrise client is refused when the server needs both-side mods, with their names and versions and an English
@@ -1179,7 +1180,11 @@ unavailable registries, stale or unloaded levels, and a missing published set gi
 `UnknownRegistry`; a registry without the entry gives `MissingEntry`. A host without a backend
 returns `Unavailable`. Listing returns `None` for an unavailable level or registry, not for a
 known empty registry. Once a client receives a valid snapshot at join or reload, it reads those
-entries; any of its declared registries omitted from the snapshot have no entries there.
+entries; any of its declared registries omitted from the snapshot have no entries there. Resolve
+`host.level(event.dimension)` in `client_level_load` or `client_level_unload` to read the
+available synchronized registries through the entering or retiring level. Unload still sees its
+old configuration during a server reconfiguration; the next Load sees the new set. A retiring
+`LevelRef` is stale after Unload.
 
 #### Block entity containers
 
@@ -1394,7 +1399,7 @@ always sent. An enchantment reaches the enchanting table through vanilla's tags 
 in_enchanting_table.json` and the others), which a mod adds to as any tag. A world's data pack replaces a mod's
 enchantment of the same id. What an enchantment does beyond vanilla's effect components is the mod's code: a native
 hook reads the held stack's enchantments, or claims a `post_attack` effect of its own kind
-([enchantment effect kinds](items/enchantment-effect-kinds.md)).
+([enchantment effect kinds](items.md#custom-enchantment-effect-kinds)).
 
 #### Worldgen additions, biome modifiers and custom biomes
 

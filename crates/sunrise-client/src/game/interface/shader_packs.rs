@@ -807,6 +807,17 @@ impl Game<'_> {
     }
 
     fn mark_entity_part(&self, start: usize, name: &str, translucent: bool) {
+        if let Some(span) = self.entity_part_span(start, name, translucent) {
+            self.push_entity_span(span);
+        }
+    }
+
+    pub(super) fn entity_part_span(
+        &self,
+        start: usize,
+        name: &str,
+        translucent: bool,
+    ) -> Option<EntitySpan> {
         let id = match &self.pack_ids {
             Some(ids) => ids
                 .entities
@@ -814,15 +825,15 @@ impl Game<'_> {
                 .copied()
                 .unwrap_or(ids.missing_entity),
             None if native_spans() => name_id(name),
-            None => return,
+            None => return None,
         };
-        self.push_span(start, "ENTITIES", id);
-        if let Some(last) = self.entity_spans.borrow_mut().last_mut() {
-            last.translucent = translucent;
-            if let Some(gpu) = self.skin_frame.borrow_mut().spans.last_mut() {
-                gpu.translucent = translucent;
-            }
-        }
+        Some(EntitySpan {
+            start: start as u32,
+            stage: sunrise_shaders::render_stage("ENTITIES"),
+            id,
+            translucent,
+            ..Default::default()
+        })
     }
 
     /// Starts a span for the block entity of block state `state`.
@@ -864,10 +875,13 @@ impl Game<'_> {
     /// Starts a span for mod model copies (`WorldDrawContext::draw_model_instances`) under a
     /// pack: block entities, as `BlockEntityDrawContext::model` draws the same model, with the
     /// id of a block the pack doesn't list, since no block owns them. Nothing without a pack.
-    pub(super) fn mark_model_copies(&self, start: usize) {
-        if let Some(ids) = &self.pack_ids {
-            self.push_span(start, "BLOCK_ENTITIES", ids.missing_block);
-        }
+    pub(super) fn model_copy_span(&self, start: usize) -> Option<EntitySpan> {
+        Some(EntitySpan {
+            start: start as u32,
+            stage: sunrise_shaders::render_stage("BLOCK_ENTITIES"),
+            id: self.pack_ids.as_ref()?.missing_block,
+            ..Default::default()
+        })
     }
 
     /// Starts the span of the local player's model; `hidden` in first person, where only a
@@ -900,13 +914,16 @@ impl Game<'_> {
     }
 
     fn push_span(&self, start: usize, stage: &str, id: i32) {
-        let mut spans = self.entity_spans.borrow_mut();
-        let span = EntitySpan {
+        self.push_entity_span(EntitySpan {
             start: start as u32,
             stage: sunrise_shaders::render_stage(stage),
             id,
             ..Default::default()
-        };
+        });
+    }
+
+    fn push_entity_span(&self, span: EntitySpan) {
+        let mut spans = self.entity_spans.borrow_mut();
         if self.pack_ids.is_some() && self.skinning() {
             let mut skin = self.skin_frame.borrow_mut();
             let gpu = EntitySpan {

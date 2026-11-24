@@ -1246,9 +1246,7 @@ impl Game<'_> {
             prepared: prepared_route(
                 self.pack_ids.is_some(),
                 !self.native_shaders.picked.is_empty(),
-                self.renderer
-                    .as_ref()
-                    .and_then(|renderer| renderer.prepared_generation()),
+                self.renderer_prepared_generation(),
                 self.standalone_geometry.generation(),
             ),
             records: Vec::new(),
@@ -1325,9 +1323,14 @@ impl Game<'_> {
 
     pub(super) fn prepared_copy_room(&self, already: u64, incoming: usize) -> Option<usize> {
         let room = self
-            .renderer
-            .as_ref()
-            .map(|renderer| renderer.prepared_instance_room(already, incoming));
+            .renderer_prepared_room_info()
+            .map(|(max_buffer, prior)| {
+                sunrise_client::gfx::prepared_instance_room_for(
+                    already.saturating_add(prior),
+                    incoming,
+                    max_buffer,
+                )
+            });
         #[cfg(test)]
         let room = room.or_else(|| sunrise_client::gfx::capped_prepared_room(already, incoming));
         room
@@ -3030,6 +3033,20 @@ mod tests {
             assert_eq!(drawn.text(&bold, [0.0, 0.0], 0xFFFFFF, true, None), Ok(7.0));
             assert_eq!(surface.vertices.len(), 8, "the glyph twice");
             assert!(surface.vertices.iter().all(|v| v.light == 240 | 240 << 8));
+
+            // Deep component trees (> 512 nodes) match vanilla Font.width / Font.drawInBatch.
+            surface.vertices.clear();
+            let mut deep = mod_api::Text::literal("A");
+            for _ in 0..600 {
+                deep = mod_api::Text::literal("").append(deep);
+            }
+            let mut drawn = GameBlockEntityDrawContext {
+                game,
+                surface: &mut surface,
+            };
+            assert_eq!(drawn.text_width(&deep), 6.0);
+            assert_eq!(drawn.text(&deep, [0.0, 0.0], 0xFFFFFF, true, None), Ok(6.0));
+            assert_eq!(surface.vertices.len(), 4);
 
             // A black outline: eight rings behind, then the text a hair in front of them.
             surface.vertices.clear();

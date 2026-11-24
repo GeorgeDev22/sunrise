@@ -87,7 +87,7 @@ A Stable or Dev tag's folder also holds that release's `SHA256SUMS` and its sign
 Every SDK base is checked the same way, against Sunrise's signature. For a [local SDK built from a
 checkout](../../how-to/native-mods/07-local-developer-builds.md), a debug build of the mod tool can also check
 against the public key set in `SUNRISE_SDK_TRUSTED_KEY`. The launcher's own copies are described in
-[Cache and disk](../../how-to/native-mods/10-cache-and-disk.md).
+[Cache and disk](../../how-to/native-mods/04-what-the-launcher-does.md#cache-and-disk).
 
 `internals add` and pin changes that need catalogs read `internals.json` from the pinned build's signed SDK.
 The tool unpacks `build-data.tar.xz` into `.sunrise/cache/<build id>/build-data/`. `internals sync` checks

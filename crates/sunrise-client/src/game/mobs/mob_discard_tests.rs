@@ -81,7 +81,9 @@ pub(in crate::game) fn run_discarded_mob_leaves_selectors_and_saves_while_frozen
     );
     let keys = [(0, 0)].into();
     let mut saved = HashMap::new();
-    game.save_every_entity(&keys, &mut saved, false);
+    let mut failed = HashMap::new();
+    game.save_every_entity(&keys, &mut saved, &mut failed, false);
+    assert!(failed.is_empty());
     // A dying but not removed entity still saves until its death animation
     // completes. Both roots are savable before the explicit discard.
     assert_eq!(saved.values().map(Vec::len).sum::<usize>(), 2);
@@ -130,7 +132,9 @@ pub(in crate::game) fn run_discarded_mob_leaves_selectors_and_saves_while_frozen
         Some(&Tag::Byte(1))
     );
     saved.clear();
-    game.save_every_entity(&keys, &mut saved, false);
+    failed.clear();
+    game.save_every_entity(&keys, &mut saved, &mut failed, false);
+    assert!(failed.is_empty());
     assert_eq!(
         saved
             .values()
@@ -175,7 +179,9 @@ pub(in crate::game) fn run_discarded_mob_leaves_selectors_and_saves_while_frozen
         .push(Mob::new(45, kind, Vec3::new(0.5, 65.0, 2.5), 0.0));
     game.mobs[3].extra.mount = Some(44);
     saved.clear();
-    game.save_every_entity(&keys, &mut saved, false);
+    failed.clear();
+    game.save_every_entity(&keys, &mut saved, &mut failed, false);
+    assert!(failed.is_empty());
     let root = &saved[&(0, 0)][0].2;
     assert!(matches!(root.get("Passengers"), Some(Tag::List(list)) if list.len() == 1));
     assert!(game.entity_discard(mod_api::EntityRef::new(
@@ -183,7 +189,9 @@ pub(in crate::game) fn run_discarded_mob_leaves_selectors_and_saves_while_frozen
         45
     )));
     saved.clear();
-    game.save_every_entity(&keys, &mut saved, false);
+    failed.clear();
+    game.save_every_entity(&keys, &mut saved, &mut failed, false);
+    assert!(failed.is_empty());
     assert_eq!(saved[&(0, 0)].len(), 1);
     assert!(saved[&(0, 0)][0].2.get("Passengers").is_none());
     // EntitySelectorParser gives @e and @n `Entity::isAlive`: a nearer mob at

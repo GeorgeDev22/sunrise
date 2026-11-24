@@ -3,8 +3,7 @@
 //! use `/waypoint_set` to place a cyan marker. The most recent death appears in red after respawn.
 use mod_api::{
     ClientHost, ClientTickPostEvent, CommandEvent, ConfigFileError, ConfigPath, Flow, Hooks,
-    ModEntry, RegisterClientCommandsEvent, RenderLevelStage, RenderLevelStageEvent, WorldDepth,
-    WorldLine,
+    ModEntry, RegisterClientCommandsEvent, SubmitCustomGeometryEvent, WorldDepth, WorldLine,
 };
 use std::sync::Mutex;
 
@@ -109,10 +108,11 @@ impl Hooks for Waypoints {
         *self.0.lock().unwrap() = Markers::default();
     }
 
-    fn render_level_stage(&self, _: &dyn ClientHost, event: &mut RenderLevelStageEvent<'_>) {
-        if event.stage != RenderLevelStage::AfterLevel {
-            return;
-        }
+    fn submit_custom_geometry(
+        &self,
+        _: &dyn ClientHost,
+        event: &mut SubmitCustomGeometryEvent<'_>,
+    ) {
         let markers = self.0.lock().unwrap();
         for (point, color) in [(markers.manual, 0xff00ffff), (markers.death, 0xffff3030)] {
             if let Some([x, y, z]) = point {

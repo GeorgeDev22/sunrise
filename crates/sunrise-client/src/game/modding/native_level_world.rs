@@ -177,7 +177,17 @@ impl Game<'_> {
         use sunrise_world::worldgen::value_provider::IntProvider;
         self.native_level_read_world(level)?;
         let key = sunrise_core::LevelKey::parse(level.dimension_id()).ok()?;
-        let facts = self.dimension_facts_for(key);
+        let facts = if let Some(constructing) = self
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.constructing(level))
+        {
+            constructing.facts.as_deref().unwrap_or_else(|| {
+                sunrise_world::dimension_type::DimensionFacts::of_builtin_level(key)
+            })
+        } else {
+            self.dimension_facts_for(key)
+        };
         Some(LevelDimensionType {
             id: facts.id.clone(),
             min_y: facts.height.min_y,

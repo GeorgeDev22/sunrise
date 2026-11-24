@@ -11,6 +11,24 @@ use std::sync::mpsc::{RecvError, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+/// Upper bound on a standard B-tree's node allocations (excluding keys' and values' heap).
+/// For a BTreeSet the value is zero-sized. An empty tree can retain a root node.
+pub fn btree_node_bytes<K, V>(len: usize) -> usize {
+    // Audited Rust 1.99.1 alloc/collections/btree/node.rs: B=6, capacity=11,
+    // non-root minimum=5, leaf header=(parent pointer,u16 index,u16 len),
+    // internal nodes add 12 child pointers. Charge every node as internal.
+    // At most 1 + len/5 nodes. Eight alignment gaps bound both layouts.
+    let align = align_of::<K>()
+        .max(align_of::<V>())
+        .max(align_of::<usize>());
+    let node = 13usize
+        .saturating_mul(size_of::<usize>())
+        .saturating_add(4)
+        .saturating_add(11usize.saturating_mul(size_of::<K>().saturating_add(size_of::<V>())))
+        .saturating_add(8usize.saturating_mul(align - 1));
+    (1 + len / 5).saturating_mul(node)
+}
+
 /// A consistent snapshot of queue pressure, including its lifetime high-water mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stats {

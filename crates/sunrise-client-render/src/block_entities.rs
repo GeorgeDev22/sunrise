@@ -1624,7 +1624,7 @@ mod tests {
             default: || 0,
             codec: None,
             copy_on_death: false,
-            sync: false,
+            sync_codec: None,
         };
         let p = (1, 64, 2);
         let mut entities = level();

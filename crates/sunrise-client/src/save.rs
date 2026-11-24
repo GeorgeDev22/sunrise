@@ -27,7 +27,7 @@ mod horizon_names_tests;
 pub mod level_mods;
 mod respawn;
 mod writes;
-use writes::{Outstanding, Writer};
+use writes::{EvictionWrites, Outstanding, Writer};
 
 use crate::{
     Result,

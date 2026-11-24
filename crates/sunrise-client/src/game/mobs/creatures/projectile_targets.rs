@@ -145,12 +145,6 @@ impl ProjectileWorld for LiveProjWorld<'_, '_> {
     fn can_stand_on(&self, p: [i32; 3], entity_y: f64) -> bool {
         self.base().can_stand_on(p, entity_y)
     }
-    fn ignites(&self, p: [i32; 3]) -> bool {
-        self.base().ignites(p)
-    }
-    fn lava_height(&self, p: BlockPos) -> Option<f64> {
-        self.base().lava_height(p)
-    }
     fn bubble_column(&self, p: [i32; 3]) -> Option<(bool, bool)> {
         self.base().bubble_column(p)
     }
