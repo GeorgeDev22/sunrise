@@ -631,9 +631,7 @@ impl Game<'_> {
             return Some(glam::DVec3::new(at.x, at.y, at.z));
         }
         if let Some(c) = self.carts.iter().find(|c| c.id == vehicle) {
-            let at = c
-                .position
-                .add_vector(Vec3::new(0.0, super::minecarts::SEAT, 0.0));
+            let at = super::minecarts::player_cart_seat(c.position);
             return Some(glam::DVec3::new(at.x, at.y, at.z));
         }
         if let Some(a) = self.armor_stands.iter().find(|a| a.id == vehicle) {

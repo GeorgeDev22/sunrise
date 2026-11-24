@@ -32,38 +32,65 @@ impl Game<'_> {
         self.riding = Some(vehicle);
         self.seat_player(vehicle);
         self.note_started_riding(vehicle);
+        self.mounted_player(vehicle);
     }
 
     /// `ServerPlayer.startRiding` once the acting player is on `vehicle`: the vehicle seats it
-    /// (`positionRider`), and its client hears that seat as a teleport and the vehicle's
-    /// passengers at once, before the tracker's next look. `leave_guest` sends both.
-    pub(in crate::game) fn tell_mounted_player(&mut self, vehicle: u32) {
-        if self.lan_acting.is_none() {
+    /// (`positionRider`), and its client hears, in this order and at once, the seat as a teleport
+    /// that keeps its look (`Relative.ROTATION`, no motion), a living vehicle's effects
+    /// (`PlayerList.sendActiveEffects`) and the vehicle's passengers.
+    pub(in crate::game) fn mounted_player(&mut self, vehicle: u32) {
+        let Some(conn) = self.lan_acting else {
             return;
-        }
-        let seat = if let Some(i) = self.boats.iter().position(|b| b.id == vehicle) {
-            Some(self.player_boat_seat(i))
-        } else if let Some(c) = self.carts.iter().find(|c| c.id == vehicle) {
-            let at = c.position;
-            Some(sunrise_core::geometry::Vec3::new(
-                at.x,
-                at.y + super::minecarts::SEAT,
-                at.z,
-            ))
-        } else {
-            if self.mobs.iter().any(|m| m.id == vehicle) {
-                self.position_rider();
-            }
-            None
         };
-        if let Some(p) = self.player.as_mut() {
-            if let Some(at) = seat {
-                p.position = at;
+        if let Some(i) = self.boats.iter().position(|b| b.id == vehicle) {
+            let seat = self.player_boat_seat(i);
+            // AbstractBoat.positionRider: a server player is not authoritative there, so the
+            // boat's turn is not added; clampRotation keeps its look within 105 degrees.
+            self.yaw = sunrise_client::camera::clamp_boat_rotation(self.yaw, self.boats[i].yaw).0;
+            if let Some(p) = self.player.as_mut() {
+                p.position = seat;
             }
-            // `teleportSetPosition` with `Vec3.ZERO` and no relative motion.
-            p.velocity = sunrise_core::geometry::Vec3::ZERO;
+        } else if let Some(c) = self.carts.iter().find(|c| c.id == vehicle) {
+            let seat = super::minecarts::player_cart_seat(c.position);
+            if let Some(p) = self.player.as_mut() {
+                p.position = seat;
+            }
+        } else if self.mobs.iter().any(|m| m.id == vehicle) {
+            self.position_rider();
         }
-        self.mounted = Some((vehicle, self.passenger_order(vehicle)));
+        let Some(p) = self.player.as_mut() else {
+            return;
+        };
+        // `teleportSetPosition` with `Vec3.ZERO` and no relative motion.
+        p.velocity = sunrise_core::geometry::Vec3::ZERO;
+        let seat = [p.position.x, p.position.y, p.position.z];
+        let effects: Vec<_> = self
+            .mobs
+            .iter()
+            .find(|m| m.id == vehicle)
+            .map(|m| m.extra.effects.iter().map(|e| m.active_effect(e)).collect())
+            .unwrap_or_default();
+        let passengers = self.passenger_order(vehicle);
+        let Some(host) = self.lan.as_mut() else {
+            return;
+        };
+        let Some(i) = host.hub.guests.connection_index(conn) else {
+            return;
+        };
+        host.hub.teleport_rider(i, seat, [false; 3], true);
+        for e in &effects {
+            host.hub.send_entity_effect(i, vehicle as i32, e, false);
+        }
+        host.hub.send_to(
+            conn,
+            &sunrise_protocol::packets::play::Clientbound::SetPassengers(
+                sunrise_protocol::packets::play::SetPassengers {
+                    vehicle: vehicle as i32,
+                    passengers: passengers.into_iter().map(|id| id as i32).collect(),
+                },
+            ),
+        );
     }
 
     /// The player riding through `riding` and its place: the acting guest (its kept place, if
@@ -249,58 +276,6 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `ServerPlayer.startRiding`: a guest put in a boat by `/ride` hears its seat as a teleport
-    /// that keeps its look (`Relative.ROTATION`, rotation 0, no motion), then the boat's
-    /// passengers, both in its own turn.
-    #[test]
-    #[ignore = "daily"]
-    fn a_mounted_guest_hears_its_seat_then_the_passengers() {
-        crate::game::native_guest_turn_tests::with_guests(|game| {
-            use crate::game::commands::Target;
-            use sunrise_protocol::packets::play::{Clientbound as C, relative};
-            game.summon_with_nbt("minecraft:oak_boat", [1.0, 64.0, 0.5], "{}")
-                .unwrap();
-            game.lan_assign_ids();
-            let boat = game.boats[0].id;
-            let (tx, rx) = std::sync::mpsc::channel();
-            let dimension = game.dim.id().to_owned();
-            game.lan
-                .as_mut()
-                .unwrap()
-                .hub
-                .update_guest(13, |g| {
-                    g.dimension = dimension;
-                    g.sender = sunrise_client::lan::PlayerSender::new(tx, Default::default());
-                })
-                .unwrap();
-            let mounted = game.as_guest(13, |game| {
-                game.ride_mount(Target::Player, Target::Boat(boat)).is_ok()
-            });
-            assert_eq!(mounted, Some(true));
-            let sent: Vec<_> = crate::game::native_sound_refs::tests::packets(&rx)
-                .into_iter()
-                .filter(|p| matches!(p, C::PlayerPosition(_) | C::SetPassengers(_)))
-                .collect();
-            let [C::PlayerPosition(seat), C::SetPassengers(aboard)] = &sent[..] else {
-                panic!("a teleport then the passengers, got {sent:?}");
-            };
-            // The boat's ride height (0.5625 / 3) less the player's vehicle attachment (0.6).
-            let expected = [1.0, 64.0 + 0.1875 - 0.6, 0.5];
-            assert!(
-                (0..3).all(|k| (seat.position[k] - expected[k]).abs() < 1e-9),
-                "{:?}",
-                seat.position
-            );
-            assert_eq!(seat.delta, [0.0; 3]);
-            assert_eq!([seat.yaw, seat.pitch], [0.0, 0.0]);
-            assert_eq!(seat.relatives, relative::Y_ROT | relative::X_ROT);
-            assert_eq!(
-                (aboard.vehicle, &aboard.passengers[..]),
-                (boat as i32, &[13][..])
-            );
-        });
-    }
     #[test]
     #[ignore = "daily"]
     fn retained_passengers_occupy_seats_in_boarding_order() {

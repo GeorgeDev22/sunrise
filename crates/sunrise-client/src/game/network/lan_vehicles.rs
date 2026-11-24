@@ -9,7 +9,7 @@
 //! here with the rider's input (`ServerPlayer.getLastClientMoveIntent`).
 //! Sneaking gets out (`Player.rideTick`: `wantsToStopRiding`), and the client
 //! is teleported where the player lands (`ServerPlayer.dismountTo`).
-use super::{Dim, Game, Keys, lan::LanHost, minecarts::SEAT};
+use super::{Dim, Game, Keys, lan::LanHost, minecarts::player_cart_seat};
 use sunrise_client::collisions::SceneCollisions;
 use sunrise_client::lan::hub::no_blocks_in;
 use sunrise_client::mobs::equine;
@@ -378,7 +378,7 @@ impl Game<'_> {
                 self.carts
                     .iter()
                     .find(|c| c.id == vehicle)
-                    .map(|c| (c.position, c.position.add_vector(Vec3::new(0.0, SEAT, 0.0))))
+                    .map(|c| (c.position, player_cart_seat(c.position)))
             })
             .or_else(|| {
                 self.cushions

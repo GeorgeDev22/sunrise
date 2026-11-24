@@ -503,7 +503,8 @@ fn a_wither_never_rides_a_cart() {
 fn a_cart_seat_matches_the_player_offset() {
     let at = Vec3::new(1.0, 10.0, 2.0);
     assert!((cart_seat(at, PASSENGER_Y).y - 10.1875).abs() < 1e-12);
-    assert!((cart_seat(at, SEAT).y - (10.0 + SEAT)).abs() < 1e-12);
+    // (31.95 + 0.1875) - 0.6 as `positionRider` adds it; 31.95 + (0.1875 - 0.6) is 31.537499999999998.
+    assert_eq!(player_cart_seat(Vec3::new(1.0, 31.95, 2.0)).y, 31.5375);
     assert_eq!(cart_seat(at, 0.0).x, 1.0);
     assert_eq!(cart_seat(at, 0.0).z, 2.0);
 }

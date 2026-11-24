@@ -841,10 +841,7 @@ impl Game<'_> {
             Command([f64; 3], [bool; 3]),
             Position([f64; 3]),
             Rider([f64; 3], [bool; 3]),
-            Mount([f64; 3]),
         }
-        // ServerPlayer.startRiding: the seat and the passengers, for the vehicle still ridden.
-        let mounted = std::mem::take(&mut self.mounted).filter(|&(v, _)| Some(v) == guest_vehicle);
         let released_vehicle = host.hub.guests[i]
             .vehicle
             .filter(|id| Some(*id) != guest_vehicle);
@@ -967,9 +964,7 @@ impl Game<'_> {
                         passengers: Vec::new(),
                     }));
                 }
-                if mounted.is_some() {
-                    teleport = Some(TurnTeleport::Mount(at));
-                } else if g.vehicle.is_none() && (moved > 0.0001 || turned || teleported) {
+                if g.vehicle.is_none() && (moved > 0.0001 || turned || teleported) {
                     // A command's teleport carries its relative axes as the
                     // packet's DELTA flags; any other move is absolute.
                     if teleported {
@@ -989,15 +984,7 @@ impl Game<'_> {
             Some(TurnTeleport::Command(at, delta)) => host.hub.teleport_command(i, at, delta),
             Some(TurnTeleport::Position(at)) => host.hub.teleport(i, Some(at)),
             Some(TurnTeleport::Rider(at, delta)) => host.hub.teleport_rider(i, at, delta, false),
-            // `connection.teleport(..., Relative.ROTATION)`: the seat, the look kept, no motion.
-            Some(TurnTeleport::Mount(at)) => host.hub.teleport_rider(i, at, [false; 3], true),
             None => {}
-        }
-        if let Some((vehicle, passengers)) = mounted {
-            host.hub.guests[i].send(&C::SetPassengers(play::SetPassengers {
-                vehicle: vehicle as i32,
-                passengers: passengers.into_iter().map(|id| id as i32).collect(),
-            }));
         }
         let g = &host.hub.guests[i];
         if new_mode != g.game_mode {

@@ -470,7 +470,7 @@ fn a_bound_cart_commits_the_ridden_tick() {
         game.player = Some(
             sunrise_client::motion::PlayerMotion::new(
                 game.motion,
-                Vec3::new(0.5, 70.0 + SEAT, 0.5),
+                player_cart_seat(Vec3::new(0.5, 70.0, 0.5)),
             )
             .unwrap(),
         );

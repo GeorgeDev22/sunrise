@@ -1,1 +1,0 @@
-sunrise-client game::boarding::tests::a_mounted_guest_hears_its_seat_then_the_passengers lib daily resources

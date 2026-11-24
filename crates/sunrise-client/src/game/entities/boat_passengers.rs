@@ -273,13 +273,16 @@ impl Game<'_> {
         self.seated_passenger_count(b.id) < b.max_passengers() && !b.under_water()
     }
     /// Where the player in boat `i` sits: in the middle alone, in front of a
-    /// mob.
+    /// mob, behind a player who got in first (`getPassengers().indexOf`).
     pub(super) fn player_boat_seat(&self, i: usize) -> Vec3 {
         let b = &self.boats[i];
         let players = self.boat_players(b.id);
         // The seated list, with the rider counted before its own link exists.
-        let count = self.passenger_order(b.id).len() + usize::from(players == 0);
-        b.seat(0, count, false, PLAYER_RIDING_OFFSET, false)
+        let order = self.passenger_order(b.id);
+        let count = order.len() + usize::from(players == 0);
+        let own = self.riding_player().map(|(id, _)| id);
+        let index = order.iter().position(|&id| Some(id) == own).unwrap_or(0);
+        b.seat(index, count, false, PLAYER_RIDING_OFFSET, false)
     }
     /// `getRootVehicle` of mob `j`: the mob or boat at the bottom of what it
     /// rides, None when it rides nothing.
