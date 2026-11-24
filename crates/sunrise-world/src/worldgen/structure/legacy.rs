@@ -33,28 +33,8 @@ pub type Result<T> = std::result::Result<T, PlacementQueryError>;
 pub type Markers = Vec<(String, [i32; 3])>;
 
 /// The random draws pieces and pool elements make, from any random.
-pub trait PieceDraws: ProcessorRandom {
-    fn boolean(&mut self) -> bool;
-    fn double(&mut self) -> f64;
-    /// `nextInt()`.
-    fn int_unbounded(&mut self) -> i32;
-    /// `nextGaussian`.
-    fn gaussian(&mut self) -> f64;
-}
-impl<R: RandomSource> PieceDraws for R {
-    fn boolean(&mut self) -> bool {
-        self.next_boolean()
-    }
-    fn double(&mut self) -> f64 {
-        self.next_double()
-    }
-    fn int_unbounded(&mut self) -> i32 {
-        self.next_int()
-    }
-    fn gaussian(&mut self) -> f64 {
-        self.next_gaussian()
-    }
-}
+pub trait PieceDraws: ProcessorRandom {}
+impl<R: RandomSource> PieceDraws for R {}
 /// The random a piece places with.
 pub trait PieceRandom: PieceDraws {
     /// The concrete random, for callers that need all of `RandomSource`.

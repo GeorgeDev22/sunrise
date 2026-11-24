@@ -64,6 +64,62 @@ pub mod tests {
         assert!(errors[1].contains("namespace"));
         assert!(errors[2].contains("invalid identifier \"test:\""));
     }
+
+    /// A structure processor type twice, one in an unowned namespace and one
+    /// without a name: every registration is refused at startup, naming the mod.
+    #[test]
+    pub(crate) fn duplicate_and_foreign_structure_processor_types_refuse_registration() {
+        #[derive(Debug)]
+        struct NoopProcessor;
+        impl mod_api::StructureProcessor for NoopProcessor {}
+
+        struct Weathering;
+        impl mod_api::StructureProcessorType for Weathering {
+            fn decode(
+                &self,
+                _: &dyn mod_api::ProcessorDecodeContext,
+                _: &sunrise_core::nbt::Tag,
+            ) -> Result<std::sync::Arc<dyn mod_api::StructureProcessor>, mod_api::StructureError>
+            {
+                Ok(std::sync::Arc::new(NoopProcessor))
+            }
+        }
+        struct Valid;
+        #[mod_api::__subscriptions]
+        impl Hooks for Valid {
+            fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+                r.register_structure_processor_type("weathering", Weathering);
+            }
+        }
+        crate::parts::tests::install_parts_fixture(&[ModEntry::new("test", Box::new(Valid))])
+            .unwrap();
+        let types = crate::__private::structure_processor_type_declarations();
+        assert!(types.iter().any(|(id, _)| id == "test:weathering"));
+        assert_eq!(types.len(), 1);
+
+        struct Invalid;
+        #[mod_api::__subscriptions]
+        impl Hooks for Invalid {
+            fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+                r.register_structure_processor_type("weathering", Weathering);
+                r.register_structure_processor_type("weathering", Weathering);
+                r.register_structure_processor_type("other:weathering", Weathering);
+                r.register_structure_processor_type("", Weathering);
+            }
+        }
+        let errors = install_parts(
+            &[ModEntry::new("test", Box::new(Invalid))],
+            &crate::parts::tests::rule_schema(),
+            |_| false,
+        )
+        .unwrap_err();
+        assert_eq!(errors.len(), 3);
+        assert!(
+            errors[0].contains("test registered structure processor type test:weathering twice")
+        );
+        assert!(errors[1].contains("namespace"));
+        assert!(errors[2].contains("invalid identifier \"test:\""));
+    }
 }
 
 impl StructuresRegistrar for PartRegistrar {
@@ -105,5 +161,27 @@ impl StructuresRegistrar for PartRegistrar {
         }
         self.pool_element_types
             .push(PoolElementTypeInfo { id: id.into(), ty });
+    }
+    fn add_structure_processor_type(
+        &mut self,
+        name: &str,
+        ty: Arc<dyn crate::StructureProcessorType>,
+    ) {
+        let id = match self.owned_declaration_id(name) {
+            Ok(id) => id,
+            Err(reason) => {
+                self.refused.push(reason);
+                return;
+            }
+        };
+        if self.structure_processor_types.iter().any(|t| *t.id == *id) {
+            self.refused.push(format!(
+                "{} registered structure processor type {id} twice",
+                self.mod_id
+            ));
+            return;
+        }
+        self.structure_processor_types
+            .push(StructureProcessorTypeInfo { id: id.into(), ty });
     }
 }

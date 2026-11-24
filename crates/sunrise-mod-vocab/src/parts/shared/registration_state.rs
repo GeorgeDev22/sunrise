@@ -59,7 +59,11 @@ pub(crate) struct Installed {
     pub(crate) arm_poses: Vec<crate::client::arm_pose::PoseInfo>,
     pub(crate) structure_types: Vec<crate::world::structure_type::StructureTypeInfo>,
     pub(crate) pool_element_types: Vec<crate::world::pool_element::PoolElementTypeInfo>,
+    pub(crate) structure_processor_types:
+        Vec<crate::world::structure_processor::StructureProcessorTypeInfo>,
     pub(crate) feature_types: Vec<crate::world::feature_type::FeatureTypeInfo>,
+    pub(crate) placement_modifier_types:
+        Vec<crate::world::placement_modifier::PlacementModifierTypeInfo>,
     pub(crate) loot_modifier_serializers:
         Vec<crate::parts::loot_modifiers::LootModifierSerializerInfo>,
     pub(crate) loot_function_types: Vec<crate::parts::loot_types::LootFunctionTypeInfo>,

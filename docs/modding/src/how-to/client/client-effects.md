@@ -316,3 +316,22 @@ the loop, flat at 0 Hz and about 3 dB down at the damping frequency on each pass
 die sooner, as in a real room. The line lengths set how dense the echoes are. The reverbs' delay lines are allocated
 once, when the sound system starts, and about 1.1 MiB is used whatever the device's rate. A reverb nothing is sent to
 costs nothing once its tail has died away. Mod-set reverb parameters are not available yet.
+
+## Narrating a line
+
+A client mod has the player's narrator say a line with `ClientNarratorClientHost::narrate`,
+as Jade's "Narrate Target" reads the block or entity under the crosshair (`GameNarrator.saySystemNow`
+in Java). It goes through the game's own narrator, so the Narrator option, the voice volume and
+the narrator's log of recent lines apply as to the game's own narration. Nothing reaches the server.
+
+```rust
+{{#include ../../../examples/src/client_misc.rs:target_changed}}
+```
+
+`Narration::Now` (`saySystemNow`) cuts off what is being said; `Narration::Queued`
+(`saySystemQueued`) waits for it. The line is the component's plain string (`Component.getString`)
+in the current language. There is no length cap beyond the component's own form limits.
+
+Each refusal says and logs nothing, and has its own name: `Text` (the component was refused at the
+boundary), `Empty` (its text is empty), `Off` (the option is Off or Chat only) and `Unavailable`
+(no speech on this platform, or no client narrator). Match `NarrateError` non-exhaustively.

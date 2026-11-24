@@ -10,6 +10,7 @@ pub mod legacy;
 pub mod mansion;
 pub mod mineshaft;
 pub mod mod_elements;
+pub mod mod_processors;
 pub mod mod_types;
 pub mod monument;
 pub mod nether_fossil;

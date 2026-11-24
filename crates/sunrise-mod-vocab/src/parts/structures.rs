@@ -13,6 +13,15 @@ pub(crate) fn installed_pool_element_type_list()
     installed().map_or(&[], |installed| installed.pool_element_types.as_slice())
 }
 
+/// The structure processor types registered at startup, for the executable to
+/// hand to the engine's processor type table.
+pub(crate) fn installed_structure_processor_type_list()
+-> &'static [crate::world::structure_processor::StructureProcessorTypeInfo] {
+    installed().map_or(&[], |installed| {
+        installed.structure_processor_types.as_slice()
+    })
+}
+
 impl dyn Registrar + '_ {
     /// Register structure type `name` (`tower` or `mymod:tower`), the way
     /// NeoForge's registries `STRUCTURE_TYPE` and `STRUCTURE_PIECE` register
@@ -36,6 +45,20 @@ impl dyn Registrar + '_ {
     pub fn register_pool_element_type<T: crate::PoolElementType>(&mut self, name: &str, ty: T) {
         self.add_pool_element_type(name, Arc::new(ty));
     }
+    /// Register structure processor type `name` (`weathering` or
+    /// `mymod:weathering`), the way NeoForge's registry `STRUCTURE_PROCESSOR`
+    /// registers once at startup: a processor list entry with
+    /// `"processor_type": "modid:weathering"` then decodes and runs by `ty`'s
+    /// code beside vanilla's processors. The id's namespace must be owned by
+    /// the calling mod's manifest; another mod's namespace, an empty name and
+    /// an id registered twice refuse the mods at startup, naming the mod.
+    pub fn register_structure_processor_type<T: crate::StructureProcessorType>(
+        &mut self,
+        name: &str,
+        ty: T,
+    ) {
+        self.add_structure_processor_type(name, Arc::new(ty));
+    }
 }
 
 /// Registrar operations for structures.
@@ -46,4 +69,11 @@ pub trait StructuresRegistrar {
     /// Register pool element type `name` with `ty`; mods reach it through
     /// `register_pool_element_type`.
     fn add_pool_element_type(&mut self, name: &str, ty: Arc<dyn crate::PoolElementType>);
+    /// Register structure processor type `name` with `ty`; mods reach it
+    /// through `register_structure_processor_type`.
+    fn add_structure_processor_type(
+        &mut self,
+        name: &str,
+        ty: Arc<dyn crate::StructureProcessorType>,
+    );
 }

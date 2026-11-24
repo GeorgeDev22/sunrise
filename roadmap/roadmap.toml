@@ -988,8 +988,8 @@ homes, mace smashes and knockback."""
 dev = """Villages: iron golem village goals, villager memories across saves, villager age, job-site claiming on \
 dedicated servers, flower offers (#1639 is one report). Combat: the mobs' `attack_knockback` attribute, mace \
 smash logic, the hit knockback source on the host, the fire burnout biome tag. Each is checked against \
-vanilla by a harness (docs/rust-parity.md)."""
-links = ["#1639", "docs/rust-parity.md"]
+vanilla by a harness (docs/status.md)."""
+links = ["#1639", "docs/status.md"]
 
 [[item]]
 id = "audio-device"

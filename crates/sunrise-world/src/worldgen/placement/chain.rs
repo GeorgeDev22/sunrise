@@ -13,6 +13,15 @@ impl<C: PlacementContext> PlacementContext for Queries<'_, C> {
     fn block_registry(&self) -> Option<&'static crate::registry::BlockRegistry> {
         self.world.block_registry()
     }
+    fn world_seed(&mut self) -> Result<i64, PlacementQueryError> {
+        self.world.world_seed()
+    }
+    fn sea_level(&mut self) -> Result<i32, PlacementQueryError> {
+        self.world.sea_level()
+    }
+    fn biome_key(&mut self, position: [i32; 3]) -> Result<mod_api::BiomeKey, PlacementQueryError> {
+        self.world.biome_key(position)
+    }
     fn state_matches_tag(
         &mut self,
         state: crate::registry::BlockStateId,

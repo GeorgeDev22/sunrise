@@ -92,21 +92,20 @@ impl ProcessorRandom for ApiDraws<'_> {
     fn long(&mut self) -> i64 {
         self.0.next_long()
     }
-}
-impl PieceDraws for ApiDraws<'_> {
-    fn boolean(&mut self) -> bool {
-        self.0.next_boolean()
+    fn int_unbounded(&mut self) -> i32 {
+        self.0.next_int()
     }
     fn double(&mut self) -> f64 {
         self.0.next_double()
     }
-    fn int_unbounded(&mut self) -> i32 {
-        self.0.next_int()
+    fn boolean(&mut self) -> bool {
+        self.0.next_boolean()
     }
     fn gaussian(&mut self) -> f64 {
         self.0.next_gaussian()
     }
 }
+impl PieceDraws for ApiDraws<'_> {}
 
 /// An engine jigsaw as the API's. An id the API can't parse reads as
 /// `minecraft:empty`, the id vanilla's jigsaws default to.

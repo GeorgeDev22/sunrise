@@ -596,7 +596,7 @@ Villages and fights behaving as in vanilla: iron golems defending villages, vill
 
 <details><summary>Technical</summary>
 
-Villages: iron golem village goals, villager memories across saves, villager age, job-site claiming on dedicated servers, flower offers ([#1639](https://github.com/horizon-rust/horizon/issues/1639) is one report). Combat: the mobs' `attack_knockback` attribute, mace smash logic, the hit knockback source on the host, the fire burnout biome tag. Each is checked against vanilla by a harness ([docs/rust-parity.md](docs/rust-parity.md)).
+Villages: iron golem village goals, villager memories across saves, villager age, job-site claiming on dedicated servers, flower offers ([#1639](https://github.com/horizon-rust/horizon/issues/1639) is one report). Combat: the mobs' `attack_knockback` attribute, mace smash logic, the hit knockback source on the host, the fire burnout biome tag. Each is checked against vanilla by a harness ([docs/status.md](docs/status.md)).
 
 </details>
 

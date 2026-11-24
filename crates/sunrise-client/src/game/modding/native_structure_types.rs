@@ -24,7 +24,7 @@ use sunrise_world::worldgen::{
     },
 };
 
-fn engine_heightmap(kind: HeightmapType) -> sunrise_world::heightmap::HeightmapType {
+pub(super) fn engine_heightmap(kind: HeightmapType) -> sunrise_world::heightmap::HeightmapType {
     use sunrise_world::heightmap::HeightmapType as Engine;
     match kind {
         HeightmapType::WorldSurfaceWg => Engine::WorldSurfaceWg,

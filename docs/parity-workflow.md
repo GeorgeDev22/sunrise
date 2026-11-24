@@ -1,6 +1,6 @@
 # Parity workflow
 
-How parity work is run, checked and merged. What is ported and where it is checked: [Rust rewrite status](rust-parity.md).
+How parity work is run, checked and merged. What is ported and where it is checked: [Sunrise status](status.md) and [port ledger](port-ledger.md).
 
 ## Datafix downloads and author self-checks
 

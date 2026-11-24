@@ -91,7 +91,7 @@ borrow registry names from the generation retained by the worker.
 
 `DataLoadContext::fluid_tags()` borrows the recipe pass's fluid-tag table. `None` means no
 recipe overlay; `Some(&[])` means an overlay with no fluid tags. See
-[Fluid ingredients](../how-to/items/fluid-ingredients.md) for how to use it.
+[Fluid ingredients](../how-to/items/ingredient-kinds.md#fluid-ingredients) for how to use it.
 `DataLoadOrigin` and `LoopSide` describe local execution, not an encoded payload.
 
 ### Ordinary Host reads

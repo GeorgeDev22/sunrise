@@ -1,6 +1,7 @@
 //! Levels, chunks, dimensions, spawning, fluids as world state and the vocabulary the world speaks.
 
 pub(crate) mod advancement_progress;
+pub(crate) mod placement_modifier;
 pub(crate) mod pool_element;
 pub(crate) mod scoreboard;
 pub(crate) mod team;
@@ -56,6 +57,7 @@ pub(crate) mod server_console;
 pub(crate) mod server_reload;
 pub mod snapshots;
 pub(crate) mod startup_progress;
+pub(crate) mod structure_processor;
 pub(crate) mod structure_template;
 pub(crate) mod structure_type;
 pub(crate) mod tags;

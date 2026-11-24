@@ -115,6 +115,69 @@ pub mod tests {
         assert_eq!(registrar.refused.len(), 1);
         assert!(registrar.feature_types.is_empty());
     }
+
+    /// A placement modifier type twice, one in an unowned namespace and one
+    /// without a name: every registration is refused at startup, naming the mod.
+    #[test]
+    pub(crate) fn duplicate_and_foreign_placement_modifier_types_refuse_registration() {
+        #[derive(Debug)]
+        struct Pass;
+        impl mod_api::PlacementModifier for Pass {
+            fn modify(
+                &self,
+                _: &mut dyn mod_api::PlacementModifierContext,
+                _: &mut dyn mod_api::RandomSource,
+                origin: [i32; 3],
+                output: &mut dyn FnMut([i32; 3]) -> Result<(), mod_api::FeatureError>,
+            ) -> Result<(), mod_api::FeatureError> {
+                output(origin)
+            }
+        }
+        struct BelowSea;
+        impl mod_api::PlacementModifierType for BelowSea {
+            fn decode(
+                &self,
+                _: &dyn mod_api::PlacementModifierDecodeContext,
+                _: &sunrise_core::nbt::Tag,
+            ) -> Result<std::sync::Arc<dyn mod_api::PlacementModifier>, mod_api::FeatureError>
+            {
+                Ok(std::sync::Arc::new(Pass))
+            }
+        }
+        struct Valid;
+        #[mod_api::__subscriptions]
+        impl Hooks for Valid {
+            fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+                r.register_placement_modifier_type("below_sea", BelowSea);
+            }
+        }
+        crate::parts::tests::install_parts_fixture(&[ModEntry::new("test", Box::new(Valid))])
+            .unwrap();
+        let types = crate::__private::placement_modifier_type_declarations();
+        assert!(types.iter().any(|(id, _)| id == "test:below_sea"));
+        assert_eq!(types.len(), 1);
+
+        struct Invalid;
+        #[mod_api::__subscriptions]
+        impl Hooks for Invalid {
+            fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+                r.register_placement_modifier_type("below_sea", BelowSea);
+                r.register_placement_modifier_type("below_sea", BelowSea);
+                r.register_placement_modifier_type("other:below_sea", BelowSea);
+                r.register_placement_modifier_type("", BelowSea);
+            }
+        }
+        let errors = install_parts(
+            &[ModEntry::new("test", Box::new(Invalid))],
+            &crate::parts::tests::rule_schema(),
+            |_| false,
+        )
+        .unwrap_err();
+        assert_eq!(errors.len(), 3);
+        assert!(errors[0].contains("test registered placement modifier type test:below_sea twice"));
+        assert!(errors[1].contains("namespace"));
+        assert!(errors[2].contains("invalid identifier \"test:\""));
+    }
 }
 
 impl FeaturesRegistrar for PartRegistrar {
@@ -178,5 +241,27 @@ impl FeaturesRegistrar for PartRegistrar {
             config,
             ty,
         });
+    }
+    fn add_placement_modifier_type(
+        &mut self,
+        name: &str,
+        ty: Arc<dyn crate::PlacementModifierType>,
+    ) {
+        let id = match self.owned_declaration_id(name) {
+            Ok(id) => id,
+            Err(reason) => {
+                self.refused.push(reason);
+                return;
+            }
+        };
+        if self.placement_modifier_types.iter().any(|t| *t.id == *id) {
+            self.refused.push(format!(
+                "{} registered placement modifier type {id} twice",
+                self.mod_id
+            ));
+            return;
+        }
+        self.placement_modifier_types
+            .push(PlacementModifierTypeInfo { id: id.into(), ty });
     }
 }

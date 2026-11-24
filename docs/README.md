@@ -9,7 +9,7 @@ To play, use [the launcher](https://github.com/sunrise-org/sunrise-launcher/blob
 - [Release flow](release-flow.md): pull request checks, merging and the automatic Nightly releases that reach players.
 - [Operations](operations.md): running Sunrise by hand when no agent runs and the maintainer's machines are off: merging, releases, offline runners, the mods registry, Kira, the official server, security.
 - [Build from source](native-client.md#run-from-a-checkout): your own copy of the game, resource preparation, `cargo run`.
-- [Build times](build-times.md): `tools/build_times.py` measures cold and incremental builds per crate and the critical path, writes a JSON report and a table, and compares two reports; the first numbers, Windows and Linux.
+- [Build times](build-times.md): `tools/build_times.py` measures cold and incremental builds per crate and the critical path, writes a JSON report and a table, and compares two reports.
 - [Native client](native-client.md): options, controls, the dedicated server, `sunrise-ctl` scripting, packaging, architecture.
 - [Controllers](controllers.md): playing with PlayStation, Xbox and Nintendo Switch Pro controllers, Steam Deck built-in controls, analog movement, and the input layer.
 - [Host a server](hosting.md): install `sunrise-server`, prepare the game files, first run, `server.toml`, the commands, the web panel, backups, services and Docker; what works today and what doesn't yet.
@@ -55,15 +55,14 @@ To play, use [the launcher](https://github.com/sunrise-org/sunrise-launcher/blob
 
 ## Parity
 
-- [Rust rewrite status](rust-parity.md): where the state of the port lives (harnesses, port ledger, known issues) and the rules every port keeps.
+- [Sunrise status](status.md): player-visible gap count and subsystem harness coverage against vanilla 26.3.
 - [Parity workflow](parity-workflow.md): `tools/parity.py`, the gate, other machines, merging.
 - [Paper event parity](paper-parity.md): local trace comparisons, scenarios and tolerances, and informational nightly/manual CI.
 - [CI runners](ci-runners.md): which jobs run on GitHub's runners and which on ours (the desktop, playsunrise, the Mac mini), the `SELF_HOSTED_CI` switch, and where a fork's pull request may run.
-- Area notes: [block behaviours and ticking](parity/blocks.md), [section meshing](parity/meshing.md), [redstone machines tick by tick](parity/redstone-diff.md), [the same seed in vanilla and Sunrise](parity/world-compare.md).
+- Area notes: [section meshing](parity/meshing.md), [redstone machines tick by tick](parity/redstone-diff.md), [the same seed in vanilla and Sunrise](parity/world-compare.md).
 - [Port ledger](port-ledger.md): `tools/port_ledger.py`, every vanilla method next to the Rust functions that port it, both ways, with the gaps where a port isn't wired like vanilla.
 - [Version ports](version-ports.md): how a new Minecraft release is detected, diffed against the pinned one and ported, and what stays manual.
 - [Reading vanilla](parity-workflow.md#reading-vanilla): the local decompiled sources and bytecode queries the harnesses build on.
-
 - [Translations](translations.md): language coverage and human review of machine-written strings.
 
 ## Design notes
