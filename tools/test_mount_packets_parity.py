@@ -18,7 +18,7 @@ command's reply; the tracker sends the passengers again on its next look.
 
 Alice's teleports, passenger lists, the other entities' effects and the command replies in the mount steps and the
 one after the boat's are compared exactly; the ride's reply by its key alone (the hover carries the vehicle's random
-UUID). The dismounts between the mounts are not compared.
+UUID). Clearing the world and the dismounts between the mounts are not compared.
 """
 import sys
 
@@ -34,35 +34,40 @@ def build(command):
     return f'cmd Alice {command}'
 
 
+def nearest(kind):
+    return f'@e[type=minecraft:{kind},limit=1,sort=nearest]'
+
+
 SCRIPT = [
     ('setup', [
         'chat on', 'mounts on',
-        # No natural spawns: a flat world's slimes attack Alice at their own random moments.
         build('gamerule spawn_monsters false'), build('gamerule spawn_mobs false'),
         build('forceload add -16 -16 16 16'),
-        build('kill @e[type=minecraft:slime]'),
         build('tp @s 1.0 -60 0.5 150 0'),
-        build('summon minecraft:oak_boat 1.0 -60 0.5 {Rotation:[0f,0f]}'),
-        build('summon minecraft:pig 1.0 -60 0.5 {NoAI:1b}'),
-        build('ride @e[type=minecraft:pig,limit=1] mount @e[type=minecraft:oak_boat,limit=1]'),
         # A floor under the cart, so its dismount sets Alice down on it rather than in the air.
         build('fill 1 -1 -1 5 -1 2 minecraft:stone'),
+    ]),
+    # The flat world's own slimes and animals load with their chunks, after the setup: one that bumps the boat takes
+    # its last seat. Once they are gone, the vehicles are summoned.
+    ('off-world', [
+        build('kill @e[type=!minecraft:player]'),
+        build('summon minecraft:oak_boat 1.0 -60 0.5 {Rotation:[0f,0f]}'),
+        build('summon minecraft:pig 1.0 -60 0.5 {NoAI:1b}'),
+        build(f'ride {nearest("pig")} mount {nearest("oak_boat")}'),
         build('summon minecraft:minecart 3.0 0.04 0.5 {NoGravity:1b,Rotation:[0f,0f]}'),
         build('summon minecraft:horse 5.0 -60 0.5 {NoAI:1b,Rotation:[0f,0f]}'),
-        build('effect give @e[type=minecraft:horse] minecraft:speed infinite 1 true'),
+        build(f'effect give {nearest("horse")} minecraft:speed infinite 1 true'),
     ]),
-    ('boat', [
-        build('ride @s mount @e[type=minecraft:oak_boat,limit=1]'),
-    ]),
+    ('boat', [build(f'ride @s mount {nearest("oak_boat")}')]),
     ('seated', [
         build('data get entity @s Rotation'),
         build('rotate @s 0 0'),
         build('effect give @s minecraft:instant_health 1 9 true'),
     ]),
     ('off-boat', [build('ride @s dismount')]),
-    ('minecart', [build('ride @s mount @e[type=minecraft:minecart,limit=1]')]),
+    ('minecart', [build(f'ride @s mount {nearest("minecart")}')]),
     ('off-minecart', [build('ride @s dismount')]),
-    ('horse', [build('ride @s mount @e[type=minecraft:horse,limit=1]')]),
+    ('horse', [build(f'ride @s mount {nearest("horse")}')]),
 ]
 
 MOUNTS = ('boat', 'minecart', 'horse')
@@ -75,7 +80,7 @@ NAMES_ENTITY = ('"commands.ride.mount.success"',)
 
 def shown(lines):
     """Alice's teleports, passenger lists, other entities' effects and command replies from the first mount on; the
-    setup and the dismounts between the mounts (`off-*`) are left out."""
+    setup and the steps between the mounts (`off-*`: clearing the world, the dismounts) are left out."""
     steps = {f'step={step}' for step, _ in SCRIPT if step != 'setup' and not step.startswith('off-')}
     kept = []
     for line in lines:

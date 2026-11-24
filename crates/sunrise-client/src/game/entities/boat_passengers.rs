@@ -284,6 +284,13 @@ impl Game<'_> {
         let index = order.iter().position(|&id| Some(id) == own).unwrap_or(0);
         b.seat(index, count, false, PLAYER_RIDING_OFFSET, false)
     }
+    /// `AbstractBoat.positionRider` for the acting player in boat `i`, at the mount and every tick
+    /// after it: its seat, and `clampRotation` keeping its look within 105 degrees of the boat. A
+    /// server player is not authoritative there, so the boat's own turn is not added.
+    pub(in crate::game) fn position_boat_player(&mut self, i: usize) -> Vec3 {
+        self.yaw = sunrise_client::camera::clamp_boat_rotation(self.yaw, self.boats[i].yaw).0;
+        self.player_boat_seat(i)
+    }
     /// `getRootVehicle` of mob `j`: the mob or boat at the bottom of what it
     /// rides, None when it rides nothing.
     pub(super) fn mob_root_vehicle(&self, mut j: usize) -> Option<u32> {

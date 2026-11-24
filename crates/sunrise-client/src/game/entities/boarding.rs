@@ -44,10 +44,7 @@ impl Game<'_> {
             return;
         };
         if let Some(i) = self.boats.iter().position(|b| b.id == vehicle) {
-            let seat = self.player_boat_seat(i);
-            // AbstractBoat.positionRider: a server player is not authoritative there, so the
-            // boat's turn is not added; clampRotation keeps its look within 105 degrees.
-            self.yaw = sunrise_client::camera::clamp_boat_rotation(self.yaw, self.boats[i].yaw).0;
+            let seat = self.position_boat_player(i);
             if let Some(p) = self.player.as_mut() {
                 p.position = seat;
             }

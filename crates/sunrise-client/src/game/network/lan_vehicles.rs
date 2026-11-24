@@ -290,7 +290,7 @@ impl Game<'_> {
                     game.dismount(i);
                     return None;
                 }
-                let p = game.player_boat_seat(i);
+                let p = game.position_boat_player(i);
                 return Some([p.x, p.y, p.z]);
             }
             // The minecart moves with the rider's input, and lets it out when
